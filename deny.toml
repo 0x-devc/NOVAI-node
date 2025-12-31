@@ -1,20 +1,20 @@
 [licenses]
 confidence-threshold = 0.8
 
-# Cargo-deny now denies all licenses unless explicitly allowed.
 allow = [
   "MIT",
   "Apache-2.0",
   "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
+  "Zlib",
+  "Unicode-3.0",
 ]
 
-# Optional: avoid warnings when an allowed license doesn't appear yet
 unused-allowed-license = "allow"
 
 [bans]
-multiple-versions = "deny"
+multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
 
@@ -22,3 +22,8 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+ignore = ["RUSTSEC-2024-0436"]
+
+

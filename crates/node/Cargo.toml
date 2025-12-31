@@ -4,5 +4,24 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[[bin]]
+name = "novai-node"
+path = "src/main.rs"
+
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal"] }
+futures = "0.3"
+libp2p = { version = "0.56", default-features = false, features = [
+  "tcp",
+  "dns",
+  "noise",
+  "yamux",
+  "ping",
+  "identify",
+  "mdns",
+  "gossipsub",
+  "tokio",
+] }
