@@ -19,7 +19,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
         .with_behaviour(|_| ping::Behaviour::default())?
         .build();
 
@@ -41,4 +45,3 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
-
