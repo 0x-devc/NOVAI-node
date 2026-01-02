@@ -5,3 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+novai-types = { path = "../types" }
+novai-codec = { path = "../codec" }
+novai-crypto = { path = "../crypto" }
+[dev-dependencies]
+ed25519-dalek = "=2.1.1"
