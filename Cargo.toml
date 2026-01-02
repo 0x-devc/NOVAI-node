@@ -8,6 +8,7 @@ members = [
     "crates/state",
     "crates/execution",
     "crates/smt",
+    "crates/mempool",
 ]
 
 resolver = "2"
