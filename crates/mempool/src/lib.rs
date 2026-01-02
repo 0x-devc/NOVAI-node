@@ -77,7 +77,14 @@ where
     ///
     /// This skips ids that were previously removed.
     pub fn drain_ready(&mut self, max: usize) -> Vec<Tx> {
-        let mut out = Vec::with_capacity(max);
+        if max == 0 {
+            return Vec::new();
+        }
+
+        // IMPORTANT: never pre-allocate with an untrusted `max`, because it can panic
+        // (capacity overflow) if it's huge. Cap it to the current queue length.
+        let cap = max.min(self.order.len());
+        let mut out = Vec::with_capacity(cap);
 
         while out.len() < max {
             let Some(id) = self.order.pop_front() else {
