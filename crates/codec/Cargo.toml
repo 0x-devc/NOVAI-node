@@ -6,3 +6,7 @@ license = "Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+novai-types = { path = "../types" }
+blake3 = "=1.8.2"

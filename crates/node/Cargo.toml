@@ -12,6 +12,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+novai-codec = { path = "../codec" }
 mempool = { path = "../mempool" }
 novai-types = { path = "../types" }
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal"] }
