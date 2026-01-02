@@ -12,6 +12,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+mempool = { path = "../mempool" }
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal"] }
 futures = "0.3"
 libp2p = { version = "0.56", default-features = false, features = [
