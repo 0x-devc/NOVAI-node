@@ -1,65 +1,97 @@
-use futures::StreamExt;
-use libp2p::{noise, ping, swarm::SwarmEvent, tcp, yamux, Multiaddr};
-
 use mempool::Mempool;
 use novai_types::Tx;
+use std::env;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // --- Simple CLI parsing ---
-    // Examples:
-    //   cargo run -p novai-node -- submit-tx hello
-    //   cargo run -p novai-node -- /ip4/1.2.3.4/tcp/1234
-    let args: Vec<String> = std::env::args().skip(1).collect();
+fn usage() {
+    eprintln!(
+        "usage:
+  novai-node submit-tx <payload>
+  novai-node drain-mempool <payload> [<payload> ...]
+examples:
+  novai-node submit-tx hello
+  novai-node drain-mempool a b c"
+    );
+}
 
-    if args.first().map(|s| s.as_str()) == Some("submit-tx") {
-        let payload = args.get(1).cloned().unwrap_or_else(|| "hello".to_string());
+fn build_tx(id: u64, payload: String) -> Tx {
+    Tx {
+        id,
+        payload: payload.into(), // String -> Vec<u8>
+    }
+}
 
-        // For now this is an in-memory mempool demo (fresh each run).
-        // Later we'll keep it alive in the node and add drain commands.
+fn main() {
+    let mut args = env::args().skip(1);
+    let Some(cmd) = args.next() else {
+        usage();
+        return;
+    };
+
+    match cmd.as_str() {
+        "submit-tx" => {
+            let Some(payload) = args.next() else {
+                usage();
+                return;
+            };
+
+            // Minimal demo: new in-memory mempool each run
+            let mut mp: Mempool<u64, Tx> = Mempool::new(|tx: &Tx| tx.id);
+            let id = 1u64;
+
+            let tx = build_tx(id, payload);
+            mp.insert(tx).expect("mempool insert failed");
+
+            println!("submitted tx id={} (mempool size={})", id, mp.len());
+        }
+
+        "drain-mempool" => {
+            let payloads: Vec<String> = args.collect();
+            if payloads.is_empty() {
+                usage();
+                return;
+            }
+
+            let mut mp: Mempool<u64, Tx> = Mempool::new(|tx: &Tx| tx.id);
+
+            for (i, payload) in payloads.into_iter().enumerate() {
+                let id = (i as u64) + 1;
+                let tx = build_tx(id, payload);
+                mp.insert(tx).expect("mempool insert failed");
+            }
+
+            let before = mp.len();
+            let drained = mp.drain_ready(usize::MAX);
+            let after = mp.len();
+
+            let ids: Vec<u64> = drained.iter().map(|t| t.id).collect();
+            println!(
+                "drained {} txs (before={} after={}) ids={:?}",
+                drained.len(),
+                before,
+                after,
+                ids
+            );
+        }
+
+        _ => usage(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_wires_tx_into_mempool_and_drains_in_order() {
         let mut mp: Mempool<u64, Tx> = Mempool::new(|tx: &Tx| tx.id);
 
-        let id = 1u64;
-        let tx = Tx {
-            id,
-            payload: payload.into_bytes(),
-        };
+        mp.insert(build_tx(1, "a".to_string())).unwrap();
+        mp.insert(build_tx(2, "b".to_string())).unwrap();
+        mp.insert(build_tx(3, "c".to_string())).unwrap();
 
-        match mp.insert(tx) {
-            Ok(()) => println!("submitted tx id={id} (mempool size={})", mp.len()),
-            Err(e) => eprintln!("submit failed: {e:?}"),
-        }
+        let drained = mp.drain_ready(usize::MAX);
+        let ids: Vec<u64> = drained.iter().map(|t| t.id).collect();
 
-        return Ok(());
-    }
-
-    // --- Existing libp2p ping demo ---
-    let mut swarm = libp2p::SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )?
-        .with_behaviour(|_| ping::Behaviour::default())?
-        .build();
-
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-
-    // If the first arg is not "submit-tx", treat it as an optional multiaddr to dial.
-    if let Some(addr) = args.first() {
-        let addr: Multiaddr = addr.parse()?;
-        swarm.dial(addr)?;
-    }
-
-    loop {
-        match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => {
-                println!("Listening on {address}");
-            }
-            event => {
-                println!("{event:?}");
-            }
-        }
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 }
