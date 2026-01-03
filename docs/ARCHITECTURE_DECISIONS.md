@@ -12,3 +12,11 @@
 10. Networking isolated from consensus
 11. Test vectors required for formats
 12. Clean-room provenance preserved
+### Test vectors (Week 2)
+
+We commit golden binary test vectors for consensus/network formats to detect encoding drift.
+
+- Location: `crates/codec/tests/vectors/*.bin`
+- Test: `crates/codec/tests/golden_vectors.rs`
+- Run: `cargo test -p novai-codec`
+- Regenerate (intentional): `UPDATE_VECTORS=1 cargo test -p novai-codec`
