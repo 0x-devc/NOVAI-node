@@ -597,6 +597,7 @@ checksum = "4a3daa8e81a3963a60642bcc1f90a670680bd4a77535faa384e9d1c79d620871"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2",
  "subtle",
@@ -1721,6 +1722,7 @@ dependencies = [
  "novai-codec",
  "novai-crypto",
  "novai-types",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -1919,7 +1921,7 @@ dependencies = [
  "ed25519-dalek",
  "novai-codec",
  "novai-types",
- "rand 0.8.5",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -1934,6 +1936,7 @@ dependencies = [
  "libp2p",
  "mempool",
  "novai-codec",
+ "novai-crypto",
  "novai-types",
  "tokio",
 ]

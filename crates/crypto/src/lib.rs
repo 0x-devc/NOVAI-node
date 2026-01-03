@@ -1,6 +1,7 @@
 use blake3::Hasher;
 use ed25519_dalek::Signer;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use rand_core::OsRng;
 
 use novai_codec::{encode_tx_v1_unsigned, CodecError};
 use novai_types::{Address, SignatureBytes, TxV1};
@@ -9,6 +10,12 @@ use novai_types::{Address, SignatureBytes, TxV1};
 pub enum CryptoError {
     InvalidPublicKey,
     Codec(CodecError),
+}
+
+pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
+    let sk = SigningKey::generate(&mut OsRng);
+    let pk = sk.verifying_key();
+    (sk, pk)
 }
 
 /// Derive the canonical 32-byte Address from a public key:

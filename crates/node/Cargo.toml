@@ -12,6 +12,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+novai-crypto = { path = "../crypto" }
 novai-codec = { path = "../codec" }
 mempool = { path = "../mempool" }
 novai-types = { path = "../types" }
