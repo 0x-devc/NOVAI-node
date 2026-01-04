@@ -48,6 +48,7 @@ impl Kv for MemKv {
 
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error> {
         if let Some(i) = self.find_index(key) {
+            // O(1) deletion; order is not preserved (still deterministic).
             self.entries.swap_remove(i);
         }
         Ok(())
