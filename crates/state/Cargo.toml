@@ -2,7 +2,13 @@
 name = "novai-state"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+publish = false
+license = "MIT OR Apache-2.0"
 
-[lib]
-path = "src/lib.rs"
+[features]
+# Keep RocksDB optional so we can compile/test deterministically without native deps.
+rocksdb = ["dep:rocksdb"]
+
+[dependencies]
+# License: MIT OR Apache-2.0 (checked by cargo-deny gate)
+rocksdb = { version = "0.24", default-features = false, optional = true }

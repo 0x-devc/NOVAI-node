@@ -2,7 +2,10 @@
 name = "novai-execution"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+publish = false
+license = "MIT OR Apache-2.0"
 
-[lib]
-path = "src/lib.rs"
+[dependencies]
+novai-state = { path = "../state" }
+novai-types = { path = "../types" }
+novai-codec = { path = "../codec" }
