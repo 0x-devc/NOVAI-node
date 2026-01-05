@@ -11,7 +11,7 @@
 //! - DB I/O errors must be surfaced; never silently ignored.
 //! - Feature-gated RocksDB may be unavailable on some machines (missing toolchain).
 //!
-//! NOTE: We keep this crate minimal in Step 4; logic comes in later steps.
+//! NOTE: We keep this crate minimal in Week 3; more logic comes in later weeks.
 
 /// Canonical prefix for account records.
 pub const KEY_PREFIX_ACCOUNTS: &[u8] = b"accounts/";
