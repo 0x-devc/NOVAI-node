@@ -6,7 +6,7 @@ If you see an error like:
 
 - `dyld: Library not loaded: @rpath/libclang.dylib`
 
-…it means your build can’t find `libclang`.
+…it means your environment can’t find `libclang`.
 
 ## Install LLVM (Homebrew)
 
