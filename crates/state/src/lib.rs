@@ -37,9 +37,16 @@ pub trait Kv {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error>;
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error>;
 }
-pub mod memkv;
 
+pub mod memkv;
 pub use memkv::MemKv;
+
+/// Optional RocksDB-backed KV store.
+#[cfg(feature = "rocksdb")]
+pub mod rocksdb_kv;
+
+#[cfg(feature = "rocksdb")]
+pub use rocksdb_kv::RocksKv;
 
 /// State encoding version for AccountStateV1 and FeePoolV1.
 pub const STATE_CODEC_V1: u8 = 1;

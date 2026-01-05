@@ -6,9 +6,13 @@ publish = false
 license = "MIT OR Apache-2.0"
 
 [features]
+default = []
 # Keep RocksDB optional so we can compile/test deterministically without native deps.
 rocksdb = ["dep:rocksdb"]
 
 [dependencies]
 # License: MIT OR Apache-2.0 (checked by cargo-deny gate)
 rocksdb = { version = "0.24", default-features = false, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
