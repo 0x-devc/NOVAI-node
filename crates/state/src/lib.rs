@@ -19,6 +19,12 @@ pub const KEY_PREFIX_ACCOUNTS: &[u8] = b"accounts/";
 /// Canonical key for the fee pool balance record.
 pub const KEY_FEE_POOL: &[u8] = b"fee_pool";
 
+/// Canonical key for the current SMT root (32 bytes, versioned encoding).
+pub const KEY_SMT_ROOT: &[u8] = b"smt/root";
+
+/// Canonical prefix for SMT node records.
+pub const KEY_PREFIX_SMT_NODE: &[u8] = b"smt/node/";
+
 /// Build the canonical key for an account record: `b"accounts/" ++ addr32`.
 ///
 /// `addr` must be exactly 32 bytes.
@@ -26,6 +32,14 @@ pub fn account_key(addr: &[u8; 32]) -> Vec<u8> {
     let mut k = Vec::with_capacity(KEY_PREFIX_ACCOUNTS.len() + addr.len());
     k.extend_from_slice(KEY_PREFIX_ACCOUNTS);
     k.extend_from_slice(addr);
+    k
+}
+
+/// Build canonical SMT node key: `b"smt/node/" ++ node_hash32`.
+pub fn smt_node_key(node_hash: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_SMT_NODE.len() + node_hash.len());
+    k.extend_from_slice(KEY_PREFIX_SMT_NODE);
+    k.extend_from_slice(node_hash);
     k
 }
 
@@ -66,6 +80,37 @@ pub use rocksdb_kv::RocksKv;
 
 /// State encoding version for AccountStateV1 and FeePoolV1.
 pub const STATE_CODEC_V1: u8 = 1;
+
+/// SMT root encoding version.
+pub const SMT_ROOT_CODEC_V1: u8 = 1;
+
+/// Encode SMT root as canonical bytes:
+/// [version:1][root32]
+pub fn encode_smt_root_v1(root: &[u8; 32]) -> [u8; 1 + 32] {
+    let mut out = [0u8; 1 + 32];
+    out[0] = SMT_ROOT_CODEC_V1;
+    out[1..33].copy_from_slice(root);
+    out
+}
+
+/// Decode SMT root from canonical bytes.
+pub fn decode_smt_root_v1(bytes: &[u8]) -> Result<[u8; 32], StateDecodeError> {
+    if bytes.len() != 1 + 32 {
+        return Err(StateDecodeError::BadLength {
+            expected: 33,
+            got: bytes.len(),
+        });
+    }
+    if bytes[0] != SMT_ROOT_CODEC_V1 {
+        return Err(StateDecodeError::BadVersion {
+            expected: SMT_ROOT_CODEC_V1,
+            got: bytes[0],
+        });
+    }
+    let mut root = [0u8; 32];
+    root.copy_from_slice(&bytes[1..33]);
+    Ok(root)
+}
 
 /// Account state record (Week 3).
 #[derive(Debug, Clone, PartialEq, Eq)]

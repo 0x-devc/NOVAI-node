@@ -2032,7 +2032,8 @@ dependencies = [
 name = "novai-execution"
 version = "0.1.0"
 dependencies = [
- "novai-codec",
+ "blake3",
+ "novai-smt",
  "novai-state",
  "novai-types",
 ]
@@ -2057,6 +2058,10 @@ version = "0.1.0"
 [[package]]
 name = "novai-smt"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "novai-state",
+]
 
 [[package]]
 name = "novai-state"

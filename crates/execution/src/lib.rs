@@ -15,9 +15,14 @@
 //! - Any overflow -> reject deterministically.
 
 use novai_state::{
-    account_key, decode_account_v1, decode_fee_pool_v1, encode_account_v1, encode_fee_pool_v1,
-    AccountStateV1, FeePoolV1, Kv, KvBatch, StateDecodeError, WriteOp, KEY_FEE_POOL,
+    account_key, decode_account_v1, decode_fee_pool_v1, decode_smt_root_v1, encode_account_v1,
+    encode_fee_pool_v1, encode_smt_root_v1, smt_node_key, AccountStateV1, FeePoolV1, Kv, KvBatch,
+    StateDecodeError, WriteOp, KEY_FEE_POOL, KEY_SMT_ROOT,
 };
+
+use novai_smt::hash::{empty_hash_at_height, Hash32};
+use novai_smt::node::Node;
+use novai_smt::smt::{Smt, SmtError, SmtStore};
 use novai_types::{Address, Nonce, TxV1};
 
 pub const EXECUTION_VERSION: u8 = 1;
@@ -111,6 +116,136 @@ fn read_fee_pool_or_default<K: Kv>(db: &K) -> Result<FeePoolV1, ExecError<K::Err
     }
 }
 
+/// Deterministically map a DB key (arbitrary bytes) to a 32-byte SMT key.
+fn smt_key_for_db_key(db_key: &[u8]) -> Hash32 {
+    blake3::hash(db_key).into()
+}
+
+fn read_smt_root_or_default<K: Kv>(db: &K) -> Result<Hash32, ExecError<K::Error>> {
+    match db.get(KEY_SMT_ROOT).map_err(ExecError::Db)? {
+        None => Ok(empty_hash_at_height(256)),
+        Some(bytes) => Ok(decode_smt_root_v1(&bytes)?),
+    }
+}
+
+/// Store adapter: reads existing nodes from Kv, buffers writes as WriteOp::Put.
+/// Deterministic: uses Vec + linear search (no HashMap).
+struct SmtOverlayStore<'a, K: Kv> {
+    db: &'a K,
+    pending: Vec<(Vec<u8>, Vec<u8>)>, // (db_key, value_bytes)
+}
+
+impl<'a, K: Kv> SmtOverlayStore<'a, K> {
+    fn new(db: &'a K) -> Self {
+        Self {
+            db,
+            pending: Vec::new(),
+        }
+    }
+
+    fn into_write_ops(self) -> Vec<WriteOp> {
+        self.pending
+            .into_iter()
+            .map(|(k, v)| WriteOp::Put(k, v))
+            .collect()
+    }
+
+    fn pending_get(&self, key: &[u8]) -> Option<&[u8]> {
+        // last-write-wins
+        for (k, v) in self.pending.iter().rev() {
+            if k.as_slice() == key {
+                return Some(v.as_slice());
+            }
+        }
+        None
+    }
+}
+
+impl<'a, K: Kv> SmtStore for SmtOverlayStore<'a, K> {
+    type Error = K::Error;
+
+    fn get_node(&self, node_hash: &Hash32) -> Result<Option<[u8; Node::ENCODED_LEN]>, Self::Error> {
+        let key = smt_node_key(node_hash);
+
+        // First check buffered writes.
+        if let Some(v) = self.pending_get(&key) {
+            if v.len() != Node::ENCODED_LEN {
+                return Ok(None);
+            }
+            let mut out = [0u8; Node::ENCODED_LEN];
+            out.copy_from_slice(v);
+            return Ok(Some(out));
+        }
+
+        match self.db.get(&key)? {
+            None => Ok(None),
+            Some(v) => {
+                if v.len() != Node::ENCODED_LEN {
+                    return Ok(None);
+                }
+                let mut out = [0u8; Node::ENCODED_LEN];
+                out.copy_from_slice(&v);
+                Ok(Some(out))
+            }
+        }
+    }
+
+    fn put_node(
+        &mut self,
+        node_hash: &Hash32,
+        node_bytes: &[u8; Node::ENCODED_LEN],
+    ) -> Result<(), Self::Error> {
+        let key = smt_node_key(node_hash);
+        self.pending.push((key, node_bytes.to_vec()));
+        Ok(())
+    }
+}
+
+fn append_smt_ops_for_state_ops<K: Kv>(
+    db: &K,
+    state_ops: &[WriteOp],
+    out_ops: &mut Vec<WriteOp>,
+) -> Result<Hash32, ExecError<K::Error>> {
+    let cur_root = read_smt_root_or_default(db)?;
+
+    // Build SMT updates in an overlay store so we can batch node writes with state writes.
+    let store = SmtOverlayStore::new(db);
+    let mut smt = Smt::with_root(store, cur_root);
+
+    for op in state_ops {
+        match op {
+            WriteOp::Put(k, v) => {
+                let sk = smt_key_for_db_key(k);
+                smt.update(sk, v).map_err(|e| match e {
+                    SmtError::Store(err) => ExecError::Db(err),
+                    _ => ExecError::Overflow,
+                })?;
+            }
+            WriteOp::Delete(k) => {
+                let sk = smt_key_for_db_key(k);
+                smt.delete(sk).map_err(|e| match e {
+                    SmtError::Store(err) => ExecError::Db(err),
+                    _ => ExecError::Overflow,
+                })?;
+            }
+        }
+    }
+
+    let new_root = smt.root();
+    let store = smt.into_store();
+
+    // Add SMT node writes.
+    out_ops.extend(store.into_write_ops());
+
+    // Add root record write.
+    out_ops.push(WriteOp::Put(
+        KEY_SMT_ROOT.to_vec(),
+        encode_smt_root_v1(&new_root).to_vec(),
+    ));
+
+    Ok(new_root)
+}
+
 /// Apply a single TxV1 as a TransferPayloadV1 against the account state machine.
 ///
 /// Rules (Week 3):
@@ -178,7 +313,7 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
         .checked_add(1)
         .ok_or(ExecError::NonceOverflow)?;
 
-    // Build atomic batch of all state changes
+    // Build atomic batch of all state changes.
     let ops = vec![
         WriteOp::Put(
             account_key(&tx.from),
@@ -194,8 +329,13 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
         ),
     ];
 
-    // Apply all changes atomically (all-or-nothing)
-    db.apply_batch(&ops).map_err(ExecError::Db)?;
+    // Append SMT node writes + smt root write, derived deterministically from the state ops.
+    let mut all_ops = ops;
+    let state_ops_snapshot = all_ops.clone();
+    let _new_root = append_smt_ops_for_state_ops(db, &state_ops_snapshot, &mut all_ops)?;
+
+    // Apply ALL changes atomically (state + SMT nodes + root).
+    db.apply_batch(&all_ops).map_err(ExecError::Db)?;
 
     Ok(())
 }
