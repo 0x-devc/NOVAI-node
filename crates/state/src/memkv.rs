@@ -1,4 +1,4 @@
-use crate::Kv;
+use crate::{Kv, KvBatch, WriteOp};
 
 /// Deterministic in-memory KV store for tests and local execution.
 ///
@@ -51,6 +51,42 @@ impl Kv for MemKv {
             // O(1) deletion; order is not preserved (still deterministic).
             self.entries.swap_remove(i);
         }
+        Ok(())
+    }
+}
+
+impl KvBatch for MemKv {
+    /// Apply multiple operations atomically (all-or-nothing).
+    ///
+    /// Implementation: Clone entries, apply ops to clone, swap on success.
+    /// This guarantees that if any op fails, no changes are visible.
+    fn apply_batch(&mut self, ops: &[WriteOp]) -> Result<(), Self::Error> {
+        // Clone current state
+        let mut tmp = self.entries.clone();
+
+        // Apply all ops to the clone
+        for op in ops {
+            match op {
+                WriteOp::Put(key, value) => {
+                    // Find existing entry
+                    if let Some(idx) = tmp.iter().position(|(k, _)| k.as_slice() == key.as_slice())
+                    {
+                        tmp[idx].1 = value.clone();
+                    } else {
+                        tmp.push((key.clone(), value.clone()));
+                    }
+                }
+                WriteOp::Delete(key) => {
+                    if let Some(idx) = tmp.iter().position(|(k, _)| k.as_slice() == key.as_slice())
+                    {
+                        tmp.swap_remove(idx);
+                    }
+                }
+            }
+        }
+
+        // Commit: swap the entire state at once (atomic from external view)
+        self.entries = tmp;
         Ok(())
     }
 }

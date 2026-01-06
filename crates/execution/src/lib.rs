@@ -16,7 +16,7 @@
 
 use novai_state::{
     account_key, decode_account_v1, decode_fee_pool_v1, encode_account_v1, encode_fee_pool_v1,
-    AccountStateV1, FeePoolV1, Kv, StateDecodeError, KEY_FEE_POOL,
+    AccountStateV1, FeePoolV1, Kv, KvBatch, StateDecodeError, WriteOp, KEY_FEE_POOL,
 };
 use novai_types::{Address, Nonce, TxV1};
 
@@ -42,7 +42,7 @@ pub enum ExecError<E> {
     NonceMismatch { expected: Nonce, got: Nonce },
     InsufficientFunds { balance: u128, needed: u128 },
     Overflow,
-    NonceOverflow, // NEW: explicit nonce overflow error
+    NonceOverflow,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -104,26 +104,11 @@ fn read_account_or_default<K: Kv>(
     }
 }
 
-fn write_account<K: Kv>(
-    db: &mut K,
-    addr: &Address,
-    a: &AccountStateV1,
-) -> Result<(), ExecError<K::Error>> {
-    let k = account_key(addr);
-    let enc = encode_account_v1(a);
-    db.put(&k, &enc).map_err(ExecError::Db)
-}
-
 fn read_fee_pool_or_default<K: Kv>(db: &K) -> Result<FeePoolV1, ExecError<K::Error>> {
     match db.get(KEY_FEE_POOL).map_err(ExecError::Db)? {
         None => Ok(FeePoolV1 { balance: 0 }),
         Some(bytes) => Ok(decode_fee_pool_v1(&bytes)?),
     }
-}
-
-fn write_fee_pool<K: Kv>(db: &mut K, p: &FeePoolV1) -> Result<(), ExecError<K::Error>> {
-    let enc = encode_fee_pool_v1(p);
-    db.put(KEY_FEE_POOL, &enc).map_err(ExecError::Db)
 }
 
 /// Apply a single TxV1 as a TransferPayloadV1 against the account state machine.
@@ -135,7 +120,9 @@ fn write_fee_pool<K: Kv>(db: &mut K, p: &FeePoolV1) -> Result<(), ExecError<K::E
 /// - Debit sender by (amount + fee), credit receiver by amount.
 /// - Increment sender nonce by 1.
 /// - Add fee to fee_pool.
-pub fn apply_tx_v1_transfer<K: Kv>(db: &mut K, tx: &TxV1) -> Result<(), ExecError<K::Error>> {
+///
+/// ATOMIC: All state changes are applied in a single batch (all-or-nothing).
+pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), ExecError<K::Error>> {
     // Decode payload (deterministic).
     let payload = decode_transfer_payload_v1(&tx.payload).map_err(|e| match e {
         ExecError::BadPayloadLength { expected, got } => {
@@ -144,9 +131,10 @@ pub fn apply_tx_v1_transfer<K: Kv>(db: &mut K, tx: &TxV1) -> Result<(), ExecErro
         ExecError::BadPayloadVersion { expected, got } => {
             ExecError::BadPayloadVersion { expected, got }
         }
-        _ => ExecError::Overflow, // unreachable for decode, but keep total match exhaustive
+        _ => ExecError::Overflow,
     })?;
 
+    // Read current state (no mutations yet)
     let mut from_acct = read_account_or_default(db, &tx.from)?;
     if tx.nonce != from_acct.nonce {
         return Err(ExecError::NonceMismatch {
@@ -158,6 +146,7 @@ pub fn apply_tx_v1_transfer<K: Kv>(db: &mut K, tx: &TxV1) -> Result<(), ExecErro
     let mut to_acct = read_account_or_default(db, &payload.to)?;
     let mut fee_pool = read_fee_pool_or_default(db)?;
 
+    // Validate and compute new state (all in memory, no writes yet)
     let amount_u128 = u64_to_u128_checked(payload.amount).map_err(|_| ExecError::Overflow)?;
     let fee_u128 = u64_to_u128_checked(tx.fee).map_err(|_| ExecError::Overflow)?;
 
@@ -189,9 +178,24 @@ pub fn apply_tx_v1_transfer<K: Kv>(db: &mut K, tx: &TxV1) -> Result<(), ExecErro
         .checked_add(1)
         .ok_or(ExecError::NonceOverflow)?;
 
-    write_account(db, &tx.from, &from_acct)?;
-    write_account(db, &payload.to, &to_acct)?;
-    write_fee_pool(db, &fee_pool)?;
+    // Build atomic batch of all state changes
+    let ops = vec![
+        WriteOp::Put(
+            account_key(&tx.from),
+            encode_account_v1(&from_acct).to_vec(),
+        ),
+        WriteOp::Put(
+            account_key(&payload.to),
+            encode_account_v1(&to_acct).to_vec(),
+        ),
+        WriteOp::Put(
+            KEY_FEE_POOL.to_vec(),
+            encode_fee_pool_v1(&fee_pool).to_vec(),
+        ),
+    ];
+
+    // Apply all changes atomically (all-or-nothing)
+    db.apply_batch(&ops).map_err(ExecError::Db)?;
 
     Ok(())
 }

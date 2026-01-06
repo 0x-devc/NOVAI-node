@@ -29,6 +29,13 @@ pub fn account_key(addr: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+/// A write operation for atomic batching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteOp {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+}
+
 /// Minimal KV interface for state storage (RocksDB-backed impl later).
 pub trait Kv {
     type Error;
@@ -36,6 +43,15 @@ pub trait Kv {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error>;
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error>;
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error>;
+}
+
+/// Extended KV trait with atomic batch support.
+///
+/// Implementations must guarantee that either all operations succeed
+/// or none take effect (all-or-nothing semantics).
+pub trait KvBatch: Kv {
+    /// Apply multiple operations atomically (all-or-nothing).
+    fn apply_batch(&mut self, ops: &[WriteOp]) -> Result<(), Self::Error>;
 }
 
 pub mod memkv;
