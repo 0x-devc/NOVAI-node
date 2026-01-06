@@ -42,6 +42,7 @@ pub enum ExecError<E> {
     NonceMismatch { expected: Nonce, got: Nonce },
     InsufficientFunds { balance: u128, needed: u128 },
     Overflow,
+    NonceOverflow, // NEW: explicit nonce overflow error
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -183,7 +184,10 @@ pub fn apply_tx_v1_transfer<K: Kv>(db: &mut K, tx: &TxV1) -> Result<(), ExecErro
         .checked_add(fee_u128)
         .ok_or(ExecError::Overflow)?;
 
-    from_acct.nonce = from_acct.nonce.checked_add(1).ok_or(ExecError::Overflow)?;
+    from_acct.nonce = from_acct
+        .nonce
+        .checked_add(1)
+        .ok_or(ExecError::NonceOverflow)?;
 
     write_account(db, &tx.from, &from_acct)?;
     write_account(db, &payload.to, &to_acct)?;
