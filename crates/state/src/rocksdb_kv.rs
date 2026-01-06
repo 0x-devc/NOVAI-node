@@ -2,10 +2,10 @@
 //!
 //! Enable with: `--features rocksdb`
 
-use crate::Kv;
+use crate::{Kv, KvBatch, WriteOp};
 
 #[cfg(feature = "rocksdb")]
-use rocksdb::{Options, DB};
+use rocksdb::{Options, WriteBatch, DB};
 
 #[cfg(feature = "rocksdb")]
 use std::path::Path;
@@ -49,6 +49,31 @@ impl Kv for RocksKv {
     }
 }
 
+#[cfg(feature = "rocksdb")]
+impl KvBatch for RocksKv {
+    /// Apply multiple operations atomically using RocksDB's WriteBatch.
+    ///
+    /// RocksDB guarantees that either all operations in a WriteBatch succeed
+    /// or none take effect (atomic commit at the DB level).
+    fn apply_batch(&mut self, ops: &[WriteOp]) -> Result<(), Self::Error> {
+        let mut batch = WriteBatch::default();
+
+        for op in ops {
+            match op {
+                WriteOp::Put(key, value) => {
+                    batch.put(key, value);
+                }
+                WriteOp::Delete(key) => {
+                    batch.delete(key);
+                }
+            }
+        }
+
+        // Atomic commit: all operations succeed or none take effect
+        self.db.write(batch)
+    }
+}
+
 #[cfg(all(test, feature = "rocksdb"))]
 mod tests {
     use super::*;
@@ -71,5 +96,40 @@ mod tests {
 
         db.delete(k).unwrap();
         assert_eq!(db.get(k).unwrap(), None);
+    }
+
+    #[test]
+    fn rocks_kv_batch_atomic_commit() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db_batch");
+
+        let mut db = RocksKv::open(&path).unwrap();
+
+        // Apply batch with multiple operations
+        let ops = vec![
+            WriteOp::Put(b"key1".to_vec(), b"value1".to_vec()),
+            WriteOp::Put(b"key2".to_vec(), b"value2".to_vec()),
+            WriteOp::Put(b"key3".to_vec(), b"value3".to_vec()),
+        ];
+
+        db.apply_batch(&ops).unwrap();
+
+        // All keys should exist
+        assert_eq!(db.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(db.get(b"key2").unwrap(), Some(b"value2".to_vec()));
+        assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
+
+        // Delete via batch
+        let ops = vec![
+            WriteOp::Delete(b"key1".to_vec()),
+            WriteOp::Delete(b"key2".to_vec()),
+        ];
+
+        db.apply_batch(&ops).unwrap();
+
+        // key1 and key2 should be gone, key3 remains
+        assert_eq!(db.get(b"key1").unwrap(), None);
+        assert_eq!(db.get(b"key2").unwrap(), None);
+        assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
     }
 }
