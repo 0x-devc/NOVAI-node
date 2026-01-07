@@ -138,7 +138,10 @@ impl<'a, K: Kv> SmtOverlayStore<'a, K> {
         }
     }
 
-    fn into_write_ops(self) -> Vec<WriteOp> {
+    fn into_write_ops(mut self) -> Vec<WriteOp> {
+        // Sort by key for deterministic ordering (consensus-critical).
+        self.pending.sort_by(|a, b| a.0.cmp(&b.0));
+
         self.pending
             .into_iter()
             .map(|(k, v)| WriteOp::Put(k, v))
