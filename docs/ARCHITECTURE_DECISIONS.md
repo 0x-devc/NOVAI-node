@@ -1,5 +1,14 @@
 # NOVAI Architecture Decisions
 
+> **⚠️ CONSENSUS-CRITICAL SPECIFICATION**
+>
+> This document contains the canonical specification for consensus-critical components.
+>
+> **Rules**:
+> - If code and docs disagree, **code wins** — but treat the disagreement as a bug that must be fixed immediately.
+> - Any change to consensus-critical parameters in this document **requires updating golden tests and test vectors**.
+> - These specifications are binding for all node implementations and must produce identical results across all platforms.
+
 ## Week 4: Sparse Merkle Tree (SMT) State Root
 
 ### Overview
