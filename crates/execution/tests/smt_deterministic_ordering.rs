@@ -81,12 +81,12 @@ fn smt_write_ordering_is_deterministic_across_runs() {
         );
     }
 
-    // Note: Full node-level comparison would require DB iteration support.
-    // MemKv doesn't expose iteration, but verifying roots is sufficient because:
-    // 1. We sort pending writes before applying (deterministic write order)
-    // 2. Root is cryptographically derived from all nodes (deterministic tree structure)
-    // 3. Identical roots across 3 runs with multiple operations proves that both
-    //    write ordering and tree computation are deterministic
+    // Note: This test proves ROOT DETERMINISM across multiple runs.
+    // Write ordering is deterministic BY CONSTRUCTION (explicit sort).
+    //
+    // What this proves: Same tx sequence → same root (deterministic)
+    // What this does NOT prove: Byte-for-byte comparison of all smt/node/* entries
+    //   (would require DB iteration, not available in MemKv test store)
 }
 
 #[test]
@@ -115,25 +115,12 @@ fn smt_root_bytes_stable_across_platforms() {
 
     let root = db.get(KEY_SMT_ROOT).unwrap().expect("root must exist");
 
-    // This is the golden root for this exact sequence.
-    // If this assertion fails after a code change, you've broken consensus.
-    //
-    // To update: run the test, capture the actual root, and verify the change
-    // was intentional and documented.
-    
-    // Note: We can't hardcode the exact bytes without running the code first,
-    // but the important property is that it's STABLE across runs.
-    // The first test already proves stability. This test would lock the value
-    // once we've run it once and recorded the expected bytes.
-    
+    // Locks down root encoding format (consensus-critical).
     assert_eq!(root.len(), 33, "SMT root encoding must be 33 bytes (v1)");
     assert_eq!(root[0], 0x01, "SMT root must have version byte 0x01");
     
-    // The actual root hash (bytes 1-33) will be deterministic.
-    // To make this a true golden test, uncomment and fill in after first run:
-    // let expected_root: [u8; 33] = [
-    //     0x01, // version
-    //     0x12, 0x34, ... // 32-byte hash (fill in from actual output)
-    // ];
+    // Note: Root bytes are deterministic but not hardcoded here.
+    // This test proves format stability. For golden root bytes, uncomment after first run:
+    // let expected_root: [u8; 33] = [ 0x01, /* 32-byte hash */ ];
     // assert_eq!(root.as_slice(), &expected_root[..]);
 }
