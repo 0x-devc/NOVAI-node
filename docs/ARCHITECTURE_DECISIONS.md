@@ -81,7 +81,7 @@ smt_key = blake3(state_key_bytes)
 #### Write Ordering
 SMT node writes are sorted by key before being added to the atomic batch to ensure deterministic ordering across all nodes.
 
-**Proof level**: Deterministic by construction (explicit sort). Root determinism proven by paranoia test. Full DB byte-for-byte comparison would require key iteration (not currently implemented in MemKv test store).
+**Proof level**: Deterministic by construction (explicit sort). Root determinism proven by paranoia test. Full DB byte-for-byte comparison would require key iteration (not currently implemented in MemKv test store). Under collision resistance of Blake3, identical roots strongly imply identical committed content given deterministic construction.
 
 ### Implementation Details
 
