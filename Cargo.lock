@@ -2067,6 +2067,7 @@ dependencies = [
 name = "novai-state"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "rocksdb",
  "tempfile",
 ]

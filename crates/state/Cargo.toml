@@ -13,6 +13,7 @@ rocksdb = ["dep:rocksdb"]
 [dependencies]
 # License: MIT OR Apache-2.0 (checked by cargo-deny gate)
 rocksdb = { version = "0.24", default-features = false, optional = true }
+blake3 = "=1.8.2"
 
 [dev-dependencies]
 tempfile = "3"

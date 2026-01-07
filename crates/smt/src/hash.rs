@@ -32,6 +32,12 @@ pub fn empty_hash_at_height(height: u16) -> Hash32 {
     hasher.finalize().into()
 }
 
+// Height contract:
+// - height is subtree height / remaining bits.
+// - leaf height = 0.
+// - root height = 256 (because keys are 256-bit).
+// The SMT code treats the root as height 256 and decrements by 1 per level.
+
 /// Canonical leaf hash.
 ///
 /// leaf = blake3( TAG_LEAF || key32 || blake3(value_bytes) )

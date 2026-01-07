@@ -43,6 +43,21 @@ pub fn smt_node_key(node_hash: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+/// Canonical mapping from variable-length state DB keys to 32-byte SMT keys.
+///
+/// # Consensus-critical
+///
+/// State keys are variable-length (e.g. `b"accounts/<addr32>"`, `b"fee_pool"`),
+/// but the Sparse Merkle Tree uses fixed 256-bit keys.
+///
+/// **Rule:** `smt_key = blake3(state_key_bytes)`
+///
+/// This function is the single source of truth for that mapping.
+/// Do not change its behavior without a network upgrade.
+pub fn smt_key_for_state_key(key: &[u8]) -> [u8; 32] {
+    blake3::hash(key).into()
+}
+
 /// A write operation for atomic batching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOp {

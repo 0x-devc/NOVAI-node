@@ -16,8 +16,8 @@
 
 use novai_state::{
     account_key, decode_account_v1, decode_fee_pool_v1, decode_smt_root_v1, encode_account_v1,
-    encode_fee_pool_v1, encode_smt_root_v1, smt_node_key, AccountStateV1, FeePoolV1, Kv, KvBatch,
-    StateDecodeError, WriteOp, KEY_FEE_POOL, KEY_SMT_ROOT,
+    encode_fee_pool_v1, encode_smt_root_v1, smt_key_for_state_key, smt_node_key, AccountStateV1,
+    FeePoolV1, Kv, KvBatch, StateDecodeError, WriteOp, KEY_FEE_POOL, KEY_SMT_ROOT,
 };
 
 use novai_smt::hash::{empty_hash_at_height, Hash32};
@@ -116,11 +116,6 @@ fn read_fee_pool_or_default<K: Kv>(db: &K) -> Result<FeePoolV1, ExecError<K::Err
     }
 }
 
-/// Deterministically map a DB key (arbitrary bytes) to a 32-byte SMT key.
-fn smt_key_for_db_key(db_key: &[u8]) -> Hash32 {
-    blake3::hash(db_key).into()
-}
-
 fn read_smt_root_or_default<K: Kv>(db: &K) -> Result<Hash32, ExecError<K::Error>> {
     match db.get(KEY_SMT_ROOT).map_err(ExecError::Db)? {
         None => Ok(empty_hash_at_height(256)),
@@ -215,14 +210,14 @@ fn append_smt_ops_for_state_ops<K: Kv>(
     for op in state_ops {
         match op {
             WriteOp::Put(k, v) => {
-                let sk = smt_key_for_db_key(k);
+                let sk: Hash32 = smt_key_for_state_key(k);
                 smt.update(sk, v).map_err(|e| match e {
                     SmtError::Store(err) => ExecError::Db(err),
                     _ => ExecError::Overflow,
                 })?;
             }
             WriteOp::Delete(k) => {
-                let sk = smt_key_for_db_key(k);
+                let sk: Hash32 = smt_key_for_state_key(k);
                 smt.delete(sk).map_err(|e| match e {
                     SmtError::Store(err) => ExecError::Db(err),
                     _ => ExecError::Overflow,
