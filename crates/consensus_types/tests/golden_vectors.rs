@@ -1,0 +1,139 @@
+//! Golden vector tests for consensus message encodings.
+//!
+//! These tests ensure encoding stability across versions.
+//! To regenerate vectors (ONLY when intentionally changing format):
+//!   `UPDATE_VECTORS=1` cargo test -p novai-consensus-types
+
+use novai_consensus_types::codec::*;
+use novai_consensus_types::{Block, Timeout, Vote, QC};
+use std::fs;
+use std::path::Path;
+
+fn vectors_dir() -> &'static Path {
+    Path::new("tests/vectors")
+}
+
+fn should_update_vectors() -> bool {
+    std::env::var("UPDATE_VECTORS").is_ok()
+}
+
+#[test]
+fn golden_vote_unsigned() {
+    let vote = Vote {
+        height: 42,
+        round: 7,
+        block_hash: [0xaa; 32],
+        voter: [0xbb; 32],
+        signature: [0x00; 64], // Not used in unsigned encoding
+    };
+
+    let bytes = encode_vote_v1_unsigned(&vote);
+    let path = vectors_dir().join("vote_unsigned_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "Vote unsigned encoding drifted!");
+    }
+}
+
+#[test]
+fn golden_vote_signed() {
+    let vote = Vote {
+        height: 42,
+        round: 7,
+        block_hash: [0xaa; 32],
+        voter: [0xbb; 32],
+        signature: [0xcc; 64],
+    };
+
+    let bytes = encode_vote_v1_signed(&vote);
+    let path = vectors_dir().join("vote_signed_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "Vote signed encoding drifted!");
+    }
+}
+
+#[test]
+fn golden_block_empty_txs() {
+    let block = Block {
+        height: 100,
+        round: 5,
+        parent_hash: [0x11; 32],
+        state_root: [0x22; 32],
+        txs: vec![],
+    };
+
+    let bytes = encode_block_v1(&block);
+    let path = vectors_dir().join("block_empty_txs_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "Block (empty txs) encoding drifted!");
+    }
+}
+
+#[test]
+fn golden_qc_empty_votes() {
+    let qc = QC {
+        height: 50,
+        round: 3,
+        block_hash: [0x33; 32],
+        votes: vec![],
+    };
+
+    let bytes = encode_qc_v1(&qc);
+    let path = vectors_dir().join("qc_empty_votes_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "QC (empty votes) encoding drifted!");
+    }
+}
+
+#[test]
+fn golden_timeout_no_qc() {
+    let timeout = Timeout {
+        height: 25,
+        round: 2,
+        voter: [0x44; 32],
+        highest_qc: None,
+        signature: [0x55; 64],
+    };
+
+    let bytes_unsigned = encode_timeout_v1_unsigned(&timeout);
+    let bytes_signed = encode_timeout_v1_signed(&timeout);
+
+    let path_unsigned = vectors_dir().join("timeout_no_qc_unsigned_v1.bin");
+    let path_signed = vectors_dir().join("timeout_no_qc_signed_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path_unsigned, &bytes_unsigned).unwrap();
+        fs::write(&path_signed, &bytes_signed).unwrap();
+        println!("Updated: {path_unsigned:?} and {path_signed:?}");
+    } else {
+        let expected_unsigned = fs::read(&path_unsigned).expect("golden vector missing");
+        let expected_signed = fs::read(&path_signed).expect("golden vector missing");
+        assert_eq!(
+            bytes_unsigned, expected_unsigned,
+            "Timeout unsigned encoding drifted!"
+        );
+        assert_eq!(
+            bytes_signed, expected_signed,
+            "Timeout signed encoding drifted!"
+        );
+    }
+}
