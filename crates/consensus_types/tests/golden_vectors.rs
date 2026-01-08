@@ -71,7 +71,7 @@ fn golden_block_empty_txs() {
         txs: vec![],
     };
 
-    let bytes = encode_block_v1(&block);
+    let bytes = encode_block_v1(&block).unwrap();
     let path = vectors_dir().join("block_empty_txs_v1.bin");
 
     if should_update_vectors() {
@@ -85,6 +85,8 @@ fn golden_block_empty_txs() {
 
 #[test]
 fn golden_qc_empty_votes() {
+    // Note: This is a codec-stable vector but NOT a valid QC per consensus rules
+    // (QC requires exactly 2f+1 votes, not 0)
     let qc = QC {
         height: 50,
         round: 3,
@@ -92,7 +94,7 @@ fn golden_qc_empty_votes() {
         votes: vec![],
     };
 
-    let bytes = encode_qc_v1(&qc);
+    let bytes = encode_qc_v1(&qc).unwrap();
     let path = vectors_dir().join("qc_empty_votes_v1.bin");
 
     if should_update_vectors() {
@@ -100,7 +102,10 @@ fn golden_qc_empty_votes() {
         println!("Updated: {path:?}");
     } else {
         let expected = fs::read(&path).expect("golden vector missing");
-        assert_eq!(bytes, expected, "QC (empty votes) encoding drifted!");
+        assert_eq!(
+            bytes, expected,
+            "QC (empty votes - codec only) encoding drifted!"
+        );
     }
 }
 
@@ -114,8 +119,8 @@ fn golden_timeout_no_qc() {
         signature: [0x55; 64],
     };
 
-    let bytes_unsigned = encode_timeout_v1_unsigned(&timeout);
-    let bytes_signed = encode_timeout_v1_signed(&timeout);
+    let bytes_unsigned = encode_timeout_v1_unsigned(&timeout).unwrap();
+    let bytes_signed = encode_timeout_v1_signed(&timeout).unwrap();
 
     let path_unsigned = vectors_dir().join("timeout_no_qc_unsigned_v1.bin");
     let path_signed = vectors_dir().join("timeout_no_qc_signed_v1.bin");
@@ -134,6 +139,158 @@ fn golden_timeout_no_qc() {
         assert_eq!(
             bytes_signed, expected_signed,
             "Timeout signed encoding drifted!"
+        );
+    }
+}
+
+#[test]
+fn golden_qc_with_votes() {
+    // Valid QC with 3 votes (quorum for n=4)
+    let vote_a = Vote {
+        height: 10,
+        round: 2,
+        block_hash: [0x99; 32],
+        voter: [0xaa; 32],
+        signature: [0x11; 64],
+    };
+    let vote_b = Vote {
+        height: 10,
+        round: 2,
+        block_hash: [0x99; 32],
+        voter: [0xbb; 32],
+        signature: [0x22; 64],
+    };
+    let vote_c = Vote {
+        height: 10,
+        round: 2,
+        block_hash: [0x99; 32],
+        voter: [0xcc; 32],
+        signature: [0x33; 64],
+    };
+
+    let qc = QC {
+        height: 10,
+        round: 2,
+        block_hash: [0x99; 32],
+        votes: vec![vote_a, vote_b, vote_c],
+    };
+
+    let bytes = encode_qc_v1(&qc).unwrap();
+    let path = vectors_dir().join("qc_with_votes_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "QC (with votes) encoding drifted!");
+    }
+}
+
+#[test]
+fn golden_block_with_tx() {
+    use novai_types::{TxV1, TxVersion};
+
+    let tx = TxV1 {
+        version: TxVersion::V1,
+        from: [0xaa; 32],
+        nonce: 42,
+        fee: 1000,
+        payload: vec![0x01, 0x02, 0x03],
+        sig: [0xbb; 64],
+    };
+
+    let block = Block {
+        height: 5,
+        round: 1,
+        parent_hash: [0xcc; 32],
+        state_root: [0xdd; 32],
+        txs: vec![tx],
+    };
+
+    let bytes = encode_block_v1(&block).unwrap();
+    let path = vectors_dir().join("block_with_tx_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "Block (with tx) encoding drifted!");
+    }
+}
+
+#[test]
+fn golden_proposal_v1() {
+    let block = Block {
+        height: 10,
+        round: 3,
+        parent_hash: [0x11; 32],
+        state_root: [0x22; 32],
+        txs: vec![],
+    };
+
+    let qc = QC {
+        height: 9,
+        round: 2,
+        block_hash: [0x11; 32],
+        votes: vec![],
+    };
+
+    let proposal = novai_consensus_types::Proposal {
+        block,
+        justify_qc: qc,
+    };
+
+    let bytes = encode_proposal_v1(&proposal).unwrap();
+    let path = vectors_dir().join("proposal_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "Proposal encoding drifted!");
+    }
+}
+
+#[test]
+fn golden_timeout_with_qc() {
+    let qc = QC {
+        height: 5,
+        round: 2,
+        block_hash: [0xaa; 32],
+        votes: vec![],
+    };
+
+    let timeout = Timeout {
+        height: 6,
+        round: 3,
+        voter: [0xbb; 32],
+        highest_qc: Some(qc),
+        signature: [0xcc; 64],
+    };
+
+    let bytes_unsigned = encode_timeout_v1_unsigned(&timeout).unwrap();
+    let bytes_signed = encode_timeout_v1_signed(&timeout).unwrap();
+
+    let path_unsigned = vectors_dir().join("timeout_with_qc_unsigned_v1.bin");
+    let path_signed = vectors_dir().join("timeout_with_qc_signed_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path_unsigned, &bytes_unsigned).unwrap();
+        fs::write(&path_signed, &bytes_signed).unwrap();
+        println!("Updated: {path_unsigned:?} and {path_signed:?}");
+    } else {
+        let expected_unsigned = fs::read(&path_unsigned).expect("golden vector missing");
+        let expected_signed = fs::read(&path_signed).expect("golden vector missing");
+        assert_eq!(
+            bytes_unsigned, expected_unsigned,
+            "Timeout (with QC) unsigned encoding drifted!"
+        );
+        assert_eq!(
+            bytes_signed, expected_signed,
+            "Timeout (with QC) signed encoding drifted!"
         );
     }
 }

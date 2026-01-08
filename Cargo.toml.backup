@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/types",
+    "crates/crypto",
+    "crates/codec",
+    "crates/p2p",
+    "crates/node",
+    "crates/state",
+    "crates/execution",
+    "crates/smt",
+    "crates/mempool",
+]
+
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"

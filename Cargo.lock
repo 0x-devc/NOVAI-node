@@ -2018,6 +2018,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "novai-consensus-types"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "novai-codec",
+ "novai-types",
+]
+
+[[package]]
 name = "novai-crypto"
 version = "0.1.0"
 dependencies = [

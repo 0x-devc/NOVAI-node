@@ -5,6 +5,21 @@
 
 use crate::{Block, Proposal, Timeout, Vote, QC};
 
+/// Codec errors for consensus messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodecError {
+    /// Transaction encoding failed.
+    TxEncodingFailed,
+    /// QC has duplicate voters.
+    DuplicateVoter,
+    /// QC votes are not sorted by voter.
+    VotesNotSorted,
+    /// Block has too many transactions.
+    TooManyTransactions,
+    /// QC has too many votes.
+    TooManyVotes,
+}
+
 /// Codec version for Block.
 pub const BLOCK_V1: u8 = 0x01;
 
@@ -26,6 +41,12 @@ pub const TIMEOUT_UNSIGNED_V1: u8 = 0x01;
 /// Codec version for Timeout (signed).
 pub const TIMEOUT_SIGNED_V1: u8 = 0x01;
 
+/// Maximum transactions per block (`DoS` prevention).
+pub const MAX_TXS_PER_BLOCK: usize = 10_000;
+
+/// Maximum votes per QC (`DoS` prevention).
+pub const MAX_VOTES_PER_QC: usize = 10_000;
+
 // ============================================================================
 // Block Encoding
 // ============================================================================
@@ -37,10 +58,15 @@ pub const TIMEOUT_SIGNED_V1: u8 = 0x01;
 /// [version:1][height:8][round:8][parent_hash:32][state_root:32][tx_count:4][txs_bytes]
 /// ```
 ///
-/// # Panics
-/// Panics if transaction encoding fails (should never happen for valid `TxV1`).
-#[must_use]
-pub fn encode_block_v1(block: &Block) -> Vec<u8> {
+/// # Errors
+/// Returns `CodecError::TooManyTransactions` if `block.txs.len() > MAX_TXS_PER_BLOCK`.
+/// Returns `CodecError::TxEncodingFailed` if any transaction fails to encode.
+pub fn encode_block_v1(block: &Block) -> Result<Vec<u8>, CodecError> {
+    // Check size limit
+    if block.txs.len() > MAX_TXS_PER_BLOCK {
+        return Err(CodecError::TooManyTransactions);
+    }
+
     let mut buf = Vec::new();
     buf.push(BLOCK_V1);
     buf.extend_from_slice(&block.height.to_be_bytes());
@@ -50,23 +76,26 @@ pub fn encode_block_v1(block: &Block) -> Vec<u8> {
 
     // Encode transaction count
     #[allow(clippy::cast_possible_truncation)]
-    let tx_count = block.txs.len() as u32; // Safe: consensus blocks won't have 4B+ txs
+    let tx_count = block.txs.len() as u32; // Safe: checked above
     buf.extend_from_slice(&tx_count.to_be_bytes());
 
     // Encode each transaction using TxV1 signed encoding
     for tx in &block.txs {
-        let tx_bytes = novai_codec::encode_tx_v1_signed(tx).expect("tx encoding should not fail");
+        let tx_bytes =
+            novai_codec::encode_tx_v1_signed(tx).map_err(|_| CodecError::TxEncodingFailed)?;
         buf.extend_from_slice(&tx_bytes);
     }
 
-    buf
+    Ok(buf)
 }
 
 /// Compute the hash of a Block.
-#[must_use]
-pub fn hash_block_v1(block: &Block) -> [u8; 32] {
-    let bytes = encode_block_v1(block);
-    blake3::hash(&bytes).into()
+///
+/// # Errors
+/// Returns error if block encoding fails.
+pub fn hash_block_v1(block: &Block) -> Result<[u8; 32], CodecError> {
+    let bytes = encode_block_v1(block)?;
+    Ok(blake3::hash(&bytes).into())
 }
 
 // ============================================================================
@@ -113,8 +142,31 @@ pub fn encode_vote_v1_signed(vote: &Vote) -> Vec<u8> {
 /// ```text
 /// [version:1][height:8][round:8][block_hash:32][vote_count:4][votes_bytes]
 /// ```
-#[must_use]
-pub fn encode_qc_v1(qc: &QC) -> Vec<u8> {
+///
+/// # Canonical Ordering
+/// Votes MUST be sorted by `voter` (lexicographic order) before encoding.
+/// This function will sort the votes automatically to ensure determinism.
+///
+/// # Errors
+/// Returns `CodecError::TooManyVotes` if `qc.votes.len() > MAX_VOTES_PER_QC`.
+/// Returns `CodecError::DuplicateVoter` if any voter appears more than once.
+pub fn encode_qc_v1(qc: &QC) -> Result<Vec<u8>, CodecError> {
+    // Check size limit
+    if qc.votes.len() > MAX_VOTES_PER_QC {
+        return Err(CodecError::TooManyVotes);
+    }
+
+    // Sort votes by voter (canonical ordering)
+    let mut sorted_votes = qc.votes.clone();
+    sorted_votes.sort_by(|a, b| a.voter.cmp(&b.voter));
+
+    // Check for duplicates (adjacent after sorting)
+    for i in 1..sorted_votes.len() {
+        if sorted_votes[i].voter == sorted_votes[i - 1].voter {
+            return Err(CodecError::DuplicateVoter);
+        }
+    }
+
     let mut buf = Vec::new();
     buf.push(QC_V1);
     buf.extend_from_slice(&qc.height.to_be_bytes());
@@ -123,16 +175,16 @@ pub fn encode_qc_v1(qc: &QC) -> Vec<u8> {
 
     // Encode vote count
     #[allow(clippy::cast_possible_truncation)]
-    let vote_count = qc.votes.len() as u32; // Safe: QCs won't have 4B+ votes
+    let vote_count = sorted_votes.len() as u32; // Safe: checked above
     buf.extend_from_slice(&vote_count.to_be_bytes());
 
-    // Encode each vote (signed format)
-    for vote in &qc.votes {
+    // Encode each vote (signed format) in sorted order
+    for vote in &sorted_votes {
         let vote_bytes = encode_vote_v1_signed(vote);
         buf.extend_from_slice(&vote_bytes);
     }
 
-    buf
+    Ok(buf)
 }
 
 // ============================================================================
@@ -145,20 +197,22 @@ pub fn encode_qc_v1(qc: &QC) -> Vec<u8> {
 /// ```text
 /// [version:1][block_bytes][qc_bytes]
 /// ```
-#[must_use]
-pub fn encode_proposal_v1(proposal: &Proposal) -> Vec<u8> {
+///
+/// # Errors
+/// Returns error if block or QC encoding fails.
+pub fn encode_proposal_v1(proposal: &Proposal) -> Result<Vec<u8>, CodecError> {
     let mut buf = Vec::new();
     buf.push(PROPOSAL_V1);
 
     // Encode block
-    let block_bytes = encode_block_v1(&proposal.block);
+    let block_bytes = encode_block_v1(&proposal.block)?;
     buf.extend_from_slice(&block_bytes);
 
     // Encode justify QC
-    let qc_bytes = encode_qc_v1(&proposal.justify_qc);
+    let qc_bytes = encode_qc_v1(&proposal.justify_qc)?;
     buf.extend_from_slice(&qc_bytes);
 
-    buf
+    Ok(buf)
 }
 
 // ============================================================================
@@ -171,8 +225,10 @@ pub fn encode_proposal_v1(proposal: &Proposal) -> Vec<u8> {
 /// ```text
 /// [version:1][height:8][round:8][voter:32][has_qc:1][qc_bytes?]
 /// ```
-#[must_use]
-pub fn encode_timeout_v1_unsigned(timeout: &Timeout) -> Vec<u8> {
+///
+/// # Errors
+/// Returns error if `highest_qc` encoding fails.
+pub fn encode_timeout_v1_unsigned(timeout: &Timeout) -> Result<Vec<u8>, CodecError> {
     let mut buf = Vec::new();
     buf.push(TIMEOUT_UNSIGNED_V1);
     buf.extend_from_slice(&timeout.height.to_be_bytes());
@@ -183,7 +239,7 @@ pub fn encode_timeout_v1_unsigned(timeout: &Timeout) -> Vec<u8> {
     match &timeout.highest_qc {
         Some(qc) => {
             buf.push(0x01); // has_qc = true
-            let qc_bytes = encode_qc_v1(qc);
+            let qc_bytes = encode_qc_v1(qc)?;
             buf.extend_from_slice(&qc_bytes);
         }
         None => {
@@ -191,7 +247,7 @@ pub fn encode_timeout_v1_unsigned(timeout: &Timeout) -> Vec<u8> {
         }
     }
 
-    buf
+    Ok(buf)
 }
 
 /// Encode a Timeout to canonical signed bytes (includes signature).
@@ -200,16 +256,30 @@ pub fn encode_timeout_v1_unsigned(timeout: &Timeout) -> Vec<u8> {
 /// ```text
 /// [unsigned_bytes][signature:64]
 /// ```
-#[must_use]
-pub fn encode_timeout_v1_signed(timeout: &Timeout) -> Vec<u8> {
-    let mut buf = encode_timeout_v1_unsigned(timeout);
+///
+/// # Errors
+/// Returns error if unsigned encoding fails.
+pub fn encode_timeout_v1_signed(timeout: &Timeout) -> Result<Vec<u8>, CodecError> {
+    let mut buf = encode_timeout_v1_unsigned(timeout)?;
     buf.extend_from_slice(&timeout.signature);
-    buf
+    Ok(buf)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use novai_types::{TxV1, TxVersion};
+
+    fn dummy_tx() -> TxV1 {
+        TxV1 {
+            version: TxVersion::V1,
+            from: [0x00; 32],
+            nonce: 0,
+            fee: 0,
+            payload: vec![],
+            sig: [0x00; 64],
+        }
+    }
 
     #[test]
     fn block_encoding_deterministic() {
@@ -221,9 +291,23 @@ mod tests {
             txs: vec![],
         };
 
-        let bytes1 = encode_block_v1(&block);
-        let bytes2 = encode_block_v1(&block);
+        let bytes1 = encode_block_v1(&block).unwrap();
+        let bytes2 = encode_block_v1(&block).unwrap();
         assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn block_too_many_txs_rejected() {
+        let block = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0x00; 32],
+            state_root: [0x00; 32],
+            txs: vec![dummy_tx(); MAX_TXS_PER_BLOCK + 1],
+        };
+
+        let result = encode_block_v1(&block);
+        assert_eq!(result, Err(CodecError::TooManyTransactions));
     }
 
     #[test]
@@ -254,8 +338,105 @@ mod tests {
             votes: vec![],
         };
 
-        let bytes1 = encode_qc_v1(&qc);
-        let bytes2 = encode_qc_v1(&qc);
+        let bytes1 = encode_qc_v1(&qc).unwrap();
+        let bytes2 = encode_qc_v1(&qc).unwrap();
         assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn qc_votes_sorted_automatically() {
+        // Create votes in reverse order
+        let vote_a = Vote {
+            height: 1,
+            round: 0,
+            block_hash: [0x00; 32],
+            voter: [0xaa; 32],
+            signature: [0x00; 64],
+        };
+        let vote_b = Vote {
+            height: 1,
+            round: 0,
+            block_hash: [0x00; 32],
+            voter: [0xbb; 32],
+            signature: [0x00; 64],
+        };
+        let vote_c = Vote {
+            height: 1,
+            round: 0,
+            block_hash: [0x00; 32],
+            voter: [0xcc; 32],
+            signature: [0x00; 64],
+        };
+
+        // Create QC with unsorted votes
+        let qc_unsorted = QC {
+            height: 1,
+            round: 0,
+            block_hash: [0x00; 32],
+            votes: vec![vote_c.clone(), vote_a.clone(), vote_b.clone()],
+        };
+
+        // Create QC with sorted votes
+        let qc_sorted = QC {
+            height: 1,
+            round: 0,
+            block_hash: [0x00; 32],
+            votes: vec![vote_a, vote_b, vote_c],
+        };
+
+        // Both should encode to same bytes
+        let bytes_unsorted = encode_qc_v1(&qc_unsorted).unwrap();
+        let bytes_sorted = encode_qc_v1(&qc_sorted).unwrap();
+        assert_eq!(bytes_unsorted, bytes_sorted);
+    }
+
+    #[test]
+    fn qc_duplicate_voter_rejected() {
+        let vote = Vote {
+            height: 1,
+            round: 0,
+            block_hash: [0x00; 32],
+            voter: [0xaa; 32],
+            signature: [0x00; 64],
+        };
+
+        let qc = QC {
+            height: 1,
+            round: 0,
+            block_hash: [0x00; 32],
+            votes: vec![vote.clone(), vote],
+        };
+
+        let result = encode_qc_v1(&qc);
+        assert_eq!(result, Err(CodecError::DuplicateVoter));
+    }
+
+    #[test]
+    fn qc_too_many_votes_rejected() {
+        #[allow(clippy::cast_possible_truncation)]
+        let votes: Vec<Vote> = (0..=MAX_VOTES_PER_QC)
+            .map(|i| Vote {
+                height: 1,
+                round: 0,
+                block_hash: [0x00; 32],
+                voter: {
+                    let mut addr = [0x00; 32];
+                    addr[0] = (i % 256) as u8;
+                    addr[1] = (i / 256) as u8;
+                    addr
+                },
+                signature: [0x00; 64],
+            })
+            .collect();
+
+        let qc = QC {
+            height: 1,
+            round: 0,
+            block_hash: [0x00; 32],
+            votes,
+        };
+
+        let result = encode_qc_v1(&qc);
+        assert_eq!(result, Err(CodecError::TooManyVotes));
     }
 }

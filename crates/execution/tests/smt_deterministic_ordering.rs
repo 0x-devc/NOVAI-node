@@ -118,7 +118,7 @@ fn smt_root_bytes_stable_across_platforms() {
     // Locks down root encoding format (consensus-critical).
     assert_eq!(root.len(), 33, "SMT root encoding must be 33 bytes (v1)");
     assert_eq!(root[0], 0x01, "SMT root must have version byte 0x01");
-    
+
     // Note: Root bytes are deterministic but not hardcoded here.
     // This test proves format stability. For golden root bytes, uncomment after first run:
     // let expected_root: [u8; 33] = [ 0x01, /* 32-byte hash */ ];
