@@ -24,7 +24,7 @@ fn golden_vote_unsigned() {
         round: 7,
         block_hash: [0xaa; 32],
         voter: [0xbb; 32],
-        signature: [0x00; 64], // Not used in unsigned encoding
+        signature: [0x00; 64],
     };
 
     let bytes = encode_vote_v1_unsigned(&vote);
@@ -85,8 +85,6 @@ fn golden_block_empty_txs() {
 
 #[test]
 fn golden_qc_empty_votes() {
-    // Note: This is a codec-stable vector but NOT a valid QC per consensus rules
-    // (QC requires exactly 2f+1 votes, not 0)
     let qc = QC {
         height: 50,
         round: 3,
@@ -145,7 +143,6 @@ fn golden_timeout_no_qc() {
 
 #[test]
 fn golden_qc_with_votes() {
-    // Valid QC with 3 votes (quorum for n=4)
     let vote_a = Vote {
         height: 10,
         round: 2,
@@ -292,5 +289,79 @@ fn golden_timeout_with_qc() {
             bytes_signed, expected_signed,
             "Timeout (with QC) signed encoding drifted!"
         );
+    }
+}
+
+#[test]
+fn golden_proposal_unsigned() {
+    let block = Block {
+        height: 5,
+        round: 2,
+        parent_hash: [0xaa; 32],
+        state_root: [0xbb; 32],
+        txs: vec![],
+    };
+
+    let qc = QC {
+        height: 4,
+        round: 1,
+        block_hash: [0xaa; 32],
+        votes: vec![],
+    };
+
+    let proposal = novai_consensus_types::Proposal {
+        block,
+        justify_qc: qc,
+    };
+
+    let bytes = encode_proposal_v1_unsigned(&proposal).unwrap();
+    let path = vectors_dir().join("proposal_unsigned_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "Proposal unsigned encoding drifted!");
+    }
+}
+
+#[test]
+fn golden_signed_proposal() {
+    use novai_consensus_types::SignedProposal;
+
+    let block = Block {
+        height: 5,
+        round: 2,
+        parent_hash: [0xaa; 32],
+        state_root: [0xbb; 32],
+        txs: vec![],
+    };
+
+    let qc = QC {
+        height: 4,
+        round: 1,
+        block_hash: [0xaa; 32],
+        votes: vec![],
+    };
+
+    let signed_proposal = SignedProposal {
+        proposer: [0xcc; 32],
+        proposal: novai_consensus_types::Proposal {
+            block,
+            justify_qc: qc,
+        },
+        signature: [0xdd; 64],
+    };
+
+    let bytes = encode_signed_proposal_v1(&signed_proposal).unwrap();
+    let path = vectors_dir().join("signed_proposal_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "Signed proposal encoding drifted!");
     }
 }

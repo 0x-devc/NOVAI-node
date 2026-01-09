@@ -69,6 +69,14 @@ Block {
 **Constraints:**
 - `txs.len()` MUST be <= 10000 (prevent unbounded messages)
 
+### Block Hash
+The hash of a block is computed as:
+```
+block_hash = blake3(encode_block_v1(block))
+```
+- Domain separation: implicit via versioned encoding (starts with 0x01)
+- Encoding: See Canonical Encoding Rules section
+
 ### Proposal
 ```
 Proposal {
@@ -76,6 +84,21 @@ Proposal {
     justify_qc: QC,  // QC for parent block (or genesis QC for height 1)
 }
 ```
+
+### SignedProposal
+```
+SignedProposal {
+    proposer: Address,    // [u8; 32]
+    proposal: Proposal,
+    signature: [u8; 64],  // Ed25519 signature over unsigned bytes
+}
+```
+
+**Signing Rule:**
+- Proposal signature MUST be computed over: `encode_proposal_v1_unsigned(proposal)`
+- Domain separation tag: `b"NOVAI_PROPOSAL_V1"`
+- Full signed bytes: `domain_tag || encode_proposal_v1_unsigned(proposal)`
+- The `proposer` field identifies who signed the proposal
 
 ### Vote
 ```
@@ -110,7 +133,7 @@ QC {
 
 **Constraints:**
 - `votes.len()` MUST equal quorum threshold (2f+1)
-- `votes.len()` MUST be <= 10000
+- `votes.len()` MUST be <= 11000
 
 ### Timeout (view-change)
 ```
@@ -147,18 +170,25 @@ Before encoding a QC:
 
 This ensures: **same logical QC → same encoded bytes → same hash**
 
+**Policy:** Implementations normalize (auto-sort + dedup-check) during encoding. Unsorted input is acceptable—encoder canonicalizes automatically.
+
 ## Message Validity Rules
 
 ### Proposal Validity
 A Proposal is valid if:
 1. `block.height > 0` (genesis block not proposed)
-2. `block.round >= 0`
-3. `block.txs.len() <= 10000`
-4. If `block.height > 1`: `justify_qc.height == block.height - 1`
-5. If `block.height > 1`: `justify_qc.block_hash == block.parent_hash`
-6. `justify_qc` is valid (see QC validity)
-7. `sender == leader(block.height, block.round)`
-8. State transition is valid: `execute(parent_state, block.txs) == block.state_root`
+2. `block.txs.len() <= 10000`
+3. If `block.height > 1`: `justify_qc.height == block.height - 1`
+4. If `block.height > 1`: `justify_qc.block_hash == block.parent_hash`
+5. `justify_qc` is valid (see QC validity)
+6. State transition is valid: `execute(parent_state, block.txs) == block.state_root`
+
+### SignedProposal Validity
+A SignedProposal is valid if:
+1. `proposal` is valid (see Proposal Validity)
+2. `proposer == leader(proposal.block.height, proposal.block.round)`
+3. Signature verifies: `verify(proposer_pubkey, signed_bytes, signature)`
+   - Where `signed_bytes = b"NOVAI_PROPOSAL_V1" || encode_proposal_v1_unsigned(proposal)`
 
 ### Vote Validity
 A Vote is valid if:
@@ -171,7 +201,7 @@ A Vote is valid if:
 ### QC Validity
 A QC is valid if:
 1. `votes.len() == quorum_threshold` (exactly 2f+1)
-2. `votes.len() <= 10000`
+2. `votes.len() <= 11000`
 3. All votes have matching `(height, round, block_hash)` with QC fields
 4. All votes are individually valid
 5. No duplicate voters (each voter appears exactly once)
@@ -197,12 +227,14 @@ A block B at height `h` is **committed** when there exists a three-block chain:
    - `B''.parent_hash == hash(B')`
    - QC_{h+1} justifies B'
 
+**Commit Trigger:** When a node forms or receives QC_{h+2}, it commits B (and any uncommitted ancestors up to B).
+
 **Visual:**
 ```
 B (h) --QC_h--> B' (h+1) --QC_{h+1}--> B'' (h+2)
 ^
 |
-Committed when B'' is proposed with valid justify QC_{h+1}
+Committed when QC_{h+2} is observed
 ```
 
 **Rationale:** Three-chain rule ensures safety via locked QCs.
@@ -234,6 +266,7 @@ leader(height, round) = validators[(height + round) % n]
 - Round-robin with height offset
 - No single point of failure
 - Predictable (can be precomputed)
+- Uses wrapping arithmetic to prevent overflow
 
 **Validator Ordering:**
 - Validators MUST be sorted by `Address` (lexicographic byte order)
@@ -278,7 +311,7 @@ After GST (Global Stabilization Time):
 ## Implementation Notes (Week 5 Scope)
 
 ### This Week (Week 5)
-- Define message structs
+- Define message structs (including SignedProposal)
 - Implement canonical encoding with Result<_, Error> returns
 - Create golden vectors (codec stability + validity fixtures)
 - Implement deterministic leader schedule with validator constraints
@@ -295,8 +328,10 @@ To prevent DoS attacks and ensure bounded message sizes:
 | Field | Limit | Rationale |
 |-------|-------|-----------|
 | `Block.txs.len()` | 10,000 | Reasonable block size |
-| `QC.votes.len()` | 10,000 | Supports up to ~15,000 validators |
+| `QC.votes.len()` | 11,000 | Supports n ≈ 16500 validators (quorum ≈ 11000) |
 | Individual tx size | 10 KB | Enforced by tx validation |
+
+**Note:** For n = 16501 validators (f = 5500), quorum = 2f+1 = 11001, which fits within the 11000 limit approximately.
 
 ## Open Questions (To Be Resolved)
 
@@ -311,4 +346,4 @@ To prevent DoS attacks and ensure bounded message sizes:
 
 ---
 **Document Status:** Living document, updated as protocol evolves.  
-**Last Updated:** Week 5 - post-feedback hardening.
+**Last Updated:** Week 5 - post-feedback hardening (final).

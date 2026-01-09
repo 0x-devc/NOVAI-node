@@ -3,7 +3,7 @@
 //! All encodings are deterministic and use big-endian byte order.
 //! Format versioning: each message type has a version byte prefix.
 
-use crate::{Block, Proposal, Timeout, Vote, QC};
+use crate::{Block, Proposal, SignedProposal, Timeout, Vote, QC};
 
 /// Codec errors for consensus messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub const TIMEOUT_SIGNED_V1: u8 = 0x01;
 pub const MAX_TXS_PER_BLOCK: usize = 10_000;
 
 /// Maximum votes per QC (`DoS` prevention).
-pub const MAX_VOTES_PER_QC: usize = 10_000;
+pub const MAX_VOTES_PER_QC: usize = 11_000;
 
 // ============================================================================
 // Block Encoding
@@ -214,7 +214,32 @@ pub fn encode_proposal_v1(proposal: &Proposal) -> Result<Vec<u8>, CodecError> {
 
     Ok(buf)
 }
+/// Encode a Proposal to canonical unsigned bytes (for signing).
+///
+/// # Errors
+/// Returns error if block or QC encoding fails.
+pub fn encode_proposal_v1_unsigned(proposal: &Proposal) -> Result<Vec<u8>, CodecError> {
+    let mut buf = Vec::new();
+    let block_bytes = encode_block_v1(&proposal.block)?;
+    buf.extend_from_slice(&block_bytes);
+    let qc_bytes = encode_qc_v1(&proposal.justify_qc)?;
+    buf.extend_from_slice(&qc_bytes);
+    Ok(buf)
+}
 
+/// Encode a `SignedProposal` to canonical bytes.
+///
+/// # Errors
+/// Returns error if proposal encoding fails.
+pub fn encode_signed_proposal_v1(sp: &SignedProposal) -> Result<Vec<u8>, CodecError> {
+    let mut buf = Vec::new();
+    buf.push(PROPOSAL_V1);
+    buf.extend_from_slice(&sp.proposer);
+    let proposal_bytes = encode_proposal_v1_unsigned(&sp.proposal)?;
+    buf.extend_from_slice(&proposal_bytes);
+    buf.extend_from_slice(&sp.signature);
+    Ok(buf)
+}
 // ============================================================================
 // Timeout Encoding
 // ============================================================================

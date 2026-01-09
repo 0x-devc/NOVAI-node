@@ -33,7 +33,13 @@ pub struct Proposal {
     pub block: Block,
     pub justify_qc: QC,
 }
-
+/// Signed proposal for network transmission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProposal {
+    pub proposer: Address,
+    pub proposal: Proposal,
+    pub signature: [u8; 64],
+}
 /// Vote message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Vote {

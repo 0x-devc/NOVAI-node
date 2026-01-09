@@ -221,3 +221,9 @@ mod tests {
         assert!(!vs.contains(&addr_5));
     }
 }
+#[test]
+fn leader_no_overflow() {
+    let vs = ValidatorSet::new(vec![[0x01; 32], [0x02; 32], [0x03; 32], [0x04; 32]]).unwrap();
+    let leader = vs.leader(u64::MAX, 1);
+    assert_eq!(leader, [0x01; 32]); // (MAX + 1) wraps to 0, 0 % 4 = 0
+}
