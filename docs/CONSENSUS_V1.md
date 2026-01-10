@@ -65,7 +65,17 @@ Block {
     txs: Vec<TxV1>,       // Transactions (MUST be <= 10000)
 }
 ```
+## Signature Domain Separation
 
+All signatures use domain separation tags to prevent cross-context attacks:
+
+| Message Type | Domain Tag | Signed Bytes Format |
+|--------------|------------|---------------------|
+| Vote | `b"NOVAI_VOTE_V1"` | `tag \|\| encode_vote_v1_unsigned(vote)` |
+| Timeout | `b"NOVAI_TIMEOUT_V1"` | `tag \|\| encode_timeout_v1_unsigned(timeout)` |
+| Proposal | `b"NOVAI_PROPOSAL_V1"` | `tag \|\| encode_proposal_v1_unsigned(proposal)` |
+
+**Verification Rule:** For all message types, `verify(pubkey, tag || unsigned_bytes, signature)` MUST succeed.
 **Constraints:**
 - `txs.len()` MUST be <= 10000 (prevent unbounded messages)
 
@@ -84,7 +94,28 @@ Proposal {
     justify_qc: QC,  // QC for parent block (or genesis QC for height 1)
 }
 ```
+## Wire Format & Network Rules
 
+### Byte-Level Constraints
+To prevent DoS attacks, implementations MUST enforce:
+- Block encoding: <= 1 MB (10,000 txs × ~100 bytes/tx)
+- QC encoding: <= 2 MB (11,000 votes × ~145 bytes/vote)
+- Proposal encoding: <= 3 MB (block + QC)
+- Individual message: <= 10 MB total
+
+### Network Acceptance Policy
+**QC Vote Ordering:**
+- Peers MAY send QC votes in any order over the wire
+- Receivers MUST normalize (auto-sort + dedup-check) before using
+- Both sorted and unsorted QCs are valid network messages
+- After normalization, duplicate voters cause rejection
+
+**Rationale:** Allows flexible QC construction while ensuring deterministic hashing.
+
+### Forward Compatibility
+- Unknown version bytes MUST be rejected with clear error
+- Receivers MUST NOT attempt to parse unknown versions
+- Version negotiation is out of scope for V1
 ### SignedProposal
 ```
 SignedProposal {
@@ -146,10 +177,17 @@ Timeout {
 }
 ```
 
-**Signing Rule:**
-- Timeout signature MUST be computed over: `encode_timeout_v1_unsigned(timeout)`
-- Domain separation tag: `b"NOVAI_TIMEOUT_V1"`
-- Full signed bytes: `domain_tag || encode_timeout_v1_unsigned(timeout)`
+## Signature Domain Separation
+
+All signatures use domain separation tags to prevent cross-context attacks:
+
+| Message Type | Domain Tag | Signed Bytes Format |
+|--------------|------------|---------------------|
+| Vote | `b"NOVAI_VOTE_V1"` | `tag || encode_vote_v1_unsigned(vote)` |
+| Timeout | `b"NOVAI_TIMEOUT_V1"` | `tag || encode_timeout_v1_unsigned(timeout)` |
+| Proposal | `b"NOVAI_PROPOSAL_V1"` | `tag || encode_proposal_v1_unsigned(proposal)` |
+
+**Verification Rule:** For all message types, `verify(pubkey, tag || unsigned_bytes, signature)` MUST succeed.
 
 ## Canonical Encoding Rules
 
@@ -171,8 +209,31 @@ Before encoding a QC:
 This ensures: **same logical QC → same encoded bytes → same hash**
 
 **Policy:** Implementations normalize (auto-sort + dedup-check) during encoding. Unsorted input is acceptable—encoder canonicalizes automatically.
+## Wire Format & Network Rules
+
+### Byte-Level Constraints
+To prevent DoS attacks, implementations MUST enforce:
+- Block encoding: <= 1 MB (10,000 txs × ~100 bytes/tx)
+- QC encoding: <= 2 MB (11,000 votes × ~145 bytes/vote)
+- Proposal encoding: <= 3 MB (block + QC)
+- Individual message: <= 10 MB total
+
+### Network Acceptance Policy
+**QC Vote Ordering:**
+- Peers MAY send QC votes in any order over the wire
+- Receivers MUST normalize (auto-sort + dedup-check) before using
+- Both sorted and unsorted QCs are valid network messages
+- After normalization, duplicate voters cause rejection
+
+**Rationale:** Allows flexible QC construction while ensuring deterministic hashing.
+
+### Forward Compatibility
+- Unknown version bytes MUST be rejected with clear error
+- Receivers MUST NOT attempt to parse unknown versions
+- Version negotiation is out of scope for V1
 
 ## Message Validity Rules
+
 
 ### Proposal Validity
 A Proposal is valid if:
@@ -328,7 +389,9 @@ To prevent DoS attacks and ensure bounded message sizes:
 | Field | Limit | Rationale |
 |-------|-------|-----------|
 | `Block.txs.len()` | 10,000 | Reasonable block size |
-| `QC.votes.len()` | 11,000 | Supports n ≈ 16500 validators (quorum ≈ 11000) |
+| `QC.votes.len()` | 11,000 | Supports up to n=16,501 validators (max quorum=11,001)* |
+
+\*For n validators where n=3f+1, quorum = 2f+1 = 2⌊(n-1)/3⌋+1. Max n where quorum ≤ 11,000 is n=16,501 (f=5,500, quorum=11,001).
 | Individual tx size | 10 KB | Enforced by tx validation |
 
 **Note:** For n = 16501 validators (f = 5500), quorum = 2f+1 = 11001, which fits within the 11000 limit approximately.
