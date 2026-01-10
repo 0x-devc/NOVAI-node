@@ -2018,6 +2018,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "novai-consensus"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "mempool",
+ "novai-codec",
+ "novai-consensus-types",
+ "novai-crypto",
+ "novai-execution",
+ "novai-state",
+ "novai-types",
+ "rand_core 0.6.4",
+]
+
+[[package]]
 name = "novai-consensus-types"
 version = "0.1.0"
 dependencies = [

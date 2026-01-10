@@ -14,3 +14,5 @@ Add at least 1 integration/unit test for the wiring
 
 Ensure
 fmt / clippy / test / deny pass
+[dev-dependencies]
+proptest = "1.4"
