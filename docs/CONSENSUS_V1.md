@@ -94,6 +94,35 @@ Proposal {
     justify_qc: QC,  // QC for parent block (or genesis QC for height 1)
 }
 ```
+### GenesisQC Special Case
+
+The **GenesisQC** is a special QC used only to justify the first proposal at height=1.
+
+**Definition:**
+```
+GenesisQC {
+    height: 0,
+    round: 0,
+    block_hash: [0; 32],
+    votes: []  // EMPTY - no votes required
+}
+```
+
+**Validity Rules:**
+1. **GenesisQC is ONLY valid as `justify_qc` for height=1 proposals**
+2. **All proposals at height > 1 MUST have a normal QC** with:
+   - `votes.len() >= quorum` (where quorum = 2f+1)
+   - All votes properly signed by validators
+   - Votes sorted by voter address
+   - No duplicate voters
+
+**Rationale:**
+- The genesis block (height=0) has no parent to vote on
+- Height=1 is the first proposed block and needs a bootstrap justification
+- This avoids the "chicken and egg" problem at chain start
+
+**Implementation Note:**
+Validators MUST reject any proposal at height > 1 that attempts to use GenesisQC.
 ## Wire Format & Network Rules
 
 ### Byte-Level Constraints

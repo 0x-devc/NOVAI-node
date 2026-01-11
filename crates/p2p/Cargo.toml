@@ -4,5 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[dependencies]
+novai-consensus-types = { path = "../consensus_types" }
+
+[lints]
+workspace = true
+
 [lib]
 path = "src/lib.rs"

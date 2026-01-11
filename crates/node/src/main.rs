@@ -1,17 +1,23 @@
 use mempool::{NonceProvider, TxMempool};
 use novai_codec::txid_v1;
 use novai_crypto::{generate_keypair, sign_tx_v1};
+use novai_node::consensus_node::ConsensusNode;
 use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
+use std::time::Duration;
 
 fn usage() {
     eprintln!(
         "usage:
+  novai-node run --port <port> [--peer <addr>]... --validator <index>
   novai-node submit-tx <payload> [--nonce <u64>] [--fee <u64>] [--min-fee <u64>] [--cap <u64>]
   novai-node drain-mempool <payload> [<payload> ...] [--max <u64>] [--min-fee <u64>] [--cap <u64>]
 
 examples:
+  novai-node run --port 9000 --validator 0
+  novai-node run --port 9001 --peer 127.0.0.1:9000 --validator 1
   novai-node submit-tx hello
   novai-node submit-tx hello --fee 10 --nonce 0
   novai-node drain-mempool a b c
@@ -45,10 +51,11 @@ impl NonceProvider for InMemoryNonceProvider {
     }
 }
 
-fn build_tx(from: Address, nonce: u64, fee: u64, payload: String) -> TxV1 {
+fn build_tx(from: Address, pubkey: [u8; 32], nonce: u64, fee: u64, payload: String) -> TxV1 {
     TxV1 {
         version: TxVersion::V1,
         from,
+        pubkey,
         nonce,
         fee,
         payload: payload.into_bytes(),
@@ -73,6 +80,115 @@ fn main() {
     };
 
     match cmd.as_str() {
+        "run" => {
+            // Parse flags
+            let mut port: Option<u16> = None;
+            let mut peers: Vec<String> = Vec::new();
+            let mut validator_idx: Option<usize> = None;
+
+            let rest: Vec<String> = args.collect();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--port" => {
+                        port = Some(parse_u64(rest.get(i + 1).cloned(), "--port") as u16);
+                        i += 2;
+                    }
+                    "--peer" => {
+                        peers.push(rest.get(i + 1).cloned().expect("missing --peer value"));
+                        i += 2;
+                    }
+                    "--validator" => {
+                        validator_idx = Some(parse_u64(rest.get(i + 1).cloned(), "--validator") as usize);
+                        i += 2;
+                    }
+                    other => {
+                        panic!("unknown flag: {other}");
+                    }
+                }
+            }
+
+            let port = port.expect("--port required");
+            let validator_idx = validator_idx.expect("--validator required");
+
+            // Hardcoded 5-node validator set for devnet
+            let validator_keys: Vec<ed25519_dalek::SigningKey> = (0..5)
+                .map(|i| ed25519_dalek::SigningKey::from_bytes(&[i as u8; 32]))
+                .collect();
+
+            let validator_set: Vec<Address> = validator_keys
+                .iter()
+                .map(|sk| {
+                    let pk = sk.verifying_key();
+                    novai_crypto::address_from_pubkey(&pk)
+                })
+                .collect();
+
+            let validator_pubkeys: HashMap<Address, ed25519_dalek::VerifyingKey> = 
+                validator_keys
+                    .iter()
+                    .map(|sk| {
+                        let pk = sk.verifying_key();
+                        (novai_crypto::address_from_pubkey(&pk), pk)
+                    })
+                    .collect();
+
+            let our_key = validator_keys[validator_idx].clone();
+            let our_addr = validator_set[validator_idx];
+
+            println!("🚀 Starting consensus node");
+            println!("   Port: {}", port);
+            println!("   Validator index: {}", validator_idx);
+            println!("   Address: {:?}", &our_addr[..8]);
+            println!("   Peers: {:?}", peers);
+
+            // Create node
+            let node = Arc::new(ConsensusNode::new(
+                our_key,
+                validator_set.clone(),
+                validator_pubkeys,
+            ));
+
+            // Start listener
+            let bind_addr = format!("127.0.0.1:{}", port).parse().expect("parse bind addr");
+            node.start_listener(bind_addr).expect("start listener");
+
+            // Connect to peers (with retry)
+            std::thread::sleep(Duration::from_secs(1)); // Give time for others to start
+            for peer in &peers {
+                let peer_addr = peer.parse().expect("parse peer addr");
+                match node.connect_to_peer(peer_addr) {
+                    Ok(_) => println!("✅ Connected to peer {}", peer),
+                    Err(e) => println!("⚠️  Failed to connect to {}: {}", peer, e),
+                }
+            }
+
+            println!("✅ Node started, waiting for peers...");
+            std::thread::sleep(Duration::from_secs(2));
+
+            // Create dummy mempool and nonce provider for Week 6
+            let mut mempool = TxMempool::new(1, 1000);
+            let nonce_provider = InMemoryNonceProvider::default();
+
+            // Simple consensus loop
+            loop {
+                std::thread::sleep(Duration::from_secs(3));
+
+                if node.are_we_leader() {
+                    println!("👑 We are leader, proposing block...");
+                    if let Err(e) = node.propose_block(&mut mempool, &nonce_provider) {
+                        println!("❌ Propose failed: {}", e);
+                    }
+                } else {
+                    println!("👂 Listening for proposals...");
+                }
+
+                // Check peer count
+                let peer_count = node.peer_manager.peer_count();
+                println!("   Connected peers: {}", peer_count);
+            }
+        }
+
         "submit-tx" => {
             let Some(payload) = args.next() else {
                 usage();
@@ -122,7 +238,7 @@ fn main() {
             let mut nonce_provider = InMemoryNonceProvider::default();
             nonce_provider.set(from, nonce);
 
-            let mut tx = build_tx(from, nonce, fee, payload);
+            let mut tx = build_tx(from, pk.to_bytes(), nonce, fee, payload);
             sign_tx_v1(&sk, &mut tx).expect("sign tx");
 
             let id = mp.insert(tx, &nonce_provider).expect("mempool insert");
@@ -193,7 +309,7 @@ fn main() {
 
             for (idx, payload) in payloads.into_iter().enumerate() {
                 let fee = (idx as u64) + 1;
-                let mut tx = build_tx(from, 0, fee, payload);
+                let mut tx = build_tx(from, pk.to_bytes(), 0, fee, payload);
                 sign_tx_v1(&sk, &mut tx).expect("sign tx");
 
                 mp.insert(tx, &nonce_provider).expect("mempool insert");

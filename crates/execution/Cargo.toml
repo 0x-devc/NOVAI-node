@@ -10,3 +10,9 @@ novai-types = { path = "../types" }
 novai-state = { path = "../state" }
 novai-smt = { path = "../smt" }
 blake3 = "=1.8.2"
+
+[dev-dependencies]
+novai-crypto = { path = "../crypto" }
+
+[lints]
+workspace = true

@@ -82,9 +82,11 @@ pub fn encode_tx_v1_unsigned(tx: &TxV1) -> Result<Vec<u8>, CodecError> {
     let mut out = Vec::new();
     write_u8(&mut out, tx.version as u8);
     write_32(&mut out, &tx.from);
+    write_32(&mut out, &tx.pubkey);
     write_u64_le(&mut out, tx.nonce);
     write_u64_le(&mut out, tx.fee);
-    write_bytes(&mut out, &tx.payload)?;
+    write_u32_le(&mut out, tx.payload.len() as u32);
+    out.extend_from_slice(&tx.payload);
     Ok(out)
 }
 
@@ -100,6 +102,7 @@ pub fn decode_tx_v1_unsigned(bytes: &[u8]) -> Result<TxV1, CodecError> {
     let v = read_u8(&mut input)?;
     let version = TxVersion::from_u8(v).ok_or(CodecError::InvalidVersion)?;
     let from: Address = read_32(&mut input)?;
+    let pubkey: [u8; 32] = read_32(&mut input)?;
     let nonce = read_u64_le(&mut input)?;
     let fee = read_u64_le(&mut input)?;
     let payload_len = read_u32_le(&mut input)? as usize;
@@ -115,6 +118,7 @@ pub fn decode_tx_v1_unsigned(bytes: &[u8]) -> Result<TxV1, CodecError> {
     Ok(TxV1 {
         version,
         from,
+        pubkey,
         nonce,
         fee,
         payload,
@@ -127,6 +131,7 @@ pub fn decode_tx_v1_signed(bytes: &[u8]) -> Result<TxV1, CodecError> {
     let v = read_u8(&mut input)?;
     let version = TxVersion::from_u8(v).ok_or(CodecError::InvalidVersion)?;
     let from: Address = read_32(&mut input)?;
+    let pubkey: [u8; 32] = read_32(&mut input)?;
     let nonce = read_u64_le(&mut input)?;
     let fee = read_u64_le(&mut input)?;
 
@@ -142,6 +147,7 @@ pub fn decode_tx_v1_signed(bytes: &[u8]) -> Result<TxV1, CodecError> {
     Ok(TxV1 {
         version,
         from,
+        pubkey,
         nonce,
         fee,
         payload,

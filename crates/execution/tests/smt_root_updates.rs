@@ -4,23 +4,23 @@ use novai_state::{
     account_key, decode_account_v1, decode_smt_root_v1, encode_account_v1, smt_key_for_state_key,
     AccountStateV1, Kv, MemKv, KEY_FEE_POOL, KEY_SMT_ROOT,
 };
-use novai_types::{Address, TxV1, TxVersion};
+use novai_types::{Address, TxV1};
 
 fn mk_addr(b: u8) -> Address {
     [b; 32]
 }
 
+/// Constructs a structurally-valid TxV1 for execution tests.
+/// Execution does NOT validate signatures (mempool does), so sig is zeroed.
 fn mk_tx(from: Address, nonce: u64, fee: u64, to: Address, amount: u64) -> TxV1 {
     let payload = encode_transfer_payload_v1(&TransferPayloadV1 { to, amount }).to_vec();
-
     TxV1 {
-        version: TxVersion::V1,
+        version: novai_types::TxVersion::V1,
         from,
+        pubkey: from, // Execution doesn't verify signatures, reuse from as dummy pubkey
         nonce,
         fee,
         payload,
-        // execution doesn't verify signatures (mempool/crypto does),
-        // but TxV1 requires a 64-byte signature field.
         sig: [0u8; 64],
     }
 }

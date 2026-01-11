@@ -10,6 +10,7 @@ novai-codec = { path = "../codec" }
 blake3 = "=1.8.2"
 
 [dev-dependencies]
+novai-crypto = { path = "../crypto" }
 
 [lints]
 workspace = true

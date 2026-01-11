@@ -5,8 +5,7 @@ use novai_state::{
     account_key, encode_account_v1, encode_fee_pool_v1, AccountStateV1, FeePoolV1, Kv, KvBatch,
     WriteOp, KEY_FEE_POOL,
 };
-use novai_types::{Address, TxV1, TxVersion};
-use std::sync::{Arc, Mutex};
+use novai_types::{Address, TxV1};
 
 fn addr(b: u8) -> Address {
     [b; 32]
@@ -15,8 +14,9 @@ fn addr(b: u8) -> Address {
 fn tx(from: Address, nonce: u64, fee: u64, to: Address, amount: u64) -> TxV1 {
     let payload = encode_transfer_payload_v1(&TransferPayloadV1 { to, amount }).to_vec();
     TxV1 {
-        version: TxVersion::V1,
+        version: novai_types::TxVersion::V1,
         from,
+        pubkey: from, // Execution doesn't verify, so reuse from as dummy pubkey
         nonce,
         fee,
         payload,
@@ -77,6 +77,8 @@ impl Kv for FaultyKv {
         Ok(())
     }
 }
+
+use std::sync::{Arc, Mutex};
 
 impl KvBatch for FaultyKv {
     fn apply_batch(&mut self, ops: &[WriteOp]) -> Result<(), Self::Error> {

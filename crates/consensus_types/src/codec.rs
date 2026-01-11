@@ -10,6 +10,8 @@ use crate::{Block, Proposal, SignedProposal, Timeout, Vote, QC};
 pub enum CodecError {
     /// Transaction encoding failed.
     TxEncodingFailed,
+    /// Transaction decoding failed.
+    TxDecodingFailed,
     /// QC has duplicate voters.
     DuplicateVoter,
     /// QC votes are not sorted by voter.
@@ -18,6 +20,10 @@ pub enum CodecError {
     TooManyTransactions,
     /// QC has too many votes.
     TooManyVotes,
+    /// Input buffer too short for decoding.
+    BufferTooShort,
+    /// Unsupported version byte.
+    UnsupportedVersion,
 }
 
 /// Codec version for Block.
@@ -46,6 +52,12 @@ pub const MAX_TXS_PER_BLOCK: usize = 10_000;
 
 /// Maximum votes per QC (`DoS` prevention).
 pub const MAX_VOTES_PER_QC: usize = 11_000;
+
+/// Minimum bytes per transaction (conservative estimate for validation).
+const MIN_TX_BYTES: usize = 100;
+
+/// Minimum bytes per vote (conservative estimate for validation).
+const MIN_VOTE_BYTES: usize = 100;
 
 // ============================================================================
 // Block Encoding
@@ -214,6 +226,7 @@ pub fn encode_proposal_v1(proposal: &Proposal) -> Result<Vec<u8>, CodecError> {
 
     Ok(buf)
 }
+
 /// Encode a Proposal to canonical unsigned bytes (for signing).
 ///
 /// # Errors
@@ -240,6 +253,7 @@ pub fn encode_signed_proposal_v1(sp: &SignedProposal) -> Result<Vec<u8>, CodecEr
     buf.extend_from_slice(&sp.signature);
     Ok(buf)
 }
+
 // ============================================================================
 // Timeout Encoding
 // ============================================================================
@@ -290,6 +304,256 @@ pub fn encode_timeout_v1_signed(timeout: &Timeout) -> Result<Vec<u8>, CodecError
     Ok(buf)
 }
 
+// =============================================================================
+// Decode functions
+// ============================================================================
+
+/// Decode a Vote from signed wire format.
+pub fn decode_vote_v1_signed(buf: &[u8]) -> Result<Vote, CodecError> {
+    if buf.len() < 1 + 8 + 8 + 32 + 32 + 64 {
+        return Err(CodecError::BufferTooShort);
+    }
+
+    let mut input = buf;
+    
+    let version = read_u8(&mut input)?;
+    if version != 1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+
+    let height = read_u64_be(&mut input)?;
+    let round = read_u64_be(&mut input)?;
+    let block_hash = read_32(&mut input)?;
+    let voter = read_32(&mut input)?;
+    let signature = read_64(&mut input)?;
+
+    Ok(Vote {
+        height,
+        round,
+        block_hash,
+        voter,
+        signature,
+    })
+}
+
+/// Decode a QC from wire format.
+pub fn decode_qc_v1(buf: &[u8]) -> Result<QC, CodecError> {
+    if buf.len() < 1 + 8 + 8 + 32 + 4 {
+        return Err(CodecError::BufferTooShort);
+    }
+
+    let mut input = buf;
+    
+    let version = read_u8(&mut input)?;
+    if version != 1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+
+    let height = read_u64_be(&mut input)?;
+    let round = read_u64_be(&mut input)?;
+    let block_hash = read_32(&mut input)?;
+    
+    let vote_count = read_u32_be(&mut input)?;
+    if vote_count > MAX_VOTES_PER_QC as u32 {
+        return Err(CodecError::TooManyVotes);
+    }
+
+    let mut votes = Vec::with_capacity(vote_count as usize);
+    for _ in 0..vote_count {
+        let vote_height = read_u64_be(&mut input)?;
+        let vote_round = read_u64_be(&mut input)?;
+        let vote_block_hash = read_32(&mut input)?;
+        let voter = read_32(&mut input)?;
+        let signature = read_64(&mut input)?;
+
+        votes.push(Vote {
+            height: vote_height,
+            round: vote_round,
+            block_hash: vote_block_hash,
+            voter,
+            signature,
+        });
+    }
+
+    Ok(QC {
+        height,
+        round,
+        block_hash,
+        votes,
+    })
+}
+
+/// Decode a SignedProposal from wire format.
+pub fn decode_signed_proposal_v1(buf: &[u8]) -> Result<SignedProposal, CodecError> {
+    if buf.len() < 1 + 32 + 64 {
+        return Err(CodecError::BufferTooShort);
+    }
+
+    let mut input = buf;
+    
+    let version = read_u8(&mut input)?;
+    if version != 1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+
+    let proposer = read_32(&mut input)?;
+    
+    // Decode proposal (block + justify_qc)
+    let proposal = decode_proposal_v1(&mut input)?;
+    
+    let signature = read_64(&mut input)?;
+
+    Ok(SignedProposal {
+        proposer,
+        proposal,
+        signature,
+    })
+}
+
+fn decode_proposal_v1(input: &mut &[u8]) -> Result<Proposal, CodecError> {
+    // Decode block
+    let block = decode_block_v1(input)?;
+    
+    // Decode justify_qc
+    let justify_qc = decode_qc_v1_internal(input)?;
+
+    Ok(Proposal {
+        block,
+        justify_qc,
+    })
+}
+
+fn decode_block_v1(input: &mut &[u8]) -> Result<Block, CodecError> {
+    let version = read_u8(input)?;
+    if version != 1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+
+    let height = read_u64_be(input)?;
+    let round = read_u64_be(input)?;
+    let parent_hash = read_32(input)?;
+    let state_root = read_32(input)?;
+    
+    let tx_count = read_u32_be(input)?;
+    if tx_count as usize > MAX_TXS_PER_BLOCK {
+        return Err(CodecError::TooManyTransactions);
+    }
+    
+    // Check buffer has enough bytes for claimed tx count (DoS prevention)
+    let min_required_bytes = (tx_count as usize).saturating_mul(MIN_TX_BYTES);
+    if input.len() < min_required_bytes {
+        return Err(CodecError::BufferTooShort);
+    }
+    
+    let mut txs: Vec<novai_types::TxV1> = Vec::with_capacity(tx_count as usize);
+    
+    for _ in 0..tx_count {
+        let tx = novai_codec::decode_tx_v1_signed(input)
+            .map_err(|_| CodecError::TxDecodingFailed)?;
+        txs.push(tx);
+    }
+
+    Ok(Block {
+        height,
+        round,
+        parent_hash,
+        state_root,
+        txs,
+    })
+}
+
+fn decode_qc_v1_internal(input: &mut &[u8]) -> Result<QC, CodecError> {
+    let version = read_u8(input)?;
+    if version != 1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+
+    let height = read_u64_be(input)?;
+    let round = read_u64_be(input)?;
+    let block_hash = read_32(input)?;
+    
+    let vote_count = read_u32_be(input)?;
+    if vote_count > MAX_VOTES_PER_QC as u32 {
+        return Err(CodecError::TooManyVotes);
+    }
+
+    // Check buffer has enough bytes for claimed vote count (DoS prevention)
+    let min_required_bytes = (vote_count as usize).saturating_mul(MIN_VOTE_BYTES);
+    if input.len() < min_required_bytes {
+        return Err(CodecError::BufferTooShort);
+    }
+
+    let mut votes = Vec::with_capacity(vote_count as usize);
+    for _ in 0..vote_count {
+        let vote_height = read_u64_be(input)?;
+        let vote_round = read_u64_be(input)?;
+        let vote_block_hash = read_32(input)?;
+        let voter = read_32(input)?;
+        let signature = read_64(input)?;
+
+        votes.push(Vote {
+            height: vote_height,
+            round: vote_round,
+            block_hash: vote_block_hash,
+            voter,
+            signature,
+        });
+    }
+
+    Ok(QC {
+        height,
+        round,
+        block_hash,
+        votes,
+    })
+}
+
+// Helper read functions
+fn read_u8(input: &mut &[u8]) -> Result<u8, CodecError> {
+    if input.is_empty() {
+        return Err(CodecError::BufferTooShort);
+    }
+    let val = input[0];
+    *input = &input[1..];
+    Ok(val)
+}
+
+fn read_u32_be(input: &mut &[u8]) -> Result<u32, CodecError> {
+    if input.len() < 4 {
+        return Err(CodecError::BufferTooShort);
+    }
+    let bytes: [u8; 4] = input[..4].try_into().unwrap();
+    *input = &input[4..];
+    Ok(u32::from_be_bytes(bytes))
+}
+
+fn read_u64_be(input: &mut &[u8]) -> Result<u64, CodecError> {
+    if input.len() < 8 {
+        return Err(CodecError::BufferTooShort);
+    }
+    let bytes: [u8; 8] = input[..8].try_into().unwrap();
+    *input = &input[8..];
+    Ok(u64::from_be_bytes(bytes))
+}
+
+fn read_32(input: &mut &[u8]) -> Result<[u8; 32], CodecError> {
+    if input.len() < 32 {
+        return Err(CodecError::BufferTooShort);
+    }
+    let bytes: [u8; 32] = input[..32].try_into().unwrap();
+    *input = &input[32..];
+    Ok(bytes)
+}
+
+fn read_64(input: &mut &[u8]) -> Result<[u8; 64], CodecError> {
+    if input.len() < 64 {
+        return Err(CodecError::BufferTooShort);
+    }
+    let bytes: [u8; 64] = input[..64].try_into().unwrap();
+    *input = &input[64..];
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +563,7 @@ mod tests {
         TxV1 {
             version: TxVersion::V1,
             from: [0x00; 32],
+            pubkey: [0x00; 32],
             nonce: 0,
             fee: 0,
             payload: vec![],
@@ -462,6 +727,33 @@ mod tests {
         };
 
         let result = encode_qc_v1(&qc);
+        assert_eq!(result, Err(CodecError::TooManyVotes));
+    }
+
+    #[test]
+    fn block_decode_rejects_huge_tx_count() {
+        let mut buf = vec![0x01]; // version
+        buf.extend_from_slice(&1u64.to_be_bytes()); // height
+        buf.extend_from_slice(&0u64.to_be_bytes()); // round
+        buf.extend_from_slice(&[0u8; 32]); // parent_hash
+        buf.extend_from_slice(&[0u8; 32]); // state_root
+        buf.extend_from_slice(&(MAX_TXS_PER_BLOCK as u32 + 1).to_be_bytes()); // tx_count: exceeds limit
+        
+        let mut input = buf.as_slice();
+        let result = decode_block_v1(&mut input);
+        assert_eq!(result, Err(CodecError::TooManyTransactions));
+    }
+
+    #[test]
+    fn qc_decode_rejects_huge_vote_count() {
+        let mut buf = vec![0x01]; // version
+        buf.extend_from_slice(&1u64.to_be_bytes()); // height
+        buf.extend_from_slice(&0u64.to_be_bytes()); // round
+        buf.extend_from_slice(&[0u8; 32]); // block_hash
+        buf.extend_from_slice(&(MAX_VOTES_PER_QC as u32 + 1).to_be_bytes()); // vote_count: exceeds limit
+        
+        let mut input = buf.as_slice();
+        let result = decode_qc_v1(&mut input);
         assert_eq!(result, Err(CodecError::TooManyVotes));
     }
 }

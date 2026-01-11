@@ -186,16 +186,16 @@ fn golden_qc_with_votes() {
 
 #[test]
 fn golden_block_with_tx() {
-    use novai_types::{TxV1, TxVersion};
-
-    let tx = TxV1 {
-        version: TxVersion::V1,
-        from: [0xaa; 32],
-        nonce: 42,
-        fee: 1000,
-        payload: vec![0x01, 0x02, 0x03],
-        sig: [0xbb; 64],
-    };
+   // Deterministic tx for golden vector (no random keypair)
+let tx = novai_types::TxV1 {
+    version: novai_types::TxVersion::V1,
+    from: [0xAA; 32],
+    pubkey: [0xBB; 32],
+    nonce: 0,
+    fee: 10,
+    payload: b"test".to_vec(),
+    sig: [0xCC; 64],
+};
 
     let block = Block {
         height: 5,

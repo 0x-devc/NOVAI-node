@@ -1,5 +1,5 @@
 //! novai-node
 //!
-//! Purpose: placeholder crate for clean-room workspace bootstrap.
-//! Invariants: no external dependencies (Week 1).
-//! Failure modes: none (placeholder).
+//! Purpose: Consensus node binary and library.
+
+pub mod consensus_node;

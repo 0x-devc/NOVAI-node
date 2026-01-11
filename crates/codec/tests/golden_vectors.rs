@@ -32,11 +32,13 @@ fn write_or_compare(path: &Path, actual: &[u8]) {
 
 fn sample_tx() -> TxV1 {
     let from: Address = [0x11u8; 32];
+    let pubkey: [u8; 32] = [0x33u8; 32];
     let sig: SignatureBytes = [0x22u8; 64];
 
     TxV1 {
         version: TxVersion::V1,
         from,
+        pubkey,
         nonce: 42,
         fee: 7,
         payload: b"hello".to_vec(),

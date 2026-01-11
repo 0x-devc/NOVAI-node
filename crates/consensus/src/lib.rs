@@ -7,7 +7,7 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use novai_consensus_types::{Block, Vote, QC};
 use novai_types::Address;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Consensus engine errors.
 #[derive(Debug)]
@@ -30,16 +30,13 @@ pub enum ConsensusError {
 
 /// Consensus state for a single node.
 pub struct ConsensusState {
-    /// Current height.
     pub height: u64,
-    /// Current round.
     pub round: u64,
-    /// Highest QC we've seen.
     pub highest_qc: Option<QC>,
-    /// Pending votes for current round (keyed by block_hash).
     pub pending_votes: HashMap<[u8; 32], Vec<Vote>>,
-    /// Our validator address.
     pub our_address: Address,
+    pub last_proposed: Option<(u64, u64)>,
+    pub voted_in_round: HashSet<Address>,
 }
 
 impl ConsensusState {
@@ -51,6 +48,8 @@ impl ConsensusState {
             highest_qc: None,
             pending_votes: HashMap::new(),
             our_address,
+            last_proposed: None,
+            voted_in_round: HashSet::new(),
         }
     }
 
@@ -69,6 +68,12 @@ impl ConsensusState {
         K: novai_state::Kv,
         K::Error: std::fmt::Debug,
     {
+        // Check if already proposed for this height/round
+        let proposed_key = (self.height + 1, self.round);
+        if self.last_proposed == Some(proposed_key) {
+            return Err(ConsensusError::NotLeader);
+        }
+
         // Check if we're the leader
         let leader = self.compute_leader(validator_set)?;
         if leader != self.our_address {
@@ -98,12 +103,15 @@ impl ConsensusState {
 
         // Build block
         let block = Block {
-            height: self.height,
+            height: self.height + 1,
             round: self.round,
             parent_hash,
             state_root,
             txs,
         };
+
+        // Mark as proposed
+        self.last_proposed = Some((block.height, block.round));
 
         Ok(block)
     }
@@ -117,11 +125,11 @@ impl ConsensusState {
         K: novai_state::Kv,
         K::Error: std::fmt::Debug,
     {
-        // Check height matches
-        if block.height != self.height {
+        // Check height is next
+        if block.height != self.height + 1 {
             return Err(ConsensusError::InvalidBlock(format!(
                 "Height mismatch: expected {}, got {}",
-                self.height, block.height
+                self.height + 1, block.height
             )));
         }
 
@@ -155,8 +163,31 @@ impl ConsensusState {
             ));
         }
 
-        // Week 6: Basic structure checks only
-        // Transaction signature verification happens in execution layer
+        // Verify all transaction signatures
+        for tx in &block.txs {
+            // 1. Verify address matches pubkey
+            let pubkey = novai_crypto::pubkey_from_bytes(&tx.pubkey)
+                .map_err(|e| ConsensusError::CryptoError(format!("{:?}", e)))?;
+            
+            let expected_addr = novai_crypto::address_from_pubkey(&pubkey);
+            if tx.from != expected_addr {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "Address mismatch: from={:?} but pubkey hashes to {:?}",
+                    tx.from, expected_addr
+                )));
+            }
+
+            // 2. Verify signature
+            if !novai_crypto::verify_tx_v1(&pubkey, tx)
+                .map_err(|e| ConsensusError::CryptoError(format!("{:?}", e)))?
+            {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "Invalid transaction signature for tx from {:?}",
+                    tx.from
+                )));
+            }
+        }
+
         Ok(())
     }
 
@@ -175,11 +206,11 @@ impl ConsensusState {
 
         // Create unsigned vote struct
         let unsigned_vote = Vote {
-            height: self.height,
-            round: self.round,
+            height: block.height,
+            round: block.round,
             block_hash,
             voter: self.our_address,
-            signature: [0u8; 64], // Placeholder
+            signature: [0u8; 64],
         };
 
         // Encode unsigned bytes
@@ -195,8 +226,8 @@ impl ConsensusState {
 
         // Build final vote with signature
         let vote = Vote {
-            height: self.height,
-            round: self.round,
+            height: block.height,
+            round: block.round,
             block_hash,
             voter: self.our_address,
             signature,
@@ -214,11 +245,12 @@ impl ConsensusState {
         vote: Vote,
         validator_pubkeys: &[(Address, VerifyingKey)],
     ) -> Result<(), ConsensusError> {
-        // Verify vote matches current height/round
-        if vote.height != self.height || vote.round != self.round {
-            return Err(ConsensusError::InvalidVote(
-                "Vote height/round mismatch".to_string(),
-            ));
+        // Verify vote is for next height
+        if vote.height != self.height + 1 {
+            return Err(ConsensusError::InvalidVote(format!(
+                "Vote height mismatch: expected {}, got {}",
+                self.height + 1, vote.height
+            )));
         }
 
         // Find voter's public key in validator set
@@ -228,13 +260,11 @@ impl ConsensusState {
             .map(|(_, pk)| pk)
             .ok_or_else(|| ConsensusError::InvalidVote("Voter not in validator set".to_string()))?;
 
-        // Check for duplicate vote from same voter (before expensive signature check)
-        if let Some(votes) = self.pending_votes.get(&vote.block_hash) {
-            if votes.iter().any(|v| v.voter == vote.voter) {
-                return Err(ConsensusError::InvalidVote(
-                    "Duplicate vote from same voter (equivocation)".to_string(),
-                ));
-            }
+        // Check for duplicate vote from same voter in this round (BEFORE expensive signature check)
+        if self.voted_in_round.contains(&vote.voter) {
+            return Err(ConsensusError::InvalidVote(
+                "Duplicate vote from same voter in current round (equivocation)".to_string(),
+            ));
         }
 
         // Create unsigned vote for verification
@@ -243,7 +273,7 @@ impl ConsensusState {
             round: vote.round,
             block_hash: vote.block_hash,
             voter: vote.voter,
-            signature: [0u8; 64], // Placeholder
+            signature: [0u8; 64],
         };
 
         let unsigned_bytes = novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
@@ -257,6 +287,9 @@ impl ConsensusState {
         if !novai_crypto::verify_bytes(pubkey, &to_verify, &vote.signature) {
             return Err(ConsensusError::InvalidVote("Invalid signature".to_string()));
         }
+
+        // Mark this voter as having voted in this round
+        self.voted_in_round.insert(vote.voter);
 
         // Add vote to pending votes
         self.pending_votes
@@ -287,14 +320,14 @@ impl ConsensusState {
         let quorum = 2 * f + 1;
 
         if votes.len() < quorum {
-            return Ok(None); // Not enough votes yet
+            return Ok(None);
         }
 
         // Form QC with exactly quorum votes
         let qc_votes: Vec<Vote> = votes.iter().take(quorum).cloned().collect();
 
         let qc = QC {
-            height: self.height,
+            height: self.height + 1,
             round: self.round,
             block_hash: *block_hash,
             votes: qc_votes,
@@ -303,14 +336,32 @@ impl ConsensusState {
         Ok(Some(qc))
     }
 
-    /// Compute leader for current height/round.
-    fn compute_leader(&self, validator_set: &[Address]) -> Result<Address, ConsensusError> {
+    /// Compute leader for a given view (height, round).
+    /// This is the canonical leader selection function used everywhere.
+    ///
+    /// # Leader Selection Rule
+    /// Leader index = (view_height + round) % validator_set.len()
+    /// where view_height is the height we're building consensus AT (not FOR).
+    ///
+    /// # Examples
+    /// - To propose for height=1, we're at view_height=0, so leader_idx = (0+0) % n
+    /// - To vote for a block at height=1, we compute leader for view_height=0
+    pub fn compute_leader_for_view(
+        view_height: u64,
+        round: u64,
+        validator_set: &[Address],
+    ) -> Result<Address, ConsensusError> {
         if validator_set.is_empty() {
             return Err(ConsensusError::InvalidBlock(
                 "Empty validator set".to_string(),
             ));
         }
-        let idx = (self.height.wrapping_add(self.round) as usize) % validator_set.len();
+        let idx = (view_height.wrapping_add(round) as usize) % validator_set.len();
         Ok(validator_set[idx])
+    }
+
+    /// Compute leader for current height/round (convenience wrapper).
+    fn compute_leader(&self, validator_set: &[Address]) -> Result<Address, ConsensusError> {
+        Self::compute_leader_for_view(self.height, self.round, validator_set)
     }
 }

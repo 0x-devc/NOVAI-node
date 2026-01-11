@@ -100,7 +100,7 @@ where
 // -----------------------------------------------------------------------------
 
 use novai_codec::{encode_tx_v1_unsigned, txid_v1};
-use novai_crypto::{pubkey_from_bytes, verify_bytes};
+use novai_crypto::{address_from_pubkey, pubkey_from_bytes, verify_bytes};
 use novai_types::{Address, TxId, TxV1};
 
 /// Provides the current expected nonce for a sender address (state snapshot).
@@ -119,6 +119,7 @@ pub enum TxMempoolError {
     NonceTooLow { expected: u64, got: u64 },
     InvalidSignature,
     InvalidPublicKey,
+    AddressMismatch,
     CodecError,
 }
 
@@ -192,11 +193,17 @@ impl TxMempool {
             });
         }
 
+        // Verify address matches pubkey
+        let vk = pubkey_from_bytes(&tx.pubkey).map_err(|_| TxMempoolError::InvalidPublicKey)?;
+        let expected_addr = address_from_pubkey(&vk);
+        if tx.from != expected_addr {
+            return Err(TxMempoolError::AddressMismatch);
+        }
+
         // canonical unsigned bytes
         let unsigned = encode_tx_v1_unsigned(&tx).map_err(|_| TxMempoolError::CodecError)?;
 
-        // verify signature (from is interpreted as ed25519 pubkey bytes in Week 2)
-        let vk = pubkey_from_bytes(&tx.from).map_err(|_| TxMempoolError::InvalidPublicKey)?;
+        // verify signature
         if !verify_bytes(&vk, &unsigned, &tx.sig) {
             return Err(TxMempoolError::InvalidSignature);
         }
@@ -391,7 +398,7 @@ mod tests {
 
     use ed25519_dalek::{SigningKey, VerifyingKey};
     use novai_codec::encode_tx_v1_unsigned;
-    use novai_crypto::sign_bytes;
+    use novai_crypto::{address_from_pubkey, sign_bytes};
     use novai_types::{SignatureBytes, TxVersion};
 
     fn test_keypair(seed: u8) -> (SigningKey, VerifyingKey) {
@@ -419,14 +426,17 @@ mod tests {
 
     fn make_signed_tx(
         from_sk: &SigningKey,
-        from_pk_bytes: Address,
+        from_vk: &VerifyingKey,
         nonce: u64,
         fee: u64,
         payload: &[u8],
     ) -> TxV1 {
+        let from_addr = address_from_pubkey(from_vk);
+        
         let mut tx = TxV1 {
             version: TxVersion::V1,
-            from: from_pk_bytes,
+            from: from_addr,
+            pubkey: from_vk.to_bytes(),
             nonce,
             fee,
             payload: payload.to_vec(),
@@ -442,13 +452,13 @@ mod tests {
     #[test]
     fn rejects_below_min_fee() {
         let (sk, vk) = test_keypair(7);
-        let from: Address = vk.to_bytes();
+        let from: Address = address_from_pubkey(&vk);
 
         let mut np = TestNonceProvider::default();
         np.set(from, 0);
 
         let mut mp = TxMempool::new(10, 2);
-        let tx = make_signed_tx(&sk, from, 0, 9, b"p");
+        let tx = make_signed_tx(&sk, &vk, 0, 9, b"p");
         let err = mp.insert(tx, &np).unwrap_err();
         assert!(matches!(err, TxMempoolError::FeeTooLow { .. }));
     }
@@ -456,13 +466,13 @@ mod tests {
     #[test]
     fn rejects_nonce_too_low() {
         let (sk, vk) = test_keypair(9);
-        let from: Address = vk.to_bytes();
+        let from: Address = address_from_pubkey(&vk);
 
         let mut np = TestNonceProvider::default();
         np.set(from, 5);
 
         let mut mp = TxMempool::new(1, 2);
-        let tx = make_signed_tx(&sk, from, 4, 1, b"p");
+        let tx = make_signed_tx(&sk, &vk, 4, 1, b"p");
         let err = mp.insert(tx, &np).unwrap_err();
         assert!(matches!(err, TxMempoolError::NonceTooLow { .. }));
     }
@@ -470,7 +480,7 @@ mod tests {
     #[test]
     fn rejects_invalid_signature() {
         let (_sk1, vk1) = test_keypair(1);
-        let from1: Address = vk1.to_bytes();
+        let from1: Address = address_from_pubkey(&vk1);
 
         let (sk2, _vk2) = test_keypair(2);
 
@@ -483,6 +493,7 @@ mod tests {
         let mut tx = TxV1 {
             version: TxVersion::V1,
             from: from1,
+            pubkey: vk1.to_bytes(),
             nonce: 0,
             fee: 1,
             payload: b"x".to_vec(),
@@ -499,7 +510,7 @@ mod tests {
     #[test]
     fn drain_is_fee_priority_and_nonce_ready() {
         let (sk, vk) = test_keypair(3);
-        let from: Address = vk.to_bytes();
+        let from: Address = address_from_pubkey(&vk);
 
         let mut np = TestNonceProvider::default();
         np.set(from, 0);
@@ -507,11 +518,11 @@ mod tests {
         let mut mp = TxMempool::new(1, 10);
 
         // nonce 0 ready, fee 5
-        let tx_a = make_signed_tx(&sk, from, 0, 5, b"a");
+        let tx_a = make_signed_tx(&sk, &vk, 0, 5, b"a");
         // nonce 1 NOT ready initially, fee 999 (should not drain yet)
-        let tx_b = make_signed_tx(&sk, from, 1, 999, b"b");
+        let tx_b = make_signed_tx(&sk, &vk, 1, 999, b"b");
         // nonce 0 ready, fee 10 (should drain first)
-        let tx_c = make_signed_tx(&sk, from, 0, 10, b"c");
+        let tx_c = make_signed_tx(&sk, &vk, 0, 10, b"c");
 
         mp.insert(tx_a, &np).unwrap();
         mp.insert(tx_b, &np).unwrap();
@@ -533,8 +544,8 @@ mod tests {
     fn fairness_cap_limits_per_sender() {
         let (sk1, vk1) = test_keypair(5);
         let (sk2, vk2) = test_keypair(6);
-        let from1: Address = vk1.to_bytes();
-        let from2: Address = vk2.to_bytes();
+        let from1: Address = address_from_pubkey(&vk1);
+        let from2: Address = address_from_pubkey(&vk2);
 
         let mut np = TestNonceProvider::default();
         np.set(from1, 0);
@@ -543,9 +554,9 @@ mod tests {
         let mut mp = TxMempool::new(1, 1); // cap = 1 per sender per drain
 
         // Two ready txs from sender1 (both nonce 0) and one from sender2.
-        let s1_hi = make_signed_tx(&sk1, from1, 0, 100, b"s1_hi");
-        let s1_lo = make_signed_tx(&sk1, from1, 0, 1, b"s1_lo");
-        let s2_mid = make_signed_tx(&sk2, from2, 0, 50, b"s2_mid");
+        let s1_hi = make_signed_tx(&sk1, &vk1, 0, 100, b"s1_hi");
+        let s1_lo = make_signed_tx(&sk1, &vk1, 0, 1, b"s1_lo");
+        let s2_mid = make_signed_tx(&sk2, &vk2, 0, 50, b"s2_mid");
 
         mp.insert(s1_hi, &np).unwrap();
         mp.insert(s1_lo, &np).unwrap();

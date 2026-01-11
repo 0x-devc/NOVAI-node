@@ -49,11 +49,14 @@ impl BlockHeaderVersion {
 /// Signing rule (Week 2):
 /// - Signature is computed over the canonical *unsigned* encoding of this tx
 ///   (everything except `sig`).
-/// - `from` is the 32-byte ed25519 public key (Address).
+/// - `from` is the Address (blake3 hash of pubkey).
+/// - `pubkey` is the actual ed25519 public key used for signature verification.
+/// - Verifiers MUST check: from == blake3(pubkey)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxV1 {
     pub version: TxVersion,
     pub from: Address,
+    pub pubkey: [u8; 32],
     pub nonce: Nonce,
     pub fee: Fee,
     pub payload: Vec<u8>,

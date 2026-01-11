@@ -33,7 +33,7 @@ fn leader_proposes_block() {
         .propose_block(&mut mempool, &nonce_provider, &db, &validator_set)
         .unwrap();
 
-    assert_eq!(block.height, 0);
+    assert_eq!(block.height, 1); // Proposals are for next height (self.height + 1)
     assert_eq!(block.round, 0);
     assert_eq!(block.parent_hash, [0u8; 32]); // Genesis
 }
@@ -103,7 +103,7 @@ fn vote_and_form_qc() {
 
     assert!(qc.is_some());
     let qc = qc.unwrap();
-    assert_eq!(qc.height, 0);
+    assert_eq!(qc.height, 1); // QC is for the block's height (self.height + 1)
     assert_eq!(qc.round, 0);
     assert_eq!(qc.votes.len(), 3); // Quorum = 2f+1 = 3 for n=4
 }
@@ -134,5 +134,78 @@ fn equivocation_detected() {
     // Try to vote again (equivocation)
     let result = state.add_vote(vote1, &validator_pubkeys);
 
+    assert!(matches!(result, Err(ConsensusError::InvalidVote(_))));
+}
+#[test]
+fn leader_computation_is_consistent() {
+    // Setup 4 validators
+    let mut validators: Vec<Address> = Vec::new();
+    for _ in 0..4 {
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = sk.verifying_key();
+        let addr = address_from_pubkey(&pk);
+        validators.push(addr);
+    }
+
+    // Test that leader computation gives same result for same inputs
+    for height in 0..10 {
+        for round in 0..5 {
+            let leader1 = ConsensusState::compute_leader_for_view(height, round, &validators).unwrap();
+            let leader2 = ConsensusState::compute_leader_for_view(height, round, &validators).unwrap();
+            assert_eq!(leader1, leader2, "Leader computation must be deterministic");
+            
+            // Verify it's actually in the validator set
+            assert!(validators.contains(&leader1), "Leader must be from validator set");
+        }
+    }
+}
+
+#[test]
+fn leader_rotates_with_height_and_round() {
+    // Setup 4 validators
+    let mut validators: Vec<Address> = Vec::new();
+    for _ in 0..4 {
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = sk.verifying_key();
+        let addr = address_from_pubkey(&pk);
+        validators.push(addr);
+    }
+
+    // Test that leader changes as height/round advance
+    let leader_h0_r0 = ConsensusState::compute_leader_for_view(0, 0, &validators).unwrap();
+    let leader_h1_r0 = ConsensusState::compute_leader_for_view(1, 0, &validators).unwrap();
+    let leader_h0_r1 = ConsensusState::compute_leader_for_view(0, 1, &validators).unwrap();
+    
+    // Leader should rotate (with 4 validators, they should be different)
+    assert_ne!(leader_h0_r0, leader_h1_r0, "Leader should change with height");
+    assert_ne!(leader_h0_r0, leader_h0_r1, "Leader should change with round");
+}
+#[test]
+fn duplicate_vote_rejected() {
+    // Setup
+    let sk = SigningKey::generate(&mut OsRng);
+    let pk = sk.verifying_key();
+    let addr = address_from_pubkey(&pk);
+
+    let validator_pubkeys = vec![(addr, pk)];
+    let validator_set = vec![addr];
+
+    let mut state = ConsensusState::new(addr);
+    let mut mempool = mempool::TxMempool::new(1, 100);
+    let nonce_provider = TestNonceProvider;
+    let db = MemKv::new();
+
+    let block = state
+        .propose_block(&mut mempool, &nonce_provider, &db, &validator_set)
+        .unwrap();
+
+    // Vote once
+    let vote = state.create_vote(&block, &sk).unwrap();
+    state.add_vote(vote.clone(), &validator_pubkeys).unwrap();
+
+    // Try to vote again with same vote (replay attack)
+    let result = state.add_vote(vote, &validator_pubkeys);
+
+    // Should be rejected as duplicate
     assert!(matches!(result, Err(ConsensusError::InvalidVote(_))));
 }
