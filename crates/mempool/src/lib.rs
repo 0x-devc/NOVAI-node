@@ -432,7 +432,7 @@ mod tests {
         payload: &[u8],
     ) -> TxV1 {
         let from_addr = address_from_pubkey(from_vk);
-        
+
         let mut tx = TxV1 {
             version: TxVersion::V1,
             from: from_addr,

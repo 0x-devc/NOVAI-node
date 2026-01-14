@@ -6,11 +6,11 @@ use novai_state::{
 };
 use novai_types::{Address, TxV1};
 
-fn mk_addr(b: u8) -> Address {
+const fn mk_addr(b: u8) -> Address {
     [b; 32]
 }
 
-/// Constructs a structurally-valid TxV1 for execution tests.
+/// Constructs a structurally-valid `TxV1` for execution tests.
 /// Execution does NOT validate signatures (mempool does), so sig is zeroed.
 fn mk_tx(from: Address, nonce: u64, fee: u64, to: Address, amount: u64) -> TxV1 {
     let payload = encode_transfer_payload_v1(&TransferPayloadV1 { to, amount }).to_vec();
@@ -47,10 +47,10 @@ fn smt_root_matches_fresh_recompute_from_state() {
     apply_tx_v1_transfer(&mut db, &tx).unwrap();
 
     // Read stored SMT root from DB.
-    let stored_root = match db.get(KEY_SMT_ROOT).unwrap() {
-        None => panic!("expected KEY_SMT_ROOT to be written"),
-        Some(bytes) => decode_smt_root_v1(&bytes).unwrap(),
-    };
+    let stored_root = db.get(KEY_SMT_ROOT).unwrap().map_or_else(
+        || panic!("expected KEY_SMT_ROOT to be written"),
+        |bytes| decode_smt_root_v1(&bytes).unwrap(),
+    );
 
     // Recompute root from scratch from the state keys we expect to exist.
     let mut smt = Smt::new(MemoryStore::default());

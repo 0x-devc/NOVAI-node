@@ -69,6 +69,7 @@ fn write_64(out: &mut Vec<u8>, v: &[u8; 64]) {
     out.extend_from_slice(v);
 }
 
+#[allow(dead_code)]
 fn write_bytes(out: &mut Vec<u8>, b: &[u8]) -> Result<(), CodecError> {
     let len_u32: u32 = b.len().try_into().map_err(|_| CodecError::LengthOverflow)?;
     write_u32_le(out, len_u32);

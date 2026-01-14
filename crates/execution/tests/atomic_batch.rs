@@ -7,7 +7,7 @@ use novai_state::{
 };
 use novai_types::{Address, TxV1};
 
-fn addr(b: u8) -> Address {
+const fn addr(b: u8) -> Address {
     [b; 32]
 }
 
@@ -66,6 +66,7 @@ impl Kv for FaultyKv {
         } else {
             entries.push((key.to_vec(), value.to_vec()));
         }
+        drop(entries);
         Ok(())
     }
 
@@ -74,6 +75,7 @@ impl Kv for FaultyKv {
         if let Some(idx) = entries.iter().position(|(k, _)| k.as_slice() == key) {
             entries.swap_remove(idx);
         }
+        drop(entries);
         Ok(())
     }
 }
@@ -90,14 +92,16 @@ impl KvBatch for FaultyKv {
             *count += 1;
             if *count == self.fail_on_op {
                 // FAIL HERE - batch should be aborted, no changes applied
-                return Err(format!("Simulated DB failure on operation {}", i));
+                drop(count);
+                return Err(format!("Simulated DB failure on operation {i}"));
             }
+            drop(count);
 
             match op {
                 WriteOp::Put(key, value) => {
                     if let Some(idx) = tmp.iter().position(|(k, _)| k.as_slice() == key.as_slice())
                     {
-                        tmp[idx].1 = value.clone();
+                        tmp[idx].1.clone_from(value);
                     } else {
                         tmp.push((key.clone(), value.clone()));
                     }

@@ -7,21 +7,20 @@ use novai_state::{
 use novai_types::{Address, TxV1};
 
 fn read_smt_root_from_db(db: &MemKv) -> [u8; 32] {
-    match db.get(KEY_SMT_ROOT).unwrap() {
-        None => [0u8; 32],
-        Some(b) => decode_smt_root_v1(&b).unwrap(),
-    }
+    db.get(KEY_SMT_ROOT)
+        .unwrap()
+        .map_or([0u8; 32], |b| decode_smt_root_v1(&b).unwrap())
 }
 
 fn must_get(db: &MemKv, key: &[u8]) -> Vec<u8> {
     db.get(key).unwrap().expect("missing expected key in db")
 }
 
-fn mk_addr(b: u8) -> Address {
+const fn mk_addr(b: u8) -> Address {
     [b; 32]
 }
 
-/// Constructs a structurally-valid TxV1 for execution tests.
+/// Constructs a structurally-valid `TxV1` for execution tests.
 /// Execution does NOT validate signatures (mempool does), so sig is zeroed.
 fn mk_transfer_tx(from: Address, nonce: u64, fee: u64, to: Address, amount: u64) -> TxV1 {
     let payload = encode_transfer_payload_v1(&TransferPayloadV1 { to, amount }).to_vec();
@@ -78,7 +77,7 @@ fn smt_root_stored_matches_fresh_rebuild_from_state() {
     ];
 
     for k in keys {
-        let v = must_get(&db, &k).to_vec(); // explicit clone for clarity/determinism
+        let v = must_get(&db, &k).clone(); // explicit clone for clarity/determinism
         let k32 = smt_key_for_state_key(&k);
         fresh.update(k32, &v).unwrap();
     }

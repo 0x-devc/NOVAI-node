@@ -25,6 +25,18 @@ pub const KEY_SMT_ROOT: &[u8] = b"smt/root";
 /// Canonical prefix for SMT node records.
 pub const KEY_PREFIX_SMT_NODE: &[u8] = b"smt/node/";
 
+/// Canonical key for committed height (u64 big-endian).
+pub const KEY_COMMITTED_HEIGHT: &[u8] = b"consensus/committed_height";
+
+/// Canonical prefix for block records by height.
+pub const KEY_PREFIX_BLOCKS: &[u8] = b"consensus/blocks/";
+
+/// Canonical prefix for QC records by height.
+pub const KEY_PREFIX_QCS: &[u8] = b"consensus/qcs/";
+
+/// Canonical key for the highest QC seen.
+pub const KEY_HIGHEST_QC: &[u8] = b"consensus/highest_qc";
+
 /// Build the canonical key for an account record: `b"accounts/" ++ addr32`.
 ///
 /// `addr` must be exactly 32 bytes.
@@ -40,6 +52,22 @@ pub fn smt_node_key(node_hash: &[u8; 32]) -> Vec<u8> {
     let mut k = Vec::with_capacity(KEY_PREFIX_SMT_NODE.len() + node_hash.len());
     k.extend_from_slice(KEY_PREFIX_SMT_NODE);
     k.extend_from_slice(node_hash);
+    k
+}
+
+/// Build canonical block key: `b"consensus/blocks/" ++ height_u64_be`.
+pub fn block_key(height: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_BLOCKS.len() + 8);
+    k.extend_from_slice(KEY_PREFIX_BLOCKS);
+    k.extend_from_slice(&height.to_be_bytes());
+    k
+}
+
+/// Build canonical QC key: `b"consensus/qcs/" ++ height_u64_be`.
+pub fn qc_key(height: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_QCS.len() + 8);
+    k.extend_from_slice(KEY_PREFIX_QCS);
+    k.extend_from_slice(&height.to_be_bytes());
     k
 }
 

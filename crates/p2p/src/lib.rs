@@ -1,8 +1,8 @@
 //! novai-p2p: Minimal TCP-based networking for consensus messages.
 //!
 //! Wire format: [len: u32 be][version: u8][kind: u8][payload: len-2 bytes]
-//! 
-//! Clean-room implementation using std::net (no external P2P libraries).
+//!
+//! Clean-room implementation using `std::net` (no external P2P libraries).
 //! Suitable for localhost devnet and testing.
 
 use std::io::{Read, Write};
@@ -10,7 +10,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use novai_consensus_types::{QC, SignedProposal, Vote};
+use novai_consensus_types::{SignedProposal, Vote, QC};
 
 /// Maximum wire message size (2MB).
 const MAX_WIRE_MSG_BYTES: u32 = 2 * 1024 * 1024;
@@ -25,7 +25,7 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
-    fn from_u8(b: u8) -> Option<Self> {
+    const fn from_u8(b: u8) -> Option<Self> {
         match b {
             1 => Some(Self::SignedProposal),
             2 => Some(Self::Vote),
@@ -53,16 +53,19 @@ pub enum P2PError {
 
 impl From<std::io::Error> for P2PError {
     fn from(e: std::io::Error) -> Self {
-        P2PError::Io(e.to_string())
+        Self::Io(e.to_string())
     }
 }
 
 /// Encode a network message to wire format.
+///
+/// # Errors
+/// Returns error if encoding fails or message exceeds size limit.
 pub fn encode_wire_message(msg: &NetworkMessage) -> Result<Vec<u8>, P2PError> {
     let (kind, payload) = match msg {
         NetworkMessage::SignedProposal(sp) => {
             let bytes = novai_consensus_types::codec::encode_signed_proposal_v1(sp)
-                .map_err(|e| P2PError::Codec(format!("{:?}", e)))?;
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
             (MessageKind::SignedProposal, bytes)
         }
         NetworkMessage::Vote(v) => {
@@ -71,12 +74,13 @@ pub fn encode_wire_message(msg: &NetworkMessage) -> Result<Vec<u8>, P2PError> {
         }
         NetworkMessage::Qc(qc) => {
             let bytes = novai_consensus_types::codec::encode_qc_v1(qc)
-                .map_err(|e| P2PError::Codec(format!("{:?}", e)))?;
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
             (MessageKind::Qc, bytes)
         }
     };
 
-    let len = payload.len() as u32 + 2; // +2 for version + kind
+    #[allow(clippy::cast_possible_truncation)]
+    let len = (payload.len() as u32) + 2; // +2 for version + kind
     if len > MAX_WIRE_MSG_BYTES {
         return Err(P2PError::MessageTooLarge(len));
     }
@@ -91,6 +95,9 @@ pub fn encode_wire_message(msg: &NetworkMessage) -> Result<Vec<u8>, P2PError> {
 }
 
 /// Read one framed message from a TCP stream.
+///
+/// # Errors
+/// Returns error if read fails, message is malformed, or exceeds size limit.
 pub fn read_wire_message(stream: &mut TcpStream) -> Result<NetworkMessage, P2PError> {
     // Read length prefix
     let mut len_buf = [0u8; 4];
@@ -111,11 +118,10 @@ pub fn read_wire_message(stream: &mut TcpStream) -> Result<NetworkMessage, P2PEr
     let kind_byte = header[1];
 
     if version != 1 {
-        return Err(P2PError::Codec(format!("unsupported version: {}", version)));
+        return Err(P2PError::Codec(format!("unsupported version: {version}")));
     }
 
-    let kind = MessageKind::from_u8(kind_byte)
-        .ok_or(P2PError::InvalidKind(kind_byte))?;
+    let kind = MessageKind::from_u8(kind_byte).ok_or(P2PError::InvalidKind(kind_byte))?;
 
     // Read payload
     let payload_len = (len - 2) as usize;
@@ -126,23 +132,26 @@ pub fn read_wire_message(stream: &mut TcpStream) -> Result<NetworkMessage, P2PEr
     match kind {
         MessageKind::SignedProposal => {
             let sp = novai_consensus_types::codec::decode_signed_proposal_v1(&payload)
-                .map_err(|e| P2PError::Codec(format!("{:?}", e)))?;
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
             Ok(NetworkMessage::SignedProposal(sp))
         }
         MessageKind::Vote => {
             let vote = novai_consensus_types::codec::decode_vote_v1_signed(&payload)
-                .map_err(|e| P2PError::Codec(format!("{:?}", e)))?;
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
             Ok(NetworkMessage::Vote(vote))
         }
         MessageKind::Qc => {
             let qc = novai_consensus_types::codec::decode_qc_v1(&payload)
-                .map_err(|e| P2PError::Codec(format!("{:?}", e)))?;
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
             Ok(NetworkMessage::Qc(qc))
         }
     }
 }
 
 /// Write one framed message to a TCP stream.
+///
+/// # Errors
+/// Returns error if encoding or write fails.
 pub fn write_wire_message(stream: &mut TcpStream, msg: &NetworkMessage) -> Result<(), P2PError> {
     let wire = encode_wire_message(msg)?;
     stream.write_all(&wire)?;
@@ -155,7 +164,14 @@ pub struct PeerManager {
     peers: Arc<Mutex<Vec<TcpStream>>>,
 }
 
+impl Default for PeerManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerManager {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             peers: Arc::new(Mutex::new(Vec::new())),
@@ -163,23 +179,28 @@ impl PeerManager {
     }
 
     /// Add a connected peer.
+    ///
+    /// # Panics
+    /// Panics if the mutex is poisoned.
     pub fn add_peer(&self, stream: TcpStream) {
         let mut peers = self.peers.lock().unwrap();
         peers.push(stream);
     }
 
     /// Broadcast a message to all connected peers.
+    ///
+    /// # Errors
+    /// Returns error if encoding fails (individual peer write failures are handled internally).
+    ///
+    /// # Panics
+    /// Panics if the mutex is poisoned.
     pub fn broadcast(&self, msg: &NetworkMessage) -> Result<(), P2PError> {
-        let mut peers = self.peers.lock().unwrap();
-        
-        // Send to all peers, remove disconnected ones
-        peers.retain_mut(|stream| {
-            match write_wire_message(stream, msg) {
-                Ok(_) => true,
-                Err(_) => {
-                    eprintln!("Peer disconnected, removing");
-                    false
-                }
+        self.peers.lock().unwrap().retain_mut(|stream| {
+            if matches!(write_wire_message(stream, msg), Ok(())) {
+                true
+            } else {
+                eprintln!("Peer disconnected, removing");
+                false
             }
         });
 
@@ -187,14 +208,23 @@ impl PeerManager {
     }
 
     /// Get count of connected peers.
+    ///
+    /// # Panics
+    /// Panics if the mutex is poisoned.
+    #[must_use]
     pub fn peer_count(&self) -> usize {
         self.peers.lock().unwrap().len()
     }
 }
 
 /// Start a TCP listener for incoming peer connections.
-/// Start a TCP listener for incoming peer connections.
 /// Callback is invoked for each new connection.
+///
+/// # Errors
+/// Returns error if binding fails.
+///
+/// # Panics
+/// Panics if stream cloning fails.
 pub fn start_listener<F>(
     bind_addr: SocketAddr,
     peer_manager: Arc<PeerManager>,
@@ -204,24 +234,24 @@ where
     F: Fn(TcpStream) + Send + 'static,
 {
     let listener = TcpListener::bind(bind_addr)?;
-    
-    println!("P2P listener started on {}", bind_addr);
+
+    println!("P2P listener started on {bind_addr}");
 
     thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
                     println!("New peer connected from {:?}", stream.peer_addr());
-                    
+
                     // Clone stream for peer manager
                     let stream_clone = stream.try_clone().expect("clone stream");
                     peer_manager.add_peer(stream_clone);
-                    
+
                     // Give stream to callback for reading
                     on_peer_connected(stream);
                 }
                 Err(e) => {
-                    eprintln!("Failed to accept connection: {}", e);
+                    eprintln!("Failed to accept connection: {e}");
                 }
             }
         }
@@ -231,9 +261,12 @@ where
 }
 
 /// Connect to a peer.
+///
+/// # Errors
+/// Returns error if connection fails.
 pub fn connect_to_peer(addr: SocketAddr) -> Result<TcpStream, P2PError> {
     let stream = TcpStream::connect(addr)?;
-    println!("Connected to peer at {}", addr);
+    println!("Connected to peer at {addr}");
     Ok(stream)
 }
 
@@ -251,18 +284,19 @@ mod tests {
             signature: [0xCC; 64],
         };
 
-        let msg = NetworkMessage::Vote(vote.clone());
+        let msg = NetworkMessage::Vote(vote);
         let wire = encode_wire_message(&msg).unwrap();
 
         // Verify framing
-        assert_eq!(&wire[0..4], &((wire.len() as u32 - 4).to_be_bytes()));
+        #[allow(clippy::cast_possible_truncation)]
+        let expected_len = (wire.len() as u32) - 4;
+        assert_eq!(&wire[0..4], &expected_len.to_be_bytes());
         assert_eq!(wire[4], 1); // version
         assert_eq!(wire[5], MessageKind::Vote as u8);
     }
 
     #[test]
     fn reject_oversized_message() {
-        let huge_payload = vec![0u8; (MAX_WIRE_MSG_BYTES + 1) as usize];
         let vote = Vote {
             height: 1,
             round: 0,
@@ -270,9 +304,9 @@ mod tests {
             voter: [0u8; 32],
             signature: [0xCC; 64],
         };
-        
+
         // This should work
         let msg = NetworkMessage::Vote(vote);
         assert!(encode_wire_message(&msg).is_ok());
     }
-} 
+}

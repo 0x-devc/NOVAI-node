@@ -309,13 +309,16 @@ pub fn encode_timeout_v1_signed(timeout: &Timeout) -> Result<Vec<u8>, CodecError
 // ============================================================================
 
 /// Decode a Vote from signed wire format.
+///
+/// # Errors
+/// Returns error if buffer is too short or data is malformed.
 pub fn decode_vote_v1_signed(buf: &[u8]) -> Result<Vote, CodecError> {
     if buf.len() < 1 + 8 + 8 + 32 + 32 + 64 {
         return Err(CodecError::BufferTooShort);
     }
 
     let mut input = buf;
-    
+
     let version = read_u8(&mut input)?;
     if version != 1 {
         return Err(CodecError::UnsupportedVersion);
@@ -324,26 +327,29 @@ pub fn decode_vote_v1_signed(buf: &[u8]) -> Result<Vote, CodecError> {
     let height = read_u64_be(&mut input)?;
     let round = read_u64_be(&mut input)?;
     let block_hash = read_32(&mut input)?;
-    let voter = read_32(&mut input)?;
+    let vote_voter = read_32(&mut input)?;
     let signature = read_64(&mut input)?;
 
     Ok(Vote {
         height,
         round,
         block_hash,
-        voter,
+        voter: vote_voter,
         signature,
     })
 }
 
 /// Decode a QC from wire format.
+///
+/// # Errors
+/// Returns error if buffer is too short, too many votes, or data is malformed.
 pub fn decode_qc_v1(buf: &[u8]) -> Result<QC, CodecError> {
     if buf.len() < 1 + 8 + 8 + 32 + 4 {
         return Err(CodecError::BufferTooShort);
     }
 
     let mut input = buf;
-    
+
     let version = read_u8(&mut input)?;
     if version != 1 {
         return Err(CodecError::UnsupportedVersion);
@@ -352,9 +358,10 @@ pub fn decode_qc_v1(buf: &[u8]) -> Result<QC, CodecError> {
     let height = read_u64_be(&mut input)?;
     let round = read_u64_be(&mut input)?;
     let block_hash = read_32(&mut input)?;
-    
+
     let vote_count = read_u32_be(&mut input)?;
-    if vote_count > MAX_VOTES_PER_QC as u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    if vote_count > (MAX_VOTES_PER_QC as u32) {
         return Err(CodecError::TooManyVotes);
     }
 
@@ -363,14 +370,14 @@ pub fn decode_qc_v1(buf: &[u8]) -> Result<QC, CodecError> {
         let vote_height = read_u64_be(&mut input)?;
         let vote_round = read_u64_be(&mut input)?;
         let vote_block_hash = read_32(&mut input)?;
-        let voter = read_32(&mut input)?;
+        let vote_voter = read_32(&mut input)?;
         let signature = read_64(&mut input)?;
 
         votes.push(Vote {
             height: vote_height,
             round: vote_round,
             block_hash: vote_block_hash,
-            voter,
+            voter: vote_voter,
             signature,
         });
     }
@@ -383,24 +390,27 @@ pub fn decode_qc_v1(buf: &[u8]) -> Result<QC, CodecError> {
     })
 }
 
-/// Decode a SignedProposal from wire format.
+/// Decode a `SignedProposal` from wire format.
+///
+/// # Errors
+/// Returns error if buffer is too short or data is malformed.
 pub fn decode_signed_proposal_v1(buf: &[u8]) -> Result<SignedProposal, CodecError> {
     if buf.len() < 1 + 32 + 64 {
         return Err(CodecError::BufferTooShort);
     }
 
     let mut input = buf;
-    
+
     let version = read_u8(&mut input)?;
     if version != 1 {
         return Err(CodecError::UnsupportedVersion);
     }
 
     let proposer = read_32(&mut input)?;
-    
+
     // Decode proposal (block + justify_qc)
     let proposal = decode_proposal_v1(&mut input)?;
-    
+
     let signature = read_64(&mut input)?;
 
     Ok(SignedProposal {
@@ -413,17 +423,18 @@ pub fn decode_signed_proposal_v1(buf: &[u8]) -> Result<SignedProposal, CodecErro
 fn decode_proposal_v1(input: &mut &[u8]) -> Result<Proposal, CodecError> {
     // Decode block
     let block = decode_block_v1(input)?;
-    
+
     // Decode justify_qc
     let justify_qc = decode_qc_v1_internal(input)?;
 
-    Ok(Proposal {
-        block,
-        justify_qc,
-    })
+    Ok(Proposal { block, justify_qc })
 }
 
-fn decode_block_v1(input: &mut &[u8]) -> Result<Block, CodecError> {
+/// Decode a block from canonical bytes.
+///
+/// # Errors
+/// Returns error if decoding fails or data is malformed.
+pub fn decode_block_v1(input: &mut &[u8]) -> Result<Block, CodecError> {
     let version = read_u8(input)?;
     if version != 1 {
         return Err(CodecError::UnsupportedVersion);
@@ -433,23 +444,23 @@ fn decode_block_v1(input: &mut &[u8]) -> Result<Block, CodecError> {
     let round = read_u64_be(input)?;
     let parent_hash = read_32(input)?;
     let state_root = read_32(input)?;
-    
+
     let tx_count = read_u32_be(input)?;
     if tx_count as usize > MAX_TXS_PER_BLOCK {
         return Err(CodecError::TooManyTransactions);
     }
-    
+
     // Check buffer has enough bytes for claimed tx count (DoS prevention)
     let min_required_bytes = (tx_count as usize).saturating_mul(MIN_TX_BYTES);
     if input.len() < min_required_bytes {
         return Err(CodecError::BufferTooShort);
     }
-    
+
     let mut txs: Vec<novai_types::TxV1> = Vec::with_capacity(tx_count as usize);
-    
+
     for _ in 0..tx_count {
-        let tx = novai_codec::decode_tx_v1_signed(input)
-            .map_err(|_| CodecError::TxDecodingFailed)?;
+        let tx =
+            novai_codec::decode_tx_v1_signed(input).map_err(|_| CodecError::TxDecodingFailed)?;
         txs.push(tx);
     }
 
@@ -471,9 +482,10 @@ fn decode_qc_v1_internal(input: &mut &[u8]) -> Result<QC, CodecError> {
     let height = read_u64_be(input)?;
     let round = read_u64_be(input)?;
     let block_hash = read_32(input)?;
-    
+
     let vote_count = read_u32_be(input)?;
-    if vote_count > MAX_VOTES_PER_QC as u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    if vote_count > (MAX_VOTES_PER_QC as u32) {
         return Err(CodecError::TooManyVotes);
     }
 
@@ -488,14 +500,14 @@ fn decode_qc_v1_internal(input: &mut &[u8]) -> Result<QC, CodecError> {
         let vote_height = read_u64_be(input)?;
         let vote_round = read_u64_be(input)?;
         let vote_block_hash = read_32(input)?;
-        let voter = read_32(input)?;
+        let vote_voter = read_32(input)?;
         let signature = read_64(input)?;
 
         votes.push(Vote {
             height: vote_height,
             round: vote_round,
             block_hash: vote_block_hash,
-            voter,
+            voter: vote_voter,
             signature,
         });
     }
@@ -711,8 +723,11 @@ mod tests {
                 block_hash: [0x00; 32],
                 voter: {
                     let mut addr = [0x00; 32];
-                    addr[0] = (i % 256) as u8;
-                    addr[1] = (i / 256) as u8;
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        addr[0] = (i % 256) as u8;
+                        addr[1] = (i / 256) as u8;
+                    }
                     addr
                 },
                 signature: [0x00; 64],
@@ -737,8 +752,10 @@ mod tests {
         buf.extend_from_slice(&0u64.to_be_bytes()); // round
         buf.extend_from_slice(&[0u8; 32]); // parent_hash
         buf.extend_from_slice(&[0u8; 32]); // state_root
-        buf.extend_from_slice(&(MAX_TXS_PER_BLOCK as u32 + 1).to_be_bytes()); // tx_count: exceeds limit
-        
+        #[allow(clippy::cast_possible_truncation)]
+        let tx_count = (MAX_TXS_PER_BLOCK as u32) + 1;
+        buf.extend_from_slice(&tx_count.to_be_bytes()); // tx_count: exceeds limit
+
         let mut input = buf.as_slice();
         let result = decode_block_v1(&mut input);
         assert_eq!(result, Err(CodecError::TooManyTransactions));
@@ -750,10 +767,12 @@ mod tests {
         buf.extend_from_slice(&1u64.to_be_bytes()); // height
         buf.extend_from_slice(&0u64.to_be_bytes()); // round
         buf.extend_from_slice(&[0u8; 32]); // block_hash
-        buf.extend_from_slice(&(MAX_VOTES_PER_QC as u32 + 1).to_be_bytes()); // vote_count: exceeds limit
-        
-        let mut input = buf.as_slice();
-        let result = decode_qc_v1(&mut input);
+        #[allow(clippy::cast_possible_truncation)]
+        let vote_count = (MAX_VOTES_PER_QC as u32) + 1;
+        buf.extend_from_slice(&vote_count.to_be_bytes()); // vote_count: exceeds limit
+
+        let input = buf.as_slice();
+        let result = decode_qc_v1(input);
         assert_eq!(result, Err(CodecError::TooManyVotes));
     }
 }

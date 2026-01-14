@@ -31,7 +31,7 @@ pub const EXECUTION_VERSION: u8 = 1;
 pub const TRANSFER_PAYLOAD_V1: u8 = 1;
 
 /// Canonical Transfer payload:
-/// [version:1][to:32][amount_be:8]
+/// `[version:1][to:32][amount_be:8]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferPayloadV1 {
     pub to: Address,
@@ -52,11 +52,14 @@ pub enum ExecError<E> {
 
 impl<E> From<StateDecodeError> for ExecError<E> {
     fn from(e: StateDecodeError) -> Self {
-        ExecError::Decode(e)
+        Self::Decode(e)
     }
 }
 
 /// Deterministically decode a transfer payload from `tx.payload`.
+///
+/// # Errors
+/// Returns error if payload length or version is invalid.
 pub fn decode_transfer_payload_v1(payload: &[u8]) -> Result<TransferPayloadV1, ExecError<()>> {
     const LEN: usize = 1 + 32 + 8;
     if payload.len() != LEN {
@@ -83,6 +86,7 @@ pub fn decode_transfer_payload_v1(payload: &[u8]) -> Result<TransferPayloadV1, E
 }
 
 /// Deterministically encode a transfer payload.
+#[must_use]
 pub fn encode_transfer_payload_v1(p: &TransferPayloadV1) -> [u8; 1 + 32 + 8] {
     let mut out = [0u8; 1 + 32 + 8];
     out[0] = TRANSFER_PAYLOAD_V1;
@@ -91,8 +95,8 @@ pub fn encode_transfer_payload_v1(p: &TransferPayloadV1) -> [u8; 1 + 32 + 8] {
     out
 }
 
-fn u64_to_u128_checked(x: u64) -> Result<u128, ExecError<()>> {
-    Ok(u128::from(x))
+fn u64_to_u128_checked(x: u64) -> u128 {
+    u128::from(x)
 }
 
 fn read_account_or_default<K: Kv>(
@@ -123,15 +127,15 @@ fn read_smt_root_or_default<K: Kv>(db: &K) -> Result<Hash32, ExecError<K::Error>
     }
 }
 
-/// Store adapter: reads existing nodes from Kv, buffers writes as WriteOp::Put.
-/// Deterministic: uses Vec + linear search (no HashMap).
+/// Store adapter: reads existing nodes from Kv, buffers writes as `WriteOp::Put`.
+/// Deterministic: uses Vec + linear search (no `HashMap`).
 struct SmtOverlayStore<'a, K: Kv> {
     db: &'a K,
     pending: Vec<(Vec<u8>, Vec<u8>)>, // (db_key, value_bytes)
 }
 
 impl<'a, K: Kv> SmtOverlayStore<'a, K> {
-    fn new(db: &'a K) -> Self {
+    const fn new(db: &'a K) -> Self {
         Self {
             db,
             pending: Vec::new(),
@@ -159,7 +163,7 @@ impl<'a, K: Kv> SmtOverlayStore<'a, K> {
     }
 }
 
-impl<'a, K: Kv> SmtStore for SmtOverlayStore<'a, K> {
+impl<K: Kv> SmtStore for SmtOverlayStore<'_, K> {
     type Error = K::Error;
 
     fn get_node(&self, node_hash: &Hash32) -> Result<Option<[u8; Node::ENCODED_LEN]>, Self::Error> {
@@ -244,7 +248,7 @@ fn append_smt_ops_for_state_ops<K: Kv>(
     Ok(new_root)
 }
 
-/// Apply a single TxV1 as a TransferPayloadV1 against the account state machine.
+/// Apply a single `TxV1` as a `TransferPayloadV1` against the account state machine.
 ///
 /// Rules (Week 3):
 /// - Nonce exact match.
@@ -252,9 +256,12 @@ fn append_smt_ops_for_state_ops<K: Kv>(
 /// - Checked arithmetic only.
 /// - Debit sender by (amount + fee), credit receiver by amount.
 /// - Increment sender nonce by 1.
-/// - Add fee to fee_pool.
+/// - Add fee to `fee_pool`.
 ///
 /// ATOMIC: All state changes are applied in a single batch (all-or-nothing).
+///
+/// # Errors
+/// Returns error if nonce mismatch, insufficient funds, payload decode fails, or DB error.
 pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), ExecError<K::Error>> {
     // Decode payload (deterministic).
     let payload = decode_transfer_payload_v1(&tx.payload).map_err(|e| match e {
@@ -280,8 +287,8 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
     let mut fee_pool = read_fee_pool_or_default(db)?;
 
     // Validate and compute new state (all in memory, no writes yet)
-    let amount_u128 = u64_to_u128_checked(payload.amount).map_err(|_| ExecError::Overflow)?;
-    let fee_u128 = u64_to_u128_checked(tx.fee).map_err(|_| ExecError::Overflow)?;
+    let amount_u128 = u64_to_u128_checked(payload.amount);
+    let fee_u128 = u64_to_u128_checked(tx.fee);
 
     let needed = amount_u128
         .checked_add(fee_u128)

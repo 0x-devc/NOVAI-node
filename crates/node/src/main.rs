@@ -99,7 +99,8 @@ fn main() {
                         i += 2;
                     }
                     "--validator" => {
-                        validator_idx = Some(parse_u64(rest.get(i + 1).cloned(), "--validator") as usize);
+                        validator_idx =
+                            Some(parse_u64(rest.get(i + 1).cloned(), "--validator") as usize);
                         i += 2;
                     }
                     other => {
@@ -124,14 +125,13 @@ fn main() {
                 })
                 .collect();
 
-            let validator_pubkeys: HashMap<Address, ed25519_dalek::VerifyingKey> = 
-                validator_keys
-                    .iter()
-                    .map(|sk| {
-                        let pk = sk.verifying_key();
-                        (novai_crypto::address_from_pubkey(&pk), pk)
-                    })
-                    .collect();
+            let validator_pubkeys: HashMap<Address, ed25519_dalek::VerifyingKey> = validator_keys
+                .iter()
+                .map(|sk| {
+                    let pk = sk.verifying_key();
+                    (novai_crypto::address_from_pubkey(&pk), pk)
+                })
+                .collect();
 
             let our_key = validator_keys[validator_idx].clone();
             let our_addr = validator_set[validator_idx];
@@ -150,7 +150,9 @@ fn main() {
             ));
 
             // Start listener
-            let bind_addr = format!("127.0.0.1:{}", port).parse().expect("parse bind addr");
+            let bind_addr = format!("127.0.0.1:{}", port)
+                .parse()
+                .expect("parse bind addr");
             node.start_listener(bind_addr).expect("start listener");
 
             // Connect to peers (with retry)

@@ -15,11 +15,11 @@ use novai_state::{
 };
 use novai_types::{Address, TxV1};
 
-fn mk_addr(b: u8) -> Address {
+const fn mk_addr(b: u8) -> Address {
     [b; 32]
 }
 
-/// Build a transfer TxV1 for execution tests (signature not verified by execution layer).
+/// Build a transfer `TxV1` for execution tests (signature not verified by execution layer).
 fn mk_transfer_tx(from: Address, nonce: u64, fee: u64, to: Address, amount: u64) -> TxV1 {
     let payload = encode_transfer_payload_v1(&TransferPayloadV1 { to, amount }).to_vec();
     TxV1 {
@@ -78,8 +78,7 @@ fn smt_write_ordering_is_deterministic_across_runs() {
     for (run, root) in &results[1..] {
         assert_eq!(
             root, first_root,
-            "Run {} produced different SMT root than run 0",
-            run
+            "Run {run} produced different SMT root than run 0",
         );
     }
 
@@ -93,7 +92,6 @@ fn smt_write_ordering_is_deterministic_across_runs() {
     // Cryptographic assumption: Identical roots strongly imply identical committed
     // content under collision resistance, given deterministic SMT construction.
 }
-
 
 #[test]
 fn smt_root_bytes_stable_across_platforms() {
@@ -124,11 +122,9 @@ fn smt_root_bytes_stable_across_platforms() {
     // Locks down root encoding format (consensus-critical).
     assert_eq!(root.len(), 33, "SMT root encoding must be 33 bytes (v1)");
     assert_eq!(root[0], 0x01, "SMT root must have version byte 0x01");
-    
-
 
     // Note: Root bytes are deterministic but not hardcoded here.
     // This test proves format stability. For golden root bytes, uncomment after first run:
     // let expected_root: [u8; 33] = [ 0x01, /* 32-byte hash */ ];
     // assert_eq!(root.as_slice(), &expected_root[..]);
-} 
+}

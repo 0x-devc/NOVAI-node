@@ -5,9 +5,9 @@ use novai_state::{
     account_key, encode_account_v1, encode_fee_pool_v1, AccountStateV1, FeePoolV1, Kv, MemKv,
     KEY_FEE_POOL,
 };
-use novai_types::{Address, TxV1, TxVersion};
+use novai_types::{Address, TxV1};
 
-fn addr(b: u8) -> Address {
+const fn addr(b: u8) -> Address {
     [b; 32]
 }
 

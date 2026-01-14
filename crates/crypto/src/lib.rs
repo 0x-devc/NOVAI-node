@@ -57,13 +57,13 @@ pub fn verify_tx_v1(pk: &VerifyingKey, tx: &TxV1) -> Result<bool, CryptoError> {
 }
 
 /// Test helper: build a TxV1 with valid keypair, signature, and address.
-/// 
+///
 /// **WARNING**: Only for tests! Generates new keypair each time.
 /// DO NOT use in production code.
 pub fn build_test_tx_v1(nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
     let (sk, pk) = generate_keypair();
     let from = address_from_pubkey(&pk);
-    
+
     let mut tx = TxV1 {
         version: novai_types::TxVersion::V1,
         from,
@@ -73,7 +73,7 @@ pub fn build_test_tx_v1(nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
         payload,
         sig: [0u8; 64],
     };
-    
+
     sign_tx_v1(&sk, &mut tx).expect("test tx signing failed");
     tx
 }

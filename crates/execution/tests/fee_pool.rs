@@ -7,7 +7,7 @@ use novai_state::{
 };
 use novai_types::{Address, TxV1};
 
-fn addr(b: u8) -> Address {
+const fn addr(b: u8) -> Address {
     [b; 32]
 }
 
