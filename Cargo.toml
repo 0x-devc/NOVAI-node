@@ -3,6 +3,7 @@ members = [
     "crates/types",
     "crates/crypto",
     "crates/codec",
+    "crates/ai_entities",
     "crates/p2p",
     "crates/node",
     "crates/state",

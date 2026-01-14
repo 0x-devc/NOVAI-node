@@ -101,3 +101,43 @@ SMT node writes are sorted by key before being added to the atomic batch to ensu
 ### References
 - Blake3: https://github.com/BLAKE3-team/BLAKE3
 - Sparse Merkle Trees: https://eprint.iacr.org/2016/683.pdf
+---
+
+## AI-Native Architecture Decisions (Retrofit Week 1)
+
+### Decision A8: AI Entities as Protocol Primitives
+
+AI entities are first-class protocol primitives, NOT smart contracts. They have:
+
+- **Stable Identity**: Computed as `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator_address)`
+- **Persistent Memory**: Separate storage namespace (`ai_memory/`)
+- **Economic Agency**: Own assets via `economic_balance`, pay fees
+- **Explicit Capabilities**: Permission flags grant/deny specific actions
+
+This design ensures AI behavior is predictable, auditable, and controllable at the protocol level.
+
+### Decision A9: Autonomy Modes
+
+Three autonomy modes define AI behavior progression:
+
+| Mode | Value | Description |
+|------|-------|-------------|
+| **Advisory** | 0 | Propose only, never execute. All proposals require explicit human/governance approval. |
+| **Gated** | 1 | Mode B - Proposals go through approval gates with multisig + timelock. |
+| **Autonomous** | 2 | Mode C - Reserved for future. Requires ZK-proof verification for execution. |
+
+Default is **Advisory**. Upgrade to Gated requires governance approval with timelock.
+
+### Decision A10: Capability Manifest
+
+Every AI entity has explicit capabilities encoded as bitflags:
+
+| Bit | Capability | Description |
+|-----|------------|-------------|
+| 0 | `read_public_chain` | Read blocks, transactions, accounts |
+| 1 | `read_memory_objects` | Read L1 on-chain memory |
+| 2 | `emit_proposals` | Create proposal objects |
+| 3 | `request_execution` | Request Tier 1/2 actions (must pass gates) |
+| 4 | `read_nnpx_derived` | Access NNPX derived views (bounded, schema-validated) |
+
+Capabilities are immutable per module version. New capabilities require a new manifest registration.

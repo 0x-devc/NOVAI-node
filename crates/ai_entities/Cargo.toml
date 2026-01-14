@@ -1,0 +1,12 @@
+[package]
+name = "novai-ai-entities"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+novai-types = { path = "../types" }
+blake3 = "=1.8.2"
+
+[dev-dependencies]
+novai-codec = { path = "../codec" }

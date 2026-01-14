@@ -2010,10 +2010,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "novai-ai-entities"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "novai-codec",
+ "novai-types",
+]
+
+[[package]]
 name = "novai-codec"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "novai-ai-entities",
  "novai-types",
 ]
 

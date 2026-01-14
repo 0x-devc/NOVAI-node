@@ -9,4 +9,5 @@ path = "src/lib.rs"
 
 [dependencies]
 novai-types = { path = "../types" }
+novai-ai-entities = { path = "../ai_entities" }
 blake3 = "=1.8.2"

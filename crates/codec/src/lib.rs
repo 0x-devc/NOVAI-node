@@ -1,3 +1,6 @@
+pub mod ai_entity_codec;
+pub use ai_entity_codec::*;
+
 use novai_types::{
     Address, BlockHeaderV1, BlockHeaderVersion, Hash32, SignatureBytes, TxId, TxV1, TxVersion,
 };
