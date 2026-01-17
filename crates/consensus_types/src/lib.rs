@@ -70,3 +70,29 @@ pub struct Timeout {
     pub highest_qc: Option<QC>,
     pub signature: [u8; 64],
 }
+
+/// Block request for peer-to-peer sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockRequest {
+    pub requester: Address,
+    pub start_height: u64,
+    pub end_height: u64,
+}
+
+/// Block response for peer-to-peer sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockResponse {
+    pub responder: Address,
+    pub request_start: u64,
+    pub request_end: u64,
+    pub blocks: Vec<Block>,
+}
+
+/// Compute the hash of a block using canonical encoding.
+///
+/// # Panics
+/// Panics if block encoding fails (should never happen for valid blocks).
+pub fn block_hash(block: &Block) -> [u8; 32] {
+    let encoded = codec::encode_block_v1(block).expect("block encoding should never fail");
+    *blake3::hash(&encoded).as_bytes()
+}

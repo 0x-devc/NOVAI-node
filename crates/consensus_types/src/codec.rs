@@ -3,7 +3,7 @@
 //! All encodings are deterministic and use big-endian byte order.
 //! Format versioning: each message type has a version byte prefix.
 
-use crate::{Block, Proposal, SignedProposal, Timeout, Vote, QC};
+use crate::{Block, BlockRequest, BlockResponse, Proposal, SignedProposal, Timeout, Vote, QC};
 
 /// Codec errors for consensus messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,12 @@ pub const TIMEOUT_UNSIGNED_V1: u8 = 0x01;
 
 /// Codec version for Timeout (signed).
 pub const TIMEOUT_SIGNED_V1: u8 = 0x01;
+
+/// Codec version for BlockRequest.
+pub const BLOCK_REQUEST_V1: u8 = 0x01;
+
+/// Codec version for BlockResponse.
+pub const BLOCK_RESPONSE_V1: u8 = 0x01;
 
 /// Maximum transactions per block (`DoS` prevention).
 pub const MAX_TXS_PER_BLOCK: usize = 10_000;
@@ -649,6 +655,134 @@ fn read_64(input: &mut &[u8]) -> Result<[u8; 64], CodecError> {
     Ok(bytes)
 }
 
+// ============================================================================
+// BlockRequest Encoding
+// ============================================================================
+
+/// Encode a `BlockRequest` to canonical bytes.
+///
+/// Format:
+/// ```text
+/// [version:1][requester:32][start_height:8][end_height:8]
+/// ```
+pub fn encode_block_request_v1(req: &BlockRequest) -> Result<Vec<u8>, CodecError> {
+    let mut buf = Vec::with_capacity(49);
+    buf.push(BLOCK_REQUEST_V1);
+    buf.extend_from_slice(&req.requester);
+    buf.extend_from_slice(&req.start_height.to_be_bytes());
+    buf.extend_from_slice(&req.end_height.to_be_bytes());
+    Ok(buf)
+}
+
+/// Decode a `BlockRequest` from canonical bytes.
+///
+/// # Errors
+/// Returns error if buffer is too short or version is unsupported.
+pub fn decode_block_request_v1(buf: &[u8]) -> Result<BlockRequest, CodecError> {
+    const EXPECTED_SIZE: usize = 49;
+
+    if buf.len() != EXPECTED_SIZE {
+        return Err(CodecError::BufferTooShort);
+    }
+
+    let mut input = buf;
+
+    let version = read_u8(&mut input)?;
+    if version != BLOCK_REQUEST_V1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+
+    let requester = read_32(&mut input)?;
+    let start_height = read_u64_be(&mut input)?;
+    let end_height = read_u64_be(&mut input)?;
+
+    Ok(BlockRequest {
+        requester,
+        start_height,
+        end_height,
+    })
+}
+
+// ============================================================================
+// BlockResponse Encoding
+// ============================================================================
+
+/// Maximum blocks per response (DoS prevention).
+pub const MAX_BLOCKS_PER_RESPONSE: usize = 1000;
+
+/// Encode a `BlockResponse` to canonical bytes.
+///
+/// Format:
+/// ```text
+/// [version:1][responder:32][request_start:8][request_end:8][block_count:4][blocks_bytes]
+/// ```
+///
+/// # Errors
+/// Returns error if too many blocks or block encoding fails.
+pub fn encode_block_response_v1(resp: &BlockResponse) -> Result<Vec<u8>, CodecError> {
+    if resp.blocks.len() > MAX_BLOCKS_PER_RESPONSE {
+        return Err(CodecError::TooManyTransactions); // Reuse error for now
+    }
+
+    let mut buf = Vec::new();
+    buf.push(BLOCK_RESPONSE_V1);
+    buf.extend_from_slice(&resp.responder);
+    buf.extend_from_slice(&resp.request_start.to_be_bytes());
+    buf.extend_from_slice(&resp.request_end.to_be_bytes());
+
+    #[allow(clippy::cast_possible_truncation)]
+    let block_count = resp.blocks.len() as u32;
+    buf.extend_from_slice(&block_count.to_be_bytes());
+
+    for block in &resp.blocks {
+        let block_bytes = encode_block_v1(block)?;
+        buf.extend_from_slice(&block_bytes);
+    }
+
+    Ok(buf)
+}
+
+/// Decode a `BlockResponse` from canonical bytes.
+///
+/// # Errors
+/// Returns error if buffer is too short, version is unsupported, or block decoding fails.
+pub fn decode_block_response_v1(buf: &[u8]) -> Result<BlockResponse, CodecError> {
+    const MIN_SIZE: usize = 1 + 32 + 8 + 8 + 4; // 53 bytes
+
+    if buf.len() < MIN_SIZE {
+        return Err(CodecError::BufferTooShort);
+    }
+
+    let mut input = buf;
+
+    let version = read_u8(&mut input)?;
+    if version != BLOCK_RESPONSE_V1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+
+    let responder = read_32(&mut input)?;
+    let request_start = read_u64_be(&mut input)?;
+    let request_end = read_u64_be(&mut input)?;
+    let block_count = read_u32_be(&mut input)?;
+
+    if block_count > MAX_BLOCKS_PER_RESPONSE as u32 {
+        return Err(CodecError::TooManyTransactions); // Reuse error
+    }
+
+    let mut blocks = Vec::with_capacity(block_count as usize);
+    for _ in 0..block_count {
+        let block = decode_block_v1(&mut input)?;
+        blocks.push(block);
+    }
+
+    Ok(BlockResponse {
+        responder,
+        request_start,
+        request_end,
+        blocks,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,5 +1044,74 @@ mod tests {
         assert_eq!(decoded.voter, timeout.voter);
         assert!(decoded.highest_qc.is_some());
         assert_eq!(decoded.signature, timeout.signature);
+    }
+
+    #[test]
+    fn test_block_request_response_roundtrip() {
+        // Test BlockRequest roundtrip
+        let request = BlockRequest {
+            requester: [0xaa; 32],
+            start_height: 10,
+            end_height: 20,
+        };
+
+        let encoded = encode_block_request_v1(&request).unwrap();
+        let decoded = decode_block_request_v1(&encoded).unwrap();
+
+        assert_eq!(decoded.requester, request.requester);
+        assert_eq!(decoded.start_height, request.start_height);
+        assert_eq!(decoded.end_height, request.end_height);
+        assert_eq!(encoded.len(), 49); // version + requester + start + end
+
+        // Test BlockResponse roundtrip (empty blocks)
+        let response_empty = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 10,
+            request_end: 20,
+            blocks: vec![],
+        };
+
+        let encoded = encode_block_response_v1(&response_empty).unwrap();
+        let decoded = decode_block_response_v1(&encoded).unwrap();
+
+        assert_eq!(decoded.responder, response_empty.responder);
+        assert_eq!(decoded.request_start, response_empty.request_start);
+        assert_eq!(decoded.request_end, response_empty.request_end);
+        assert_eq!(decoded.blocks.len(), 0);
+        assert_eq!(encoded.len(), 53); // version + responder + start + end + count
+
+        // Test BlockResponse roundtrip (with blocks)
+        let block1 = Block {
+            height: 10,
+            round: 5,
+            parent_hash: [0xaa; 32],
+            state_root: [0xbb; 32],
+            txs: vec![],
+        };
+
+        let block2 = Block {
+            height: 11,
+            round: 6,
+            parent_hash: [0xcc; 32],
+            state_root: [0xdd; 32],
+            txs: vec![],
+        };
+
+        let response_with_blocks = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 10,
+            request_end: 11,
+            blocks: vec![block1.clone(), block2.clone()],
+        };
+
+        let encoded = encode_block_response_v1(&response_with_blocks).unwrap();
+        let decoded = decode_block_response_v1(&encoded).unwrap();
+
+        assert_eq!(decoded.responder, response_with_blocks.responder);
+        assert_eq!(decoded.request_start, response_with_blocks.request_start);
+        assert_eq!(decoded.request_end, response_with_blocks.request_end);
+        assert_eq!(decoded.blocks.len(), 2);
+        assert_eq!(decoded.blocks[0].height, block1.height);
+        assert_eq!(decoded.blocks[1].height, block2.height);
     }
 }

@@ -111,6 +111,8 @@ pub struct ConsensusState {
     pub pending_timeouts: HashMap<(u64, u64), Vec<Timeout>>,
     /// Addresses that already sent timeout in current round (deduplication).
     pub timed_out_in_round: HashSet<Address>,
+    /// Total view changes (round advances due to timeouts) since node start.
+    pub view_changes_total: u64,
 }
 
 impl ConsensusState {
@@ -130,6 +132,7 @@ impl ConsensusState {
             block_by_hash: HashMap::new(),
             pending_timeouts: HashMap::new(),
             timed_out_in_round: HashSet::new(),
+            view_changes_total: 0,
         }
     }
 
@@ -608,6 +611,7 @@ impl ConsensusState {
 
         // Advance round
         self.round += 1;
+        self.view_changes_total += 1;
 
         // Clear round-specific state
         self.pending_votes.clear();
@@ -1294,6 +1298,7 @@ impl ConsensusState {
             block_by_hash: HashMap::new(),
             pending_timeouts: HashMap::new(),
             timed_out_in_round: HashSet::new(),
+            view_changes_total: 0,
         })
     }
 }

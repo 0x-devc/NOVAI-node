@@ -2,20 +2,30 @@
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use novai_consensus::ConsensusState;
-use novai_consensus_types::{SignedProposal, Vote, QC};
+use novai_consensus_types::{SignedProposal, Timeout, Vote, QC};
 use novai_crypto::{address_from_pubkey, sign_bytes};
 use novai_p2p::{connect_to_peer, read_wire_message, start_listener, NetworkMessage, PeerManager};
-use novai_state::MemKv;
+use novai_state::{Kv, MemKv};
 use novai_types::Address;
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 /// Cache for tracking which QCs have been broadcasted (to avoid duplicates).
 type QcBroadcastCache = Arc<Mutex<HashSet<(u64, u64, [u8; 32])>>>;
 
 /// Consensus node with networking.
+/// Tracks a pending block sync request.
+#[derive(Debug, Clone)]
+pub struct PendingSyncRequest {
+    pub peer: Address,
+    pub start_height: u64,
+    pub end_height: u64,
+    pub request_time: Instant,
+}
+
 pub struct ConsensusNode {
     pub our_address: Address,
     pub signing_key: SigningKey,
@@ -26,6 +36,9 @@ pub struct ConsensusNode {
     pub validator_set: Vec<Address>,
     pub validator_pubkeys: HashMap<Address, VerifyingKey>,
     pub qc_broadcasted: QcBroadcastCache,
+    pub round_start_time: Arc<Mutex<Instant>>,
+    pub timed_out_this_round: Arc<Mutex<bool>>,
+    pub pending_sync_request: Arc<Mutex<Option<PendingSyncRequest>>>,
 }
 
 impl ConsensusNode {
@@ -47,6 +60,9 @@ impl ConsensusNode {
             validator_set,
             validator_pubkeys,
             qc_broadcasted: Arc::new(Mutex::new(HashSet::new())),
+            round_start_time: Arc::new(Mutex::new(Instant::now())),
+            timed_out_this_round: Arc::new(Mutex::new(false)),
+            pending_sync_request: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -85,6 +101,270 @@ impl ConsensusNode {
         self.peer_manager
             .broadcast(&msg)
             .map_err(|e| format!("Broadcast failed: {:?}", e))
+    }
+
+    /// Check if timeout should be triggered and create it.
+    ///
+    /// Returns Some(Timeout) if timeout duration elapsed and not already timed out.
+    pub fn check_timeout(&self) -> Option<Timeout> {
+        let timed_out = *self.timed_out_this_round.lock().unwrap();
+        if timed_out {
+            return None; // Already timed out this round
+        }
+
+        let start_time = *self.round_start_time.lock().unwrap();
+        let state = self.state.lock().unwrap();
+
+        let timeout_duration =
+            std::time::Duration::from_millis(novai_consensus::timeout_for_round(state.round));
+
+        if start_time.elapsed() >= timeout_duration {
+            // Create timeout
+            match state.create_timeout(&self.signing_key) {
+                Ok(timeout) => {
+                    *self.timed_out_this_round.lock().unwrap() = true;
+                    println!(
+                        "⏰ TIMEOUT triggered for round={} after {:?}",
+                        state.round,
+                        start_time.elapsed()
+                    );
+                    Some(timeout)
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to create timeout: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Handle incoming timeout message.
+    ///
+    /// Returns Ok(true) if round was advanced, Ok(false) otherwise.
+    pub fn handle_timeout(&self, timeout: Timeout) -> Result<bool, String> {
+        println!("⏰ Received timeout from {:?}", &timeout.voter[..4]);
+
+        let pubkeys_vec: Vec<(Address, VerifyingKey)> = self
+            .validator_pubkeys
+            .iter()
+            .map(|(addr, pk)| (*addr, *pk))
+            .collect();
+
+        let mut state = self.state.lock().unwrap();
+
+        // Add timeout to state
+        state
+            .add_timeout(timeout, &pubkeys_vec)
+            .map_err(|e| format!("Add timeout failed: {:?}", e))?;
+
+        // Try to advance round
+        let advanced = state.try_advance_round(&self.validator_set);
+
+        if advanced {
+            // Reset round timer
+            *self.round_start_time.lock().unwrap() = Instant::now();
+            *self.timed_out_this_round.lock().unwrap() = false;
+
+            println!(
+                "⏰ ROUND ADVANCED to round={} at height={}",
+                state.round,
+                state.height + 1
+            );
+        }
+
+        Ok(advanced)
+    }
+
+    /// Request blocks from a peer for catch-up.
+    ///
+    /// Returns `Ok(())` if request was sent, or error if already pending or no peers available.
+    pub fn request_blocks_from_peer(
+        &self,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<(), String> {
+        // Check if there's already a pending request
+        let mut pending = self.pending_sync_request.lock().unwrap();
+        if pending.is_some() {
+            return Err("Sync request already pending".to_string());
+        }
+
+        // Select a peer (simple: just take the first validator that's not us)
+        let peer = self
+            .validator_set
+            .iter()
+            .find(|&&addr| addr != self.our_address)
+            .copied()
+            .ok_or_else(|| "No peers available for sync".to_string())?;
+
+        // Create and send request
+        let request = novai_consensus_types::BlockRequest {
+            requester: self.our_address,
+            start_height,
+            end_height,
+        };
+
+        println!(
+            "📥 Requesting blocks {}-{} from peer {:?}",
+            start_height,
+            end_height,
+            &peer[..4]
+        );
+
+        // Store pending request
+        *pending = Some(PendingSyncRequest {
+            peer,
+            start_height,
+            end_height,
+            request_time: Instant::now(),
+        });
+
+        drop(pending);
+
+        // Broadcast request
+        self.broadcast(NetworkMessage::BlockRequest(request))?;
+
+        Ok(())
+    }
+
+    /// Handle incoming block request from a peer.
+    pub fn handle_block_request(
+        &self,
+        request: novai_consensus_types::BlockRequest,
+    ) -> Result<(), String> {
+        println!(
+            "📤 Received block request for {}-{} from {:?}",
+            request.start_height,
+            request.end_height,
+            &request.requester[..4]
+        );
+
+        let db = self.db.lock().unwrap();
+
+        // Load individual blocks, stop at first missing
+        let mut blocks = Vec::new();
+        for height in request.start_height..=request.end_height {
+            match ConsensusState::load_block(&*db, height) {
+                Ok(Some(block)) => blocks.push(block),
+                _ => break, // Stop at first missing block
+            }
+        }
+
+        drop(db);
+
+        println!(
+            "📤 Sending {} blocks (requested {}-{}) to {:?}",
+            blocks.len(),
+            request.start_height,
+            request.end_height,
+            &request.requester[..4]
+        );
+
+        // Send response with whatever blocks we have
+        let response = novai_consensus_types::BlockResponse {
+            responder: self.our_address,
+            request_start: request.start_height,
+            request_end: request.end_height,
+            blocks,
+        };
+
+        self.broadcast(NetworkMessage::BlockResponse(response))?;
+
+        Ok(())
+    }
+
+    /// Handle incoming block response from a peer.
+    pub fn handle_block_response(
+        &self,
+        response: novai_consensus_types::BlockResponse,
+    ) -> Result<(), String> {
+        println!(
+            "📥 Received {} blocks from {:?}",
+            response.blocks.len(),
+            &response.responder[..4]
+        );
+
+        // Check if we have a pending request
+        let mut pending = self.pending_sync_request.lock().unwrap();
+        let pending_request = match pending.take() {
+            Some(req) if req.peer == response.responder => req,
+            Some(req) => {
+                // Got response from different peer, ignore but restore pending
+                *pending = Some(req);
+                return Ok(());
+            }
+            None => {
+                // No pending request, ignore
+                return Ok(());
+            }
+        };
+
+        drop(pending);
+
+        if response.blocks.is_empty() {
+            return Err(format!(
+                "Peer {:?} has no blocks for requested range {}-{}",
+                &response.responder[..4],
+                pending_request.start_height,
+                pending_request.end_height
+            ));
+        }
+
+        let mut db = self.db.lock().unwrap();
+        let state = self.state.lock().unwrap();
+        let committed_height = state.committed_height;
+
+        // Check that first block connects to our committed chain
+        if !response.blocks.is_empty() && response.blocks[0].height != committed_height + 1 {
+            return Err(format!(
+                "Block chain gap: committed_height={}, first block height={}",
+                committed_height, response.blocks[0].height
+            ));
+        }
+
+        // Get expected parent hash
+        let expected_parent_hash = if committed_height > 0 {
+            let committed_block = ConsensusState::load_block(&*db, committed_height)
+                .map_err(|e| format!("Failed to load committed block: {:?}", e))?
+                .ok_or_else(|| "Missing committed block".to_string())?;
+            novai_consensus_types::block_hash(&committed_block)
+        } else {
+            [0u8; 32] // Genesis parent
+        };
+
+        drop(state);
+
+        // Verify the blocks form a valid chain
+        if let Err(e) = ConsensusState::verify_block_chain(&response.blocks, expected_parent_hash) {
+            return Err(format!("Block chain verification failed: {:?}", e));
+        }
+
+        // Store blocks to DB
+        for block in &response.blocks {
+            let key = novai_state::block_key(block.height);
+            let value = novai_consensus_types::codec::encode_block_v1(block)
+                .map_err(|e| format!("Failed to encode block: {:?}", e))?;
+            db.put(&key, &value)
+                .map_err(|e| format!("Failed to store block: {:?}", e))?;
+        }
+
+        drop(db);
+
+        // Update committed_height in state
+        if let Some(last_block) = response.blocks.last() {
+            let mut state = self.state.lock().unwrap();
+            state.committed_height = last_block.height;
+
+            println!(
+                "✅ Synced to height {} ({} blocks applied)",
+                last_block.height,
+                response.blocks.len()
+            );
+        }
+
+        Ok(())
     }
 
     /// Check if we're the leader for current height/round.
@@ -237,6 +517,10 @@ impl ConsensusNode {
 
         drop(state);
         drop(db);
+
+        // Reset round timer - we received a valid proposal
+        *self.round_start_time.lock().unwrap() = Instant::now();
+        *self.timed_out_this_round.lock().unwrap() = false;
 
         // 6. Cache block for commit rule (Week 7)
         {
@@ -406,6 +690,9 @@ impl ConsensusNode {
             NetworkMessage::SignedProposal(sp) => self.handle_proposal(sp),
             NetworkMessage::Vote(v) => self.handle_vote(v),
             NetworkMessage::Qc(qc) => self.handle_qc(qc),
+            NetworkMessage::Timeout(t) => self.handle_timeout(t).map(|_| ()),
+            NetworkMessage::BlockRequest(req) => self.handle_block_request(req),
+            NetworkMessage::BlockResponse(resp) => self.handle_block_response(resp),
         }
     }
 }

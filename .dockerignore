@@ -1,0 +1,46 @@
+# Build artifacts (will be rebuilt in container)
+target/
+
+# Git directory (not needed for build)
+.git/
+.gitignore
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation (not needed in image)
+*.md
+docs/
+LICENSE
+
+# Test fixtures and development files
+tests/fixtures/
+benches/
+examples/
+
+# CI/CD configurations
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+
+# Local configuration
+.env
+.env.*
+*.local
+
+# Docker files (prevent recursive context)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# MacOS files
+.DS_Store
+
+# Backup files
+*.backup
+*.bak
+*.tmp

@@ -1,0 +1,37 @@
+{
+  "chain_id": "novai-testnet-1",
+  "protocol_version": 1,
+  "timestamp": "2025-01-17T00:00:00Z",
+  "validators": [
+    {
+      "pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+      "initial_stake": "1000000",
+      "name": "validator-0"
+    },
+    {
+      "pubkey": "0101010101010101010101010101010101010101010101010101010101010101",
+      "initial_stake": "1000000",
+      "name": "validator-1"
+    },
+    {
+      "pubkey": "0202020202020202020202020202020202020202020202020202020202020202",
+      "initial_stake": "1000000",
+      "name": "validator-2"
+    },
+    {
+      "pubkey": "0303030303030303030303030303030303030303030303030303030303030303",
+      "initial_stake": "1000000",
+      "name": "validator-3"
+    },
+    {
+      "pubkey": "0404040404040404040404040404040404040404040404040404040404040404",
+      "initial_stake": "1000000",
+      "name": "validator-4"
+    }
+  ],
+  "accounts": {
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "1000000000",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "500000000"
+  },
+  "ai_entities": []
+}

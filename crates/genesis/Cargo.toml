@@ -1,0 +1,22 @@
+[package]
+name = "genesis"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+chrono = "0.4"
+ed25519-dalek = "2.1"
+
+novai-types = { path = "../types" }
+novai-crypto = { path = "../crypto" }
+novai-state = { path = "../state" }
+novai-smt = { path = "../smt" }
+novai-execution = { path = "../execution" }
+novai-consensus-types = { path = "../consensus_types" }
+
+[lints]
+workspace = true

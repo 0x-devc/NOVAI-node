@@ -2,10 +2,11 @@ use mempool::{NonceProvider, TxMempool};
 use novai_codec::txid_v1;
 use novai_crypto::{address_from_pubkey, generate_keypair, sign_tx_v1};
 use novai_node::consensus_node::ConsensusNode;
+use novai_node::metrics;
 use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn usage() {
@@ -169,25 +170,80 @@ fn main() {
             std::thread::sleep(Duration::from_secs(2));
 
             // Create dummy mempool and nonce provider for Week 6
-            let mut mempool = TxMempool::new(1, 1000);
+            let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
             let nonce_provider = InMemoryNonceProvider::default();
 
-            // Simple consensus loop
-            loop {
-                std::thread::sleep(Duration::from_secs(3));
+            // Start metrics server
+            let metrics_collect = {
+                let state = Arc::clone(&node.state);
+                let peer_manager = Arc::clone(&node.peer_manager);
+                let mempool = Arc::clone(&mempool);
+                move || metrics::MetricsSnapshot {
+                    committed_height: state.lock().unwrap().committed_height,
+                    current_round: state.lock().unwrap().round,
+                    peer_count: peer_manager.peer_count() as u64,
+                    mempool_size: mempool.lock().unwrap().len() as u64,
+                    view_changes_total: state.lock().unwrap().view_changes_total,
+                }
+            };
 
-                if node.are_we_leader() {
-                    println!("👑 We are leader, proposing block...");
-                    if let Err(e) = node.propose_block(&mut mempool, &nonce_provider) {
-                        println!("❌ Propose failed: {}", e);
+            if let Err(e) = metrics::start_metrics_server("0.0.0.0:8080", metrics_collect) {
+                eprintln!("❌ Failed to start metrics server: {}", e);
+            }
+
+            // Simple consensus loop with timeout checking
+            let mut last_proposal_attempt = std::time::Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+
+                // Check for timeout
+                if let Some(timeout) = node.check_timeout() {
+                    println!("⏰ Broadcasting timeout...");
+                    if let Err(e) =
+                        node.broadcast(novai_p2p::NetworkMessage::Timeout(timeout.clone()))
+                    {
+                        println!("❌ Timeout broadcast failed: {}", e);
                     }
-                } else {
-                    println!("👂 Listening for proposals...");
+                    // Handle our own timeout
+                    if let Err(e) = node.handle_timeout(timeout) {
+                        println!("❌ Handle timeout failed: {}", e);
+                    }
                 }
 
-                // Check peer count
-                let peer_count = node.peer_manager.peer_count();
-                println!("   Connected peers: {}", peer_count);
+                // Check for sync timeout (5 seconds)
+                {
+                    let mut pending = node.pending_sync_request.lock().unwrap();
+                    if let Some(ref request) = *pending {
+                        if request.request_time.elapsed() >= Duration::from_secs(5) {
+                            println!(
+                                "⏰ Sync request timed out (peer {:?}, blocks {}-{})",
+                                &request.peer[..4],
+                                request.start_height,
+                                request.end_height
+                            );
+                            *pending = None;
+                        }
+                    }
+                }
+
+                // Propose every 3 seconds if we're leader
+                if last_proposal_attempt.elapsed() >= Duration::from_secs(3) {
+                    last_proposal_attempt = std::time::Instant::now();
+
+                    if node.are_we_leader() {
+                        println!("👑 We are leader, proposing block...");
+                        let mut mempool_guard = mempool.lock().unwrap();
+                        if let Err(e) = node.propose_block(&mut mempool_guard, &nonce_provider) {
+                            println!("❌ Propose failed: {}", e);
+                        }
+                    } else {
+                        println!("👂 Listening for proposals...");
+                    }
+
+                    // Check peer count
+                    let peer_count = node.peer_manager.peer_count();
+                    println!("   Connected peers: {}", peer_count);
+                }
             }
         }
 

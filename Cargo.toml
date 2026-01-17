@@ -11,7 +11,7 @@ members = [
     "crates/smt",
     "crates/mempool",
     "crates/consensus_types",
-    "crates/consensus",
+    "crates/consensus", "crates/genesis",
 ]
 
 resolver = "2"
