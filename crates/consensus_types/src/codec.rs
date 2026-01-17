@@ -120,6 +120,8 @@ pub fn hash_block_v1(block: &Block) -> Result<[u8; 32], CodecError> {
 /// ```text
 /// [version:1][height:8][round:8][block_hash:32][voter:32]
 /// ```
+///
+/// Note: AI signal commitment is NOT included in unsigned bytes (not signed).
 #[must_use]
 pub fn encode_vote_v1_unsigned(vote: &Vote) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -131,16 +133,24 @@ pub fn encode_vote_v1_unsigned(vote: &Vote) -> Vec<u8> {
     buf
 }
 
-/// Encode a Vote to canonical signed bytes (includes signature).
+/// Encode a Vote to canonical signed bytes (includes signature and optional AI signal).
 ///
 /// Format:
-/// ```text
-/// [unsigned_bytes][signature:64]
-/// ```
+/// - Without signal: `[unsigned_bytes][signature:64]`
+/// - With signal: `[unsigned_bytes][signature:64][has_signal:1][commitment:32]`
 #[must_use]
 pub fn encode_vote_v1_signed(vote: &Vote) -> Vec<u8> {
     let mut buf = encode_vote_v1_unsigned(vote);
     buf.extend_from_slice(&vote.signature);
+
+    // Add optional AI signal commitment
+    if let Some(commitment) = vote.ai_signal_commitment {
+        buf.push(1); // has_signal = true
+        buf.extend_from_slice(&commitment);
+    } else {
+        buf.push(0); // has_signal = false
+    }
+
     buf
 }
 
@@ -304,6 +314,53 @@ pub fn encode_timeout_v1_signed(timeout: &Timeout) -> Result<Vec<u8>, CodecError
     Ok(buf)
 }
 
+/// Decode a Timeout from signed wire format.
+///
+/// Format:
+/// ```text
+/// [version:1][height:8][round:8][voter:32][has_qc:1][qc_bytes?][signature:64]
+/// ```
+///
+/// # Errors
+/// Returns error if buffer is too short or data is malformed.
+pub fn decode_timeout_v1_signed(buf: &[u8]) -> Result<Timeout, CodecError> {
+    // Minimum size: version + height + round + voter + has_qc + signature
+    const MIN_SIZE: usize = 1 + 8 + 8 + 32 + 1 + 64; // 114 bytes
+
+    if buf.len() < MIN_SIZE {
+        return Err(CodecError::BufferTooShort);
+    }
+
+    let mut input = buf;
+
+    let version = read_u8(&mut input)?;
+    if version != TIMEOUT_UNSIGNED_V1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+
+    let height = read_u64_be(&mut input)?;
+    let round = read_u64_be(&mut input)?;
+    let voter = read_32(&mut input)?;
+
+    // Decode optional QC
+    let has_qc = read_u8(&mut input)?;
+    let highest_qc = if has_qc == 0x01 {
+        Some(decode_qc_v1_internal(&mut input)?)
+    } else {
+        None
+    };
+
+    let signature = read_64(&mut input)?;
+
+    Ok(Timeout {
+        height,
+        round,
+        voter,
+        highest_qc,
+        signature,
+    })
+}
+
 // =============================================================================
 // Decode functions
 // ============================================================================
@@ -312,8 +369,19 @@ pub fn encode_timeout_v1_signed(timeout: &Timeout) -> Result<Vec<u8>, CodecError
 ///
 /// # Errors
 /// Returns error if buffer is too short or data is malformed.
+/// Decode a Vote from signed wire format.
+///
+/// Format:
+/// - V1 without signal (145 bytes): `[version:1][height:8][round:8][block_hash:32][voter:32][signature:64]`
+/// - V1 with signal (178 bytes): `[version:1][height:8][round:8][block_hash:32][voter:32][signature:64][has_signal:1][commitment:32]`
+///
+/// # Errors
+/// Returns error if buffer is too short or data is malformed.
 pub fn decode_vote_v1_signed(buf: &[u8]) -> Result<Vote, CodecError> {
-    if buf.len() < 1 + 8 + 8 + 32 + 32 + 64 {
+    // Minimum size: version + height + round + block_hash + voter + signature
+    const MIN_SIZE: usize = 1 + 8 + 8 + 32 + 32 + 64; // 145 bytes
+
+    if buf.len() < MIN_SIZE {
         return Err(CodecError::BufferTooShort);
     }
 
@@ -330,12 +398,25 @@ pub fn decode_vote_v1_signed(buf: &[u8]) -> Result<Vote, CodecError> {
     let vote_voter = read_32(&mut input)?;
     let signature = read_64(&mut input)?;
 
+    // Check for optional AI signal commitment (backward compatible)
+    let ai_signal_commitment = if input.is_empty() {
+        None
+    } else {
+        let has_signal = read_u8(&mut input)?;
+        if has_signal == 1 {
+            Some(read_32(&mut input)?)
+        } else {
+            None
+        }
+    };
+
     Ok(Vote {
         height,
         round,
         block_hash,
         voter: vote_voter,
         signature,
+        ai_signal_commitment,
     })
 }
 
@@ -379,6 +460,7 @@ pub fn decode_qc_v1(buf: &[u8]) -> Result<QC, CodecError> {
             block_hash: vote_block_hash,
             voter: vote_voter,
             signature,
+            ai_signal_commitment: None,
         });
     }
 
@@ -509,6 +591,7 @@ fn decode_qc_v1_internal(input: &mut &[u8]) -> Result<QC, CodecError> {
             block_hash: vote_block_hash,
             voter: vote_voter,
             signature,
+            ai_signal_commitment: None,
         });
     }
 
@@ -620,6 +703,7 @@ mod tests {
             block_hash: [0xcc; 32],
             voter: [0xdd; 32],
             signature: [0xee; 64],
+            ai_signal_commitment: None,
         };
 
         let unsigned1 = encode_vote_v1_unsigned(&vote);
@@ -654,6 +738,7 @@ mod tests {
             block_hash: [0x00; 32],
             voter: [0xaa; 32],
             signature: [0x00; 64],
+            ai_signal_commitment: None,
         };
         let vote_b = Vote {
             height: 1,
@@ -661,6 +746,7 @@ mod tests {
             block_hash: [0x00; 32],
             voter: [0xbb; 32],
             signature: [0x00; 64],
+            ai_signal_commitment: None,
         };
         let vote_c = Vote {
             height: 1,
@@ -668,6 +754,7 @@ mod tests {
             block_hash: [0x00; 32],
             voter: [0xcc; 32],
             signature: [0x00; 64],
+            ai_signal_commitment: None,
         };
 
         // Create QC with unsorted votes
@@ -700,6 +787,7 @@ mod tests {
             block_hash: [0x00; 32],
             voter: [0xaa; 32],
             signature: [0x00; 64],
+            ai_signal_commitment: None,
         };
 
         let qc = QC {
@@ -731,6 +819,7 @@ mod tests {
                     addr
                 },
                 signature: [0x00; 64],
+                ai_signal_commitment: None,
             })
             .collect();
 
@@ -774,5 +863,52 @@ mod tests {
         let input = buf.as_slice();
         let result = decode_qc_v1(input);
         assert_eq!(result, Err(CodecError::TooManyVotes));
+    }
+
+    #[test]
+    fn timeout_decode_roundtrip_no_qc() {
+        let timeout = Timeout {
+            height: 42,
+            round: 7,
+            voter: [0xaa; 32],
+            highest_qc: None,
+            signature: [0xbb; 64],
+        };
+
+        let bytes = encode_timeout_v1_signed(&timeout).unwrap();
+        let decoded = decode_timeout_v1_signed(&bytes).unwrap();
+
+        assert_eq!(decoded.height, timeout.height);
+        assert_eq!(decoded.round, timeout.round);
+        assert_eq!(decoded.voter, timeout.voter);
+        assert_eq!(decoded.highest_qc, timeout.highest_qc);
+        assert_eq!(decoded.signature, timeout.signature);
+    }
+
+    #[test]
+    fn timeout_decode_roundtrip_with_qc() {
+        let qc = QC {
+            height: 10,
+            round: 3,
+            block_hash: [0xcc; 32],
+            votes: vec![],
+        };
+
+        let timeout = Timeout {
+            height: 11,
+            round: 4,
+            voter: [0xdd; 32],
+            highest_qc: Some(qc),
+            signature: [0xee; 64],
+        };
+
+        let bytes = encode_timeout_v1_signed(&timeout).unwrap();
+        let decoded = decode_timeout_v1_signed(&bytes).unwrap();
+
+        assert_eq!(decoded.height, timeout.height);
+        assert_eq!(decoded.round, timeout.round);
+        assert_eq!(decoded.voter, timeout.voter);
+        assert!(decoded.highest_qc.is_some());
+        assert_eq!(decoded.signature, timeout.signature);
     }
 }

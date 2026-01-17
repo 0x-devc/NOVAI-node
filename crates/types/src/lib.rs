@@ -78,3 +78,25 @@ pub struct BlockHeaderV1 {
     pub proposer: Address,
     pub qc_hash: Hash32,
 }
+
+/// Placeholder response type for transaction submission (Week 2).
+///
+/// This will later be used by RPC / networking layers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitTxResultV1 {
+    pub txid: TxId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Transaction {
+    pub bytes: Vec<u8>,
+}
+
+impl Transaction {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+}
+
+// Placeholder “tx id” type for logging/tests.
+// Feel free to swap to a real hash later.

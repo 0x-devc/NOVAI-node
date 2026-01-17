@@ -344,3 +344,357 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
 
     Ok(())
 }
+
+// ============================================================================
+// AI STORAGE OPERATIONS (Retrofit Week 3)
+// ============================================================================
+
+use novai_ai_entities::AiEntity;
+use novai_state::{ai_entity_key, ai_memory_key};
+
+/// AI Entity encoding version.
+pub const AI_ENTITY_CODEC_V1: u8 = 1;
+
+/// Encode an `AiEntity` to canonical bytes.
+///
+/// Format: [version:1][code_hash:32][creator:32][autonomy_mode:1][capabilities:1]
+///         `[economic_balance_be:16][nonce_be:8][memory_root:32][params_root:32]`
+///         `[registered_at_be:8][last_active_at_be:8]`
+///
+/// Total: 1 + 32 + 32 + 1 + 1 + 16 + 8 + 32 + 32 + 8 + 8 = 171 bytes
+#[must_use]
+pub fn encode_ai_entity_v1(entity: &AiEntity) -> [u8; 171] {
+    let mut out = [0u8; 171];
+    let mut pos = 0;
+
+    out[pos] = AI_ENTITY_CODEC_V1;
+    pos += 1;
+
+    out[pos..pos + 32].copy_from_slice(&entity.code_hash);
+    pos += 32;
+
+    out[pos..pos + 32].copy_from_slice(&entity.creator);
+    pos += 32;
+
+    out[pos] = entity.autonomy_mode.to_byte();
+    pos += 1;
+
+    out[pos] = entity.capabilities.to_byte();
+    pos += 1;
+
+    out[pos..pos + 16].copy_from_slice(&entity.economic_balance.to_be_bytes());
+    pos += 16;
+
+    out[pos..pos + 8].copy_from_slice(&entity.nonce.to_be_bytes());
+    pos += 8;
+
+    out[pos..pos + 32].copy_from_slice(&entity.memory_root);
+    pos += 32;
+
+    out[pos..pos + 32].copy_from_slice(&entity.params_root);
+    pos += 32;
+
+    out[pos..pos + 8].copy_from_slice(&entity.registered_at.to_be_bytes());
+    pos += 8;
+
+    out[pos..pos + 8].copy_from_slice(&entity.last_active_at.to_be_bytes());
+
+    out
+}
+
+/// Decode an `AiEntity` from canonical bytes.
+///
+/// # Errors
+///
+/// Returns error if payload length or version is invalid.
+pub fn decode_ai_entity_v1(bytes: &[u8]) -> Result<AiEntity, ExecError<()>> {
+    const LEN: usize = 171;
+    if bytes.len() != LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: LEN,
+            got: bytes.len(),
+        });
+    }
+
+    let mut pos = 0;
+
+    let version = bytes[pos];
+    if version != AI_ENTITY_CODEC_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: AI_ENTITY_CODEC_V1,
+            got: version,
+        });
+    }
+    pos += 1;
+
+    let mut code_hash = [0u8; 32];
+    code_hash.copy_from_slice(&bytes[pos..pos + 32]);
+    pos += 32;
+
+    let mut creator = [0u8; 32];
+    creator.copy_from_slice(&bytes[pos..pos + 32]);
+    pos += 32;
+
+    let autonomy_mode = novai_ai_entities::AutonomyMode::from_byte(bytes[pos]).ok_or(
+        ExecError::BadPayloadVersion {
+            expected: 0,
+            got: bytes[pos],
+        },
+    )?;
+    pos += 1;
+
+    let capabilities = novai_ai_entities::Capabilities::from_byte(bytes[pos]);
+    pos += 1;
+
+    let mut bal_bytes = [0u8; 16];
+    bal_bytes.copy_from_slice(&bytes[pos..pos + 16]);
+    let economic_balance = u128::from_be_bytes(bal_bytes);
+    pos += 16;
+
+    let mut nonce_bytes = [0u8; 8];
+    nonce_bytes.copy_from_slice(&bytes[pos..pos + 8]);
+    let nonce = u64::from_be_bytes(nonce_bytes);
+    pos += 8;
+
+    let mut memory_root = [0u8; 32];
+    memory_root.copy_from_slice(&bytes[pos..pos + 32]);
+    pos += 32;
+
+    let mut params_root = [0u8; 32];
+    params_root.copy_from_slice(&bytes[pos..pos + 32]);
+    pos += 32;
+
+    let mut reg_bytes = [0u8; 8];
+    reg_bytes.copy_from_slice(&bytes[pos..pos + 8]);
+    let registered_at = u64::from_be_bytes(reg_bytes);
+    pos += 8;
+
+    let mut last_bytes = [0u8; 8];
+    last_bytes.copy_from_slice(&bytes[pos..pos + 8]);
+    let last_active_at = u64::from_be_bytes(last_bytes);
+
+    // Compute ID from code_hash and creator (deterministic)
+    let id = AiEntity::compute_id(&code_hash, &creator);
+
+    Ok(AiEntity {
+        id,
+        code_hash,
+        creator,
+        autonomy_mode,
+        capabilities,
+        economic_balance,
+        nonce,
+        memory_root,
+        params_root,
+        registered_at,
+        last_active_at,
+    })
+}
+
+/// Read an AI entity from storage.
+///
+/// # Errors
+///
+/// Returns error if DB read fails or stored bytes are malformed.
+pub fn read_ai_entity<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+) -> Result<Option<AiEntity>, ExecError<K::Error>> {
+    let key = ai_entity_key(entity_id);
+    match db.get(&key).map_err(ExecError::Db)? {
+        None => Ok(None),
+        Some(bytes) => {
+            let entity = decode_ai_entity_v1(&bytes).map_err(|e| match e {
+                ExecError::BadPayloadLength { expected, got } => {
+                    ExecError::BadPayloadLength { expected, got }
+                }
+                ExecError::BadPayloadVersion { expected, got } => {
+                    ExecError::BadPayloadVersion { expected, got }
+                }
+                _ => ExecError::Overflow,
+            })?;
+            Ok(Some(entity))
+        }
+    }
+}
+
+/// Write an AI entity to storage (returns `WriteOp` for batching).
+#[must_use]
+pub fn write_ai_entity_op(entity: &AiEntity) -> WriteOp {
+    let key = ai_entity_key(&entity.id);
+    let value = encode_ai_entity_v1(entity).to_vec();
+    WriteOp::Put(key, value)
+}
+
+/// Read AI memory slot value.
+///
+/// # Errors
+///
+/// Returns error if DB read fails.
+pub fn read_ai_memory<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+    slot: &[u8],
+) -> Result<Option<Vec<u8>>, ExecError<K::Error>> {
+    let key = ai_memory_key(entity_id, slot);
+    db.get(&key).map_err(ExecError::Db)
+}
+
+/// Create `WriteOp` to write AI memory slot.
+#[must_use]
+pub fn write_ai_memory_op(entity_id: &[u8; 32], slot: &[u8], value: Vec<u8>) -> WriteOp {
+    let key = ai_memory_key(entity_id, slot);
+    WriteOp::Put(key, value)
+}
+
+/// Create `WriteOp` to delete AI memory slot.
+#[must_use]
+pub fn delete_ai_memory_op(entity_id: &[u8; 32], slot: &[u8]) -> WriteOp {
+    let key = ai_memory_key(entity_id, slot);
+    WriteOp::Delete(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use novai_ai_entities::{AutonomyMode, Capabilities};
+    use novai_state::{ai_signal_key, KvBatch, MemKv};
+
+    #[test]
+    fn ai_entity_write_read_roundtrip() {
+        let mut db = MemKv::new();
+
+        // Create an AI entity
+        let entity = AiEntity::new(
+            [0x42u8; 32], // code_hash
+            [0x01u8; 32], // creator
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            1000, // registered_at
+        );
+
+        // Write entity to DB
+        let op = write_ai_entity_op(&entity);
+        db.apply_batch(&[op]).unwrap();
+
+        // Read it back
+        let read_back = read_ai_entity(&db, &entity.id).unwrap();
+        assert!(read_back.is_some(), "Entity should exist after write");
+
+        let read_entity = read_back.unwrap();
+        assert_eq!(read_entity.id, entity.id);
+        assert_eq!(read_entity.code_hash, entity.code_hash);
+        assert_eq!(read_entity.creator, entity.creator);
+        assert_eq!(read_entity.autonomy_mode, entity.autonomy_mode);
+        assert_eq!(
+            read_entity.capabilities.to_byte(),
+            entity.capabilities.to_byte()
+        );
+        assert_eq!(read_entity.economic_balance, entity.economic_balance);
+        assert_eq!(read_entity.nonce, entity.nonce);
+        assert_eq!(read_entity.memory_root, entity.memory_root);
+        assert_eq!(read_entity.params_root, entity.params_root);
+        assert_eq!(read_entity.registered_at, entity.registered_at);
+        assert_eq!(read_entity.last_active_at, entity.last_active_at);
+    }
+
+    #[test]
+    fn ai_memory_isolation() {
+        let mut db = MemKv::new();
+
+        let entity_a = [0xAAu8; 32];
+        let entity_b = [0xBBu8; 32];
+        let slot = b"config";
+
+        // Write different values for same slot name, different entities
+        let op_a = write_ai_memory_op(&entity_a, slot, b"value_for_a".to_vec());
+        let op_b = write_ai_memory_op(&entity_b, slot, b"value_for_b".to_vec());
+        db.apply_batch(&[op_a, op_b]).unwrap();
+
+        // Read back and verify isolation
+        let val_a = read_ai_memory(&db, &entity_a, slot).unwrap();
+        let val_b = read_ai_memory(&db, &entity_b, slot).unwrap();
+
+        assert_eq!(val_a, Some(b"value_for_a".to_vec()));
+        assert_eq!(val_b, Some(b"value_for_b".to_vec()));
+
+        // Verify they are different
+        assert_ne!(val_a, val_b, "Memory must be isolated between entities");
+    }
+
+    #[test]
+    fn ai_key_ordering() {
+        // Signal keys for heights 100, 200 must be lexicographically ordered
+        // because we use big-endian encoding for height
+        let issuer = [0x01u8; 32];
+
+        let key_100 = ai_signal_key(100, &issuer);
+        let key_200 = ai_signal_key(200, &issuer);
+
+        assert!(
+            key_100 < key_200,
+            "ai_signal_key(100, x) must be < ai_signal_key(200, x) for range scans"
+        );
+
+        // Also test edge cases
+        let key_0 = ai_signal_key(0, &issuer);
+        let key_max = ai_signal_key(u64::MAX, &issuer);
+
+        assert!(key_0 < key_100);
+        assert!(key_200 < key_max);
+
+        // Different issuers at same height should not affect height ordering
+        let issuer_2 = [0xFFu8; 32];
+        let key_100_issuer2 = ai_signal_key(100, &issuer_2);
+        let key_200_issuer1 = ai_signal_key(200, &issuer);
+
+        assert!(
+            key_100_issuer2 < key_200_issuer1,
+            "Height ordering must take precedence over issuer"
+        );
+    }
+
+    #[test]
+    fn ai_entity_not_found_returns_none() {
+        let db = MemKv::new();
+        let nonexistent = [0xDEu8; 32];
+
+        let result = read_ai_entity(&db, &nonexistent).unwrap();
+        assert!(result.is_none(), "Non-existent entity should return None");
+    }
+
+    #[test]
+    fn ai_memory_not_found_returns_none() {
+        let db = MemKv::new();
+        let entity = [0xAAu8; 32];
+
+        let result = read_ai_memory(&db, &entity, b"nonexistent").unwrap();
+        assert!(
+            result.is_none(),
+            "Non-existent memory slot should return None"
+        );
+    }
+
+    #[test]
+    fn ai_memory_delete_works() {
+        let mut db = MemKv::new();
+        let entity = [0xAAu8; 32];
+        let slot = b"temp_data";
+
+        // Write
+        let write_op = write_ai_memory_op(&entity, slot, b"some_value".to_vec());
+        db.apply_batch(&[write_op]).unwrap();
+
+        // Verify exists
+        let val = read_ai_memory(&db, &entity, slot).unwrap();
+        assert!(val.is_some());
+
+        // Delete
+        let delete_op = delete_ai_memory_op(&entity, slot);
+        db.apply_batch(&[delete_op]).unwrap();
+
+        // Verify gone
+        let val_after = read_ai_memory(&db, &entity, slot).unwrap();
+        assert!(val_after.is_none(), "Memory slot should be deleted");
+    }
+}

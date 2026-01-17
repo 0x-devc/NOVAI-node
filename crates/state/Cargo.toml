@@ -17,3 +17,4 @@ blake3 = "=1.8.2"
 
 [dev-dependencies]
 tempfile = "3"
+novai-smt = { path = "../smt" }

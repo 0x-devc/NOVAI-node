@@ -5,13 +5,13 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-novai-types = { path = "../types" }
-novai-consensus-types = { path = "../consensus_types" }
-novai-crypto = { path = "../crypto" }
-novai-codec = { path = "../codec" }
-novai-execution = { path = "../execution" }
-novai-state = { path = "../state" }
-mempool = { path = "../mempool" }
+novai-types = { path = "../types", version = "0.1.0" }
+novai-consensus-types = { path = "../consensus_types", version = "0.1.0" }
+novai-crypto = { path = "../crypto", version = "0.1.0" }
+novai-codec = { path = "../codec", version = "0.1.0" }
+novai-execution = { path = "../execution", version = "0.1.0" }
+novai-state = { path = "../state", version = "0.1.0" }
+mempool = { path = "../mempool", version = "0.1.0" }
 ed25519-dalek = "=2.1.1"
 
 [dev-dependencies]

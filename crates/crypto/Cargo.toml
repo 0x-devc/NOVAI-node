@@ -8,8 +8,8 @@ license = "Apache-2.0"
 path = "src/lib.rs"
 
 [dependencies]
-novai-types = { path = "../types" }
-novai-codec = { path = "../codec" }
+novai-types = { path = "../types", version = "0.1.0" }
+novai-codec = { path = "../codec", version = "0.1.0" }
 blake3 = "=1.8.2"
 ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }

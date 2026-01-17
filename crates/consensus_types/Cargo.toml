@@ -5,12 +5,12 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-novai-types = { path = "../types" }
-novai-codec = { path = "../codec" }
+novai-types = { path = "../types", version = "0.1.0" }
+novai-codec = { path = "../codec", version = "0.1.0" }
 blake3 = "=1.8.2"
 
 [dev-dependencies]
-novai-crypto = { path = "../crypto" }
+novai-crypto = { path = "../crypto", version = "0.1.0" }
 
 [lints]
 workspace = true

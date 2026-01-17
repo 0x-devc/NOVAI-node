@@ -1,6 +1,6 @@
 use mempool::{NonceProvider, TxMempool};
 use novai_codec::txid_v1;
-use novai_crypto::{generate_keypair, sign_tx_v1};
+use novai_crypto::{address_from_pubkey, generate_keypair, sign_tx_v1};
 use novai_node::consensus_node::ConsensusNode;
 use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
@@ -235,7 +235,7 @@ fn main() {
 
             // Dev keypair per run
             let (sk, pk) = generate_keypair();
-            let from = pk.to_bytes();
+            let from = address_from_pubkey(&pk);
 
             let mut nonce_provider = InMemoryNonceProvider::default();
             nonce_provider.set(from, nonce);
@@ -306,7 +306,7 @@ fn main() {
 
             // Insert txs with increasing fees so drain shows fee-priority deterministically.
             let (sk, pk) = generate_keypair();
-            let from = pk.to_bytes();
+            let from = address_from_pubkey(&pk);
             nonce_provider.set(from, 0);
 
             for (idx, payload) in payloads.into_iter().enumerate() {
@@ -317,25 +317,27 @@ fn main() {
                 mp.insert(tx, &nonce_provider).expect("mempool insert");
             }
 
+            // ✅ MISSING IN YOUR BROKEN FILE: define these before using them
             let before = mp.len();
             let drained = mp.drain_ready(max, &nonce_provider);
             let after = mp.len();
 
-            let ids: Vec<String> = drained
+            let lines: Vec<String> = drained
                 .iter()
-                .map(|tx| txid_v1(tx).expect("txid").to_vec())
-                .map(|id_bytes| {
-                    let id: TxId = id_bytes.try_into().expect("txid size");
-                    short_id(&id)
+                .map(|tx| {
+                    let id_bytes = txid_v1(tx).expect("txid");
+                    let id: TxId = id_bytes;
+                    let payload = String::from_utf8_lossy(&tx.payload);
+                    format!("fee={} payload={} id={}", tx.fee, payload, short_id(&id))
                 })
                 .collect();
 
             println!(
-                "drained {} txs (before={} after={}) ids={:?}",
+                "drained {} txs (before={} after={})\n{}",
                 drained.len(),
                 before,
                 after,
-                ids
+                lines.join("\n")
             );
         }
 

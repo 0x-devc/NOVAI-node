@@ -266,6 +266,11 @@ impl ConsensusNode {
             .add_vote(vote.clone(), &pubkeys_vec)
             .map_err(|e| format!("Add vote failed: {:?}", e))?;
 
+        // Log AI signal if present (advisory only)
+        if let Some(commitment) = vote.ai_signal_commitment {
+            println!("📊 Node received vote with AI signal: {:?}", commitment);
+        }
+
         // Check if we're leader for the block's height
         // Leader for height N is determined at state height N-1
         let leader_for_vote = {
@@ -342,7 +347,7 @@ impl ConsensusNode {
 
             // FIX B: Persist atomically BEFORE applying in-memory changes
             state
-                .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height)
+                .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
                 .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
 
             // Now safe to apply in-memory commits

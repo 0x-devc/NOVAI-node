@@ -102,3 +102,57 @@ fn golden_vectors_tx_and_header_v1() {
     write_or_compare(tx_signed_path, &signed);
     write_or_compare(header_path, &header_bytes);
 }
+
+use novai_ai_entities::{AiSignalType, AiSignalV1};
+use novai_codec::{
+    decode_ai_signal_v1, decode_signal_commitment_v1, encode_ai_signal_v1,
+    encode_signal_commitment_v1,
+};
+
+fn sample_signal_no_proof() -> AiSignalV1 {
+    AiSignalV1 {
+        signal_type: AiSignalType::Prediction,
+        height: 999,
+        issuer: [0x44u8; 32],
+        confidence: 128,
+        payload_hash: [0x55u8; 32],
+        zk_proof: None,
+        signature: [0x66u8; 64],
+    }
+}
+
+#[test]
+fn golden_vectors_ai_signal_v1_and_commitment_v1() {
+    let signal_no_proof = sample_signal_no_proof();
+    let mut signal_with_proof = sample_signal_no_proof();
+    signal_with_proof.zk_proof = Some(vec![0x99u8; 256]);
+
+    // --- Encode ---
+    let no_proof_bytes = encode_ai_signal_v1(&signal_no_proof).expect("encode signal (no proof)");
+    let with_proof_bytes =
+        encode_ai_signal_v1(&signal_with_proof).expect("encode signal (with proof)");
+
+    let commitment = signal_no_proof.to_commitment();
+    let commitment_bytes = encode_signal_commitment_v1(&commitment);
+
+    // --- Decode checks / roundtrip ---
+    let decoded_no_proof = decode_ai_signal_v1(&no_proof_bytes).expect("decode no-proof");
+    assert_eq!(decoded_no_proof, signal_no_proof);
+
+    let decoded_with_proof = decode_ai_signal_v1(&with_proof_bytes).expect("decode with-proof");
+    assert_eq!(decoded_with_proof, signal_with_proof);
+
+    let decoded_commitment =
+        decode_signal_commitment_v1(&commitment_bytes).expect("decode commitment");
+    assert_eq!(decoded_commitment, commitment);
+
+    // --- Golden file paths (relative to crates/codec) ---
+    let p1 = Path::new("tests/vectors/ai_signal_v1_no_proof.bin");
+    let p2 = Path::new("tests/vectors/ai_signal_v1_with_proof.bin");
+    let p3 = Path::new("tests/vectors/signal_commitment_v1.bin");
+
+    // --- Compare (or generate) ---
+    write_or_compare(p1, &no_proof_bytes);
+    write_or_compare(p2, &with_proof_bytes);
+    write_or_compare(p3, &commitment_bytes);
+}

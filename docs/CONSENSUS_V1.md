@@ -175,6 +175,32 @@ Vote {
 - Vote signature MUST be computed over: `encode_vote_v1_unsigned(vote)`
 - Domain separation tag: `b"NOVAI_VOTE_V1"`
 - Full signed bytes: `domain_tag || encode_vote_v1_unsigned(vote)`
+**AI Signal Commitments in Votes (Advisory Only):**
+
+Votes MAY include an optional AI signal commitment:
+```
+Vote {
+    height: u64,
+    round: u64,
+    block_hash: [u8; 32],
+    voter: Address,
+    signature: [u8; 64],
+    ai_signal_commitment: Option<[u8; 32]>,  // Optional commitment hash
+}
+```
+
+**Important Properties:**
+- AI signal commitments are **advisory only** and do NOT affect consensus safety
+- Votes without signals (`ai_signal_commitment: None`) are always valid
+- Votes with signals (`ai_signal_commitment: Some(hash)`) are always valid
+- Signal presence or absence does NOT affect vote validity or QC formation
+- The commitment is a hash only; full signal content is transmitted separately
+- Signals are NOT included in the signed vote bytes (not part of `encode_vote_v1_unsigned`)
+
+**Wire Format:**
+- Vote without signal: 146 bytes (original format + 1 byte flag)
+- Vote with signal: 178 bytes (original format + 1 byte flag + 32 byte commitment)
+- Old 145-byte votes (pre-signal) decode as `ai_signal_commitment: None` for backward compatibility
 
 ### Quorum Certificate (QC)
 ```

@@ -25,6 +25,7 @@ fn golden_vote_unsigned() {
         block_hash: [0xaa; 32],
         voter: [0xbb; 32],
         signature: [0x00; 64],
+        ai_signal_commitment: None,
     };
 
     let bytes = encode_vote_v1_unsigned(&vote);
@@ -47,6 +48,7 @@ fn golden_vote_signed() {
         block_hash: [0xaa; 32],
         voter: [0xbb; 32],
         signature: [0xcc; 64],
+        ai_signal_commitment: None,
     };
 
     let bytes = encode_vote_v1_signed(&vote);
@@ -58,6 +60,29 @@ fn golden_vote_signed() {
     } else {
         let expected = fs::read(&path).expect("golden vector missing");
         assert_eq!(bytes, expected, "Vote signed encoding drifted!");
+    }
+}
+
+#[test]
+fn golden_vote_with_signal() {
+    let vote = Vote {
+        height: 42,
+        round: 7,
+        block_hash: [0xaa; 32],
+        voter: [0xbb; 32],
+        signature: [0xcc; 64],
+        ai_signal_commitment: Some([0xdd; 32]),
+    };
+
+    let bytes = encode_vote_v1_signed(&vote);
+    let path = vectors_dir().join("vote_with_signal_v1.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "Vote with AI signal encoding drifted!");
     }
 }
 
@@ -149,6 +174,7 @@ fn golden_qc_with_votes() {
         block_hash: [0x99; 32],
         voter: [0xaa; 32],
         signature: [0x11; 64],
+        ai_signal_commitment: None,
     };
     let vote_b = Vote {
         height: 10,
@@ -156,6 +182,7 @@ fn golden_qc_with_votes() {
         block_hash: [0x99; 32],
         voter: [0xbb; 32],
         signature: [0x22; 64],
+        ai_signal_commitment: None,
     };
     let vote_c = Vote {
         height: 10,
@@ -163,6 +190,7 @@ fn golden_qc_with_votes() {
         block_hash: [0x99; 32],
         voter: [0xcc; 32],
         signature: [0x33; 64],
+        ai_signal_commitment: None,
     };
 
     let qc = QC {
@@ -364,4 +392,34 @@ fn golden_signed_proposal() {
         let expected = fs::read(&path).expect("golden vector missing");
         assert_eq!(bytes, expected, "Signed proposal encoding drifted!");
     }
+}
+
+#[test]
+fn vote_backward_compatibility_old_format() {
+    // ... rest of function {
+    // Simulate old 145-byte format (no has_signal byte)
+    // Format: [version:1][height:8][round:8][block_hash:32][voter:32][signature:64]
+    let mut old_vote_bytes = Vec::new();
+    old_vote_bytes.push(0x01); // version
+    old_vote_bytes.extend_from_slice(&100u64.to_be_bytes()); // height
+    old_vote_bytes.extend_from_slice(&5u64.to_be_bytes()); // round
+    old_vote_bytes.extend_from_slice(&[0xee; 32]); // block_hash
+    old_vote_bytes.extend_from_slice(&[0xff; 32]); // voter
+    old_vote_bytes.extend_from_slice(&[0x77; 64]); // signature
+
+    assert_eq!(old_vote_bytes.len(), 145, "Old format should be 145 bytes");
+
+    // Decode old format
+    let decoded = decode_vote_v1_signed(&old_vote_bytes).expect("Old vote should decode");
+
+    // Verify all fields
+    assert_eq!(decoded.height, 100);
+    assert_eq!(decoded.round, 5);
+    assert_eq!(decoded.block_hash, [0xee; 32]);
+    assert_eq!(decoded.voter, [0xff; 32]);
+    assert_eq!(decoded.signature, [0x77; 64]);
+    assert_eq!(
+        decoded.ai_signal_commitment, None,
+        "Old votes should decode with None"
+    );
 }

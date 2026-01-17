@@ -48,6 +48,8 @@ pub struct Vote {
     pub block_hash: [u8; 32],
     pub voter: Address,
     pub signature: [u8; 64],
+    /// Optional AI signal commitment (hash only, advisory). Does not affect vote validity.
+    pub ai_signal_commitment: Option<[u8; 32]>,
 }
 
 /// Quorum Certificate (aggregated votes).

@@ -12,15 +12,15 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-novai-crypto = { path = "../crypto" }
-novai-codec = { path = "../codec" }
-novai-consensus = { path = "../consensus" }
-novai-consensus-types = { path = "../consensus_types" }
-novai-state = { path = "../state" }
-novai-execution = { path = "../execution" }
-mempool = { path = "../mempool" }
-novai-types = { path = "../types" }
-novai-p2p = { path = "../p2p" }
+mempool = { path = "../mempool", version = "0.1.0" }
+novai-types = { path = "../types", version = "0.1.0" }
+novai-crypto = { path = "../crypto", version = "0.1.0" }
+novai-codec = { path = "../codec", version = "0.1.0" }
+novai-consensus = { path = "../consensus", version = "0.1.0" }
+novai-consensus-types = { path = "../consensus_types", version = "0.1.0" }
+novai-state = { path = "../state", version = "0.1.0" }
+novai-execution = { path = "../execution", version = "0.1.0" }
+novai-p2p = { path = "../p2p", version = "0.1.0" }
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal"] }
 futures = "0.3"
 libp2p = { version = "0.56", default-features = false, features = [
@@ -38,3 +38,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ed25519-dalek = "=2.1.1"
 rand_core = { version = "0.6", features = ["getrandom"] }
+
+
+[dev-dependencies]
+proptest = "~1.4"

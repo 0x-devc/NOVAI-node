@@ -282,6 +282,7 @@ mod tests {
             block_hash: [0xAA; 32],
             voter: [0xBB; 32],
             signature: [0xCC; 64],
+            ai_signal_commitment: None,
         };
 
         let msg = NetworkMessage::Vote(vote);
@@ -303,6 +304,7 @@ mod tests {
             block_hash: [0u8; 32],
             voter: [0u8; 32],
             signature: [0xCC; 64],
+            ai_signal_commitment: None,
         };
 
         // This should work

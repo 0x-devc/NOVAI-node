@@ -4,7 +4,10 @@
 //! including their identity, memory, economic agency, and autonomy levels.
 
 use blake3::Hasher;
+
+pub mod signals;
 use novai_types::Address;
+pub use signals::*;
 
 /// Unique identifier for an AI entity.
 pub type AiEntityId = [u8; 32];
