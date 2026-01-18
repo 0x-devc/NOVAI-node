@@ -2145,8 +2145,10 @@ dependencies = [
  "novai-consensus-types",
  "novai-crypto",
  "novai-execution",
+ "novai-p2p",
  "novai-state",
  "novai-types",
+ "rand 0.8.5",
  "rand_core 0.6.4",
 ]
 
