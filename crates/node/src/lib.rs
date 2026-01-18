@@ -4,3 +4,4 @@
 
 pub mod consensus_node;
 pub mod metrics;
+pub mod rpc;

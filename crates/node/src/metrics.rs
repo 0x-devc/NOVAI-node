@@ -27,6 +27,10 @@ pub struct MetricsSnapshot {
     pub mempool_size: u64,
     /// Total view changes (round advances due to timeouts).
     pub view_changes_total: u64,
+    /// Number of transactions in last committed block.
+    pub block_tx_count: u64,
+    /// Total transactions committed across all blocks.
+    pub total_txs_committed: u64,
 }
 
 impl MetricsSnapshot {
@@ -57,12 +61,22 @@ novai_mempool_size {}
 # HELP novai_consensus_view_changes_total Total view changes (round advances)
 # TYPE novai_consensus_view_changes_total counter
 novai_consensus_view_changes_total {}
+
+# HELP novai_block_tx_count Transactions in last committed block
+# TYPE novai_block_tx_count gauge
+novai_block_tx_count {}
+
+# HELP novai_total_txs_committed Total transactions committed across all blocks
+# TYPE novai_total_txs_committed counter
+novai_total_txs_committed {}
 "#,
             self.committed_height,
             self.current_round,
             self.peer_count,
             self.mempool_size,
             self.view_changes_total,
+            self.block_tx_count,
+            self.total_txs_committed,
         )
     }
 }
@@ -131,6 +145,8 @@ mod tests {
             peer_count: 4,
             mempool_size: 127,
             view_changes_total: 5,
+            block_tx_count: 25,
+            total_txs_committed: 1050,
         };
 
         let output = snapshot.to_prometheus();
@@ -141,11 +157,14 @@ mod tests {
         assert!(output.contains("novai_peer_count 4"));
         assert!(output.contains("novai_mempool_size 127"));
         assert!(output.contains("novai_consensus_view_changes_total 5"));
+        assert!(output.contains("novai_block_tx_count 25"));
+        assert!(output.contains("novai_total_txs_committed 1050"));
 
         // Check that HELP and TYPE lines are present
         assert!(output.contains("# HELP novai_committed_height"));
         assert!(output.contains("# TYPE novai_committed_height gauge"));
         assert!(output.contains("# TYPE novai_consensus_view_changes_total counter"));
+        assert!(output.contains("# TYPE novai_total_txs_committed counter"));
     }
 
     #[test]
@@ -156,10 +175,13 @@ mod tests {
             peer_count: 0,
             mempool_size: 0,
             view_changes_total: 0,
+            block_tx_count: 0,
+            total_txs_committed: 0,
         };
 
         let output = snapshot.to_prometheus();
         assert!(output.contains("novai_committed_height 0"));
         assert!(output.contains("novai_peer_count 0"));
+        assert!(output.contains("novai_block_tx_count 0"));
     }
 }

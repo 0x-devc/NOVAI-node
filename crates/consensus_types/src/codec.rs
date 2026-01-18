@@ -47,10 +47,10 @@ pub const TIMEOUT_UNSIGNED_V1: u8 = 0x01;
 /// Codec version for Timeout (signed).
 pub const TIMEOUT_SIGNED_V1: u8 = 0x01;
 
-/// Codec version for BlockRequest.
+/// Codec version for `BlockRequest`.
 pub const BLOCK_REQUEST_V1: u8 = 0x01;
 
-/// Codec version for BlockResponse.
+/// Codec version for `BlockResponse`.
 pub const BLOCK_RESPONSE_V1: u8 = 0x01;
 
 /// Maximum transactions per block (`DoS` prevention).
@@ -665,6 +665,9 @@ fn read_64(input: &mut &[u8]) -> Result<[u8; 64], CodecError> {
 /// ```text
 /// [version:1][requester:32][start_height:8][end_height:8]
 /// ```
+///
+/// # Errors
+/// Currently infallible, but returns `Result` for consistency with other codec functions.
 pub fn encode_block_request_v1(req: &BlockRequest) -> Result<Vec<u8>, CodecError> {
     let mut buf = Vec::with_capacity(49);
     buf.push(BLOCK_REQUEST_V1);
@@ -707,7 +710,7 @@ pub fn decode_block_request_v1(buf: &[u8]) -> Result<BlockRequest, CodecError> {
 // BlockResponse Encoding
 // ============================================================================
 
-/// Maximum blocks per response (DoS prevention).
+/// Maximum blocks per response (`DoS` prevention).
 pub const MAX_BLOCKS_PER_RESPONSE: usize = 1000;
 
 /// Encode a `BlockResponse` to canonical bytes.
@@ -746,6 +749,9 @@ pub fn encode_block_response_v1(resp: &BlockResponse) -> Result<Vec<u8>, CodecEr
 ///
 /// # Errors
 /// Returns error if buffer is too short, version is unsupported, or block decoding fails.
+///
+/// # Panics
+/// Panics if `MAX_BLOCKS_PER_RESPONSE` constant doesn't fit in u32 (should never happen).
 pub fn decode_block_response_v1(buf: &[u8]) -> Result<BlockResponse, CodecError> {
     const MIN_SIZE: usize = 1 + 32 + 8 + 8 + 4; // 53 bytes
 
@@ -765,7 +771,9 @@ pub fn decode_block_response_v1(buf: &[u8]) -> Result<BlockResponse, CodecError>
     let request_end = read_u64_be(&mut input)?;
     let block_count = read_u32_be(&mut input)?;
 
-    if block_count > MAX_BLOCKS_PER_RESPONSE as u32 {
+    let max_blocks = u32::try_from(MAX_BLOCKS_PER_RESPONSE)
+        .expect("MAX_BLOCKS_PER_RESPONSE should fit in u32");
+    if block_count > max_blocks {
         return Err(CodecError::TooManyTransactions); // Reuse error
     }
 

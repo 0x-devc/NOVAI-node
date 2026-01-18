@@ -12,6 +12,7 @@ members = [
     "crates/mempool",
     "crates/consensus_types",
     "crates/consensus", "crates/genesis",
+    "tools/tx-generator",
 ]
 
 resolver = "2"

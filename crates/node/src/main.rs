@@ -184,6 +184,8 @@ fn main() {
                     peer_count: peer_manager.peer_count() as u64,
                     mempool_size: mempool.lock().unwrap().len() as u64,
                     view_changes_total: state.lock().unwrap().view_changes_total,
+                    block_tx_count: 0, // TODO: Wire to actual block commit events
+                    total_txs_committed: 0, // TODO: Accumulate from block commits
                 }
             };
 

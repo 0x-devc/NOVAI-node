@@ -92,6 +92,7 @@ pub struct BlockResponse {
 ///
 /// # Panics
 /// Panics if block encoding fails (should never happen for valid blocks).
+#[must_use]
 pub fn block_hash(block: &Block) -> [u8; 32] {
     let encoded = codec::encode_block_v1(block).expect("block encoding should never fail");
     *blake3::hash(&encoded).as_bytes()
