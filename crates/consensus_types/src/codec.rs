@@ -771,8 +771,8 @@ pub fn decode_block_response_v1(buf: &[u8]) -> Result<BlockResponse, CodecError>
     let request_end = read_u64_be(&mut input)?;
     let block_count = read_u32_be(&mut input)?;
 
-    let max_blocks = u32::try_from(MAX_BLOCKS_PER_RESPONSE)
-        .expect("MAX_BLOCKS_PER_RESPONSE should fit in u32");
+    let max_blocks =
+        u32::try_from(MAX_BLOCKS_PER_RESPONSE).expect("MAX_BLOCKS_PER_RESPONSE should fit in u32");
     if block_count > max_blocks {
         return Err(CodecError::TooManyTransactions); // Reuse error
     }
