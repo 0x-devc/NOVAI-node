@@ -43,10 +43,7 @@ impl<'a> InvariantChecker<'a> {
             // For now, use placeholder
             let block_hash = [0u8; 32];
 
-            height_blocks
-                .entry(height)
-                .or_insert_with(HashSet::new)
-                .insert(block_hash);
+            height_blocks.entry(height).or_default().insert(block_hash);
 
             // Check: at most one unique block per height
             if let Some(blocks) = height_blocks.get(&height) {
@@ -529,7 +526,7 @@ fn test_safety_under_max_byzantine() {
     println!("Simulating validator 0 as Byzantine");
 
     // Check safety still holds
-    let heights: HashMap<usize, u64> = controller
+    let _heights: HashMap<usize, u64> = controller
         .validators
         .iter()
         .enumerate()

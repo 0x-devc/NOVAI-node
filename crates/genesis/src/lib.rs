@@ -637,8 +637,7 @@ mod tests {
         let mut validators = Vec::new();
         for i in 0..101 {
             validators.push(format!(
-                r#"{{"pubkey": "{:064x}", "initial_stake": "1000000"}}"#,
-                i
+                r#"{{"pubkey": "{i:064x}", "initial_stake": "1000000"}}"#
             ));
         }
         let json = format!(

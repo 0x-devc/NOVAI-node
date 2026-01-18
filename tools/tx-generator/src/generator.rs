@@ -81,6 +81,7 @@ impl GeneratorHandle {
     }
 
     /// Shutdown the generator immediately by aborting the task.
+    #[allow(dead_code)]
     pub fn shutdown(self) {
         self.join_handle.abort();
     }

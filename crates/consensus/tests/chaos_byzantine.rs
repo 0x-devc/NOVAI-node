@@ -104,7 +104,7 @@ fn test_invalid_block_proposal() {
 /// 4. Vote rejected
 #[test]
 fn test_malformed_signature() {
-    let (controller, _validator_addrs, validator_pubkeys) = setup_chaos_testnet(5, 33333);
+    let (_controller, _validator_addrs, validator_pubkeys) = setup_chaos_testnet(5, 33333);
 
     println!("\n=== Test: Malformed Signature ===");
 
@@ -174,7 +174,7 @@ fn test_conflicting_proposals() {
 /// 5. Fork fails
 #[test]
 fn test_byzantine_minority_cannot_fork() {
-    let (controller, _validator_addrs, _validator_pubkeys) = setup_chaos_testnet(5, 55555);
+    let (_controller, _validator_addrs, _validator_pubkeys) = setup_chaos_testnet(5, 55555);
 
     println!("\n=== Test: Byzantine Minority Cannot Fork ===");
     println!("n=5, f=1 Byzantine, need 3/5 for QC");
@@ -213,7 +213,7 @@ fn test_byzantine_minority_cannot_fork() {
 /// 4. No conflicting commits at same height
 #[test]
 fn test_safety_under_byzantine_faults() {
-    let (controller, _validator_addrs, _validator_pubkeys) = setup_chaos_testnet(5, 66666);
+    let (_controller, _validator_addrs, _validator_pubkeys) = setup_chaos_testnet(5, 66666);
 
     println!("\n=== Test: Safety Under Byzantine Faults ===");
     println!("n=5, f=1 tolerated Byzantine faults");
@@ -301,7 +301,7 @@ fn test_byzantine_in_partition() {
 /// 4. This test documents the failure mode
 #[test]
 fn test_excessive_byzantine_validators() {
-    let (controller, _validator_addrs, _validator_pubkeys) = setup_chaos_testnet(5, 88888);
+    let (_controller, _validator_addrs, _validator_pubkeys) = setup_chaos_testnet(5, 88888);
 
     println!("\n=== Test: Excessive Byzantine Validators ===");
     println!("n=5, safety threshold: f < n/3, so f_max=1");
@@ -344,7 +344,7 @@ fn test_excessive_byzantine_validators() {
 /// 4. Honest validators adapt and continue
 #[test]
 fn test_gradual_byzantine_behavior() {
-    let (controller, _validator_addrs, _validator_pubkeys) = setup_chaos_testnet(5, 99999);
+    let (_controller, _validator_addrs, _validator_pubkeys) = setup_chaos_testnet(5, 99999);
 
     println!("\n=== Test: Gradual Byzantine Behavior ===");
 
@@ -407,7 +407,7 @@ fn test_byzantine_safety_property() {
         let height = validator.committed_height();
         committed_blocks
             .entry(height)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert([0u8; 32]); // Placeholder block hash
     }
 

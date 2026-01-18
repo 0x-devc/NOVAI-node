@@ -424,7 +424,7 @@ fn test_network_jitter() {
 
     println!("\n=== Test: Network Jitter (Varying Latency) ===");
 
-    let latencies = vec![50, 500, 100, 2000, 200, 1000, 150];
+    let latencies = [50, 500, 100, 2000, 200, 1000, 150];
 
     for (idx, latency_ms) in latencies.iter().enumerate() {
         println!("Iteration {}: {}ms latency", idx, latency_ms);

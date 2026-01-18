@@ -18,6 +18,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct SenderAccount {
     /// Deterministic index used to derive this account.
+    #[allow(dead_code)]
     pub index: usize,
     /// Ed25519 signing key.
     pub signing_key: SigningKey,
@@ -59,6 +60,7 @@ impl SenderAccount {
     }
 
     /// Get current nonce without incrementing.
+    #[allow(dead_code)]
     pub fn current_nonce(&self) -> u64 {
         self.nonce.load(Ordering::SeqCst)
     }
@@ -74,6 +76,7 @@ impl SenderAccount {
     ///
     /// SAFETY: Only safe if the transaction was not submitted to the node.
     /// Using this after submission can cause nonce gaps.
+    #[allow(dead_code)]
     pub fn rollback_nonce(&self) {
         self.nonce.fetch_sub(1, Ordering::SeqCst);
     }
@@ -110,6 +113,7 @@ impl SenderPool {
     }
 
     /// Get sender by index.
+    #[allow(dead_code)]
     pub fn get_sender(&self, index: usize) -> Option<Arc<SenderAccount>> {
         self.accounts.get(index).cloned()
     }
@@ -120,11 +124,13 @@ impl SenderPool {
     }
 
     /// Check if pool is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.accounts.is_empty()
     }
 
     /// Get all accounts (for reporting).
+    #[allow(dead_code)]
     pub fn all_accounts(&self) -> &[Arc<SenderAccount>] {
         &self.accounts
     }

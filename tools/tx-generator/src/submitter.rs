@@ -32,8 +32,10 @@ pub struct SubmitterConfig {
     /// Request timeout.
     pub request_timeout: Duration,
     /// Enable confirmation tracking via polling.
+    #[allow(dead_code)]
     pub track_confirmations: bool,
     /// Polling interval for confirmation tracking.
+    #[allow(dead_code)]
     pub confirmation_poll_interval: Duration,
 }
 
@@ -55,11 +57,20 @@ impl Default for SubmitterConfig {
 #[derive(Debug, Clone)]
 pub enum SubmitResult {
     /// Successfully submitted, node returned TxId.
-    Accepted { txid: TxId },
+    Accepted {
+        #[allow(dead_code)]
+        txid: TxId,
+    },
     /// Node rejected transaction (validation error).
-    Rejected { reason: String },
+    Rejected {
+        #[allow(dead_code)]
+        reason: String,
+    },
     /// Network/timeout error after all retries.
-    Failed { error: String },
+    Failed {
+        #[allow(dead_code)]
+        error: String,
+    },
 }
 
 /// Handle to control a running submitter pool.
@@ -117,6 +128,7 @@ pub struct SubmitterStats {
     pub total_rejected: u64,
     pub total_failed: u64,
     pub total_retries: u64,
+    #[allow(dead_code)]
     pub confirmed_count: u64, // TODO: Implement confirmation tracking
 }
 

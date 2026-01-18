@@ -36,7 +36,9 @@ struct DelayedMessage {
     from: usize,
     #[allow(dead_code)]
     to: usize,
+    #[allow(dead_code)]
     message: NetworkMessage,
+    #[allow(dead_code)]
     deliver_at: Instant,
 }
 
@@ -62,6 +64,7 @@ pub struct ChaosNetwork {
     drop_rate_map: Arc<Mutex<HashMap<usize, f64>>>,
 
     /// Deterministic RNG for reproducible chaos
+    #[allow(dead_code)]
     rng: Arc<Mutex<StdRng>>,
 
     /// Number of validators in the network
@@ -95,6 +98,7 @@ impl ChaosNetwork {
     /// - Dropped (if from and to are in different partitions)
     /// - Dropped (if random drop rate check fails)
     /// - Delayed (based on latency map)
+    #[allow(dead_code)]
     pub fn send_message(
         &self,
         from: usize,
@@ -141,6 +145,7 @@ impl ChaosNetwork {
     }
 
     /// Broadcast message from one validator to all others.
+    #[allow(dead_code)]
     pub fn broadcast_message(&self, from: usize, message: NetworkMessage) -> Result<(), String> {
         for to in 0..self.num_validators {
             if to != from {
@@ -153,6 +158,7 @@ impl ChaosNetwork {
     /// Deliver all messages that are ready (past their deliver_at time).
     ///
     /// Returns: Vec of (validator_id, message) ready for delivery.
+    #[allow(dead_code)]
     pub fn deliver_pending_messages(&self) -> Vec<(usize, NetworkMessage)> {
         let now = Instant::now();
         let mut delivered = Vec::new();
@@ -201,6 +207,7 @@ impl ChaosNetwork {
     }
 
     /// Determine if message should be dropped based on drop rate.
+    #[allow(dead_code)]
     fn should_drop_message(&self, validator: usize) -> Result<bool, String> {
         let drop_rates = self.drop_rate_map.lock().unwrap();
         let drop_rate = drop_rates.get(&validator).copied().unwrap_or(0.0);
@@ -220,6 +227,7 @@ impl ChaosNetwork {
     }
 
     /// Get drop rate for a specific validator.
+    #[allow(dead_code)]
     pub fn get_drop_rate(&self, validator: usize) -> Result<f64, String> {
         let drop_rates = self.drop_rate_map.lock().unwrap();
         Ok(drop_rates.get(&validator).copied().unwrap_or(0.0))
@@ -239,10 +247,12 @@ impl ChaosNetwork {
 pub struct ValidatorHandle {
     pub id: usize,
     pub address: Address,
+    #[allow(dead_code)]
     pub signing_key: SigningKey,
     pub verifying_key: VerifyingKey,
     pub state: Arc<Mutex<ConsensusState>>,
     pub db: Arc<Mutex<MemKv>>,
+    #[allow(dead_code)]
     pub mempool: Arc<Mutex<mempool::TxMempool>>,
     pub is_crashed: Arc<Mutex<bool>>,
 }
@@ -299,21 +309,25 @@ impl ValidatorHandle {
     }
 
     /// Get current round.
+    #[allow(dead_code)]
     pub fn current_round(&self) -> u64 {
         self.state.lock().unwrap().round
     }
 
     /// Get current height.
+    #[allow(dead_code)]
     pub fn current_height(&self) -> u64 {
         self.state.lock().unwrap().height
     }
 
     /// Cache a block in the validator's state.
+    #[allow(dead_code)]
     pub fn cache_block(&self, block: Block) {
         self.state.lock().unwrap().cache_block(block);
     }
 
     /// Process a vote (if not crashed).
+    #[allow(dead_code)]
     pub fn process_vote(
         &self,
         vote: Vote,
@@ -331,6 +345,7 @@ impl ValidatorHandle {
     }
 
     /// Try to form QC for a block hash.
+    #[allow(dead_code)]
     pub fn try_form_qc(
         &self,
         block_hash: &[u8; 32],
@@ -436,6 +451,7 @@ impl ChaosController {
     }
 
     /// Inject asymmetric latency (different delays for different validators).
+    #[allow(dead_code)]
     pub fn inject_asymmetric_latency(
         &self,
         latency_map: HashMap<usize, Duration>,
@@ -507,11 +523,13 @@ impl ChaosController {
     }
 
     /// Get list of all validator addresses.
+    #[allow(dead_code)]
     pub fn validator_addresses(&self) -> Vec<Address> {
         self.validators.iter().map(|v| v.address).collect()
     }
 
     /// Get list of all validator public keys.
+    #[allow(dead_code)]
     pub fn validator_pubkeys(&self) -> Vec<(Address, VerifyingKey)> {
         self.validators
             .iter()
@@ -520,6 +538,7 @@ impl ChaosController {
     }
 
     /// Check if all non-crashed validators have reached a minimum height.
+    #[allow(dead_code)]
     pub fn all_reached_height(&self, min_height: u64) -> bool {
         self.validators
             .iter()
@@ -528,6 +547,7 @@ impl ChaosController {
     }
 
     /// Wait for all non-crashed validators to reach a minimum committed height.
+    #[allow(dead_code)]
     pub fn wait_for_height(&self, min_height: u64, timeout: Duration) -> Result<(), String> {
         let start = Instant::now();
         while !self.all_reached_height(min_height) {

@@ -19,22 +19,36 @@ use tracing::{debug, info};
 #[derive(Debug, Clone)]
 pub enum MetricEvent {
     /// Transaction submitted to node.
-    Submitted { txid: [u8; 32], timestamp: Instant },
+    Submitted {
+        #[allow(dead_code)]
+        txid: [u8; 32],
+        #[allow(dead_code)]
+        timestamp: Instant,
+    },
     /// Transaction accepted by node (in mempool).
-    Accepted { txid: [u8; 32], latency: Duration },
+    Accepted {
+        #[allow(dead_code)]
+        txid: [u8; 32],
+        latency: Duration,
+    },
     /// Transaction rejected by node (validation error).
     Rejected {
+        #[allow(dead_code)]
         txid: [u8; 32],
+        #[allow(dead_code)]
         reason: String,
         latency: Duration,
     },
     /// Submission failed (network error after retries).
     Failed {
+        #[allow(dead_code)]
         txid: [u8; 32],
+        #[allow(dead_code)]
         error: String,
         latency: Duration,
     },
     /// Transaction confirmed in a block.
+    #[allow(dead_code)]
     Confirmed {
         txid: [u8; 32],
         block_height: u64,

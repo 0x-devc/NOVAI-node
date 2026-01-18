@@ -411,10 +411,7 @@ fn verify_no_conflicting_commits(
             if *height <= state.committed_height {
                 let block_hash = novai_consensus_types::codec::hash_block_v1(block).unwrap();
 
-                commits
-                    .entry(*height)
-                    .or_insert_with(Vec::new)
-                    .push(block_hash);
+                commits.entry(*height).or_default().push(block_hash);
             }
         }
     }

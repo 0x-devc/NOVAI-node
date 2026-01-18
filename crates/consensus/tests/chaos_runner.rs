@@ -478,7 +478,7 @@ fn test_chaos_monkey() {
         match action {
             0..=2 => {
                 // 30%: Inject partition
-                let patterns = vec![
+                let patterns = [
                     vec![vec![0, 1], vec![2, 3, 4]],
                     vec![vec![0, 1, 2], vec![3, 4]],
                     vec![vec![0], vec![1, 2, 3, 4]],
