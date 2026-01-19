@@ -5,9 +5,14 @@
 
 use blake3::Hasher;
 
+pub mod gates;
 pub mod signals;
+pub mod tiers;
+
+pub use gates::*;
 use novai_types::Address;
 pub use signals::*;
+pub use tiers::*;
 
 /// Unique identifier for an AI entity.
 pub type AiEntityId = [u8; 32];

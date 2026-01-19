@@ -4,6 +4,9 @@ pub use ai_entity_codec::*;
 pub mod ai_signal_codec;
 pub use ai_signal_codec::*;
 
+pub mod gate_codec;
+pub use gate_codec::*;
+
 use novai_types::{
     Address, BlockHeaderV1, BlockHeaderVersion, Hash32, SignatureBytes, TxId, TxV1, TxVersion,
 };
