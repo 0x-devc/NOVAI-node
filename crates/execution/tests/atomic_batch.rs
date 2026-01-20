@@ -78,6 +78,17 @@ impl Kv for FaultyKv {
         drop(entries);
         Ok(())
     }
+
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+        let entries = self.inner.lock().unwrap();
+        let mut results: Vec<_> = entries
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .cloned()
+            .collect();
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(results)
+    }
 }
 
 use std::sync::{Arc, Mutex};

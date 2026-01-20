@@ -47,6 +47,26 @@ impl Kv for RocksKv {
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error> {
         self.db.delete(key)
     }
+
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+        use rocksdb::IteratorMode;
+
+        let mut results = Vec::new();
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(prefix, rocksdb::Direction::Forward));
+
+        for item in iter {
+            let (key, value) = item?;
+            // Stop when we move past the prefix
+            if !key.starts_with(prefix) {
+                break;
+            }
+            results.push((key.to_vec(), value.to_vec()));
+        }
+        // RocksDB iterator is already sorted lexicographically
+        Ok(results)
+    }
 }
 
 #[cfg(feature = "rocksdb")]

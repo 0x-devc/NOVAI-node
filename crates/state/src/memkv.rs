@@ -53,6 +53,18 @@ impl Kv for MemKv {
         }
         Ok(())
     }
+
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+        let mut results: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .cloned()
+            .collect();
+        // Sort lexicographically for deterministic ordering (consensus-critical)
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(results)
+    }
 }
 
 impl KvBatch for MemKv {

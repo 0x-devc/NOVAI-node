@@ -2470,6 +2470,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "novai-ai-entities",
+ "novai-codec",
  "novai-crypto",
  "novai-smt",
  "novai-state",
@@ -2485,6 +2486,7 @@ dependencies = [
  "hex",
  "libp2p",
  "mempool",
+ "novai-ai-entities",
  "novai-codec",
  "novai-consensus",
  "novai-consensus-types",

@@ -42,12 +42,31 @@ pub struct TransferPayloadV1 {
 pub enum ExecError<E> {
     Db(E),
     Decode(StateDecodeError),
-    BadPayloadLength { expected: usize, got: usize },
-    BadPayloadVersion { expected: u8, got: u8 },
-    NonceMismatch { expected: Nonce, got: Nonce },
-    InsufficientFunds { balance: u128, needed: u128 },
+    BadPayloadLength {
+        expected: usize,
+        got: usize,
+    },
+    BadPayloadVersion {
+        expected: u8,
+        got: u8,
+    },
+    NonceMismatch {
+        expected: Nonce,
+        got: Nonce,
+    },
+    InsufficientFunds {
+        balance: u128,
+        needed: u128,
+    },
     Overflow,
     NonceOverflow,
+    // Week 14 - Signal commitment errors (D14.2)
+    /// Issuer entity ID not found in state.
+    IssuerNotFound,
+    /// Issuer entity does not have `emit_proposals` capability.
+    IssuerMissingCapability,
+    /// Issuer entity ID in payload does not match tx.from.
+    IssuerMismatch,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -93,6 +112,80 @@ pub fn encode_transfer_payload_v1(p: &TransferPayloadV1) -> [u8; 1 + 32 + 8] {
     out[1..33].copy_from_slice(&p.to);
     out[33..41].copy_from_slice(&p.amount.to_be_bytes());
     out
+}
+
+// ============================================================================
+// SIGNAL COMMITMENT PAYLOAD (Week 14 - D14.1)
+// ============================================================================
+
+/// Signal commitment payload version.
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1: u8 = 2;
+
+/// Canonical Signal Commitment payload (D14.1):
+/// `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
+///
+/// Total size: 66 bytes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalCommitmentPayloadV1 {
+    /// Commitment hash of the full signal.
+    pub signal_hash: [u8; 32],
+    /// Signal type (0-6).
+    pub signal_type: novai_ai_entities::AiSignalType,
+    /// AI entity ID that issued this signal.
+    pub issuer_entity_id: [u8; 32],
+}
+
+/// Deterministically encode a signal commitment payload.
+#[must_use]
+pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> [u8; 66] {
+    let mut out = [0u8; 66];
+    out[0] = SIGNAL_COMMITMENT_PAYLOAD_V1;
+    out[1..33].copy_from_slice(&p.signal_hash);
+    out[33] = p.signal_type.to_byte();
+    out[34..66].copy_from_slice(&p.issuer_entity_id);
+    out
+}
+
+/// Deterministically decode a signal commitment payload from `tx.payload`.
+///
+/// # Errors
+/// Returns error if payload length or version is invalid.
+pub fn decode_signal_commitment_payload_v1(
+    payload: &[u8],
+) -> Result<SignalCommitmentPayloadV1, ExecError<()>> {
+    const LEN: usize = 66;
+    if payload.len() != LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: LEN,
+            got: payload.len(),
+        });
+    }
+    let ver = payload[0];
+    if ver != SIGNAL_COMMITMENT_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: SIGNAL_COMMITMENT_PAYLOAD_V1,
+            got: ver,
+        });
+    }
+
+    let mut signal_hash = [0u8; 32];
+    signal_hash.copy_from_slice(&payload[1..33]);
+
+    let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
+        ExecError::BadPayloadVersion {
+            expected: 6, // max valid signal type
+            got: payload[33],
+        },
+    )?;
+
+    let mut issuer_entity_id = [0u8; 32];
+    issuer_entity_id.copy_from_slice(&payload[34..66]);
+
+    Ok(SignalCommitmentPayloadV1 {
+        signal_hash,
+        signal_type,
+        issuer_entity_id,
+    })
 }
 
 fn u64_to_u128_checked(x: u64) -> u128 {
@@ -349,8 +442,11 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
 // AI STORAGE OPERATIONS (Retrofit Week 3)
 // ============================================================================
 
-use novai_ai_entities::AiEntity;
-use novai_state::{ai_entity_key, ai_memory_key};
+use novai_ai_entities::{AiEntity, SignalCommitment};
+use novai_codec::encode_signal_commitment_v1;
+use novai_state::{
+    ai_entity_key, ai_memory_key, ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
+};
 
 /// AI Entity encoding version.
 pub const AI_ENTITY_CODEC_V1: u8 = 1;
@@ -552,6 +648,229 @@ pub fn write_ai_memory_op(entity_id: &[u8; 32], slot: &[u8], value: Vec<u8>) -> 
 pub fn delete_ai_memory_op(entity_id: &[u8; 32], slot: &[u8]) -> WriteOp {
     let key = ai_memory_key(entity_id, slot);
     WriteOp::Delete(key)
+}
+
+// ============================================================================
+// SIGNAL COMMITMENT EXECUTION (Week 14 - D14.2, D14.3, D14.6)
+// ============================================================================
+
+/// Apply a `PublishSignalCommitment` transaction.
+///
+/// # Validation (D14.2)
+/// 1. Issuer entity ID must match `tx.from`
+/// 2. Issuer must be a registered AI entity
+/// 3. Issuer must have `emit_proposals` capability
+/// 4. Signal type must be valid (0-6) - checked during payload decode
+/// 5. Issuer must have sufficient balance for fee
+/// 6. Nonce must be correct
+///
+/// # State Changes (D14.3, D14.4, D14.6)
+/// - Store commitment at `ai_signal_key(height, issuer)`
+/// - Create secondary index by type
+/// - Create secondary index by issuer
+/// - Deduct fee from AI entity balance
+/// - Increment AI entity nonce
+/// - Update `last_active_at`
+///
+/// # Errors
+/// Returns error if validation fails or DB error occurs.
+pub fn apply_signal_commitment_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
+    // Decode payload (validates signal_type is 0-6)
+    let payload = decode_signal_commitment_payload_v1(&tx.payload).map_err(|e| match e {
+        ExecError::BadPayloadLength { expected, got } => {
+            ExecError::BadPayloadLength { expected, got }
+        }
+        ExecError::BadPayloadVersion { expected, got } => {
+            ExecError::BadPayloadVersion { expected, got }
+        }
+        _ => ExecError::Overflow,
+    })?;
+
+    // D14.2: Validate issuer_entity_id matches tx.from
+    if payload.issuer_entity_id != tx.from {
+        return Err(ExecError::IssuerMismatch);
+    }
+
+    // D14.2: Load and validate AI entity
+    let mut entity =
+        read_ai_entity(db, &payload.issuer_entity_id)?.ok_or(ExecError::IssuerNotFound)?;
+
+    // D14.2: Validate emit_proposals capability
+    if !entity.capabilities.emit_proposals {
+        return Err(ExecError::IssuerMissingCapability);
+    }
+
+    // D14.2: Validate nonce
+    if tx.nonce != entity.nonce {
+        return Err(ExecError::NonceMismatch {
+            expected: entity.nonce,
+            got: tx.nonce,
+        });
+    }
+
+    // D14.2: Validate sufficient balance for fee
+    let fee_u128 = u128::from(tx.fee);
+    if entity.economic_balance < fee_u128 {
+        return Err(ExecError::InsufficientFunds {
+            balance: entity.economic_balance,
+            needed: fee_u128,
+        });
+    }
+
+    // D14.6: Deduct fee from AI entity balance
+    entity.economic_balance = entity
+        .economic_balance
+        .checked_sub(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+
+    // D14.6: Increment AI entity nonce
+    entity.nonce = entity
+        .nonce
+        .checked_add(1)
+        .ok_or(ExecError::NonceOverflow)?;
+
+    // D14.6: Update last_active_at
+    entity.last_active_at = current_height;
+
+    // D14.3: Build SignalCommitment for storage
+    let commitment = SignalCommitment {
+        commitment_hash: payload.signal_hash,
+        signal_type: payload.signal_type,
+        height: current_height,
+        issuer: payload.issuer_entity_id,
+    };
+    let commitment_bytes = encode_signal_commitment_v1(&commitment);
+
+    // Build atomic batch of all state changes
+    let mut ops = Vec::new();
+
+    // D14.3: Store commitment at primary key
+    let primary_key = ai_signal_key(current_height, &payload.issuer_entity_id);
+    ops.push(WriteOp::Put(primary_key, commitment_bytes.clone()));
+
+    // D14.4: Secondary index by type
+    let type_key = ai_signal_by_type_key(
+        payload.signal_type.to_byte(),
+        current_height,
+        &payload.issuer_entity_id,
+    );
+    ops.push(WriteOp::Put(type_key, commitment_bytes.clone()));
+
+    // D14.4: Secondary index by issuer
+    let issuer_key = ai_signal_by_issuer_key(&payload.issuer_entity_id, current_height);
+    ops.push(WriteOp::Put(issuer_key, commitment_bytes));
+
+    // D14.6: Update AI entity
+    ops.push(write_ai_entity_op(&entity));
+
+    // Apply all changes atomically
+    db.apply_batch(&ops).map_err(ExecError::Db)?;
+
+    Ok(())
+}
+
+// ============================================================================
+// SIGNAL QUERY FUNCTIONS (Week 14 - D14.5)
+// ============================================================================
+
+use novai_codec::decode_signal_commitment_v1;
+use novai_state::{
+    KEY_PREFIX_AI_SIGNALS, KEY_PREFIX_AI_SIGNALS_BY_ISSUER, KEY_PREFIX_AI_SIGNALS_BY_TYPE,
+};
+
+/// Query all signal commitments at a specific height (D14.5).
+///
+/// Returns all signals stored at the given height, ordered by issuer.
+///
+/// # Errors
+/// Returns error if DB read fails or stored data is malformed.
+pub fn get_signals_by_height<K: Kv>(
+    db: &K,
+    height: u64,
+) -> Result<Vec<SignalCommitment>, ExecError<K::Error>> {
+    // Build prefix: "ai/signals/" ++ height_be8 ++ "/"
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_SIGNALS.len() + 8 + 1);
+    prefix.extend_from_slice(KEY_PREFIX_AI_SIGNALS);
+    prefix.extend_from_slice(&height.to_be_bytes());
+    prefix.push(b'/');
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let mut results = Vec::with_capacity(entries.len());
+    for (_key, value) in entries {
+        let commitment = decode_signal_commitment_v1(&value).map_err(|_| ExecError::Overflow)?;
+        results.push(commitment);
+    }
+
+    Ok(results)
+}
+
+/// Query signal commitments by issuer in height range [`start_height`, `end_height`] (D14.5).
+///
+/// Returns all signals from the given issuer within the height range.
+///
+/// # Errors
+/// Returns error if DB read fails or stored data is malformed.
+pub fn get_signals_by_issuer<K: Kv>(
+    db: &K,
+    issuer: &[u8; 32],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<SignalCommitment>, ExecError<K::Error>> {
+    // Build prefix: "ai/signals/by_issuer/" ++ issuer32 ++ "/"
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_SIGNALS_BY_ISSUER.len() + 32 + 1);
+    prefix.extend_from_slice(KEY_PREFIX_AI_SIGNALS_BY_ISSUER);
+    prefix.extend_from_slice(issuer);
+    prefix.push(b'/');
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let mut results = Vec::new();
+    for (_key, value) in entries {
+        let commitment = decode_signal_commitment_v1(&value).map_err(|_| ExecError::Overflow)?;
+        // Filter by height range
+        if commitment.height >= start_height && commitment.height <= end_height {
+            results.push(commitment);
+        }
+    }
+
+    Ok(results)
+}
+
+/// Query signal commitments by type in height range [`start_height`, `end_height`] (D14.5).
+///
+/// Returns all signals of the given type within the height range.
+///
+/// # Errors
+/// Returns error if DB read fails or stored data is malformed.
+pub fn get_signals_by_type<K: Kv>(
+    db: &K,
+    signal_type: novai_ai_entities::AiSignalType,
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<SignalCommitment>, ExecError<K::Error>> {
+    // Build prefix: "ai/signals/by_type/" ++ type_u8 ++ "/"
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_SIGNALS_BY_TYPE.len() + 1 + 1);
+    prefix.extend_from_slice(KEY_PREFIX_AI_SIGNALS_BY_TYPE);
+    prefix.push(signal_type.to_byte());
+    prefix.push(b'/');
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let mut results = Vec::new();
+    for (_key, value) in entries {
+        let commitment = decode_signal_commitment_v1(&value).map_err(|_| ExecError::Overflow)?;
+        // Filter by height range
+        if commitment.height >= start_height && commitment.height <= end_height {
+            results.push(commitment);
+        }
+    }
+
+    Ok(results)
 }
 
 #[cfg(test)]

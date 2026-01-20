@@ -53,6 +53,12 @@ pub const KEY_PREFIX_AI_PARAMS: &[u8] = b"ai/params/";
 /// Canonical prefix for AI signal records.
 pub const KEY_PREFIX_AI_SIGNALS: &[u8] = b"ai/signals/";
 
+/// Canonical prefix for AI signal index by type (Week 14 - D14.4).
+pub const KEY_PREFIX_AI_SIGNALS_BY_TYPE: &[u8] = b"ai/signals/by_type/";
+
+/// Canonical prefix for AI signal index by issuer (Week 14 - D14.4).
+pub const KEY_PREFIX_AI_SIGNALS_BY_ISSUER: &[u8] = b"ai/signals/by_issuer/";
+
 /// Build the canonical key for an account record: `b"accounts/" ++ addr32`.
 ///
 /// `addr` must be exactly 32 bytes.
@@ -132,6 +138,34 @@ pub fn ai_signal_key(height: u64, issuer: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+/// Build canonical key for AI signal index by type (Week 14 - D14.4):
+/// `b"ai/signals/by_type/" ++ type_u8 ++ "/" ++ height_be8 ++ "/" ++ issuer32`.
+///
+/// Uses big-endian height so lexicographic ordering matches height ordering.
+pub fn ai_signal_by_type_key(signal_type: u8, height: u64, issuer: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_SIGNALS_BY_TYPE.len() + 1 + 1 + 8 + 1 + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_SIGNALS_BY_TYPE);
+    k.push(signal_type);
+    k.push(b'/');
+    k.extend_from_slice(&height.to_be_bytes());
+    k.push(b'/');
+    k.extend_from_slice(issuer);
+    k
+}
+
+/// Build canonical key for AI signal index by issuer (Week 14 - D14.4):
+/// `b"ai/signals/by_issuer/" ++ issuer32 ++ "/" ++ height_be8`.
+///
+/// Uses big-endian height so lexicographic ordering matches height ordering.
+pub fn ai_signal_by_issuer_key(issuer: &[u8; 32], height: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_SIGNALS_BY_ISSUER.len() + 32 + 1 + 8);
+    k.extend_from_slice(KEY_PREFIX_AI_SIGNALS_BY_ISSUER);
+    k.extend_from_slice(issuer);
+    k.push(b'/');
+    k.extend_from_slice(&height.to_be_bytes());
+    k
+}
+
 /// Canonical mapping from variable-length state DB keys to 32-byte SMT keys.
 ///
 /// # Consensus-critical
@@ -161,6 +195,12 @@ pub trait Kv {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error>;
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error>;
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error>;
+
+    /// Scan all keys with given prefix, returning (key, value) pairs.
+    ///
+    /// Results MUST be ordered lexicographically by key for determinism.
+    /// This is required for consensus-safe range queries (Week 14 - D14.5).
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error>;
 }
 
 /// Extended KV trait with atomic batch support.
