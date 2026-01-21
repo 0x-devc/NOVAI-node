@@ -120,8 +120,9 @@ fn main() {
             let validator_idx = validator_idx.expect("--validator required");
             let metrics_port = metrics_port.unwrap_or(8080); // Default to 8080
 
-            // Hardcoded 5-node validator set for devnet
-            let validator_keys: Vec<ed25519_dalek::SigningKey> = (0..5)
+            // Hardcoded 4-node validator set for devnet
+            // NOTE: Must match the number of nodes started by testnet-local.sh
+            let validator_keys: Vec<ed25519_dalek::SigningKey> = (0..4)
                 .map(|i| ed25519_dalek::SigningKey::from_bytes(&[i as u8; 32]))
                 .collect();
 

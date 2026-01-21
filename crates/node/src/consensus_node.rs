@@ -665,18 +665,25 @@ impl ConsensusNode {
     pub fn handle_qc(&self, qc: QC) -> Result<(), String> {
         println!("📜 Received QC for height={} round={}", qc.height, qc.round);
 
-        // Check commit rule and get blocks to commit (now returns Result)
+        // CRITICAL FIX: Hold state lock across cache_qc_and_check_commit AND apply_commits
+        // to prevent race condition where timeouts arriving between the two operations
+        // get wiped out by apply_commits clearing pending_timeouts.
+        let mut state = self.state.lock().unwrap();
+
+        // Record current round before processing QC
+        let old_round = state.round;
+
+        // Check commit rule and get blocks to commit
         // Note: cache_qc_and_check_commit also updates highest_qc if dominated
-        let to_commit = {
-            let mut state = self.state.lock().unwrap();
-            state
-                .cache_qc_and_check_commit(qc.clone())
-                .map_err(|e| format!("Commit check failed: {:?}", e))?
-        };
+        let to_commit = state
+            .cache_qc_and_check_commit(qc.clone())
+            .map_err(|e| format!("Commit check failed: {:?}", e))?;
+
+        // Check if round was reset (view height advanced)
+        let round_was_reset = state.round == 0 && old_round != 0;
 
         // Apply commits if any
         if !to_commit.is_empty() {
-            let mut state = self.state.lock().unwrap();
             let mut db = self.db.lock().unwrap();
 
             // Calculate new committed height (last block in to_commit)
@@ -697,7 +704,6 @@ impl ConsensusNode {
             );
         } else {
             // FIX C: Even without commit, persist highest_qc if it was updated
-            let state = self.state.lock().unwrap();
             if state.highest_qc.as_ref().map(|q| q.height) == Some(qc.height) {
                 // This QC became the new highest - persist it
                 let mut db = self.db.lock().unwrap();
@@ -709,6 +715,16 @@ impl ConsensusNode {
                     qc.height
                 );
             }
+        }
+
+        // Release state lock before updating node-level flags
+        drop(state);
+
+        // FIX: When round is reset due to QC/commit, reset the node-level timeout flags
+        // so the node can start a fresh timeout cycle for the new height
+        if round_was_reset || !to_commit.is_empty() {
+            *self.round_start_time.lock().unwrap() = Instant::now();
+            *self.timed_out_this_round.lock().unwrap() = false;
         }
 
         Ok(())
