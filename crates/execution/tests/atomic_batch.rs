@@ -1,3 +1,5 @@
+#![allow(clippy::significant_drop_tightening)]
+
 //! Atomic batch tests: prove that DB failures during batch don't cause partial state.
 
 use novai_execution::{apply_tx_v1_transfer, encode_transfer_payload_v1, TransferPayloadV1};

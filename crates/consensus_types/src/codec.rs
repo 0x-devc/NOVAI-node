@@ -63,7 +63,8 @@ pub const MAX_VOTES_PER_QC: usize = 11_000;
 const MIN_TX_BYTES: usize = 100;
 
 /// Minimum bytes per vote (conservative estimate for validation).
-const MIN_VOTE_BYTES: usize = 100;
+// Minimum vote size: version(1) + height(8) + round(8) + block_hash(32) + voter(32) + signature(64) + has_signal(1) = 146
+const MIN_VOTE_BYTES: usize = 146;
 
 // ============================================================================
 // Block Encoding
@@ -585,11 +586,25 @@ fn decode_qc_v1_internal(input: &mut &[u8]) -> Result<QC, CodecError> {
 
     let mut votes = Vec::with_capacity(vote_count as usize);
     for _ in 0..vote_count {
+        // Read vote version byte (must match VOTE_UNSIGNED_V1)
+        let vote_version = read_u8(input)?;
+        if vote_version != VOTE_UNSIGNED_V1 {
+            return Err(CodecError::UnsupportedVersion);
+        }
+
         let vote_height = read_u64_be(input)?;
         let vote_round = read_u64_be(input)?;
         let vote_block_hash = read_32(input)?;
         let vote_voter = read_32(input)?;
         let signature = read_64(input)?;
+
+        // Read has_signal indicator and optional commitment
+        let has_signal = read_u8(input)?;
+        let ai_signal_commitment = if has_signal == 1 {
+            Some(read_32(input)?)
+        } else {
+            None
+        };
 
         votes.push(Vote {
             height: vote_height,
@@ -597,7 +612,7 @@ fn decode_qc_v1_internal(input: &mut &[u8]) -> Result<QC, CodecError> {
             block_hash: vote_block_hash,
             voter: vote_voter,
             signature,
-            ai_signal_commitment: None,
+            ai_signal_commitment,
         });
     }
 

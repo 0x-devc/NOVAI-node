@@ -151,8 +151,15 @@ impl ConsensusState {
         K: novai_state::Kv,
         K::Error: std::fmt::Debug,
     {
+        // Block height should be max(committed_height, highest_qc_height) + 1
+        // This ensures we don't propose conflicting blocks after a QC forms
+        let next_height = match &self.highest_qc {
+            Some(qc) => std::cmp::max(self.height, qc.height) + 1,
+            None => self.height + 1,
+        };
+
         // Check if already proposed for this height/round
-        let proposed_key = (self.height + 1, self.round);
+        let proposed_key = (next_height, self.round);
         if self.last_proposed == Some(proposed_key) {
             return Err(ConsensusError::NotLeader);
         }
@@ -166,7 +173,7 @@ impl ConsensusState {
         // Drain ready transactions from mempool
         let txs = mempool.drain_ready(1000, nonce_provider);
 
-        // Compute parent hash
+        // Compute parent hash (from highest_qc if exists, else genesis)
         let parent_hash = if let Some(ref qc) = self.highest_qc {
             qc.block_hash
         } else {
@@ -186,7 +193,7 @@ impl ConsensusState {
 
         // Build block
         let block = Block {
-            height: self.height + 1,
+            height: next_height,
             round: self.round,
             parent_hash,
             state_root,
@@ -208,11 +215,17 @@ impl ConsensusState {
         K: novai_state::Kv,
         K::Error: std::fmt::Debug,
     {
+        // Expected height is max(committed_height, highest_qc_height) + 1
+        let expected_height = match &self.highest_qc {
+            Some(qc) => std::cmp::max(self.height, qc.height) + 1,
+            None => self.height + 1,
+        };
+
         // Check height is next
-        if block.height != self.height + 1 {
+        if block.height != expected_height {
             return Err(ConsensusError::InvalidBlock(format!(
                 "Height mismatch: expected {}, got {}",
-                self.height + 1,
+                expected_height,
                 block.height
             )));
         }
@@ -331,11 +344,17 @@ impl ConsensusState {
         vote: Vote,
         validator_pubkeys: &[(Address, VerifyingKey)],
     ) -> Result<(), ConsensusError> {
-        // Verify vote is for next height
-        if vote.height != self.height + 1 {
+        // Expected vote height is max(committed_height, highest_qc_height) + 1
+        let expected_height = match &self.highest_qc {
+            Some(qc) => std::cmp::max(self.height, qc.height) + 1,
+            None => self.height + 1,
+        };
+
+        // Verify vote is for expected height
+        if vote.height != expected_height {
             return Err(ConsensusError::InvalidVote(format!(
                 "Vote height mismatch: expected {}, got {}",
-                self.height + 1,
+                expected_height,
                 vote.height
             )));
         }
@@ -419,8 +438,14 @@ impl ConsensusState {
         // Form QC with exactly quorum votes
         let qc_votes: Vec<Vote> = votes.iter().take(quorum).cloned().collect();
 
+        // QC height is the view height we're forming consensus for
+        let qc_height = match &self.highest_qc {
+            Some(qc) => std::cmp::max(self.height, qc.height) + 1,
+            None => self.height + 1,
+        };
+
         let qc = QC {
-            height: self.height + 1,
+            height: qc_height,
             round: self.round,
             block_hash: *block_hash,
             votes: qc_votes,
@@ -453,9 +478,14 @@ impl ConsensusState {
         Ok(validator_set[idx])
     }
 
-    /// Compute leader for current height/round (convenience wrapper).
+    /// Compute leader for current view (convenience wrapper).
+    /// Uses view_height = max(committed_height, highest_qc_height) for leader selection.
     fn compute_leader(&self, validator_set: &[Address]) -> Result<Address, ConsensusError> {
-        Self::compute_leader_for_view(self.height, self.round, validator_set)
+        let view_height = match &self.highest_qc {
+            Some(qc) => std::cmp::max(self.height, qc.height),
+            None => self.height,
+        };
+        Self::compute_leader_for_view(view_height, self.round, validator_set)
     }
 
     // ========== WEEK 8: TIMEOUT & ROUND ADVANCE ==========
@@ -465,9 +495,15 @@ impl ConsensusState {
     /// # Errors
     /// Returns error if signing fails.
     pub fn create_timeout(&self, signing_key: &SigningKey) -> Result<Timeout, ConsensusError> {
+        // Timeout height is max(committed_height, highest_qc_height) + 1
+        let timeout_height = match &self.highest_qc {
+            Some(qc) => std::cmp::max(self.height, qc.height) + 1,
+            None => self.height + 1,
+        };
+
         // Create unsigned timeout struct
         let unsigned_timeout = Timeout {
-            height: self.height + 1, // Timeout for next height
+            height: timeout_height,
             round: self.round,
             voter: self.our_address,
             highest_qc: self.highest_qc.clone(),
@@ -489,7 +525,7 @@ impl ConsensusState {
 
         // Build final timeout with signature
         let timeout = Timeout {
-            height: self.height + 1,
+            height: timeout_height,
             round: self.round,
             voter: self.our_address,
             highest_qc: self.highest_qc.clone(),
@@ -509,10 +545,16 @@ impl ConsensusState {
         validator_pubkeys: &[(Address, VerifyingKey)],
     ) -> Result<(), ConsensusError> {
         // Verify timeout is for next height
-        if timeout.height != self.height + 1 {
+        // Expected timeout height is max(committed_height, highest_qc_height) + 1
+        let expected_timeout_height = match &self.highest_qc {
+            Some(qc) => std::cmp::max(self.height, qc.height) + 1,
+            None => self.height + 1,
+        };
+
+        if timeout.height != expected_timeout_height {
             return Err(ConsensusError::InvalidVote(format!(
                 "Timeout height mismatch: expected {}, got {}",
-                self.height + 1,
+                expected_timeout_height,
                 timeout.height
             )));
         }
@@ -594,7 +636,13 @@ impl ConsensusState {
     ///
     /// Returns true if round was advanced, false otherwise.
     pub fn try_advance_round(&mut self, validator_set: &[Address]) -> bool {
-        let key = (self.height + 1, self.round);
+        // Expected timeout height is max(committed_height, highest_qc_height) + 1
+        let expected_height = match &self.highest_qc {
+            Some(qc) => std::cmp::max(self.height, qc.height) + 1,
+            None => self.height + 1,
+        };
+
+        let key = (expected_height, self.round);
         let timeouts = match self.pending_timeouts.get(&key) {
             Some(t) => t,
             None => return false,
@@ -622,7 +670,7 @@ impl ConsensusState {
         println!(
             "⏰ ROUND ADVANCED to round={} at height={} (received {} timeouts)",
             self.round,
-            self.height + 1,
+            expected_height,
             timeouts.len()
         );
 
@@ -676,6 +724,24 @@ impl ConsensusState {
             }
         };
         if dominated {
+            // Reset round to 0 when view height advances (new dominating QC)
+            // This is critical for leader synchronization
+            let old_view_height = self
+                .highest_qc
+                .as_ref()
+                .map(|q| q.height)
+                .unwrap_or(self.height);
+            let new_view_height = qc.height;
+
+            if new_view_height > old_view_height {
+                self.round = 0;
+                self.pending_votes.clear();
+                self.voted_in_round.clear();
+                self.timed_out_in_round.clear();
+                self.pending_timeouts.clear();
+                self.last_proposed = None;
+            }
+
             self.highest_qc = Some(qc.clone());
         }
 
@@ -828,9 +894,19 @@ impl ConsensusState {
 
     /// Check for conflicting commits (fork detection).
     ///
+    /// In HotStuff BFT, if a block doesn't get a QC, the next round's leader
+    /// proposes a different block for the same height. This is normal behavior.
+    /// A real fork would be COMMITTING two different blocks at the same height.
+    ///
     /// # Panics
-    /// Panics if two different blocks claim the same height.
+    /// Panics if two different blocks conflict at or below committed_height.
     pub fn check_no_fork(&self, block: &Block) {
+        // Only check for forks at or below committed_height.
+        // Heights above committed_height can have different proposals in different rounds.
+        if block.height > self.committed_height {
+            return;
+        }
+
         if let Some(cached) = self.block_cache.get(&block.height) {
             let cached_hash = novai_consensus_types::codec::hash_block_v1(cached)
                 .expect("cached block must encode");

@@ -189,6 +189,7 @@ pub enum WriteOp {
 }
 
 /// Minimal KV interface for state storage (RocksDB-backed impl later).
+#[allow(clippy::type_complexity)]
 pub trait Kv {
     type Error;
 

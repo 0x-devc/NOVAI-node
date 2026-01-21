@@ -367,15 +367,16 @@ impl ConsensusNode {
         Ok(())
     }
 
-    /// Check if we're the leader for current height/round.
-    /// Check if we're the leader for current height/round.
+    /// Check if we're the leader for current view.
+    /// Uses view_height = max(committed_height, highest_qc.height) for consistency with propose_block.
     pub fn are_we_leader(&self) -> bool {
         let state = self.state.lock().unwrap();
-        match ConsensusState::compute_leader_for_view(
-            state.height,
-            state.round,
-            &self.validator_set,
-        ) {
+        let view_height = match &state.highest_qc {
+            Some(qc) => std::cmp::max(state.height, qc.height),
+            None => state.height,
+        };
+        match ConsensusState::compute_leader_for_view(view_height, state.round, &self.validator_set)
+        {
             Ok(leader) => leader == self.our_address,
             Err(_) => false,
         }
@@ -394,12 +395,27 @@ impl ConsensusNode {
             .propose_block(mempool, nonce_provider, &*db, &self.validator_set)
             .map_err(|e| format!("Propose block failed: {:?}", e))?;
 
-        let justify_qc = state.highest_qc.clone().unwrap_or(QC {
-            height: 0,
-            round: 0,
-            block_hash: [0u8; 32],
-            votes: vec![],
-        });
+        // CRITICAL: Cache our own proposed block so we can form QC when votes arrive
+        state.cache_block(block.clone());
+
+        // justify_qc should certify the parent block (height - 1)
+        // For height 1: use GenesisQC (height=0)
+        // For height > 1: use highest_qc (which should be for height - 1)
+        let justify_qc = if block.height == 1 {
+            QC {
+                height: 0,
+                round: 0,
+                block_hash: [0u8; 32],
+                votes: vec![],
+            }
+        } else {
+            state.highest_qc.clone().ok_or_else(|| {
+                format!(
+                    "Cannot propose height {} without highest_qc",
+                    block.height
+                )
+            })?
+        };
 
         let proposal = novai_consensus_types::Proposal {
             block: block.clone(),
@@ -487,7 +503,17 @@ impl ConsensusNode {
                 ));
             }
         } else {
-            // Height > 1 MUST have valid QC with quorum
+            // Height > 1 MUST have valid QC for height - 1
+            if justify_qc.height != block.height - 1 {
+                return Err(format!(
+                    "Height {} proposal must have justify_qc for height {}, got height={}",
+                    block.height,
+                    block.height - 1,
+                    justify_qc.height
+                ));
+            }
+
+            // MUST have quorum votes
             let n = self.validator_set.len();
             let f = (n - 1) / 3;
             let quorum = 2 * f + 1;
@@ -600,6 +626,33 @@ impl ConsensusNode {
             }
 
             println!("🎉 QC formed with {} votes!", qc.votes.len());
+
+            // CRITICAL: Process the QC locally before broadcasting
+            // This updates our own highest_qc and checks for commits
+            let to_commit = state
+                .cache_qc_and_check_commit(qc.clone())
+                .map_err(|e| format!("Commit check failed: {:?}", e))?;
+
+            // Apply commits if any
+            if !to_commit.is_empty() {
+                let mut db = self.db.lock().unwrap();
+                let new_committed_height = to_commit.last().unwrap().height;
+                state
+                    .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
+                    .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
+                state.apply_commits(&to_commit);
+                println!(
+                    "💾 Committed blocks up to height={} (formed QC locally)",
+                    new_committed_height
+                );
+            } else {
+                // Persist highest_qc even without commit
+                let mut db = self.db.lock().unwrap();
+                state
+                    .persist_highest_qc(&mut *db)
+                    .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
+                println!("💾 Persisted highest_qc={} (formed locally)", qc.height);
+            }
 
             drop(state);
             self.broadcast(NetworkMessage::Qc(qc))?;

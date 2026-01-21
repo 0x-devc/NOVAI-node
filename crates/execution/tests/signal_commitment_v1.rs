@@ -1,3 +1,8 @@
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::missing_const_for_fn)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_lossless)]
+
 //! Week 14 integration tests for signal commitment transactions.
 //!
 //! Acceptance Criteria:

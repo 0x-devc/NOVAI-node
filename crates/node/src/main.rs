@@ -12,13 +12,13 @@ use std::time::Duration;
 fn usage() {
     eprintln!(
         "usage:
-  novai-node run --port <port> [--peer <addr>]... --validator <index>
+  novai-node run --port <port> [--peer <addr>]... --validator <index> [--metrics-port <port>]
   novai-node submit-tx <payload> [--nonce <u64>] [--fee <u64>] [--min-fee <u64>] [--cap <u64>]
   novai-node drain-mempool <payload> [<payload> ...] [--max <u64>] [--min-fee <u64>] [--cap <u64>]
 
 examples:
   novai-node run --port 9000 --validator 0
-  novai-node run --port 9001 --peer 127.0.0.1:9000 --validator 1
+  novai-node run --port 9001 --peer 127.0.0.1:9000 --validator 1 --metrics-port 8081
   novai-node submit-tx hello
   novai-node submit-tx hello --fee 10 --nonce 0
   novai-node drain-mempool a b c
@@ -86,6 +86,7 @@ fn main() {
             let mut port: Option<u16> = None;
             let mut peers: Vec<String> = Vec::new();
             let mut validator_idx: Option<usize> = None;
+            let mut metrics_port: Option<u16> = None;
 
             let rest: Vec<String> = args.collect();
             let mut i = 0;
@@ -104,6 +105,11 @@ fn main() {
                             Some(parse_u64(rest.get(i + 1).cloned(), "--validator") as usize);
                         i += 2;
                     }
+                    "--metrics-port" => {
+                        metrics_port =
+                            Some(parse_u64(rest.get(i + 1).cloned(), "--metrics-port") as u16);
+                        i += 2;
+                    }
                     other => {
                         panic!("unknown flag: {other}");
                     }
@@ -112,6 +118,7 @@ fn main() {
 
             let port = port.expect("--port required");
             let validator_idx = validator_idx.expect("--validator required");
+            let metrics_port = metrics_port.unwrap_or(8080); // Default to 8080
 
             // Hardcoded 5-node validator set for devnet
             let validator_keys: Vec<ed25519_dalek::SigningKey> = (0..5)
@@ -139,6 +146,7 @@ fn main() {
 
             println!("🚀 Starting consensus node");
             println!("   Port: {}", port);
+            println!("   Metrics port: {}", metrics_port);
             println!("   Validator index: {}", validator_idx);
             println!("   Address: {:?}", &our_addr[..8]);
             println!("   Peers: {:?}", peers);
@@ -189,7 +197,8 @@ fn main() {
                 }
             };
 
-            if let Err(e) = metrics::start_metrics_server("0.0.0.0:8080", metrics_collect) {
+            let metrics_addr = format!("0.0.0.0:{}", metrics_port);
+            if let Err(e) = metrics::start_metrics_server(&metrics_addr, metrics_collect) {
                 eprintln!("❌ Failed to start metrics server: {}", e);
             }
 
