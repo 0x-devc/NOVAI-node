@@ -4,9 +4,19 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+# Enable HTTP-based artifact fetching (adds ureq dependency)
+http-fetch = ["ureq"]
+
 [dependencies]
 novai-types = { path = "../types", version = "0.1.0" }
 blake3 = "=1.8.2"
+hex = "0.4"
+
+# Optional: HTTP client for artifact fetching (MIT OR Apache-2.0)
+ureq = { version = "2.9", optional = true }
 
 [dev-dependencies]
 novai-codec = { path = "../codec", version = "0.1.0" }
+tempfile = "3.10"

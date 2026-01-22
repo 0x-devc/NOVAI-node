@@ -2,17 +2,32 @@
 //!
 //! This crate defines first-class protocol primitives for AI entities,
 //! including their identity, memory, economic agency, and autonomy levels.
+//!
+//! # Modules
+//!
+//! - `signals` - AI advisory signal types and commitments
+//! - `gates` - Approval gates for AI action execution
+//! - `tiers` - Action tier classification system
+//! - `artifacts` - Content-addressed storage for off-chain data (Week 15)
+//! - `payload` - Signal payload format for off-chain storage (Week 15)
+//! - `verify` - Verification flow for payloads and memory (Week 15)
 
 use blake3::Hasher;
 
+pub mod artifacts;
 pub mod gates;
+pub mod payload;
 pub mod signals;
 pub mod tiers;
+pub mod verify;
 
+pub use artifacts::*;
 pub use gates::*;
 use novai_types::Address;
+pub use payload::*;
 pub use signals::*;
 pub use tiers::*;
+pub use verify::*;
 
 /// Unique identifier for an AI entity.
 pub type AiEntityId = [u8; 32];
