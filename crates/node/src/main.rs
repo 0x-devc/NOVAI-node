@@ -238,18 +238,15 @@ fn main() {
                     }
                 }
 
-                // Propose every 3 seconds if we're leader
+                // Propose every 3 seconds (atomically checks leadership)
                 if last_proposal_attempt.elapsed() >= Duration::from_secs(3) {
                     last_proposal_attempt = std::time::Instant::now();
 
-                    if node.are_we_leader() {
-                        println!("👑 We are leader, proposing block...");
-                        let mut mempool_guard = mempool.lock().unwrap();
-                        if let Err(e) = node.propose_block(&mut mempool_guard, &nonce_provider) {
-                            println!("❌ Propose failed: {}", e);
-                        }
-                    } else {
-                        println!("👂 Listening for proposals...");
+                    let mut mempool_guard = mempool.lock().unwrap();
+                    match node.try_propose_block(&mut mempool_guard, &nonce_provider) {
+                        Ok(true) => println!("👑 Proposed block successfully"),
+                        Ok(false) => println!("👂 Listening for proposals..."),
+                        Err(e) => println!("❌ Propose failed: {}", e),
                     }
 
                     // Check peer count

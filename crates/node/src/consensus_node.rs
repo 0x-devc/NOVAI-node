@@ -1,7 +1,7 @@
 //! Networked consensus node implementation.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use novai_consensus::ConsensusState;
+use novai_consensus::{ConsensusError, ConsensusState};
 use novai_consensus_types::{SignedProposal, Timeout, Vote, QC};
 use novai_crypto::{address_from_pubkey, sign_bytes};
 use novai_p2p::{connect_to_peer, read_wire_message, start_listener, NetworkMessage, PeerManager};
@@ -410,10 +410,7 @@ impl ConsensusNode {
             }
         } else {
             state.highest_qc.clone().ok_or_else(|| {
-                format!(
-                    "Cannot propose height {} without highest_qc",
-                    block.height
-                )
+                format!("Cannot propose height {} without highest_qc", block.height)
             })?
         };
 
@@ -444,7 +441,77 @@ impl ConsensusNode {
         self.broadcast(NetworkMessage::SignedProposal(signed_proposal))
     }
 
-    /// Handle incoming proposal.
+    /// Atomically check leadership and propose a block.
+    ///
+    /// This method avoids the TOCTOU race between checking leadership and proposing
+    /// by performing both operations within a single lock acquisition.
+    ///
+    /// # Returns
+    /// - `Ok(true)` if we successfully proposed a block
+    /// - `Ok(false)` if we're not the leader or already proposed (expected, not an error)
+    /// - `Err(...)` for actual errors (signing, broadcasting, etc.)
+    pub fn try_propose_block(
+        &self,
+        mempool: &mut mempool::TxMempool,
+        nonce_provider: &impl mempool::NonceProvider,
+    ) -> Result<bool, String> {
+        let mut state = self.state.lock().unwrap();
+        let db = self.db.lock().unwrap();
+
+        // Try to propose - NotLeader and AlreadyProposed are expected outcomes, not errors
+        let block = match state.propose_block(mempool, nonce_provider, &*db, &self.validator_set) {
+            Ok(block) => block,
+            Err(ConsensusError::NotLeader) => return Ok(false),
+            Err(ConsensusError::AlreadyProposed) => return Ok(false),
+            Err(e) => return Err(format!("Propose block failed: {:?}", e)),
+        };
+
+        // Cache our own proposed block so we can form QC when votes arrive
+        state.cache_block(block.clone());
+
+        // Build justify_qc for the proposal
+        let justify_qc = if block.height == 1 {
+            QC {
+                height: 0,
+                round: 0,
+                block_hash: [0u8; 32],
+                votes: vec![],
+            }
+        } else {
+            state.highest_qc.clone().ok_or_else(|| {
+                format!("Cannot propose height {} without highest_qc", block.height)
+            })?
+        };
+
+        let proposal = novai_consensus_types::Proposal {
+            block: block.clone(),
+            justify_qc,
+        };
+
+        let unsigned_bytes = novai_consensus_types::codec::encode_proposal_v1_unsigned(&proposal)
+            .map_err(|e| format!("Encode proposal failed: {:?}", e))?;
+
+        let signature = sign_bytes(&self.signing_key, &unsigned_bytes);
+
+        let signed_proposal = SignedProposal {
+            proposer: self.our_address,
+            proposal,
+            signature,
+        };
+
+        // Release locks before broadcasting
+        drop(state);
+        drop(db);
+
+        println!(
+            "📤 Proposing block at height={} round={}",
+            block.height, block.round
+        );
+
+        self.broadcast(NetworkMessage::SignedProposal(signed_proposal))?;
+        Ok(true)
+    }
+
     /// Handle incoming proposal.
     pub fn handle_proposal(&self, signed_proposal: SignedProposal) -> Result<(), String> {
         println!(

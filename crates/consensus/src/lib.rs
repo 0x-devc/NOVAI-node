@@ -81,6 +81,8 @@ pub enum ConsensusError {
     CryptoError(String),
     /// Not leader for this height/round.
     NotLeader,
+    /// Already proposed for this height/round.
+    AlreadyProposed,
 }
 
 /// Consensus state for a single node.
@@ -161,7 +163,7 @@ impl ConsensusState {
         // Check if already proposed for this height/round
         let proposed_key = (next_height, self.round);
         if self.last_proposed == Some(proposed_key) {
-            return Err(ConsensusError::NotLeader);
+            return Err(ConsensusError::AlreadyProposed);
         }
 
         // Check if we're the leader
@@ -225,8 +227,7 @@ impl ConsensusState {
         if block.height != expected_height {
             return Err(ConsensusError::InvalidBlock(format!(
                 "Height mismatch: expected {}, got {}",
-                expected_height,
-                block.height
+                expected_height, block.height
             )));
         }
 
@@ -354,8 +355,7 @@ impl ConsensusState {
         if vote.height != expected_height {
             return Err(ConsensusError::InvalidVote(format!(
                 "Vote height mismatch: expected {}, got {}",
-                expected_height,
-                vote.height
+                expected_height, vote.height
             )));
         }
 
@@ -554,8 +554,7 @@ impl ConsensusState {
         if timeout.height != expected_timeout_height {
             return Err(ConsensusError::InvalidVote(format!(
                 "Timeout height mismatch: expected {}, got {}",
-                expected_timeout_height,
-                timeout.height
+                expected_timeout_height, timeout.height
             )));
         }
 

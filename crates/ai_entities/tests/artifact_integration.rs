@@ -29,10 +29,18 @@ fn acceptance_1_store_fetch_roundtrip_raw_bytes() {
 
     // Fetch and verify content matches
     let fetched = store.fetch(&hash).unwrap();
-    assert_eq!(fetched, content.to_vec(), "Fetched content must match stored content");
+    assert_eq!(
+        fetched,
+        content.to_vec(),
+        "Fetched content must match stored content"
+    );
 
     // Verify hash is correct
-    assert_eq!(hash, artifact_hash(content), "Returned hash must match content hash");
+    assert_eq!(
+        hash,
+        artifact_hash(content),
+        "Returned hash must match content hash"
+    );
 }
 
 #[test]
@@ -69,7 +77,10 @@ fn acceptance_1_store_fetch_large_content() {
     let hash = store.store(&large_content).unwrap();
 
     let fetched = store.fetch(&hash).unwrap();
-    assert_eq!(fetched, large_content, "Large content must roundtrip correctly");
+    assert_eq!(
+        fetched, large_content,
+        "Large content must roundtrip correctly"
+    );
 }
 
 #[test]
@@ -184,7 +195,10 @@ fn acceptance_3_full_verification_flow() {
     let verified_payload = fetch_and_verify_payload(&store, &commitment_hash)
         .expect("Full verification flow should succeed");
 
-    assert_eq!(verified_payload, payload, "Verified payload must match original");
+    assert_eq!(
+        verified_payload, payload,
+        "Verified payload must match original"
+    );
 }
 
 #[test]
@@ -215,7 +229,10 @@ fn acceptance_3_fetch_and_verify_returns_correct_errors() {
     let result = fetch_and_verify_payload(&store, &missing_hash);
 
     assert!(
-        matches!(result, Err(FetchVerifyError::Artifact(ArtifactError::NotFound(_)))),
+        matches!(
+            result,
+            Err(FetchVerifyError::Artifact(ArtifactError::NotFound(_)))
+        ),
         "Should return NotFound error for missing artifact"
     );
 }
@@ -261,10 +278,7 @@ fn acceptance_4_local_store_multiple_artifacts() {
         b"Third artifact",
     ];
 
-    let hashes: Vec<[u8; 32]> = contents
-        .iter()
-        .map(|c| store.store(*c).unwrap())
-        .collect();
+    let hashes: Vec<[u8; 32]> = contents.iter().map(|c| store.store(*c).unwrap()).collect();
 
     // Verify all can be fetched
     for (content, hash) in contents.iter().zip(hashes.iter()) {
@@ -380,18 +394,24 @@ fn e2e_ai_signal_workflow() {
 
     // Step 3: Store payload off-chain
     let stored_hash = store.store(&encoded).unwrap();
-    assert_eq!(commitment_hash, stored_hash, "Computed and stored hashes must match");
+    assert_eq!(
+        commitment_hash, stored_hash,
+        "Computed and stored hashes must match"
+    );
 
     // Step 4: On-chain: commitment_hash would be stored in a transaction
     // (simulated - in real use this would be in SignalCommitment)
 
     // Step 5: Client fetches and verifies the payload
-    let verified = fetch_and_verify_payload(&store, &commitment_hash)
-        .expect("Verification should succeed");
+    let verified =
+        fetch_and_verify_payload(&store, &commitment_hash).expect("Verification should succeed");
 
     // Step 6: Client uses the verified payload
     assert_eq!(verified.model_id, "novai-market-analyzer");
-    assert_eq!(verified.explanation, "Strong buy signal based on RSI oversold conditions");
+    assert_eq!(
+        verified.explanation,
+        "Strong buy signal based on RSI oversold conditions"
+    );
 
     // Step 7: Verify the payload hash matches what's on-chain
     assert_eq!(
