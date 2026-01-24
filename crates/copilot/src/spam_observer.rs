@@ -300,6 +300,13 @@ pub struct CollectingSpamCallback {
 }
 
 #[cfg(test)]
+impl Default for CollectingSpamCallback {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
 impl CollectingSpamCallback {
     pub fn new() -> Self {
         Self {
@@ -574,7 +581,7 @@ mod tests {
         // 2. Add TxMempool/PeerManager to SpamObserver (breaking change)
         // Both would be caught in code review.
 
-        assert!(true, "Observer is purely observational by design");
+        // INVARIANT: Observer is purely observational by design.
 
         // Additional runtime verification
         let metrics = observer.metrics();

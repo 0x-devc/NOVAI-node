@@ -26,9 +26,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod congestion_forecaster;
+pub mod congestion_reporter;
+pub mod congestion_stats;
 pub mod detector;
 pub mod observer;
 pub mod reporter;
+pub mod resource_budget;
 pub mod spam_detector;
 pub mod spam_observer;
 pub mod spam_reporter;
@@ -42,6 +46,13 @@ pub use spam_detector::{DetectedSpamPattern, SpamDetector, SpamPatternKind, Spam
 pub use spam_observer::{SpamCallback, SpamObserver, SpamObserverConfig, SpamObserverMetrics};
 pub use spam_reporter::SpamReporter;
 pub use spam_stats::{SenderStats, SpamStats, TxRejectionReason};
+pub use congestion_forecaster::{
+    BlockSizeRecommendation, CongestionForecast, CongestionForecaster, CongestionLevel,
+    CongestionThresholds, FeeRecommendation, ForecastEvidence,
+};
+pub use congestion_reporter::CongestionReporter;
+pub use congestion_stats::CongestionStats;
+pub use resource_budget::{ResourceBudget, ResourceTracker, ResourceUsage};
 pub use stats::{ChainStats, RingBuffer};
 
 #[cfg(test)]

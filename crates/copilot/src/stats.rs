@@ -350,7 +350,7 @@ mod tests {
 
         // p95 of 1-100 should be 95 or 96
         let p95 = buf.p95();
-        assert!(p95 >= 95 && p95 <= 96);
+        assert!((95..=96).contains(&p95));
     }
 
     #[test]

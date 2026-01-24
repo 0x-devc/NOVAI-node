@@ -450,7 +450,7 @@ mod tests {
         // v3 now has 10 missed, average is (1+1+10)/3 = 4
 
         let detector = AnomalyDetector::new();
-        let anomalies = detector.detect(&stats);
+        let _anomalies = detector.detect(&stats);
 
         // v3 has 10 missed, average is 4
         // 10 * 100 = 1000, 4 * 300 = 1200
@@ -699,7 +699,7 @@ mod tests {
 
         // At exactly 3x threshold (300%), confidence should be ~100
         let c1 = detector.compute_confidence(300, 100, 300);
-        assert!(c1 >= 90 && c1 <= 110, "At threshold: confidence={}", c1);
+        assert!((90..=110).contains(&c1), "At threshold: confidence={}", c1);
 
         // At 6x (600%), confidence should be higher
         let c2 = detector.compute_confidence(600, 100, 300);

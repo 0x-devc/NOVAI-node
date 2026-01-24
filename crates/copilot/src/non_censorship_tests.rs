@@ -703,7 +703,6 @@ mod tests {
         println!();
         println!("All spam detection is ADVISORY ONLY.");
         println!("No automatic enforcement actions are taken.");
-
-        assert!(true);
+        // Test passes if it reaches this point - demonstrates advisory-only architecture
     }
 }

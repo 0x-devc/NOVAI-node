@@ -345,7 +345,7 @@ mod tests {
 
         // Median should be around 50-60
         let median = stats.median_fee();
-        assert!(median >= 40 && median <= 60, "median={}", median);
+        assert!((40..=60).contains(&median), "median={}", median);
     }
 
     #[test]

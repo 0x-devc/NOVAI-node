@@ -495,7 +495,7 @@ mod tests {
     fn payload_model_ids_are_distinct() {
         let reporter = SpamReporter::new(test_signing_key());
 
-        let patterns = vec![
+        let patterns = [
             test_pattern_high_invalid(),
             test_pattern_high_tx_rate(),
             test_pattern_mempool_spike(),
