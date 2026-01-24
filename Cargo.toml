@@ -5,6 +5,7 @@ members = [
     "crates/codec",
     "crates/ai_entities",
     "crates/copilot",
+    "crates/governance",
     "crates/p2p",
     "crates/node",
     "crates/state",

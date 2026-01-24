@@ -2495,6 +2495,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "novai-governance"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "novai-ai-entities",
+ "novai-types",
+]
+
+[[package]]
 name = "novai-node"
 version = "0.1.0"
 dependencies = [

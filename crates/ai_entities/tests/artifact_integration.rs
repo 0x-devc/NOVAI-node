@@ -278,7 +278,7 @@ fn acceptance_4_local_store_multiple_artifacts() {
         b"Third artifact",
     ];
 
-    let hashes: Vec<[u8; 32]> = contents.iter().map(|c| store.store(*c).unwrap()).collect();
+    let hashes: Vec<[u8; 32]> = contents.iter().map(|c| store.store(c).unwrap()).collect();
 
     // Verify all can be fetched
     for (content, hash) in contents.iter().zip(hashes.iter()) {

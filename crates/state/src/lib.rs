@@ -59,6 +59,22 @@ pub const KEY_PREFIX_AI_SIGNALS_BY_TYPE: &[u8] = b"ai/signals/by_type/";
 /// Canonical prefix for AI signal index by issuer (Week 14 - D14.4).
 pub const KEY_PREFIX_AI_SIGNALS_BY_ISSUER: &[u8] = b"ai/signals/by_issuer/";
 
+// ============================================================================
+// GOVERNANCE STORAGE KEY PREFIXES (Week 19)
+// ============================================================================
+
+/// Canonical prefix for governance proposal records.
+/// Key: `proposals/{proposal_id32}` → Proposal (encoded via governance codec)
+pub const KEY_PREFIX_GOVERNANCE_PROPOSALS: &[u8] = b"governance/proposals/";
+
+/// Canonical prefix for governance audit log records.
+/// Key: `governance_log/{proposal_id32}` → AuditLogEntry
+pub const KEY_PREFIX_GOVERNANCE_LOG: &[u8] = b"governance/log/";
+
+/// Canonical prefix for governance proposals indexed by state.
+/// Key: `proposals_by_state/{state_u8}/{proposal_id32}` → empty (presence is the index)
+pub const KEY_PREFIX_GOVERNANCE_PROPOSALS_BY_STATE: &[u8] = b"governance/proposals_by_state/";
+
 /// Build the canonical key for an account record: `b"accounts/" ++ addr32`.
 ///
 /// `addr` must be exactly 32 bytes.
@@ -163,6 +179,42 @@ pub fn ai_signal_by_issuer_key(issuer: &[u8; 32], height: u64) -> Vec<u8> {
     k.extend_from_slice(issuer);
     k.push(b'/');
     k.extend_from_slice(&height.to_be_bytes());
+    k
+}
+
+// ============================================================================
+// GOVERNANCE KEY BUILDER FUNCTIONS (Week 19)
+// ============================================================================
+
+/// Build canonical key for a governance proposal:
+/// `b"governance/proposals/" ++ proposal_id32`.
+pub fn governance_proposal_key(proposal_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_GOVERNANCE_PROPOSALS.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_GOVERNANCE_PROPOSALS);
+    k.extend_from_slice(proposal_id);
+    k
+}
+
+/// Build canonical key for a governance audit log entry:
+/// `b"governance/log/" ++ proposal_id32`.
+pub fn governance_log_key(proposal_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_GOVERNANCE_LOG.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_GOVERNANCE_LOG);
+    k.extend_from_slice(proposal_id);
+    k
+}
+
+/// Build canonical key for governance proposal-by-state index:
+/// `b"governance/proposals_by_state/" ++ state_u8 ++ "/" ++ proposal_id32`.
+///
+/// The state byte comes first to enable efficient range scans of all proposals
+/// in a given state.
+pub fn governance_proposal_by_state_key(state: u8, proposal_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_GOVERNANCE_PROPOSALS_BY_STATE.len() + 1 + 1 + 32);
+    k.extend_from_slice(KEY_PREFIX_GOVERNANCE_PROPOSALS_BY_STATE);
+    k.push(state);
+    k.push(b'/');
+    k.extend_from_slice(proposal_id);
     k
 }
 
