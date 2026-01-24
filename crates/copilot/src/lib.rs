@@ -29,9 +29,20 @@
 pub mod detector;
 pub mod observer;
 pub mod reporter;
+pub mod spam_detector;
+pub mod spam_observer;
+pub mod spam_reporter;
+pub mod spam_stats;
 pub mod stats;
 
 pub use detector::{AnomalyDetector, AnomalyKind, DetectedAnomaly};
 pub use observer::{ChainObserver, ObservableState};
 pub use reporter::AnomalyReporter;
+pub use spam_detector::{DetectedSpamPattern, SpamDetector, SpamPatternKind, SpamThresholds};
+pub use spam_observer::{SpamCallback, SpamObserver, SpamObserverConfig, SpamObserverMetrics};
+pub use spam_reporter::SpamReporter;
+pub use spam_stats::{SenderStats, SpamStats, TxRejectionReason};
 pub use stats::{ChainStats, RingBuffer};
+
+#[cfg(test)]
+mod non_censorship_tests;
