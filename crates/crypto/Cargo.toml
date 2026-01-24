@@ -7,6 +7,11 @@ license = "Apache-2.0"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+# Enable logging for ZK stub verifier (for debugging)
+zk-logging = []
+
 [dependencies]
 novai-types = { path = "../types", version = "0.1.0" }
 novai-codec = { path = "../codec", version = "0.1.0" }

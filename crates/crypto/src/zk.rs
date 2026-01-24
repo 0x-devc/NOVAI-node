@@ -1,0 +1,153 @@
+//! ZK Proof Verification Hooks (D20.4)
+//!
+//! PURPOSE: Define interface for future ZK verification.
+//! This is a STUB implementation that always returns true.
+//!
+//! IMPORTANT: Real ZK verification is deferred to post-Week 30.
+//! This stub enables signal commitment tests and protocol integration
+//! without blocking on ZK circuit development.
+//!
+//! INVARIANTS:
+//! - Trait signature is stable (changing it is a breaking change)
+//! - Stub always returns true (for testing/development)
+//! - Real implementation will have same trait signature
+//!
+//! FAILURE MODES:
+//! - Stub cannot fail (always returns true)
+//! - Real implementation may return false for invalid proofs
+
+/// Trait for ZK proof verification.
+///
+/// Implementations verify that a proof is valid for given public inputs.
+///
+/// # Future Implementation
+///
+/// Post-Week 30, this will be implemented with actual ZK circuits for:
+/// - AI signal validity proofs
+/// - State transition proofs
+/// - Computation integrity proofs
+///
+/// # Example
+///
+/// ```
+/// use novai_crypto::{ZkVerifier, StubZkVerifier};
+///
+/// // Using the stub verifier (always returns true)
+/// let proof = b"mock_proof_data";
+/// let inputs = b"public_inputs";
+/// assert!(StubZkVerifier::verify_proof(proof, inputs));
+/// ```
+pub trait ZkVerifier {
+    /// Verify a ZK proof against public inputs.
+    ///
+    /// # Arguments
+    ///
+    /// * `proof` - The serialized proof bytes (format depends on implementation)
+    /// * `public_inputs` - The public inputs the proof claims to satisfy
+    ///
+    /// # Returns
+    ///
+    /// `true` if the proof is valid for the given public inputs, `false` otherwise.
+    ///
+    /// # Note
+    ///
+    /// The stub implementation always returns `true`. Real implementations
+    /// will perform cryptographic verification.
+    fn verify_proof(proof: &[u8], public_inputs: &[u8]) -> bool;
+}
+
+/// Stub ZK verifier that always returns true.
+///
+/// # WARNING
+///
+/// This is a placeholder implementation for development and testing.
+/// **DO NOT** use in production without replacing with a real ZK verifier.
+///
+/// # Logging
+///
+/// When compiled with the `zk-logging` feature, this stub logs proof
+/// verification attempts to stderr for debugging purposes.
+///
+/// # Example
+///
+/// ```
+/// use novai_crypto::{ZkVerifier, StubZkVerifier};
+///
+/// // Stub always returns true regardless of input
+/// assert!(StubZkVerifier::verify_proof(&[], &[]));
+/// assert!(StubZkVerifier::verify_proof(b"any_proof", b"any_inputs"));
+/// ```
+pub struct StubZkVerifier;
+
+impl ZkVerifier for StubZkVerifier {
+    fn verify_proof(proof: &[u8], public_inputs: &[u8]) -> bool {
+        // Log proof details when zk-logging feature is enabled
+        #[cfg(feature = "zk-logging")]
+        eprintln!(
+            "[ZK STUB] verify_proof: proof_size={} bytes, inputs_size={} bytes -> true",
+            proof.len(),
+            public_inputs.len()
+        );
+
+        // Suppress unused variable warnings when logging is disabled
+        #[cfg(not(feature = "zk-logging"))]
+        let _ = (proof, public_inputs);
+
+        // Stub always returns true
+        true
+    }
+}
+
+/// Marker type for future real ZK verifier implementations.
+///
+/// This type is not yet implemented. It serves as documentation
+/// for the planned post-Week 30 implementation.
+///
+/// # Planned Features
+///
+/// - Groth16 or PLONK proof verification
+/// - Support for multiple circuit types
+/// - Batch verification for efficiency
+/// - Hardware acceleration support
+#[doc(hidden)]
+pub struct PlaceholderRealVerifier {
+    _private: (), // Prevent construction
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stub_returns_true_for_empty_inputs() {
+        assert!(StubZkVerifier::verify_proof(&[], &[]));
+    }
+
+    #[test]
+    fn stub_returns_true_for_any_inputs() {
+        let proof = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let inputs = vec![0x01, 0x02, 0x03];
+        assert!(StubZkVerifier::verify_proof(&proof, &inputs));
+    }
+
+    #[test]
+    fn stub_returns_true_for_large_inputs() {
+        let proof = vec![0x42u8; 1024];
+        let inputs = vec![0x99u8; 256];
+        assert!(StubZkVerifier::verify_proof(&proof, &inputs));
+    }
+
+    #[test]
+    fn stub_is_deterministic() {
+        let proof = b"test_proof";
+        let inputs = b"test_inputs";
+
+        let result1 = StubZkVerifier::verify_proof(proof, inputs);
+        let result2 = StubZkVerifier::verify_proof(proof, inputs);
+        let result3 = StubZkVerifier::verify_proof(proof, inputs);
+
+        assert_eq!(result1, result2);
+        assert_eq!(result2, result3);
+        assert!(result1); // All should be true
+    }
+}

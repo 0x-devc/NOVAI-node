@@ -6,6 +6,10 @@ use rand_core::OsRng;
 use novai_codec::{encode_tx_v1_unsigned, CodecError};
 use novai_types::{Address, SignatureBytes, TxV1};
 
+// ZK verification hooks (D20.4)
+pub mod zk;
+pub use zk::{StubZkVerifier, ZkVerifier};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CryptoError {
     InvalidPublicKey,
