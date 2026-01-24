@@ -1,11 +1,13 @@
 use mempool::{NonceProvider, TxMempool};
 use novai_codec::txid_v1;
+use novai_copilot::observer::{AnomalyCallback, ChainObserver, ObservableState, ObserverConfig};
 use novai_crypto::{address_from_pubkey, generate_keypair, sign_tx_v1};
 use novai_node::consensus_node::ConsensusNode;
 use novai_node::metrics;
 use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
 use std::env;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -49,6 +51,63 @@ impl InMemoryNonceProvider {
 impl NonceProvider for InMemoryNonceProvider {
     fn expected_nonce(&self, from: &Address) -> u64 {
         *self.expected.get(from).unwrap_or(&0)
+    }
+}
+
+/// Wrapper for node state that implements ObservableState.
+struct NodeObservableState {
+    node: Arc<ConsensusNode>,
+    mempool: Arc<Mutex<TxMempool>>,
+}
+
+impl ObservableState for NodeObservableState {
+    fn committed_height(&self) -> u64 {
+        self.node.state.lock().unwrap().committed_height
+    }
+
+    fn current_round(&self) -> u64 {
+        self.node.state.lock().unwrap().round
+    }
+
+    fn peer_count(&self) -> u64 {
+        self.node.peer_manager.peer_count() as u64
+    }
+
+    fn mempool_size(&self) -> u64 {
+        self.mempool.lock().unwrap().len() as u64
+    }
+
+    fn view_changes_total(&self) -> u64 {
+        self.node.state.lock().unwrap().view_changes_total
+    }
+
+    fn validator_set(&self) -> Vec<Address> {
+        self.node.validator_set.clone()
+    }
+
+    fn expected_leader(&self, height: u64, round: u64) -> Option<Address> {
+        let validators = &self.node.validator_set;
+        if validators.is_empty() {
+            return None;
+        }
+        let idx = ((height + round) as usize) % validators.len();
+        Some(validators[idx])
+    }
+}
+
+/// Callback that logs anomalies (signal tx submission to be added later).
+struct LoggingAnomalyCallback;
+
+impl AnomalyCallback for LoggingAnomalyCallback {
+    fn on_anomaly(
+        &self,
+        _payload: novai_ai_entities::SignalPayload,
+        signal: novai_ai_entities::AiSignalV1,
+    ) {
+        println!(
+            "🚨 ANOMALY: height={} confidence={} type={:?}",
+            signal.height, signal.confidence, signal.signal_type
+        );
     }
 }
 
@@ -152,7 +211,8 @@ fn main() {
             println!("   Address: {:?}", &our_addr[..8]);
             println!("   Peers: {:?}", peers);
 
-            // Create node
+            // Create node (clone our_key since we need it for copilot observer too)
+            let observer_key = our_key.clone();
             let node = Arc::new(ConsensusNode::new(
                 our_key,
                 validator_set.clone(),
@@ -182,11 +242,40 @@ fn main() {
             let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
             let nonce_provider = InMemoryNonceProvider::default();
 
+            // Create copilot observer
+            let observer_config = ObserverConfig::default();
+            let observer = ChainObserver::new(observer_key, observer_config);
+            let observer_metrics = observer.metrics();
+            let observer = Arc::new(Mutex::new(observer));
+
+            // Start copilot observer background thread
+            {
+                let observer = Arc::clone(&observer);
+                let observable_state = NodeObservableState {
+                    node: Arc::clone(&node),
+                    mempool: Arc::clone(&mempool),
+                };
+                let callback = LoggingAnomalyCallback;
+
+                std::thread::spawn(move || {
+                    println!("🤖 Copilot observer started");
+                    loop {
+                        std::thread::sleep(Duration::from_millis(500));
+                        let mut obs = observer.lock().unwrap();
+                        let anomalies = obs.observe(&observable_state, &callback);
+                        if !anomalies.is_empty() {
+                            println!("   Detected {} anomalies this cycle", anomalies.len());
+                        }
+                    }
+                });
+            }
+
             // Start metrics server
             let metrics_collect = {
                 let state = Arc::clone(&node.state);
                 let peer_manager = Arc::clone(&node.peer_manager);
                 let mempool = Arc::clone(&mempool);
+                let observer_metrics = Arc::clone(&observer_metrics);
                 move || metrics::MetricsSnapshot {
                     committed_height: state.lock().unwrap().committed_height,
                     current_round: state.lock().unwrap().round,
@@ -195,6 +284,19 @@ fn main() {
                     view_changes_total: state.lock().unwrap().view_changes_total,
                     block_tx_count: 0, // TODO: Wire to actual block commit events
                     total_txs_committed: 0, // TODO: Accumulate from block commits
+                    // Copilot metrics from observer
+                    copilot_observations_total: observer_metrics
+                        .observations
+                        .load(Ordering::Relaxed),
+                    anomaly_signals_total: observer_metrics
+                        .anomalies_detected
+                        .load(Ordering::Relaxed),
+                    anomaly_signals_published: observer_metrics
+                        .signals_published
+                        .load(Ordering::Relaxed),
+                    anomaly_last_confidence: observer_metrics
+                        .last_confidence
+                        .load(Ordering::Relaxed),
                 }
             };
 

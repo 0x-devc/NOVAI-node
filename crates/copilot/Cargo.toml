@@ -1,0 +1,19 @@
+[package]
+name = "novai-copilot"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Validator Co-Pilot: Statistics-based anomaly detection for NOVAI"
+
+[dependencies]
+# Internal crates
+novai-types = { path = "../types", version = "0.1.0" }
+novai-ai-entities = { path = "../ai_entities", version = "0.1.0" }
+novai-crypto = { path = "../crypto", version = "0.1.0" }
+
+# Crypto for signing
+ed25519-dalek = "2.1"
+blake3 = "=1.8.2"
+
+[dev-dependencies]
+tempfile = "3.10"

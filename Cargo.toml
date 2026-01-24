@@ -4,6 +4,7 @@ members = [
     "crates/crypto",
     "crates/codec",
     "crates/ai_entities",
+    "crates/copilot",
     "crates/p2p",
     "crates/node",
     "crates/state",
@@ -11,7 +12,8 @@ members = [
     "crates/smt",
     "crates/mempool",
     "crates/consensus_types",
-    "crates/consensus", "crates/genesis",
+    "crates/consensus",
+    "crates/genesis",
     "tools/tx-generator",
 ]
 

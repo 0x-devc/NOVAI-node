@@ -31,6 +31,16 @@ pub struct MetricsSnapshot {
     pub block_tx_count: u64,
     /// Total transactions committed across all blocks.
     pub total_txs_committed: u64,
+
+    // Copilot metrics
+    /// Total copilot observation cycles.
+    pub copilot_observations_total: u64,
+    /// Total anomalies detected by copilot.
+    pub anomaly_signals_total: u64,
+    /// Total signals published on-chain.
+    pub anomaly_signals_published: u64,
+    /// Confidence level of last detected anomaly (0-255).
+    pub anomaly_last_confidence: u64,
 }
 
 impl MetricsSnapshot {
@@ -69,6 +79,22 @@ novai_block_tx_count {}
 # HELP novai_total_txs_committed Total transactions committed across all blocks
 # TYPE novai_total_txs_committed counter
 novai_total_txs_committed {}
+
+# HELP novai_copilot_observations_total Total copilot observation cycles
+# TYPE novai_copilot_observations_total counter
+novai_copilot_observations_total {}
+
+# HELP novai_anomaly_signals_total Total anomalies detected by copilot
+# TYPE novai_anomaly_signals_total counter
+novai_anomaly_signals_total {}
+
+# HELP novai_anomaly_signals_published Total signals published on-chain
+# TYPE novai_anomaly_signals_published counter
+novai_anomaly_signals_published {}
+
+# HELP novai_anomaly_last_confidence Confidence of last detected anomaly (0-255)
+# TYPE novai_anomaly_last_confidence gauge
+novai_anomaly_last_confidence {}
 "#,
             self.committed_height,
             self.current_round,
@@ -77,6 +103,10 @@ novai_total_txs_committed {}
             self.view_changes_total,
             self.block_tx_count,
             self.total_txs_committed,
+            self.copilot_observations_total,
+            self.anomaly_signals_total,
+            self.anomaly_signals_published,
+            self.anomaly_last_confidence,
         )
     }
 }
@@ -147,6 +177,10 @@ mod tests {
             view_changes_total: 5,
             block_tx_count: 25,
             total_txs_committed: 1050,
+            copilot_observations_total: 200,
+            anomaly_signals_total: 3,
+            anomaly_signals_published: 2,
+            anomaly_last_confidence: 180,
         };
 
         let output = snapshot.to_prometheus();
@@ -160,11 +194,20 @@ mod tests {
         assert!(output.contains("novai_block_tx_count 25"));
         assert!(output.contains("novai_total_txs_committed 1050"));
 
+        // Check copilot metrics
+        assert!(output.contains("novai_copilot_observations_total 200"));
+        assert!(output.contains("novai_anomaly_signals_total 3"));
+        assert!(output.contains("novai_anomaly_signals_published 2"));
+        assert!(output.contains("novai_anomaly_last_confidence 180"));
+
         // Check that HELP and TYPE lines are present
         assert!(output.contains("# HELP novai_committed_height"));
         assert!(output.contains("# TYPE novai_committed_height gauge"));
         assert!(output.contains("# TYPE novai_consensus_view_changes_total counter"));
         assert!(output.contains("# TYPE novai_total_txs_committed counter"));
+        assert!(output.contains("# TYPE novai_copilot_observations_total counter"));
+        assert!(output.contains("# TYPE novai_anomaly_signals_total counter"));
+        assert!(output.contains("# TYPE novai_anomaly_last_confidence gauge"));
     }
 
     #[test]
@@ -177,11 +220,18 @@ mod tests {
             view_changes_total: 0,
             block_tx_count: 0,
             total_txs_committed: 0,
+            copilot_observations_total: 0,
+            anomaly_signals_total: 0,
+            anomaly_signals_published: 0,
+            anomaly_last_confidence: 0,
         };
 
         let output = snapshot.to_prometheus();
         assert!(output.contains("novai_committed_height 0"));
         assert!(output.contains("novai_peer_count 0"));
         assert!(output.contains("novai_block_tx_count 0"));
+        assert!(output.contains("novai_copilot_observations_total 0"));
+        assert!(output.contains("novai_anomaly_signals_total 0"));
+        assert!(output.contains("novai_anomaly_last_confidence 0"));
     }
 }

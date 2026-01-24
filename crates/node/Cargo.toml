@@ -22,6 +22,7 @@ novai-state = { path = "../state", version = "0.1.0" }
 novai-execution = { path = "../execution", version = "0.1.0" }
 novai-ai-entities = { path = "../ai_entities", version = "0.1.0" }
 novai-p2p = { path = "../p2p", version = "0.1.0" }
+novai-copilot = { path = "../copilot", version = "0.1.0" }
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal"] }
 futures = "0.3"
 libp2p = { version = "0.56", default-features = false, features = [
