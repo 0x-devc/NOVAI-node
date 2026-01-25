@@ -39,12 +39,8 @@ fn write_or_compare_hash(path: &PathBuf, actual: &[u8; 32], name: &str) {
         fs::write(path, actual).expect("write vector");
         println!("Updated: {} ({} bytes)", path.display(), actual.len());
     } else {
-        let expected = fs::read(path).unwrap_or_else(|_| {
-            panic!(
-                "Missing vector: {}. Run UPDATE_VECTORS=1",
-                path.display()
-            )
-        });
+        let expected = fs::read(path)
+            .unwrap_or_else(|_| panic!("Missing vector: {}. Run UPDATE_VECTORS=1", path.display()));
         assert_eq!(
             actual.as_slice(),
             expected.as_slice(),

@@ -186,11 +186,10 @@ fn init_state_with_ai_entities() -> (MemKv, [[u8; 32]; 3]) {
 
 /// Read SMT root from database.
 fn read_smt_root(db: &MemKv) -> [u8; 32] {
-    db.get(KEY_SMT_ROOT)
-        .unwrap()
-        .map_or_else(|| empty_hash_at_height(256), |bytes| {
-            decode_smt_root_v1(&bytes).unwrap()
-        })
+    db.get(KEY_SMT_ROOT).unwrap().map_or_else(
+        || empty_hash_at_height(256),
+        |bytes| decode_smt_root_v1(&bytes).unwrap(),
+    )
 }
 
 // ============================================================================

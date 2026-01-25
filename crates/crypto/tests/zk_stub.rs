@@ -98,7 +98,10 @@ fn trait_can_be_used_as_bound() {
 
     // Use the generic function with StubZkVerifier
     let result = verify_with_trait::<StubZkVerifier>(proof, inputs);
-    assert!(result, "Trait bound function should work with StubZkVerifier");
+    assert!(
+        result,
+        "Trait bound function should work with StubZkVerifier"
+    );
 }
 
 /// Demonstrates how a future real verifier would implement the trait.
