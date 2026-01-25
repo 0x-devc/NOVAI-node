@@ -86,6 +86,13 @@ pub enum ExecError<E> {
     },
     /// Entity does not own the memory object.
     MemoryObjectOwnerMismatch,
+    // Week 22 - NNPX privacy errors (D22.4)
+    /// AI entity attempted to access NNPX private data.
+    NnpxAccessDenied,
+    /// Nullifier has already been spent (double-spend attempt).
+    NullifierAlreadySpent,
+    /// Invalid private payload commitment.
+    InvalidPrivateCommitment,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -1486,6 +1493,101 @@ pub fn get_signals_by_type<K: Kv>(
     Ok(results)
 }
 
+// ============================================================================
+// NNPX PRIVACY BOUNDARY ENFORCEMENT (Week 22 - D22.4)
+// ============================================================================
+
+use novai_state::{is_nnpx_key, nnpx_nullifier_key};
+
+/// Caller context for privacy boundary checks.
+///
+/// Used to determine if an operation is initiated by an AI entity
+/// (which is blocked from NNPX access) or by a human-controlled account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    /// Human-controlled account (address).
+    Account([u8; 32]),
+    /// AI entity (entity ID).
+    AiEntity([u8; 32]),
+}
+
+/// Validate that the caller has permission to access a key.
+///
+/// # Privacy Boundary (D22.4)
+///
+/// AI entities are NEVER allowed to directly access NNPX private data.
+/// This is a hard security boundary enforced at the execution layer.
+///
+/// # Errors
+///
+/// Returns `NnpxAccessDenied` if:
+/// - Key starts with `b"nnpx/"` AND caller is an AI entity
+#[inline]
+pub fn validate_nnpx_access<E>(key: &[u8], caller: &Caller) -> Result<(), ExecError<E>> {
+    if is_nnpx_key(key) {
+        if let Caller::AiEntity(_) = caller {
+            return Err(ExecError::NnpxAccessDenied);
+        }
+    }
+    Ok(())
+}
+
+/// Check if a nullifier has already been spent.
+///
+/// # Errors
+///
+/// Returns `NullifierAlreadySpent` if the nullifier exists in state.
+pub fn validate_nullifier_unspent<K: Kv>(
+    db: &K,
+    nullifier: &[u8; 32],
+) -> Result<(), ExecError<K::Error>> {
+    let key = nnpx_nullifier_key(nullifier);
+    if db.get(&key).map_err(ExecError::Db)?.is_some() {
+        return Err(ExecError::NullifierAlreadySpent);
+    }
+    Ok(())
+}
+
+/// Mark a nullifier as spent by writing it to the nullifier set.
+///
+/// Returns a `WriteOp` for inclusion in an atomic batch.
+#[must_use]
+pub fn mark_nullifier_spent(nullifier: &[u8; 32]) -> WriteOp {
+    let key = nnpx_nullifier_key(nullifier);
+    // Value is empty - presence in the set is what matters
+    WriteOp::Put(key, vec![])
+}
+
+/// Validate that an AI entity does NOT have NNPX-derived capability.
+///
+/// # Privacy Invariant
+///
+/// AI entities must NEVER be registered with `read_nnpx_derived: true`.
+/// This function is used during entity registration to enforce this invariant.
+///
+/// # Errors
+///
+/// Returns `NnpxAccessDenied` if the entity has `read_nnpx_derived` capability.
+#[inline]
+#[allow(clippy::missing_const_for_fn)] // Generic functions cannot be const in stable Rust
+pub fn validate_ai_entity_no_nnpx_capability<E>(
+    capabilities: &novai_ai_entities::Capabilities,
+) -> Result<(), ExecError<E>> {
+    if capabilities.read_nnpx_derived {
+        return Err(ExecError::NnpxAccessDenied);
+    }
+    Ok(())
+}
+
+/// Check if a key is in the NNPX private store.
+///
+/// Convenience re-export from `novai_state` for use in execution logic.
+#[inline]
+#[must_use]
+pub fn is_private_key(key: &[u8]) -> bool {
+    is_nnpx_key(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1877,8 +1979,11 @@ mod tests {
 
         // Set count to max - this simulates having max objects already
         let count_key = ai_memory_count_key(&entity.id);
-        db.put(&count_key, &encode_memory_count(MAX_MEMORY_OBJECTS_PER_ENTITY))
-            .unwrap();
+        db.put(
+            &count_key,
+            &encode_memory_count(MAX_MEMORY_OBJECTS_PER_ENTITY),
+        )
+        .unwrap();
 
         let tx = mk_create_memory_tx(
             entity.id,
@@ -2045,5 +2150,187 @@ mod tests {
 
         let obj = read_memory_object(&db, &entity.id, &object_id).unwrap();
         assert!(obj.is_none());
+    }
+
+    // ========================================================================
+    // NNPX PRIVACY SECURITY TESTS (Week 22 - D22.5)
+    // ========================================================================
+
+    #[test]
+    fn ai_cannot_read_nnpx() {
+        // D22.5: AI entity operations are rejected for nnpx/ keys
+
+        let ai_entity_id = [0x42u8; 32];
+        let account_addr = [0x01u8; 32];
+
+        let ai_caller = Caller::AiEntity(ai_entity_id);
+        let account_caller = Caller::Account(account_addr);
+
+        // AI entity trying to access NNPX keys should be denied
+        let nnpx_key = b"nnpx/commitments/abc123";
+        let result: Result<(), ExecError<()>> = validate_nnpx_access(nnpx_key, &ai_caller);
+        assert!(
+            matches!(result, Err(ExecError::NnpxAccessDenied)),
+            "AI entity must be denied access to NNPX keys"
+        );
+
+        // Human account can access NNPX keys
+        let result: Result<(), ExecError<()>> = validate_nnpx_access(nnpx_key, &account_caller);
+        assert!(
+            result.is_ok(),
+            "Human account should be allowed to access NNPX keys"
+        );
+
+        // AI entity can access public keys
+        let public_key = b"accounts/alice";
+        let result: Result<(), ExecError<()>> = validate_nnpx_access(public_key, &ai_caller);
+        assert!(result.is_ok(), "AI entity can access public keys");
+
+        // Test various NNPX prefixes
+        for key in [
+            b"nnpx/".as_slice(),
+            b"nnpx/nullifiers/null1",
+            b"nnpx/encrypted/payload1",
+            b"nnpx/commitments/commit1",
+        ] {
+            let result: Result<(), ExecError<()>> = validate_nnpx_access(key, &ai_caller);
+            assert!(
+                matches!(result, Err(ExecError::NnpxAccessDenied)),
+                "AI entity must be denied access to all NNPX keys"
+            );
+        }
+    }
+
+    #[test]
+    fn commitment_hides_payload() {
+        // D22.5: Same payload with different encryption produces different commitments
+        use novai_ai_entities::PrivatePayloadCommitment;
+
+        // Simulate same logical payload encrypted with different randomness
+        let payload_encrypted_v1 = b"encrypted_with_random_nonce_1";
+        let payload_encrypted_v2 = b"encrypted_with_random_nonce_2";
+
+        let hash1 = PrivatePayloadCommitment::compute_commitment_hash(payload_encrypted_v1);
+        let hash2 = PrivatePayloadCommitment::compute_commitment_hash(payload_encrypted_v2);
+
+        // Different encrypted payloads must produce different commitments
+        // This is the "hiding" property - observer cannot determine original content
+        assert_ne!(
+            hash1, hash2,
+            "Different encryptions must produce different commitments (hiding property)"
+        );
+
+        // Same payload must produce same commitment (deterministic)
+        let hash1_again = PrivatePayloadCommitment::compute_commitment_hash(payload_encrypted_v1);
+        assert_eq!(
+            hash1, hash1_again,
+            "Same payload must produce same commitment (deterministic)"
+        );
+    }
+
+    #[test]
+    fn nullifier_prevents_reuse() {
+        // D22.5: Duplicate nullifiers are detected and rejected
+        use novai_ai_entities::PrivatePayloadCommitment;
+
+        let mut db = MemKv::new();
+
+        let spending_secret = [0xABu8; 32];
+        let counter = 42u64;
+
+        // Compute nullifier
+        let nullifier = PrivatePayloadCommitment::compute_nullifier(&spending_secret, counter);
+
+        // First spend: nullifier is unspent
+        let result = validate_nullifier_unspent(&db, &nullifier);
+        assert!(result.is_ok(), "First spend should succeed");
+
+        // Mark as spent
+        let spend_op = mark_nullifier_spent(&nullifier);
+        db.apply_batch(&[spend_op]).unwrap();
+
+        // Second spend: nullifier is already spent (double-spend attempt)
+        let result = validate_nullifier_unspent(&db, &nullifier);
+        assert!(
+            matches!(result, Err(ExecError::NullifierAlreadySpent)),
+            "Double-spend must be rejected"
+        );
+
+        // Different counter = different nullifier = valid new spend
+        let nullifier2 = PrivatePayloadCommitment::compute_nullifier(&spending_secret, counter + 1);
+        let result = validate_nullifier_unspent(&db, &nullifier2);
+        assert!(
+            result.is_ok(),
+            "Different nullifier (new spend) should succeed"
+        );
+    }
+
+    #[test]
+    fn ai_entity_cannot_have_nnpx_capability() {
+        // D22.4: AI entities must not be registered with read_nnpx_derived capability
+
+        // Valid AI capabilities (no NNPX access)
+        let valid_caps = Capabilities::gated();
+        assert!(!valid_caps.read_nnpx_derived);
+        let result: Result<(), ExecError<()>> = validate_ai_entity_no_nnpx_capability(&valid_caps);
+        assert!(result.is_ok(), "AI without NNPX capability should pass");
+
+        // Invalid: AI trying to get NNPX access
+        let mut invalid_caps = Capabilities::gated();
+        invalid_caps.read_nnpx_derived = true;
+        let result: Result<(), ExecError<()>> =
+            validate_ai_entity_no_nnpx_capability(&invalid_caps);
+        assert!(
+            matches!(result, Err(ExecError::NnpxAccessDenied)),
+            "AI with NNPX capability must be rejected"
+        );
+    }
+
+    #[test]
+    fn is_private_key_identifies_nnpx_keys() {
+        // Verify the is_private_key helper works correctly
+
+        // NNPX keys are private
+        assert!(is_private_key(b"nnpx/"));
+        assert!(is_private_key(b"nnpx/commitments/abc"));
+        assert!(is_private_key(b"nnpx/nullifiers/xyz"));
+        assert!(is_private_key(b"nnpx/encrypted/data"));
+
+        // Non-NNPX keys are public
+        assert!(!is_private_key(b"accounts/alice"));
+        assert!(!is_private_key(b"ai/entities/entity1"));
+        assert!(!is_private_key(b"consensus/blocks/100"));
+        assert!(!is_private_key(b"governance/proposals/prop1"));
+    }
+
+    #[test]
+    fn nullifier_storage_key_format() {
+        // Verify nullifier keys are stored in the NNPX namespace
+        let nullifier = [0xABu8; 32];
+        let key = nnpx_nullifier_key(&nullifier);
+
+        // Must be an NNPX key
+        assert!(
+            is_private_key(&key),
+            "Nullifier key must be in NNPX namespace"
+        );
+
+        // Must start with correct prefix
+        assert!(
+            key.starts_with(b"nnpx/nullifiers/"),
+            "Nullifier key must have correct prefix"
+        );
+    }
+
+    #[test]
+    fn caller_enum_equality() {
+        let ai1 = Caller::AiEntity([0x01u8; 32]);
+        let ai2 = Caller::AiEntity([0x02u8; 32]);
+        let ai1_copy = Caller::AiEntity([0x01u8; 32]);
+        let account = Caller::Account([0x01u8; 32]);
+
+        assert_eq!(ai1, ai1_copy, "Same AI entity should be equal");
+        assert_ne!(ai1, ai2, "Different AI entities should not be equal");
+        assert_ne!(ai1, account, "AI entity and account should not be equal");
     }
 }

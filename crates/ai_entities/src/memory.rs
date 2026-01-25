@@ -89,7 +89,6 @@ impl MemoryObjectType {
     }
 }
 
-
 // ============================================================================
 // MEMORY OBJECT STRUCT (D21.2)
 // ============================================================================
@@ -270,9 +269,8 @@ pub fn decode_memory_object_v1(bytes: &[u8]) -> Result<MemoryObject, MemoryObjec
     pos += 32;
 
     // Object type
-    let object_type = MemoryObjectType::from_byte(bytes[pos]).ok_or(
-        MemoryObjectDecodeError::InvalidObjectType { byte: bytes[pos] },
-    )?;
+    let object_type = MemoryObjectType::from_byte(bytes[pos])
+        .ok_or(MemoryObjectDecodeError::InvalidObjectType { byte: bytes[pos] })?;
     pos += 1;
 
     // Owner entity
@@ -527,7 +525,8 @@ mod tests {
 
         let obj = MemoryObject::new(owner, MemoryObjectType::ChainSummary, 1000, data.clone());
 
-        let expected_id = MemoryObject::compute_id(&owner, MemoryObjectType::ChainSummary, 1000, &data);
+        let expected_id =
+            MemoryObject::compute_id(&owner, MemoryObjectType::ChainSummary, 1000, &data);
         assert_eq!(obj.object_id, expected_id);
         assert_eq!(obj.created_at, 1000);
         assert_eq!(obj.updated_at, 1000);
@@ -559,7 +558,10 @@ mod tests {
         let result = decode_memory_object_v1(&bytes);
         assert!(matches!(
             result,
-            Err(MemoryObjectDecodeError::BadVersion { expected: 1, got: 99 })
+            Err(MemoryObjectDecodeError::BadVersion {
+                expected: 1,
+                got: 99
+            })
         ));
     }
 
@@ -594,7 +596,8 @@ mod tests {
         let owner = [0x42u8; 32];
 
         // Valid size
-        let small_obj = MemoryObject::new(owner, MemoryObjectType::ChainSummary, 1000, vec![0u8; 100]);
+        let small_obj =
+            MemoryObject::new(owner, MemoryObjectType::ChainSummary, 1000, vec![0u8; 100]);
         assert!(small_obj.is_valid_size());
 
         // At limit
@@ -685,14 +688,23 @@ mod tests {
             let encoded = encode_memory_object_v1(&obj);
             let decoded = decode_memory_object_v1(&encoded).unwrap();
 
-            assert_eq!(obj.object_type, decoded.object_type, "Type {:?} failed", object_type);
+            assert_eq!(
+                obj.object_type, decoded.object_type,
+                "Type {:?} failed",
+                object_type
+            );
         }
     }
 
     #[test]
     fn encoding_is_deterministic() {
         let owner = [0x42u8; 32];
-        let obj = MemoryObject::new(owner, MemoryObjectType::ChainSummary, 1000, b"test".to_vec());
+        let obj = MemoryObject::new(
+            owner,
+            MemoryObjectType::ChainSummary,
+            1000,
+            b"test".to_vec(),
+        );
 
         let enc1 = encode_memory_object_v1(&obj);
         let enc2 = encode_memory_object_v1(&obj);

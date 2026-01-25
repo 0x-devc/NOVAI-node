@@ -76,6 +76,32 @@ pub const KEY_PREFIX_AI_MEMORY_COUNT: &[u8] = b"ai/memory_count/";
 pub const KEY_PREFIX_AI_MEMORY_BY_TYPE: &[u8] = b"ai/memory_by_type/";
 
 // ============================================================================
+// NNPX PRIVACY KEY PREFIXES (Week 22)
+// ============================================================================
+
+/// Canonical prefix for NNPX private data (Week 22 - D22.2).
+/// All keys with this prefix are routed to the `nnpx` column family.
+pub const KEY_PREFIX_NNPX: &[u8] = b"nnpx/";
+
+/// Canonical prefix for NNPX commitment records (Week 22).
+/// Key: `nnpx/commitments/{commitment_hash32}` -> PrivatePayloadCommitment
+pub const KEY_PREFIX_NNPX_COMMITMENTS: &[u8] = b"nnpx/commitments/";
+
+/// Canonical prefix for NNPX nullifier set (Week 22).
+/// Key: `nnpx/nullifiers/{nullifier32}` -> empty (presence indicates spent)
+pub const KEY_PREFIX_NNPX_NULLIFIERS: &[u8] = b"nnpx/nullifiers/";
+
+/// Canonical prefix for NNPX encrypted payloads (Week 22).
+/// Key: `nnpx/encrypted/{commitment_hash32}` -> encrypted bytes
+pub const KEY_PREFIX_NNPX_ENCRYPTED: &[u8] = b"nnpx/encrypted/";
+
+/// RocksDB column family name for private data.
+pub const CF_NNPX: &str = "nnpx";
+
+/// RocksDB column family name for public data (default).
+pub const CF_DEFAULT: &str = "default";
+
+// ============================================================================
 // GOVERNANCE STORAGE KEY PREFIXES (Week 19)
 // ============================================================================
 
@@ -228,7 +254,11 @@ pub fn ai_memory_count_key(entity_id: &[u8; 32]) -> Vec<u8> {
 /// `b"ai/memory_by_type/" ++ type_u8 ++ "/" ++ entity_id32 ++ "/" ++ object_id32`.
 ///
 /// This is a presence-only index (value is empty) for efficient type queries.
-pub fn ai_memory_by_type_key(object_type: u8, entity_id: &[u8; 32], object_id: &[u8; 32]) -> Vec<u8> {
+pub fn ai_memory_by_type_key(
+    object_type: u8,
+    entity_id: &[u8; 32],
+    object_id: &[u8; 32],
+) -> Vec<u8> {
     let mut k = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1 + 32 + 1 + 32);
     k.extend_from_slice(KEY_PREFIX_AI_MEMORY_BY_TYPE);
     k.push(object_type);
@@ -292,6 +322,46 @@ pub fn governance_proposal_by_state_key(state: u8, proposal_id: &[u8; 32]) -> Ve
     k.push(b'/');
     k.extend_from_slice(proposal_id);
     k
+}
+
+// ============================================================================
+// NNPX KEY BUILDER FUNCTIONS (Week 22)
+// ============================================================================
+
+/// Build canonical key for an NNPX commitment (Week 22 - D22.2):
+/// `b"nnpx/commitments/" ++ commitment_hash32`.
+pub fn nnpx_commitment_key(commitment_hash: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_NNPX_COMMITMENTS.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_NNPX_COMMITMENTS);
+    k.extend_from_slice(commitment_hash);
+    k
+}
+
+/// Build canonical key for an NNPX nullifier (Week 22 - D22.2):
+/// `b"nnpx/nullifiers/" ++ nullifier32`.
+pub fn nnpx_nullifier_key(nullifier: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_NNPX_NULLIFIERS.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_NNPX_NULLIFIERS);
+    k.extend_from_slice(nullifier);
+    k
+}
+
+/// Build canonical key for an NNPX encrypted payload (Week 22 - D22.2):
+/// `b"nnpx/encrypted/" ++ commitment_hash32`.
+pub fn nnpx_encrypted_key(commitment_hash: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_NNPX_ENCRYPTED.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_NNPX_ENCRYPTED);
+    k.extend_from_slice(commitment_hash);
+    k
+}
+
+/// Check if a key belongs to the NNPX private store.
+///
+/// Keys starting with `b"nnpx/"` are routed to the private column family.
+#[inline]
+#[must_use]
+pub fn is_nnpx_key(key: &[u8]) -> bool {
+    key.starts_with(KEY_PREFIX_NNPX)
 }
 
 /// Canonical mapping from variable-length state DB keys to 32-byte SMT keys.
@@ -618,10 +688,7 @@ mod tests {
         assert!(key.starts_with(KEY_PREFIX_AI_MEMORY_OBJECTS));
 
         // Check length: prefix + 32 + 1 (/) + 32
-        assert_eq!(
-            key.len(),
-            KEY_PREFIX_AI_MEMORY_OBJECTS.len() + 32 + 1 + 32
-        );
+        assert_eq!(key.len(), KEY_PREFIX_AI_MEMORY_OBJECTS.len() + 32 + 1 + 32);
     }
 
     #[test]
@@ -635,8 +702,14 @@ mod tests {
         let key_e1_o2 = ai_memory_object_key(&entity1, &object2);
         let key_e2_o1 = ai_memory_object_key(&entity2, &object1);
 
-        assert_ne!(key_e1_o1, key_e1_o2, "Different objects must have different keys");
-        assert_ne!(key_e1_o1, key_e2_o1, "Different entities must have different keys");
+        assert_ne!(
+            key_e1_o1, key_e1_o2,
+            "Different objects must have different keys"
+        );
+        assert_ne!(
+            key_e1_o1, key_e2_o1,
+            "Different entities must have different keys"
+        );
     }
 
     #[test]
@@ -720,5 +793,162 @@ mod tests {
         // Should be deterministic
         let smt_key2 = smt_key_for_state_key(&key);
         assert_eq!(smt_key, smt_key2);
+    }
+
+    // ========================================================================
+    // NNPX PRIVACY KEY TESTS (Week 22)
+    // ========================================================================
+
+    #[test]
+    fn test_nnpx_commitment_key_format() {
+        let commitment_hash = [0xABu8; 32];
+
+        let key = nnpx_commitment_key(&commitment_hash);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_NNPX_COMMITMENTS));
+
+        // Check length: prefix + 32
+        assert_eq!(key.len(), KEY_PREFIX_NNPX_COMMITMENTS.len() + 32);
+
+        // Verify it's an NNPX key
+        assert!(is_nnpx_key(&key));
+    }
+
+    #[test]
+    fn test_nnpx_nullifier_key_format() {
+        let nullifier = [0xCDu8; 32];
+
+        let key = nnpx_nullifier_key(&nullifier);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_NNPX_NULLIFIERS));
+
+        // Check length: prefix + 32
+        assert_eq!(key.len(), KEY_PREFIX_NNPX_NULLIFIERS.len() + 32);
+
+        // Verify it's an NNPX key
+        assert!(is_nnpx_key(&key));
+    }
+
+    #[test]
+    fn test_nnpx_encrypted_key_format() {
+        let commitment_hash = [0xEFu8; 32];
+
+        let key = nnpx_encrypted_key(&commitment_hash);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_NNPX_ENCRYPTED));
+
+        // Check length: prefix + 32
+        assert_eq!(key.len(), KEY_PREFIX_NNPX_ENCRYPTED.len() + 32);
+
+        // Verify it's an NNPX key
+        assert!(is_nnpx_key(&key));
+    }
+
+    #[test]
+    fn test_is_nnpx_key() {
+        // NNPX keys
+        assert!(is_nnpx_key(b"nnpx/"));
+        assert!(is_nnpx_key(b"nnpx/commitments/"));
+        assert!(is_nnpx_key(b"nnpx/nullifiers/abc"));
+        assert!(is_nnpx_key(b"nnpx/encrypted/xyz"));
+
+        // Non-NNPX keys
+        assert!(!is_nnpx_key(b"accounts/"));
+        assert!(!is_nnpx_key(b"ai/entities/"));
+        assert!(!is_nnpx_key(b"consensus/"));
+        assert!(!is_nnpx_key(b"governance/"));
+        assert!(!is_nnpx_key(b"smt/"));
+
+        // Edge cases
+        assert!(!is_nnpx_key(b"nnpx")); // Missing trailing slash
+        assert!(!is_nnpx_key(b"NNPX/")); // Case sensitive
+        assert!(!is_nnpx_key(b"")); // Empty
+    }
+
+    #[test]
+    fn test_nnpx_key_uniqueness() {
+        let hash1 = [0x01u8; 32];
+        let hash2 = [0x02u8; 32];
+
+        let key1 = nnpx_commitment_key(&hash1);
+        let key2 = nnpx_commitment_key(&hash2);
+        let key3 = nnpx_nullifier_key(&hash1);
+        let key4 = nnpx_encrypted_key(&hash1);
+
+        // Different hashes produce different keys
+        assert_ne!(key1, key2);
+
+        // Different key types produce different keys even with same hash
+        assert_ne!(key1, key3);
+        assert_ne!(key1, key4);
+        assert_ne!(key3, key4);
+    }
+
+    #[test]
+    fn test_memkv_nnpx_column_family_isolation() {
+        let mut db = MemKv::new();
+
+        // Write to both column families
+        let public_key = b"accounts/alice";
+        let private_key = b"nnpx/commitments/abc";
+
+        db.put(public_key, b"public_value").unwrap();
+        db.put(private_key, b"private_value").unwrap();
+
+        // Read back
+        assert_eq!(db.get(public_key).unwrap(), Some(b"public_value".to_vec()));
+        assert_eq!(
+            db.get(private_key).unwrap(),
+            Some(b"private_value".to_vec())
+        );
+
+        // Scan prefix should only return keys from the correct CF
+        let public_results = db.scan_prefix(b"accounts/").unwrap();
+        assert_eq!(public_results.len(), 1);
+        assert!(public_results[0].0.starts_with(b"accounts/"));
+
+        let private_results = db.scan_prefix(b"nnpx/").unwrap();
+        assert_eq!(private_results.len(), 1);
+        assert!(private_results[0].0.starts_with(b"nnpx/"));
+    }
+
+    #[test]
+    fn test_memkv_batch_with_nnpx_keys() {
+        let mut db = MemKv::new();
+
+        // Apply batch with mixed public and private keys
+        let ops = vec![
+            WriteOp::Put(b"accounts/bob".to_vec(), b"balance:100".to_vec()),
+            WriteOp::Put(b"nnpx/nullifiers/null1".to_vec(), b"".to_vec()),
+            WriteOp::Put(b"ai/entities/entity1".to_vec(), b"entity_data".to_vec()),
+            WriteOp::Put(b"nnpx/commitments/commit1".to_vec(), b"commitment".to_vec()),
+        ];
+
+        db.apply_batch(&ops).unwrap();
+
+        // Verify all keys are accessible
+        assert!(db.get(b"accounts/bob").unwrap().is_some());
+        assert!(db.get(b"nnpx/nullifiers/null1").unwrap().is_some());
+        assert!(db.get(b"ai/entities/entity1").unwrap().is_some());
+        assert!(db.get(b"nnpx/commitments/commit1").unwrap().is_some());
+
+        // Delete from both CFs
+        let delete_ops = vec![
+            WriteOp::Delete(b"accounts/bob".to_vec()),
+            WriteOp::Delete(b"nnpx/nullifiers/null1".to_vec()),
+        ];
+
+        db.apply_batch(&delete_ops).unwrap();
+
+        // Verify deletions
+        assert!(db.get(b"accounts/bob").unwrap().is_none());
+        assert!(db.get(b"nnpx/nullifiers/null1").unwrap().is_none());
+
+        // Others still exist
+        assert!(db.get(b"ai/entities/entity1").unwrap().is_some());
+        assert!(db.get(b"nnpx/commitments/commit1").unwrap().is_some());
     }
 }
