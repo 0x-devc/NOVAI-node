@@ -13,10 +13,12 @@
 //! - `verify` - Verification flow for payloads and memory (Week 15)
 //! - `memory` - On-chain memory objects for AI entities (Week 21)
 //! - `privacy` - NNPX privacy commitment types (Week 22)
+//! - `derived_views` - Derived views for AI privacy bridge (Week 23)
 
 use blake3::Hasher;
 
 pub mod artifacts;
+pub mod derived_views;
 pub mod gates;
 pub mod memory;
 pub mod payload;
@@ -26,6 +28,7 @@ pub mod tiers;
 pub mod verify;
 
 pub use artifacts::*;
+pub use derived_views::*;
 pub use gates::*;
 pub use memory::*;
 use novai_types::Address;

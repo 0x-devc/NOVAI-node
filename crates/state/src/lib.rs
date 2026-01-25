@@ -102,6 +102,31 @@ pub const CF_NNPX: &str = "nnpx";
 pub const CF_DEFAULT: &str = "default";
 
 // ============================================================================
+// DERIVED VIEWS KEY PREFIXES (Week 23)
+// ============================================================================
+
+/// Canonical prefix for derived view records (Week 23 - D23.5).
+/// Key: `derived_views/{view_id32}` -> DerivedView
+///
+/// Derived views are privacy-safe aggregates that AI entities can read
+/// (with `read_nnpx_derived` capability) without accessing raw private data.
+pub const KEY_PREFIX_DERIVED_VIEWS: &[u8] = b"derived_views/";
+
+/// Canonical prefix for derived view audit log (Week 23 - D23.5).
+/// Key: `derived_views/audit/{entity_id32}/{height_be8}` -> audit record
+///
+/// Records all AI entity reads of derived views for audit purposes.
+pub const KEY_PREFIX_DERIVED_VIEWS_AUDIT: &[u8] = b"derived_views/audit/";
+
+/// Canonical prefix for derived views indexed by schema (Week 23).
+/// Key: `derived_views/by_schema/{schema_id_be4}/{view_id32}` -> empty (presence index)
+pub const KEY_PREFIX_DERIVED_VIEWS_BY_SCHEMA: &[u8] = b"derived_views/by_schema/";
+
+/// Canonical prefix for derived views indexed by creator (Week 23).
+/// Key: `derived_views/by_creator/{creator32}/{view_id32}` -> empty (presence index)
+pub const KEY_PREFIX_DERIVED_VIEWS_BY_CREATOR: &[u8] = b"derived_views/by_creator/";
+
+// ============================================================================
 // GOVERNANCE STORAGE KEY PREFIXES (Week 19)
 // ============================================================================
 
@@ -362,6 +387,64 @@ pub fn nnpx_encrypted_key(commitment_hash: &[u8; 32]) -> Vec<u8> {
 #[must_use]
 pub fn is_nnpx_key(key: &[u8]) -> bool {
     key.starts_with(KEY_PREFIX_NNPX)
+}
+
+// ============================================================================
+// DERIVED VIEWS KEY BUILDER FUNCTIONS (Week 23)
+// ============================================================================
+
+/// Build canonical key for a derived view (Week 23 - D23.5):
+/// `b"derived_views/" ++ view_id32`.
+pub fn derived_view_key(view_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_DERIVED_VIEWS.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_DERIVED_VIEWS);
+    k.extend_from_slice(view_id);
+    k
+}
+
+/// Build canonical key for a derived view audit log entry (Week 23 - D23.5):
+/// `b"derived_views/audit/" ++ entity_id32 ++ "/" ++ height_be8`.
+///
+/// Uses big-endian height for lexicographic ordering in range scans.
+pub fn derived_view_audit_key(entity_id: &[u8; 32], height: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_DERIVED_VIEWS_AUDIT.len() + 32 + 1 + 8);
+    k.extend_from_slice(KEY_PREFIX_DERIVED_VIEWS_AUDIT);
+    k.extend_from_slice(entity_id);
+    k.push(b'/');
+    k.extend_from_slice(&height.to_be_bytes());
+    k
+}
+
+/// Build canonical key for derived view index by schema (Week 23):
+/// `b"derived_views/by_schema/" ++ schema_id_be4 ++ "/" ++ view_id32`.
+pub fn derived_view_by_schema_key(schema_id: u32, view_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_DERIVED_VIEWS_BY_SCHEMA.len() + 4 + 1 + 32);
+    k.extend_from_slice(KEY_PREFIX_DERIVED_VIEWS_BY_SCHEMA);
+    k.extend_from_slice(&schema_id.to_be_bytes());
+    k.push(b'/');
+    k.extend_from_slice(view_id);
+    k
+}
+
+/// Build canonical key for derived view index by creator (Week 23):
+/// `b"derived_views/by_creator/" ++ creator32 ++ "/" ++ view_id32`.
+pub fn derived_view_by_creator_key(creator: &[u8; 32], view_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_DERIVED_VIEWS_BY_CREATOR.len() + 32 + 1 + 32);
+    k.extend_from_slice(KEY_PREFIX_DERIVED_VIEWS_BY_CREATOR);
+    k.extend_from_slice(creator);
+    k.push(b'/');
+    k.extend_from_slice(view_id);
+    k
+}
+
+/// Check if a key belongs to the derived views store.
+///
+/// Keys starting with `b"derived_views/"` are derived view records.
+/// AI entities with `read_nnpx_derived` capability can access these.
+#[inline]
+#[must_use]
+pub fn is_derived_view_key(key: &[u8]) -> bool {
+    key.starts_with(KEY_PREFIX_DERIVED_VIEWS)
 }
 
 /// Canonical mapping from variable-length state DB keys to 32-byte SMT keys.
@@ -950,5 +1033,184 @@ mod tests {
         // Others still exist
         assert!(db.get(b"ai/entities/entity1").unwrap().is_some());
         assert!(db.get(b"nnpx/commitments/commit1").unwrap().is_some());
+    }
+
+    // ========================================================================
+    // DERIVED VIEWS KEY TESTS (Week 23)
+    // ========================================================================
+
+    #[test]
+    fn test_derived_view_key_format() {
+        let view_id = [0xABu8; 32];
+
+        let key = derived_view_key(&view_id);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_DERIVED_VIEWS));
+
+        // Check length: prefix + 32
+        assert_eq!(key.len(), KEY_PREFIX_DERIVED_VIEWS.len() + 32);
+
+        // Verify it's a derived view key
+        assert!(is_derived_view_key(&key));
+    }
+
+    #[test]
+    fn test_derived_view_audit_key_format() {
+        let entity_id = [0x42u8; 32];
+        let height = 12345u64;
+
+        let key = derived_view_audit_key(&entity_id, height);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_DERIVED_VIEWS_AUDIT));
+
+        // Check length: prefix + 32 + 1 (/) + 8
+        assert_eq!(key.len(), KEY_PREFIX_DERIVED_VIEWS_AUDIT.len() + 32 + 1 + 8);
+
+        // Verify it's a derived view key
+        assert!(is_derived_view_key(&key));
+    }
+
+    #[test]
+    fn test_derived_view_audit_key_ordering() {
+        let entity_id = [0x42u8; 32];
+
+        // Keys for different heights must be lexicographically ordered
+        let key_100 = derived_view_audit_key(&entity_id, 100);
+        let key_200 = derived_view_audit_key(&entity_id, 200);
+        let key_max = derived_view_audit_key(&entity_id, u64::MAX);
+
+        assert!(
+            key_100 < key_200,
+            "Height 100 key must be < height 200 key"
+        );
+        assert!(key_200 < key_max, "Height 200 key must be < max height key");
+    }
+
+    #[test]
+    fn test_derived_view_by_schema_key_format() {
+        let schema_id = 1u32;
+        let view_id = [0xCDu8; 32];
+
+        let key = derived_view_by_schema_key(schema_id, &view_id);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_DERIVED_VIEWS_BY_SCHEMA));
+
+        // Check length: prefix + 4 + 1 (/) + 32
+        assert_eq!(
+            key.len(),
+            KEY_PREFIX_DERIVED_VIEWS_BY_SCHEMA.len() + 4 + 1 + 32
+        );
+
+        // Verify it's a derived view key
+        assert!(is_derived_view_key(&key));
+    }
+
+    #[test]
+    fn test_derived_view_by_schema_key_ordering() {
+        let view_id = [0xCDu8; 32];
+
+        // Keys for different schemas must be lexicographically ordered
+        let key_schema1 = derived_view_by_schema_key(1, &view_id);
+        let key_schema2 = derived_view_by_schema_key(2, &view_id);
+        let key_schema3 = derived_view_by_schema_key(3, &view_id);
+
+        assert!(
+            key_schema1 < key_schema2,
+            "Schema 1 key must be < schema 2 key"
+        );
+        assert!(
+            key_schema2 < key_schema3,
+            "Schema 2 key must be < schema 3 key"
+        );
+    }
+
+    #[test]
+    fn test_derived_view_by_creator_key_format() {
+        let creator = [0xEFu8; 32];
+        let view_id = [0x12u8; 32];
+
+        let key = derived_view_by_creator_key(&creator, &view_id);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_DERIVED_VIEWS_BY_CREATOR));
+
+        // Check length: prefix + 32 + 1 (/) + 32
+        assert_eq!(
+            key.len(),
+            KEY_PREFIX_DERIVED_VIEWS_BY_CREATOR.len() + 32 + 1 + 32
+        );
+
+        // Verify it's a derived view key
+        assert!(is_derived_view_key(&key));
+    }
+
+    #[test]
+    fn test_is_derived_view_key() {
+        // Derived view keys
+        assert!(is_derived_view_key(b"derived_views/"));
+        assert!(is_derived_view_key(b"derived_views/abc123"));
+        assert!(is_derived_view_key(b"derived_views/audit/entity/100"));
+        assert!(is_derived_view_key(b"derived_views/by_schema/1/view"));
+        assert!(is_derived_view_key(b"derived_views/by_creator/addr/view"));
+
+        // Non-derived-view keys
+        assert!(!is_derived_view_key(b"accounts/"));
+        assert!(!is_derived_view_key(b"ai/entities/"));
+        assert!(!is_derived_view_key(b"nnpx/"));
+        assert!(!is_derived_view_key(b"governance/"));
+
+        // Edge cases
+        assert!(!is_derived_view_key(b"derived_views")); // Missing trailing slash
+        assert!(!is_derived_view_key(b"DERIVED_VIEWS/")); // Case sensitive
+        assert!(!is_derived_view_key(b"")); // Empty
+    }
+
+    #[test]
+    fn test_derived_view_key_uniqueness() {
+        let view_id1 = [0x01u8; 32];
+        let view_id2 = [0x02u8; 32];
+        let creator = [0x03u8; 32];
+
+        let key1 = derived_view_key(&view_id1);
+        let key2 = derived_view_key(&view_id2);
+        let key3 = derived_view_by_creator_key(&creator, &view_id1);
+        let key4 = derived_view_by_schema_key(1, &view_id1);
+
+        // Different view IDs produce different keys
+        assert_ne!(key1, key2);
+
+        // Different key types produce different keys even with same view ID
+        assert_ne!(key1, key3);
+        assert_ne!(key1, key4);
+        assert_ne!(key3, key4);
+    }
+
+    #[test]
+    fn test_derived_view_keys_produce_valid_smt_keys() {
+        let view_id = [0xABu8; 32];
+
+        let key = derived_view_key(&view_id);
+        let smt_key = smt_key_for_state_key(&key);
+
+        // Must be exactly 32 bytes
+        assert_eq!(smt_key.len(), 32);
+
+        // Should be deterministic
+        let smt_key2 = smt_key_for_state_key(&key);
+        assert_eq!(smt_key, smt_key2);
+    }
+
+    #[test]
+    fn test_derived_view_not_nnpx_key() {
+        // Derived view keys are NOT NNPX keys
+        // This is important: AI can read derived_views/ but not nnpx/
+        let view_id = [0xABu8; 32];
+        let key = derived_view_key(&view_id);
+
+        assert!(is_derived_view_key(&key), "Should be a derived view key");
+        assert!(!is_nnpx_key(&key), "Should NOT be an NNPX key");
     }
 }

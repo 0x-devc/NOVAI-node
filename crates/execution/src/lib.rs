@@ -93,6 +93,13 @@ pub enum ExecError<E> {
     NullifierAlreadySpent,
     /// Invalid private payload commitment.
     InvalidPrivateCommitment,
+    // Week 23 - Derived view errors (D23.5)
+    /// AI entity missing `read_nnpx_derived` capability.
+    DerivedViewAccessDenied,
+    /// Derived view not found.
+    DerivedViewNotFound,
+    /// Invalid derived view schema.
+    InvalidDerivedViewSchema { schema_id: u32 },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -1588,6 +1595,256 @@ pub fn is_private_key(key: &[u8]) -> bool {
     is_nnpx_key(key)
 }
 
+// ============================================================================
+// DERIVED VIEW ACCESS CONTROL (Week 23 - D23.5)
+// ============================================================================
+
+use novai_ai_entities::{
+    decode_derived_view_v1, encode_derived_view_v1, DerivedView, DerivedViewDecodeError,
+};
+use novai_state::{
+    derived_view_audit_key, derived_view_by_creator_key, derived_view_by_schema_key,
+    derived_view_key, is_derived_view_key, KEY_PREFIX_DERIVED_VIEWS,
+};
+
+/// Validate that an AI entity can read derived views.
+///
+/// # Access Control (D23.5)
+///
+/// AI entities can ONLY read derived views if they have the `read_nnpx_derived` capability.
+/// This capability grants access to privacy-safe aggregates without exposing raw private data.
+///
+/// # Arguments
+///
+/// - `entity`: The AI entity attempting to read
+///
+/// # Errors
+///
+/// Returns `DerivedViewAccessDenied` if the entity lacks the `read_nnpx_derived` capability.
+#[inline]
+#[allow(clippy::missing_const_for_fn)] // Generic functions cannot be const in stable Rust
+pub fn validate_derived_view_access<E>(
+    entity: &novai_ai_entities::AiEntity,
+) -> Result<(), ExecError<E>> {
+    if !entity.capabilities.read_nnpx_derived {
+        return Err(ExecError::DerivedViewAccessDenied);
+    }
+    Ok(())
+}
+
+/// Read a derived view from storage with access control.
+///
+/// # Access Control (D23.5)
+///
+/// 1. Validates the AI entity has `read_nnpx_derived` capability
+/// 2. Reads the derived view from storage
+/// 3. Creates an audit log entry (returned as `WriteOp`)
+///
+/// # Arguments
+///
+/// - `db`: Database handle
+/// - `entity`: AI entity performing the read
+/// - `view_id`: ID of the derived view to read
+/// - `current_height`: Current block height (for audit log)
+///
+/// # Returns
+///
+/// On success, returns `(DerivedView, WriteOp)` where `WriteOp` is the audit log entry.
+///
+/// # Errors
+///
+/// - `DerivedViewAccessDenied`: Entity lacks capability
+/// - `DerivedViewNotFound`: View doesn't exist
+/// - `Db`: Database error
+pub fn read_derived_view_with_audit<K: Kv>(
+    db: &K,
+    entity: &novai_ai_entities::AiEntity,
+    view_id: &[u8; 32],
+    current_height: u64,
+) -> Result<(DerivedView, WriteOp), ExecError<K::Error>> {
+    // Step 1: Validate capability
+    validate_derived_view_access(entity)?;
+
+    // Step 2: Read derived view
+    let key = derived_view_key(view_id);
+    let bytes = db
+        .get(&key)
+        .map_err(ExecError::Db)?
+        .ok_or(ExecError::DerivedViewNotFound)?;
+
+    let view = decode_derived_view_v1(&bytes).map_err(|e| match e {
+        DerivedViewDecodeError::InvalidSchemaId { id } => {
+            ExecError::InvalidDerivedViewSchema { schema_id: id }
+        }
+        _ => ExecError::Overflow, // Map other decode errors
+    })?;
+
+    // Step 3: Create audit log entry
+    let audit_op = create_derived_view_audit_entry(&entity.id, view_id, current_height);
+
+    Ok((view, audit_op))
+}
+
+/// Read a derived view without access control (for internal use).
+///
+/// Use this only for protocol-level operations that don't require capability checks.
+///
+/// # Errors
+///
+/// - `DerivedViewNotFound`: View doesn't exist
+/// - `Db`: Database error
+pub fn read_derived_view<K: Kv>(
+    db: &K,
+    view_id: &[u8; 32],
+) -> Result<Option<DerivedView>, ExecError<K::Error>> {
+    let key = derived_view_key(view_id);
+    match db.get(&key).map_err(ExecError::Db)? {
+        None => Ok(None),
+        Some(bytes) => {
+            let view = decode_derived_view_v1(&bytes).map_err(|e| match e {
+                DerivedViewDecodeError::InvalidSchemaId { id } => {
+                    ExecError::InvalidDerivedViewSchema { schema_id: id }
+                }
+                _ => ExecError::Overflow,
+            })?;
+            Ok(Some(view))
+        }
+    }
+}
+
+/// Create a `WriteOp` to store a derived view.
+///
+/// Also creates index entries for schema and creator lookups.
+///
+/// # Returns
+///
+/// Vector of `WriteOps` for atomic batch:
+/// 1. Primary view storage
+/// 2. Schema index entry
+/// 3. Creator index entry
+#[must_use]
+pub fn write_derived_view_ops(view: &DerivedView) -> Vec<WriteOp> {
+    let mut ops = Vec::with_capacity(3);
+
+    // Primary storage
+    let primary_key = derived_view_key(&view.view_id);
+    let encoded = encode_derived_view_v1(view);
+    ops.push(WriteOp::Put(primary_key, encoded));
+
+    // Schema index
+    let schema_key = derived_view_by_schema_key(view.schema_id, &view.view_id);
+    ops.push(WriteOp::Put(schema_key, vec![])); // Presence-only index
+
+    // Creator index
+    let creator_key = derived_view_by_creator_key(&view.creator, &view.view_id);
+    ops.push(WriteOp::Put(creator_key, vec![])); // Presence-only index
+
+    ops
+}
+
+/// Create an audit log entry for a derived view read.
+///
+/// # Audit Log Format (D23.5)
+///
+/// Key: `derived_views/audit/{entity_id}/{height}`
+/// Value: `{view_id}` (32 bytes)
+///
+/// This records that the given AI entity read a derived view at the given height.
+#[must_use]
+pub fn create_derived_view_audit_entry(
+    entity_id: &[u8; 32],
+    view_id: &[u8; 32],
+    height: u64,
+) -> WriteOp {
+    let key = derived_view_audit_key(entity_id, height);
+    WriteOp::Put(key, view_id.to_vec())
+}
+
+/// Query derived views by schema ID.
+///
+/// Returns all derived views with the given schema.
+///
+/// # Errors
+///
+/// Returns error if DB read fails or stored data is malformed.
+pub fn get_derived_views_by_schema<K: Kv>(
+    db: &K,
+    schema_id: u32,
+) -> Result<Vec<DerivedView>, ExecError<K::Error>> {
+    // Build prefix: "derived_views/by_schema/" ++ schema_id_be4 ++ "/"
+    let mut prefix = Vec::with_capacity(
+        KEY_PREFIX_DERIVED_VIEWS.len() + "by_schema/".len() + 4 + 1,
+    );
+    prefix.extend_from_slice(b"derived_views/by_schema/");
+    prefix.extend_from_slice(&schema_id.to_be_bytes());
+    prefix.push(b'/');
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let mut results = Vec::with_capacity(entries.len());
+    for (key, _value) in entries {
+        // Extract view_id from key (last 32 bytes)
+        if key.len() >= 32 {
+            let mut view_id = [0u8; 32];
+            view_id.copy_from_slice(&key[key.len() - 32..]);
+
+            // Read the actual view
+            if let Some(view) = read_derived_view(db, &view_id)? {
+                results.push(view);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Query derived views by creator.
+///
+/// Returns all derived views created by the given address/entity.
+///
+/// # Errors
+///
+/// Returns error if DB read fails or stored data is malformed.
+pub fn get_derived_views_by_creator<K: Kv>(
+    db: &K,
+    creator: &[u8; 32],
+) -> Result<Vec<DerivedView>, ExecError<K::Error>> {
+    // Build prefix: "derived_views/by_creator/" ++ creator32 ++ "/"
+    let mut prefix = Vec::with_capacity(
+        KEY_PREFIX_DERIVED_VIEWS.len() + "by_creator/".len() + 32 + 1,
+    );
+    prefix.extend_from_slice(b"derived_views/by_creator/");
+    prefix.extend_from_slice(creator);
+    prefix.push(b'/');
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let mut results = Vec::with_capacity(entries.len());
+    for (key, _value) in entries {
+        // Extract view_id from key (last 32 bytes)
+        if key.len() >= 32 {
+            let mut view_id = [0u8; 32];
+            view_id.copy_from_slice(&key[key.len() - 32..]);
+
+            // Read the actual view
+            if let Some(view) = read_derived_view(db, &view_id)? {
+                results.push(view);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Check if a key is a derived view key.
+///
+/// Convenience re-export for use in execution logic.
+#[inline]
+#[must_use]
+pub fn is_derived_view(key: &[u8]) -> bool {
+    is_derived_view_key(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2332,5 +2589,400 @@ mod tests {
         assert_eq!(ai1, ai1_copy, "Same AI entity should be equal");
         assert_ne!(ai1, ai2, "Different AI entities should not be equal");
         assert_ne!(ai1, account, "AI entity and account should not be equal");
+    }
+
+    // ========================================================================
+    // DERIVED VIEWS BOUNDARY TESTS (Week 23 - D23.6)
+    // ========================================================================
+
+    use novai_ai_entities::{AggregateVolumeData, DerivedSourceType, DerivedView};
+
+    /// Helper: Create an AI entity with derived view read capability.
+    fn create_entity_with_derived_capability() -> novai_ai_entities::AiEntity {
+        let code_hash = [0xAAu8; 32];
+        let creator = [0xBBu8; 32];
+        let caps = Capabilities {
+            read_nnpx_derived: true,
+            read_public_chain: true,
+            ..Capabilities::default()
+        };
+
+        novai_ai_entities::AiEntity::new(
+            code_hash,
+            creator,
+            AutonomyMode::Advisory,
+            caps,
+            1000,
+        )
+    }
+
+    /// Helper: Create an AI entity WITHOUT derived view read capability.
+    fn create_entity_without_derived_capability() -> novai_ai_entities::AiEntity {
+        let code_hash = [0xCCu8; 32];
+        let creator = [0xDDu8; 32];
+        let caps = Capabilities {
+            read_nnpx_derived: false,
+            read_public_chain: true,
+            ..Capabilities::default()
+        };
+
+        novai_ai_entities::AiEntity::new(
+            code_hash,
+            creator,
+            AutonomyMode::Advisory,
+            caps,
+            1000,
+        )
+    }
+
+    /// Helper: Create a test derived view.
+    fn create_test_derived_view(creator: [u8; 32]) -> DerivedView {
+        let data = AggregateVolumeData {
+            start_height: 100,
+            end_height: 200,
+            total_volume: 1_000_000,
+        }
+        .encode();
+
+        DerivedView::new(
+            DerivedSourceType::ChainAggregate,
+            1, // AggregateVolume schema
+            1000,
+            creator,
+            data,
+        )
+        .expect("Valid derived view")
+    }
+
+    #[test]
+    fn ai_reads_derived_view_with_capability() {
+        // D23.6: AI entity with read_nnpx_derived capability can read derived views
+        let mut db = MemKv::new();
+
+        // Create an entity WITH derived view capability
+        let entity = create_entity_with_derived_capability();
+        assert!(
+            entity.capabilities.read_nnpx_derived,
+            "Test entity should have capability"
+        );
+
+        // Create and store a derived view
+        let creator = [0x42u8; 32];
+        let view = create_test_derived_view(creator);
+        let view_id = view.view_id;
+
+        // Store the view
+        let ops = write_derived_view_ops(&view);
+        db.apply_batch(&ops).unwrap();
+
+        // Entity with capability can read the view
+        let result = read_derived_view_with_audit(&db, &entity, &view_id, 2000);
+        assert!(result.is_ok(), "Entity with capability should read view");
+
+        let (read_view, audit_op) = result.unwrap();
+        assert_eq!(read_view.view_id, view.view_id);
+        assert_eq!(read_view.schema_id, 1);
+        assert_eq!(read_view.source_type, DerivedSourceType::ChainAggregate);
+
+        // Verify audit op was created
+        match audit_op {
+            WriteOp::Put(key, value) => {
+                assert!(
+                    key.starts_with(b"derived_views/audit/"),
+                    "Audit key should have correct prefix"
+                );
+                assert_eq!(value.len(), 32, "Audit value should be view_id");
+            }
+            WriteOp::Delete(_) => panic!("Audit should be a Put, not Delete"),
+        }
+    }
+
+    #[test]
+    fn ai_cannot_read_derived_view_without_capability() {
+        // D23.6: AI entity WITHOUT read_nnpx_derived capability is denied
+        let mut db = MemKv::new();
+
+        // Create an entity WITHOUT derived view capability
+        let entity = create_entity_without_derived_capability();
+        assert!(
+            !entity.capabilities.read_nnpx_derived,
+            "Test entity should NOT have capability"
+        );
+
+        // Create and store a derived view
+        let creator = [0x42u8; 32];
+        let view = create_test_derived_view(creator);
+        let view_id = view.view_id;
+
+        let ops = write_derived_view_ops(&view);
+        db.apply_batch(&ops).unwrap();
+
+        // Entity without capability is denied
+        let result = read_derived_view_with_audit(&db, &entity, &view_id, 2000);
+        assert!(
+            matches!(result, Err(ExecError::DerivedViewAccessDenied)),
+            "Entity without capability should be denied"
+        );
+    }
+
+    #[test]
+    fn ai_cannot_read_raw_nnpx_even_with_derived_capability() {
+        // D23.6: AI entity with read_nnpx_derived still cannot read raw NNPX data
+        let entity = create_entity_with_derived_capability();
+        assert!(
+            entity.capabilities.read_nnpx_derived,
+            "Entity should have derived capability"
+        );
+
+        let ai_caller = Caller::AiEntity(entity.id);
+
+        // AI entity is still blocked from raw NNPX keys
+        let nnpx_key = b"nnpx/commitments/secret123";
+        let result: Result<(), ExecError<()>> = validate_nnpx_access(nnpx_key, &ai_caller);
+        assert!(
+            matches!(result, Err(ExecError::NnpxAccessDenied)),
+            "AI must STILL be blocked from raw NNPX even with derived capability"
+        );
+
+        // But derived_views/ keys are NOT nnpx keys
+        let derived_key = b"derived_views/view123";
+        assert!(!is_private_key(derived_key), "Derived views are not NNPX");
+        assert!(is_derived_view(derived_key), "Should be a derived view key");
+    }
+
+    #[test]
+    fn derived_view_schema_validated() {
+        // D23.6: Invalid schema is rejected
+        let creator = [0x42u8; 32];
+
+        // Valid schema (AggregateVolume = 1)
+        let valid_data = AggregateVolumeData {
+            start_height: 0,
+            end_height: 100,
+            total_volume: 0,
+        }
+        .encode();
+
+        let view = DerivedView::new(
+            DerivedSourceType::ChainAggregate,
+            1, // Valid schema
+            1000,
+            creator,
+            valid_data.clone(),
+        );
+        assert!(view.is_some(), "Valid schema should create view");
+
+        // Invalid schema ID (99 doesn't exist)
+        let view = DerivedView::new(
+            DerivedSourceType::ChainAggregate,
+            99, // Invalid schema
+            1000,
+            creator,
+            valid_data,
+        );
+        assert!(view.is_none(), "Invalid schema should fail");
+
+        // Invalid data length for schema
+        let wrong_length_data = vec![0u8; 10]; // AggregateVolume needs 32 bytes
+        let view = DerivedView::new(
+            DerivedSourceType::ChainAggregate,
+            1,
+            1000,
+            creator,
+            wrong_length_data,
+        );
+        assert!(view.is_none(), "Wrong data length should fail");
+    }
+
+    #[test]
+    fn derived_view_not_found_returns_error() {
+        let db = MemKv::new();
+        let entity = create_entity_with_derived_capability();
+
+        // Try to read non-existent view
+        let missing_id = [0xFFu8; 32];
+        let result = read_derived_view_with_audit(&db, &entity, &missing_id, 1000);
+        assert!(
+            matches!(result, Err(ExecError::DerivedViewNotFound)),
+            "Missing view should return NotFound error"
+        );
+    }
+
+    #[test]
+    fn derived_view_write_creates_indices() {
+        let mut db = MemKv::new();
+
+        let creator = [0x42u8; 32];
+        let view = create_test_derived_view(creator);
+
+        // Write the view
+        let ops = write_derived_view_ops(&view);
+        assert_eq!(ops.len(), 3, "Should create 3 WriteOps (primary + 2 indices)");
+
+        db.apply_batch(&ops).unwrap();
+
+        // Verify primary storage
+        let primary_key = derived_view_key(&view.view_id);
+        assert!(
+            db.get(&primary_key).unwrap().is_some(),
+            "Primary storage should exist"
+        );
+
+        // Verify schema index
+        let schema_key = derived_view_by_schema_key(view.schema_id, &view.view_id);
+        assert!(
+            db.get(&schema_key).unwrap().is_some(),
+            "Schema index should exist"
+        );
+
+        // Verify creator index
+        let creator_key = derived_view_by_creator_key(&view.creator, &view.view_id);
+        assert!(
+            db.get(&creator_key).unwrap().is_some(),
+            "Creator index should exist"
+        );
+    }
+
+    #[test]
+    fn query_derived_views_by_schema() {
+        let mut db = MemKv::new();
+
+        let creator = [0x42u8; 32];
+
+        // Create multiple views with same schema
+        let view1 = create_test_derived_view(creator);
+
+        // Create another view with different created_at to get different ID
+        let data2 = AggregateVolumeData {
+            start_height: 200,
+            end_height: 300,
+            total_volume: 2_000_000,
+        }
+        .encode();
+        let view2 = DerivedView::new(
+            DerivedSourceType::ChainAggregate,
+            1, // Same schema
+            2000,
+            creator,
+            data2,
+        )
+        .unwrap();
+
+        // Store both views
+        db.apply_batch(&write_derived_view_ops(&view1)).unwrap();
+        db.apply_batch(&write_derived_view_ops(&view2)).unwrap();
+
+        // Query by schema
+        let results = get_derived_views_by_schema(&db, 1).unwrap();
+        assert_eq!(results.len(), 2, "Should find 2 views with schema 1");
+
+        // Query non-existent schema
+        let results = get_derived_views_by_schema(&db, 99).unwrap();
+        assert_eq!(results.len(), 0, "Should find 0 views with schema 99");
+    }
+
+    #[test]
+    fn query_derived_views_by_creator() {
+        let mut db = MemKv::new();
+
+        let creator1 = [0x42u8; 32];
+        let creator2 = [0x43u8; 32];
+
+        // Create views from different creators
+        let view1 = create_test_derived_view(creator1);
+
+        let data2 = AggregateVolumeData {
+            start_height: 200,
+            end_height: 300,
+            total_volume: 2_000_000,
+        }
+        .encode();
+        let view2 = DerivedView::new(
+            DerivedSourceType::UserAuthorized,
+            1,
+            2000,
+            creator2, // Different creator
+            data2,
+        )
+        .unwrap();
+
+        // Store both views
+        db.apply_batch(&write_derived_view_ops(&view1)).unwrap();
+        db.apply_batch(&write_derived_view_ops(&view2)).unwrap();
+
+        // Query by creator1
+        let results = get_derived_views_by_creator(&db, &creator1).unwrap();
+        assert_eq!(results.len(), 1, "Should find 1 view from creator1");
+        assert_eq!(results[0].creator, creator1);
+
+        // Query by creator2
+        let results = get_derived_views_by_creator(&db, &creator2).unwrap();
+        assert_eq!(results.len(), 1, "Should find 1 view from creator2");
+        assert_eq!(results[0].creator, creator2);
+
+        // Query by non-existent creator
+        let creator3 = [0x44u8; 32];
+        let results = get_derived_views_by_creator(&db, &creator3).unwrap();
+        assert_eq!(results.len(), 0, "Should find 0 views from creator3");
+    }
+
+    #[test]
+    fn validate_derived_view_access_function() {
+        // Test the access validation function directly
+        let entity_with = create_entity_with_derived_capability();
+        let entity_without = create_entity_without_derived_capability();
+
+        let result: Result<(), ExecError<()>> = validate_derived_view_access(&entity_with);
+        assert!(result.is_ok(), "Entity with capability should pass");
+
+        let result: Result<(), ExecError<()>> = validate_derived_view_access(&entity_without);
+        assert!(
+            matches!(result, Err(ExecError::DerivedViewAccessDenied)),
+            "Entity without capability should fail"
+        );
+    }
+
+    #[test]
+    fn is_derived_view_function() {
+        // Test the is_derived_view helper
+        assert!(is_derived_view(b"derived_views/"));
+        assert!(is_derived_view(b"derived_views/view123"));
+        assert!(is_derived_view(b"derived_views/audit/entity/100"));
+
+        assert!(!is_derived_view(b"nnpx/"));
+        assert!(!is_derived_view(b"accounts/"));
+        assert!(!is_derived_view(b"ai/entities/"));
+    }
+
+    #[test]
+    fn all_schemas_are_valid() {
+        // Verify all predefined schemas can create views
+        let creator = [0x42u8; 32];
+
+        // Schema 1: AggregateVolume
+        let data1 = AggregateVolumeData {
+            start_height: 0,
+            end_height: 100,
+            total_volume: 0,
+        }
+        .encode();
+        assert!(DerivedView::new(DerivedSourceType::ChainAggregate, 1, 0, creator, data1).is_some());
+
+        // Schema 2: ActivityCount
+        let data2 = novai_ai_entities::ActivityCountData {
+            start_height: 0,
+            end_height: 100,
+            tx_count: 0,
+        }
+        .encode();
+        assert!(DerivedView::new(DerivedSourceType::ChainAggregate, 2, 0, creator, data2).is_some());
+
+        // Schema 3: PoolSize
+        let data3 = novai_ai_entities::PoolSizeData {
+            snapshot_height: 0,
+            pool_size: 0,
+        }
+        .encode();
+        assert!(DerivedView::new(DerivedSourceType::ChainAggregate, 3, 0, creator, data3).is_some());
     }
 }
