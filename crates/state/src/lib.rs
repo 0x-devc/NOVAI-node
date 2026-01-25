@@ -60,6 +60,22 @@ pub const KEY_PREFIX_AI_SIGNALS_BY_TYPE: &[u8] = b"ai/signals/by_type/";
 pub const KEY_PREFIX_AI_SIGNALS_BY_ISSUER: &[u8] = b"ai/signals/by_issuer/";
 
 // ============================================================================
+// AI MEMORY OBJECT KEY PREFIXES (Week 21)
+// ============================================================================
+
+/// Canonical prefix for AI memory object records (Week 21 - D21.3).
+/// Key: `ai/memory_objects/{entity_id32}/{object_id32}` → MemoryObject
+pub const KEY_PREFIX_AI_MEMORY_OBJECTS: &[u8] = b"ai/memory_objects/";
+
+/// Canonical prefix for AI memory object count per entity (Week 21 - D21.3).
+/// Key: `ai/memory_count/{entity_id32}` → u32 count (big-endian)
+pub const KEY_PREFIX_AI_MEMORY_COUNT: &[u8] = b"ai/memory_count/";
+
+/// Canonical prefix for AI memory objects indexed by type (Week 21).
+/// Key: `ai/memory_by_type/{type_u8}/{entity_id32}/{object_id32}` → empty (presence index)
+pub const KEY_PREFIX_AI_MEMORY_BY_TYPE: &[u8] = b"ai/memory_by_type/";
+
+// ============================================================================
 // GOVERNANCE STORAGE KEY PREFIXES (Week 19)
 // ============================================================================
 
@@ -180,6 +196,66 @@ pub fn ai_signal_by_issuer_key(issuer: &[u8; 32], height: u64) -> Vec<u8> {
     k.push(b'/');
     k.extend_from_slice(&height.to_be_bytes());
     k
+}
+
+// ============================================================================
+// AI MEMORY OBJECT KEY BUILDER FUNCTIONS (Week 21)
+// ============================================================================
+
+/// Build canonical key for an AI memory object (Week 21 - D21.3):
+/// `b"ai/memory_objects/" ++ entity_id32 ++ "/" ++ object_id32`.
+pub fn ai_memory_object_key(entity_id: &[u8; 32], object_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_OBJECTS.len() + 32 + 1 + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_MEMORY_OBJECTS);
+    k.extend_from_slice(entity_id);
+    k.push(b'/');
+    k.extend_from_slice(object_id);
+    k
+}
+
+/// Build canonical key for AI memory object count per entity (Week 21 - D21.3):
+/// `b"ai/memory_count/" ++ entity_id32`.
+///
+/// Value is a u32 count encoded as big-endian 4 bytes.
+pub fn ai_memory_count_key(entity_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_COUNT.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_MEMORY_COUNT);
+    k.extend_from_slice(entity_id);
+    k
+}
+
+/// Build canonical key for AI memory object index by type (Week 21):
+/// `b"ai/memory_by_type/" ++ type_u8 ++ "/" ++ entity_id32 ++ "/" ++ object_id32`.
+///
+/// This is a presence-only index (value is empty) for efficient type queries.
+pub fn ai_memory_by_type_key(object_type: u8, entity_id: &[u8; 32], object_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1 + 32 + 1 + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_MEMORY_BY_TYPE);
+    k.push(object_type);
+    k.push(b'/');
+    k.extend_from_slice(entity_id);
+    k.push(b'/');
+    k.extend_from_slice(object_id);
+    k
+}
+
+/// Encode a memory object count as big-endian bytes.
+#[must_use]
+pub fn encode_memory_count(count: u32) -> [u8; 4] {
+    count.to_be_bytes()
+}
+
+/// Decode a memory object count from big-endian bytes.
+///
+/// Returns 0 if bytes are invalid length.
+#[must_use]
+pub fn decode_memory_count(bytes: &[u8]) -> u32 {
+    if bytes.len() != 4 {
+        return 0;
+    }
+    let mut arr = [0u8; 4];
+    arr.copy_from_slice(bytes);
+    u32::from_be_bytes(arr)
 }
 
 // ============================================================================
@@ -525,5 +601,124 @@ mod tests {
             final_root, EXPECTED_ROOT,
             "AI-inclusive root must match golden vector"
         );
+    }
+
+    // ========================================================================
+    // AI MEMORY OBJECT KEY TESTS (Week 21)
+    // ========================================================================
+
+    #[test]
+    fn test_memory_object_key_format() {
+        let entity_id = [0x42u8; 32];
+        let object_id = [0xAAu8; 32];
+
+        let key = ai_memory_object_key(&entity_id, &object_id);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_AI_MEMORY_OBJECTS));
+
+        // Check length: prefix + 32 + 1 (/) + 32
+        assert_eq!(
+            key.len(),
+            KEY_PREFIX_AI_MEMORY_OBJECTS.len() + 32 + 1 + 32
+        );
+    }
+
+    #[test]
+    fn test_memory_object_key_uniqueness() {
+        let entity1 = [0x01u8; 32];
+        let entity2 = [0x02u8; 32];
+        let object1 = [0xAAu8; 32];
+        let object2 = [0xBBu8; 32];
+
+        let key_e1_o1 = ai_memory_object_key(&entity1, &object1);
+        let key_e1_o2 = ai_memory_object_key(&entity1, &object2);
+        let key_e2_o1 = ai_memory_object_key(&entity2, &object1);
+
+        assert_ne!(key_e1_o1, key_e1_o2, "Different objects must have different keys");
+        assert_ne!(key_e1_o1, key_e2_o1, "Different entities must have different keys");
+    }
+
+    #[test]
+    fn test_memory_count_key_format() {
+        let entity_id = [0x42u8; 32];
+
+        let key = ai_memory_count_key(&entity_id);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_AI_MEMORY_COUNT));
+
+        // Check length: prefix + 32
+        assert_eq!(key.len(), KEY_PREFIX_AI_MEMORY_COUNT.len() + 32);
+    }
+
+    #[test]
+    fn test_memory_count_encode_decode_roundtrip() {
+        for count in [0u32, 1, 50, 100, 1000, u32::MAX] {
+            let encoded = encode_memory_count(count);
+            let decoded = decode_memory_count(&encoded);
+            assert_eq!(count, decoded, "Count {} roundtrip failed", count);
+        }
+    }
+
+    #[test]
+    fn test_memory_count_decode_invalid_length() {
+        // Too short
+        assert_eq!(decode_memory_count(&[1, 2, 3]), 0);
+        // Too long
+        assert_eq!(decode_memory_count(&[1, 2, 3, 4, 5]), 0);
+        // Empty
+        assert_eq!(decode_memory_count(&[]), 0);
+    }
+
+    #[test]
+    fn test_memory_by_type_key_format() {
+        let entity_id = [0x42u8; 32];
+        let object_id = [0xAAu8; 32];
+        let object_type = 2u8; // EmbeddingCommitment
+
+        let key = ai_memory_by_type_key(object_type, &entity_id, &object_id);
+
+        // Check prefix
+        assert!(key.starts_with(KEY_PREFIX_AI_MEMORY_BY_TYPE));
+
+        // Check type byte is in correct position
+        assert_eq!(key[KEY_PREFIX_AI_MEMORY_BY_TYPE.len()], object_type);
+
+        // Check length: prefix + 1 (type) + 1 (/) + 32 + 1 (/) + 32
+        assert_eq!(
+            key.len(),
+            KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1 + 32 + 1 + 32
+        );
+    }
+
+    #[test]
+    fn test_memory_by_type_key_ordering() {
+        let entity_id = [0x42u8; 32];
+        let object_id = [0xAAu8; 32];
+
+        // Keys for different types should be ordered by type byte
+        let key_type0 = ai_memory_by_type_key(0, &entity_id, &object_id);
+        let key_type1 = ai_memory_by_type_key(1, &entity_id, &object_id);
+        let key_type4 = ai_memory_by_type_key(4, &entity_id, &object_id);
+
+        assert!(key_type0 < key_type1, "Type 0 key must be < type 1 key");
+        assert!(key_type1 < key_type4, "Type 1 key must be < type 4 key");
+    }
+
+    #[test]
+    fn test_memory_object_keys_produce_valid_smt_keys() {
+        let entity_id = [0x42u8; 32];
+        let object_id = [0xAAu8; 32];
+
+        let key = ai_memory_object_key(&entity_id, &object_id);
+        let smt_key = smt_key_for_state_key(&key);
+
+        // Must be exactly 32 bytes
+        assert_eq!(smt_key.len(), 32);
+
+        // Should be deterministic
+        let smt_key2 = smt_key_for_state_key(&key);
+        assert_eq!(smt_key, smt_key2);
     }
 }

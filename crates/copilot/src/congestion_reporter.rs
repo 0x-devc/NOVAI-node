@@ -128,10 +128,7 @@ impl CongestionReporter {
     ///
     /// This is purely data generation - NO parameter changes are made.
     #[must_use]
-    pub fn create_report(
-        &self,
-        forecast: &CongestionForecast,
-    ) -> (SignalPayload, AiSignalV1) {
+    pub fn create_report(&self, forecast: &CongestionForecast) -> (SignalPayload, AiSignalV1) {
         let payload = self.create_payload(forecast);
         let payload_hash = payload.compute_hash();
         let signal = self.create_signal(forecast, payload_hash);
@@ -171,7 +168,11 @@ fn build_explanation(forecast: &CongestionForecast) -> String {
 
     // Block size recommendation
     if let Some(ref size_rec) = forecast.block_size_recommendation {
-        let direction = if size_rec.adjustment_pct >= 0 { "+" } else { "" };
+        let direction = if size_rec.adjustment_pct >= 0 {
+            "+"
+        } else {
+            ""
+        };
         parts.push(format!(
             "BLOCK SIZE RECOMMENDATION (ADVISORY): {}{}% - {}",
             direction, size_rec.adjustment_pct, size_rec.rationale
@@ -432,8 +433,8 @@ mod tests {
     #[test]
     fn integration_full_pipeline() {
         // Integration test: Full pipeline from stats -> forecast -> report
-        use crate::congestion_stats::CongestionStats;
         use crate::congestion_forecaster::CongestionForecaster;
+        use crate::congestion_stats::CongestionStats;
 
         // Step 1: Create CongestionStats with window size 10
         let mut stats = CongestionStats::new(10);
@@ -449,7 +450,9 @@ mod tests {
 
         // Step 3: Create CongestionForecaster and forecast
         let forecaster = CongestionForecaster::new();
-        let forecast = forecaster.forecast(&stats).expect("Should have sufficient data");
+        let forecast = forecaster
+            .forecast(&stats)
+            .expect("Should have sufficient data");
 
         // Step 4: Create CongestionReporter and create_report
         let signing_key = test_signing_key();

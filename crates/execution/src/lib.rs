@@ -67,6 +67,25 @@ pub enum ExecError<E> {
     IssuerMissingCapability,
     /// Issuer entity ID in payload does not match tx.from.
     IssuerMismatch,
+    // Week 21 - Memory object errors (D21.4)
+    /// Memory object data exceeds maximum size.
+    MemoryObjectTooLarge {
+        size: usize,
+        max: usize,
+    },
+    /// Entity has too many memory objects.
+    MemoryObjectCountExceeded {
+        count: u32,
+        max: u32,
+    },
+    /// Memory object not found.
+    MemoryObjectNotFound,
+    /// Invalid memory object type byte.
+    InvalidMemoryObjectType {
+        byte: u8,
+    },
+    /// Entity does not own the memory object.
+    MemoryObjectOwnerMismatch,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -186,6 +205,204 @@ pub fn decode_signal_commitment_payload_v1(
         signal_type,
         issuer_entity_id,
     })
+}
+
+// ============================================================================
+// MEMORY OBJECT PAYLOADS (Week 21 - D21.4)
+// ============================================================================
+
+/// Create memory object payload version.
+pub const CREATE_MEMORY_OBJECT_PAYLOAD_V1: u8 = 3;
+
+/// Update memory object payload version.
+pub const UPDATE_MEMORY_OBJECT_PAYLOAD_V1: u8 = 4;
+
+/// Delete memory object payload version.
+pub const DELETE_MEMORY_OBJECT_PAYLOAD_V1: u8 = 5;
+
+/// Create Memory Object payload (D21.4):
+/// `[version:1][object_type:1][data_len_be:4][data:var]`
+///
+/// Minimum size: 6 bytes (empty data)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateMemoryObjectPayloadV1 {
+    /// Type of memory object to create.
+    pub object_type: novai_ai_entities::MemoryObjectType,
+    /// Initial data for the object.
+    pub data: Vec<u8>,
+}
+
+/// Deterministically encode a create memory object payload.
+#[must_use]
+pub fn encode_create_memory_object_payload_v1(p: &CreateMemoryObjectPayloadV1) -> Vec<u8> {
+    let mut out = Vec::with_capacity(6 + p.data.len());
+    out.push(CREATE_MEMORY_OBJECT_PAYLOAD_V1);
+    out.push(p.object_type.to_byte());
+    #[allow(clippy::cast_possible_truncation)]
+    let data_len = p.data.len() as u32;
+    out.extend_from_slice(&data_len.to_be_bytes());
+    out.extend_from_slice(&p.data);
+    out
+}
+
+/// Deterministically decode a create memory object payload.
+///
+/// # Errors
+/// Returns error if payload is malformed.
+pub fn decode_create_memory_object_payload_v1(
+    payload: &[u8],
+) -> Result<CreateMemoryObjectPayloadV1, ExecError<()>> {
+    const MIN_LEN: usize = 6; // version + type + data_len
+    if payload.len() < MIN_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: MIN_LEN,
+            got: payload.len(),
+        });
+    }
+
+    let ver = payload[0];
+    if ver != CREATE_MEMORY_OBJECT_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: CREATE_MEMORY_OBJECT_PAYLOAD_V1,
+            got: ver,
+        });
+    }
+
+    let object_type = novai_ai_entities::MemoryObjectType::from_byte(payload[1])
+        .ok_or(ExecError::InvalidMemoryObjectType { byte: payload[1] })?;
+
+    let mut data_len_bytes = [0u8; 4];
+    data_len_bytes.copy_from_slice(&payload[2..6]);
+    let data_len = u32::from_be_bytes(data_len_bytes) as usize;
+
+    if payload.len() != MIN_LEN + data_len {
+        return Err(ExecError::BadPayloadLength {
+            expected: MIN_LEN + data_len,
+            got: payload.len(),
+        });
+    }
+
+    let data = payload[6..].to_vec();
+
+    Ok(CreateMemoryObjectPayloadV1 { object_type, data })
+}
+
+/// Update Memory Object payload (D21.4):
+/// `[version:1][object_id:32][data_len_be:4][new_data:var]`
+///
+/// Minimum size: 37 bytes (empty data)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateMemoryObjectPayloadV1 {
+    /// ID of the memory object to update.
+    pub object_id: [u8; 32],
+    /// New data for the object.
+    pub new_data: Vec<u8>,
+}
+
+/// Deterministically encode an update memory object payload.
+#[must_use]
+pub fn encode_update_memory_object_payload_v1(p: &UpdateMemoryObjectPayloadV1) -> Vec<u8> {
+    let mut out = Vec::with_capacity(37 + p.new_data.len());
+    out.push(UPDATE_MEMORY_OBJECT_PAYLOAD_V1);
+    out.extend_from_slice(&p.object_id);
+    #[allow(clippy::cast_possible_truncation)]
+    let data_len = p.new_data.len() as u32;
+    out.extend_from_slice(&data_len.to_be_bytes());
+    out.extend_from_slice(&p.new_data);
+    out
+}
+
+/// Deterministically decode an update memory object payload.
+///
+/// # Errors
+/// Returns error if payload is malformed.
+pub fn decode_update_memory_object_payload_v1(
+    payload: &[u8],
+) -> Result<UpdateMemoryObjectPayloadV1, ExecError<()>> {
+    const MIN_LEN: usize = 37; // version + object_id + data_len
+    if payload.len() < MIN_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: MIN_LEN,
+            got: payload.len(),
+        });
+    }
+
+    let ver = payload[0];
+    if ver != UPDATE_MEMORY_OBJECT_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: UPDATE_MEMORY_OBJECT_PAYLOAD_V1,
+            got: ver,
+        });
+    }
+
+    let mut object_id = [0u8; 32];
+    object_id.copy_from_slice(&payload[1..33]);
+
+    let mut data_len_bytes = [0u8; 4];
+    data_len_bytes.copy_from_slice(&payload[33..37]);
+    let data_len = u32::from_be_bytes(data_len_bytes) as usize;
+
+    if payload.len() != MIN_LEN + data_len {
+        return Err(ExecError::BadPayloadLength {
+            expected: MIN_LEN + data_len,
+            got: payload.len(),
+        });
+    }
+
+    let new_data = payload[37..].to_vec();
+
+    Ok(UpdateMemoryObjectPayloadV1 {
+        object_id,
+        new_data,
+    })
+}
+
+/// Delete Memory Object payload (D21.4):
+/// `[version:1][object_id:32]`
+///
+/// Total size: 33 bytes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteMemoryObjectPayloadV1 {
+    /// ID of the memory object to delete.
+    pub object_id: [u8; 32],
+}
+
+/// Deterministically encode a delete memory object payload.
+#[must_use]
+pub fn encode_delete_memory_object_payload_v1(p: &DeleteMemoryObjectPayloadV1) -> [u8; 33] {
+    let mut out = [0u8; 33];
+    out[0] = DELETE_MEMORY_OBJECT_PAYLOAD_V1;
+    out[1..33].copy_from_slice(&p.object_id);
+    out
+}
+
+/// Deterministically decode a delete memory object payload.
+///
+/// # Errors
+/// Returns error if payload is malformed.
+pub fn decode_delete_memory_object_payload_v1(
+    payload: &[u8],
+) -> Result<DeleteMemoryObjectPayloadV1, ExecError<()>> {
+    const LEN: usize = 33;
+    if payload.len() != LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: LEN,
+            got: payload.len(),
+        });
+    }
+
+    let ver = payload[0];
+    if ver != DELETE_MEMORY_OBJECT_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: DELETE_MEMORY_OBJECT_PAYLOAD_V1,
+            got: ver,
+        });
+    }
+
+    let mut object_id = [0u8; 32];
+    object_id.copy_from_slice(&payload[1..33]);
+
+    Ok(DeleteMemoryObjectPayloadV1 { object_id })
 }
 
 fn u64_to_u128_checked(x: u64) -> u128 {
@@ -774,6 +991,402 @@ pub fn apply_signal_commitment_tx<K: KvBatch>(
 }
 
 // ============================================================================
+// MEMORY OBJECT EXECUTION (Week 21 - D21.4)
+// ============================================================================
+
+use novai_ai_entities::{
+    decode_memory_object_v1, encode_memory_object_v1, MemoryObject, MAX_MEMORY_OBJECTS_PER_ENTITY,
+    MAX_MEMORY_OBJECT_SIZE,
+};
+use novai_state::{
+    ai_memory_by_type_key, ai_memory_count_key, ai_memory_object_key, decode_memory_count,
+    encode_memory_count, KEY_PREFIX_AI_MEMORY_OBJECTS,
+};
+
+/// Read memory object count for an entity.
+fn read_memory_count<K: Kv>(db: &K, entity_id: &[u8; 32]) -> Result<u32, ExecError<K::Error>> {
+    let key = ai_memory_count_key(entity_id);
+    Ok(db
+        .get(&key)
+        .map_err(ExecError::Db)?
+        .map_or(0, |bytes| decode_memory_count(&bytes)))
+}
+
+/// Read a memory object from storage.
+///
+/// # Errors
+/// Returns error if DB read fails or stored data is malformed.
+pub fn read_memory_object<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+    object_id: &[u8; 32],
+) -> Result<Option<MemoryObject>, ExecError<K::Error>> {
+    let key = ai_memory_object_key(entity_id, object_id);
+    match db.get(&key).map_err(ExecError::Db)? {
+        None => Ok(None),
+        Some(bytes) => {
+            let obj = decode_memory_object_v1(&bytes).map_err(|_| ExecError::Overflow)?;
+            Ok(Some(obj))
+        }
+    }
+}
+
+/// Apply a `CreateMemoryObject` transaction.
+///
+/// # Validation (D21.4)
+/// 1. Entity must exist and match tx.from
+/// 2. Entity must have `read_memory_objects` capability
+/// 3. Data size must not exceed `MAX_MEMORY_OBJECT_SIZE`
+/// 4. Entity must not exceed `MAX_MEMORY_OBJECTS_PER_ENTITY`
+/// 5. Nonce must be correct
+/// 6. Sufficient balance for fee
+///
+/// # State Changes
+/// - Create memory object with computed ID
+/// - Store at `ai/memory_objects/{entity}/{object_id}`
+/// - Create type index at `ai/memory_by_type/{type}/{entity}/{object_id}`
+/// - Increment memory count
+/// - Deduct fee, increment nonce, update `last_active_at`
+///
+/// # Errors
+/// Returns error if validation fails or DB error occurs.
+pub fn apply_create_memory_object_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<[u8; 32], ExecError<K::Error>> {
+    // Decode payload
+    let payload = decode_create_memory_object_payload_v1(&tx.payload).map_err(|e| match e {
+        ExecError::BadPayloadLength { expected, got } => {
+            ExecError::BadPayloadLength { expected, got }
+        }
+        ExecError::BadPayloadVersion { expected, got } => {
+            ExecError::BadPayloadVersion { expected, got }
+        }
+        ExecError::InvalidMemoryObjectType { byte } => ExecError::InvalidMemoryObjectType { byte },
+        _ => ExecError::Overflow,
+    })?;
+
+    // Validate data size
+    if payload.data.len() > MAX_MEMORY_OBJECT_SIZE {
+        return Err(ExecError::MemoryObjectTooLarge {
+            size: payload.data.len(),
+            max: MAX_MEMORY_OBJECT_SIZE,
+        });
+    }
+
+    // Load and validate AI entity
+    let mut entity = read_ai_entity(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
+
+    // Validate capability
+    if !entity.capabilities.read_memory_objects {
+        return Err(ExecError::IssuerMissingCapability);
+    }
+
+    // Validate nonce
+    if tx.nonce != entity.nonce {
+        return Err(ExecError::NonceMismatch {
+            expected: entity.nonce,
+            got: tx.nonce,
+        });
+    }
+
+    // Validate balance
+    let fee_u128 = u128::from(tx.fee);
+    if entity.economic_balance < fee_u128 {
+        return Err(ExecError::InsufficientFunds {
+            balance: entity.economic_balance,
+            needed: fee_u128,
+        });
+    }
+
+    // Check memory object count limit
+    let current_count = read_memory_count(db, &tx.from)?;
+    if current_count >= MAX_MEMORY_OBJECTS_PER_ENTITY {
+        return Err(ExecError::MemoryObjectCountExceeded {
+            count: current_count,
+            max: MAX_MEMORY_OBJECTS_PER_ENTITY,
+        });
+    }
+
+    // Create memory object
+    let memory_object =
+        MemoryObject::new(tx.from, payload.object_type, current_height, payload.data);
+    let object_id = memory_object.object_id;
+    let encoded = encode_memory_object_v1(&memory_object);
+
+    // Update entity state
+    entity.economic_balance = entity
+        .economic_balance
+        .checked_sub(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+    entity.nonce = entity
+        .nonce
+        .checked_add(1)
+        .ok_or(ExecError::NonceOverflow)?;
+    entity.last_active_at = current_height;
+
+    // Build atomic batch
+    let mut ops = Vec::new();
+
+    // Store memory object
+    let obj_key = ai_memory_object_key(&tx.from, &object_id);
+    ops.push(WriteOp::Put(obj_key, encoded));
+
+    // Type index
+    let type_key = ai_memory_by_type_key(payload.object_type.to_byte(), &tx.from, &object_id);
+    ops.push(WriteOp::Put(type_key, vec![])); // Presence-only index
+
+    // Update count
+    let count_key = ai_memory_count_key(&tx.from);
+    ops.push(WriteOp::Put(
+        count_key,
+        encode_memory_count(current_count + 1).to_vec(),
+    ));
+
+    // Update entity
+    ops.push(write_ai_entity_op(&entity));
+
+    // Apply atomically
+    db.apply_batch(&ops).map_err(ExecError::Db)?;
+
+    Ok(object_id)
+}
+
+/// Apply an `UpdateMemoryObject` transaction.
+///
+/// # Validation (D21.4)
+/// 1. Entity must exist and match tx.from
+/// 2. Memory object must exist and be owned by entity
+/// 3. New data size must not exceed `MAX_MEMORY_OBJECT_SIZE`
+/// 4. Nonce must be correct
+/// 5. Sufficient balance for fee
+///
+/// # State Changes
+/// - Update memory object data and `updated_at`
+/// - Deduct fee, increment nonce, update `last_active_at`
+///
+/// # Errors
+/// Returns error if validation fails or DB error occurs.
+pub fn apply_update_memory_object_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
+    // Decode payload
+    let payload = decode_update_memory_object_payload_v1(&tx.payload).map_err(|e| match e {
+        ExecError::BadPayloadLength { expected, got } => {
+            ExecError::BadPayloadLength { expected, got }
+        }
+        ExecError::BadPayloadVersion { expected, got } => {
+            ExecError::BadPayloadVersion { expected, got }
+        }
+        _ => ExecError::Overflow,
+    })?;
+
+    // Validate data size
+    if payload.new_data.len() > MAX_MEMORY_OBJECT_SIZE {
+        return Err(ExecError::MemoryObjectTooLarge {
+            size: payload.new_data.len(),
+            max: MAX_MEMORY_OBJECT_SIZE,
+        });
+    }
+
+    // Load and validate AI entity
+    let mut entity = read_ai_entity(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
+
+    // Validate nonce
+    if tx.nonce != entity.nonce {
+        return Err(ExecError::NonceMismatch {
+            expected: entity.nonce,
+            got: tx.nonce,
+        });
+    }
+
+    // Validate balance
+    let fee_u128 = u128::from(tx.fee);
+    if entity.economic_balance < fee_u128 {
+        return Err(ExecError::InsufficientFunds {
+            balance: entity.economic_balance,
+            needed: fee_u128,
+        });
+    }
+
+    // Load memory object
+    let mut memory_object = read_memory_object(db, &tx.from, &payload.object_id)?
+        .ok_or(ExecError::MemoryObjectNotFound)?;
+
+    // Validate ownership
+    if memory_object.owner_entity != tx.from {
+        return Err(ExecError::MemoryObjectOwnerMismatch);
+    }
+
+    // Update memory object
+    memory_object.data = payload.new_data;
+    memory_object.updated_at = current_height;
+    let encoded = encode_memory_object_v1(&memory_object);
+
+    // Update entity state
+    entity.economic_balance = entity
+        .economic_balance
+        .checked_sub(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+    entity.nonce = entity
+        .nonce
+        .checked_add(1)
+        .ok_or(ExecError::NonceOverflow)?;
+    entity.last_active_at = current_height;
+
+    // Build atomic batch
+    let mut ops = Vec::new();
+
+    // Update memory object
+    let obj_key = ai_memory_object_key(&tx.from, &payload.object_id);
+    ops.push(WriteOp::Put(obj_key, encoded));
+
+    // Update entity
+    ops.push(write_ai_entity_op(&entity));
+
+    // Apply atomically
+    db.apply_batch(&ops).map_err(ExecError::Db)?;
+
+    Ok(())
+}
+
+/// Apply a `DeleteMemoryObject` transaction.
+///
+/// # Validation (D21.4)
+/// 1. Entity must exist and match tx.from
+/// 2. Memory object must exist and be owned by entity
+/// 3. Nonce must be correct
+/// 4. Sufficient balance for fee
+///
+/// # State Changes
+/// - Delete memory object
+/// - Delete type index
+/// - Decrement memory count
+/// - Deduct fee, increment nonce, update `last_active_at`
+///
+/// # Errors
+/// Returns error if validation fails or DB error occurs.
+pub fn apply_delete_memory_object_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
+    // Decode payload
+    let payload = decode_delete_memory_object_payload_v1(&tx.payload).map_err(|e| match e {
+        ExecError::BadPayloadLength { expected, got } => {
+            ExecError::BadPayloadLength { expected, got }
+        }
+        ExecError::BadPayloadVersion { expected, got } => {
+            ExecError::BadPayloadVersion { expected, got }
+        }
+        _ => ExecError::Overflow,
+    })?;
+
+    // Load and validate AI entity
+    let mut entity = read_ai_entity(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
+
+    // Validate nonce
+    if tx.nonce != entity.nonce {
+        return Err(ExecError::NonceMismatch {
+            expected: entity.nonce,
+            got: tx.nonce,
+        });
+    }
+
+    // Validate balance
+    let fee_u128 = u128::from(tx.fee);
+    if entity.economic_balance < fee_u128 {
+        return Err(ExecError::InsufficientFunds {
+            balance: entity.economic_balance,
+            needed: fee_u128,
+        });
+    }
+
+    // Load memory object
+    let memory_object = read_memory_object(db, &tx.from, &payload.object_id)?
+        .ok_or(ExecError::MemoryObjectNotFound)?;
+
+    // Validate ownership
+    if memory_object.owner_entity != tx.from {
+        return Err(ExecError::MemoryObjectOwnerMismatch);
+    }
+
+    // Get current count
+    let current_count = read_memory_count(db, &tx.from)?;
+
+    // Update entity state
+    entity.economic_balance = entity
+        .economic_balance
+        .checked_sub(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+    entity.nonce = entity
+        .nonce
+        .checked_add(1)
+        .ok_or(ExecError::NonceOverflow)?;
+    entity.last_active_at = current_height;
+
+    // Build atomic batch
+    let mut ops = Vec::new();
+
+    // Delete memory object
+    let obj_key = ai_memory_object_key(&tx.from, &payload.object_id);
+    ops.push(WriteOp::Delete(obj_key));
+
+    // Delete type index
+    let type_key = ai_memory_by_type_key(
+        memory_object.object_type.to_byte(),
+        &tx.from,
+        &payload.object_id,
+    );
+    ops.push(WriteOp::Delete(type_key));
+
+    // Update count (decrement, but don't go below 0)
+    let count_key = ai_memory_count_key(&tx.from);
+    ops.push(WriteOp::Put(
+        count_key,
+        encode_memory_count(current_count.saturating_sub(1)).to_vec(),
+    ));
+
+    // Update entity
+    ops.push(write_ai_entity_op(&entity));
+
+    // Apply atomically
+    db.apply_batch(&ops).map_err(ExecError::Db)?;
+
+    Ok(())
+}
+
+/// Query all memory objects for an entity.
+///
+/// Returns all memory objects owned by the entity.
+///
+/// # Errors
+/// Returns error if DB read fails or stored data is malformed.
+pub fn get_memory_objects_by_entity<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+) -> Result<Vec<MemoryObject>, ExecError<K::Error>> {
+    // Build prefix: "ai/memory_objects/" ++ entity_id ++ "/"
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_OBJECTS.len() + 32 + 1);
+    prefix.extend_from_slice(KEY_PREFIX_AI_MEMORY_OBJECTS);
+    prefix.extend_from_slice(entity_id);
+    prefix.push(b'/');
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let mut results = Vec::with_capacity(entries.len());
+    for (_key, value) in entries {
+        let obj = decode_memory_object_v1(&value).map_err(|_| ExecError::Overflow)?;
+        results.push(obj);
+    }
+
+    Ok(results)
+}
+
+// ============================================================================
 // SIGNAL QUERY FUNCTIONS (Week 14 - D14.5)
 // ============================================================================
 
@@ -1015,5 +1628,422 @@ mod tests {
         // Verify gone
         let val_after = read_ai_memory(&db, &entity, slot).unwrap();
         assert!(val_after.is_none(), "Memory slot should be deleted");
+    }
+
+    // ========================================================================
+    // MEMORY OBJECT PAYLOAD TESTS (Week 21 - D21.4)
+    // ========================================================================
+
+    #[test]
+    fn create_memory_object_payload_roundtrip() {
+        use novai_ai_entities::MemoryObjectType;
+
+        let payload = CreateMemoryObjectPayloadV1 {
+            object_type: MemoryObjectType::ChainSummary,
+            data: b"test chain summary data".to_vec(),
+        };
+
+        let encoded = encode_create_memory_object_payload_v1(&payload);
+        let decoded = decode_create_memory_object_payload_v1(&encoded).unwrap();
+
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn create_memory_object_payload_all_types() {
+        use novai_ai_entities::MemoryObjectType;
+
+        for obj_type in [
+            MemoryObjectType::ChainSummary,
+            MemoryObjectType::LabelIndex,
+            MemoryObjectType::EmbeddingCommitment,
+            MemoryObjectType::AnomalyLog,
+            MemoryObjectType::StatisticsSnapshot,
+        ] {
+            let payload = CreateMemoryObjectPayloadV1 {
+                object_type: obj_type,
+                data: vec![0xAA, 0xBB, 0xCC],
+            };
+
+            let encoded = encode_create_memory_object_payload_v1(&payload);
+            let decoded = decode_create_memory_object_payload_v1(&encoded).unwrap();
+
+            assert_eq!(decoded.object_type, obj_type);
+            assert_eq!(decoded.data, payload.data);
+        }
+    }
+
+    #[test]
+    fn update_memory_object_payload_roundtrip() {
+        let payload = UpdateMemoryObjectPayloadV1 {
+            object_id: [0xABu8; 32],
+            new_data: b"updated data content".to_vec(),
+        };
+
+        let encoded = encode_update_memory_object_payload_v1(&payload);
+        let decoded = decode_update_memory_object_payload_v1(&encoded).unwrap();
+
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn delete_memory_object_payload_roundtrip() {
+        let payload = DeleteMemoryObjectPayloadV1 {
+            object_id: [0xCDu8; 32],
+        };
+
+        let encoded = encode_delete_memory_object_payload_v1(&payload);
+        let decoded = decode_delete_memory_object_payload_v1(&encoded).unwrap();
+
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn create_memory_object_payload_empty_data() {
+        use novai_ai_entities::MemoryObjectType;
+
+        let payload = CreateMemoryObjectPayloadV1 {
+            object_type: MemoryObjectType::LabelIndex,
+            data: vec![], // Empty data
+        };
+
+        let encoded = encode_create_memory_object_payload_v1(&payload);
+        assert_eq!(encoded.len(), 6); // version(1) + type(1) + data_len(4)
+
+        let decoded = decode_create_memory_object_payload_v1(&encoded).unwrap();
+        assert_eq!(decoded.data.len(), 0);
+    }
+
+    // ========================================================================
+    // MEMORY OBJECT CRUD EXECUTION TESTS (Week 21 - D21.4)
+    // ========================================================================
+
+    /// Helper to create an AI entity with memory capabilities.
+    fn setup_test_entity_for_memory(db: &mut MemKv) -> AiEntity {
+        let mut entity = AiEntity::new(
+            [0x42u8; 32], // code_hash
+            [0x01u8; 32], // creator
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            1000, // registered_at
+        );
+        entity.economic_balance = 1_000_000u128;
+
+        let op = write_ai_entity_op(&entity);
+        db.apply_batch(&[op]).unwrap();
+
+        entity
+    }
+
+    /// Helper to build a create memory object tx.
+    fn mk_create_memory_tx(
+        entity_id: [u8; 32],
+        nonce: u64,
+        fee: u64,
+        object_type: novai_ai_entities::MemoryObjectType,
+        data: Vec<u8>,
+    ) -> TxV1 {
+        use novai_types::TxVersion;
+
+        let payload = encode_create_memory_object_payload_v1(&CreateMemoryObjectPayloadV1 {
+            object_type,
+            data,
+        });
+
+        TxV1 {
+            version: TxVersion::V1,
+            from: entity_id,
+            pubkey: entity_id,
+            nonce,
+            fee,
+            payload,
+            sig: [0u8; 64],
+        }
+    }
+
+    /// Helper to build an update memory object tx.
+    fn mk_update_memory_tx(
+        entity_id: [u8; 32],
+        nonce: u64,
+        fee: u64,
+        object_id: [u8; 32],
+        new_data: Vec<u8>,
+    ) -> TxV1 {
+        use novai_types::TxVersion;
+
+        let payload = encode_update_memory_object_payload_v1(&UpdateMemoryObjectPayloadV1 {
+            object_id,
+            new_data,
+        });
+
+        TxV1 {
+            version: TxVersion::V1,
+            from: entity_id,
+            pubkey: entity_id,
+            nonce,
+            fee,
+            payload,
+            sig: [0u8; 64],
+        }
+    }
+
+    /// Helper to build a delete memory object tx.
+    fn mk_delete_memory_tx(entity_id: [u8; 32], nonce: u64, fee: u64, object_id: [u8; 32]) -> TxV1 {
+        use novai_types::TxVersion;
+
+        let payload =
+            encode_delete_memory_object_payload_v1(&DeleteMemoryObjectPayloadV1 { object_id })
+                .to_vec();
+
+        TxV1 {
+            version: TxVersion::V1,
+            from: entity_id,
+            pubkey: entity_id,
+            nonce,
+            fee,
+            payload,
+            sig: [0u8; 64],
+        }
+    }
+
+    #[test]
+    fn create_memory_object_success() {
+        use novai_ai_entities::MemoryObjectType;
+
+        let mut db = MemKv::new();
+        let entity = setup_test_entity_for_memory(&mut db);
+
+        let tx = mk_create_memory_tx(
+            entity.id,
+            0, // nonce
+            1, // fee
+            MemoryObjectType::ChainSummary,
+            b"chain summary data".to_vec(),
+        );
+
+        let object_id = apply_create_memory_object_tx(&mut db, &tx, 2000).unwrap();
+
+        // Verify object was created
+        let obj = read_memory_object(&db, &entity.id, &object_id)
+            .unwrap()
+            .expect("Object should exist");
+        assert_eq!(obj.object_type, MemoryObjectType::ChainSummary);
+        assert_eq!(obj.data, b"chain summary data".to_vec());
+        assert_eq!(obj.owner_entity, entity.id);
+        assert_eq!(obj.created_at, 2000);
+        assert_eq!(obj.updated_at, 2000);
+
+        // Verify count was incremented
+        let count = read_memory_count(&db, &entity.id).unwrap();
+        assert_eq!(count, 1);
+
+        // Verify entity state was updated
+        let updated_entity = read_ai_entity(&db, &entity.id).unwrap().unwrap();
+        assert_eq!(updated_entity.nonce, 1);
+        assert_eq!(updated_entity.last_active_at, 2000);
+    }
+
+    #[test]
+    fn create_memory_object_size_limit_enforced() {
+        use novai_ai_entities::{MemoryObjectType, MAX_MEMORY_OBJECT_SIZE};
+
+        let mut db = MemKv::new();
+        let entity = setup_test_entity_for_memory(&mut db);
+
+        // Try to create object exceeding size limit
+        let oversized_data = vec![0xAAu8; MAX_MEMORY_OBJECT_SIZE + 1];
+        let tx = mk_create_memory_tx(
+            entity.id,
+            0,
+            1,
+            MemoryObjectType::ChainSummary,
+            oversized_data,
+        );
+
+        let result = apply_create_memory_object_tx(&mut db, &tx, 2000);
+        assert!(matches!(
+            result,
+            Err(ExecError::MemoryObjectTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn create_memory_object_count_limit_enforced() {
+        use novai_ai_entities::{MemoryObjectType, MAX_MEMORY_OBJECTS_PER_ENTITY};
+        use novai_state::{ai_memory_count_key, encode_memory_count};
+
+        let mut db = MemKv::new();
+        let entity = setup_test_entity_for_memory(&mut db);
+
+        // Set count to max - this simulates having max objects already
+        let count_key = ai_memory_count_key(&entity.id);
+        db.put(&count_key, &encode_memory_count(MAX_MEMORY_OBJECTS_PER_ENTITY))
+            .unwrap();
+
+        let tx = mk_create_memory_tx(
+            entity.id,
+            0,
+            1,
+            MemoryObjectType::ChainSummary,
+            b"data".to_vec(),
+        );
+
+        let result = apply_create_memory_object_tx(&mut db, &tx, 2000);
+        assert!(matches!(
+            result,
+            Err(ExecError::MemoryObjectCountExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn update_memory_object_success() {
+        use novai_ai_entities::MemoryObjectType;
+
+        let mut db = MemKv::new();
+        let entity = setup_test_entity_for_memory(&mut db);
+
+        // Create an object first
+        let create_tx = mk_create_memory_tx(
+            entity.id,
+            0,
+            1,
+            MemoryObjectType::StatisticsSnapshot,
+            b"initial data".to_vec(),
+        );
+        let object_id = apply_create_memory_object_tx(&mut db, &create_tx, 2000).unwrap();
+
+        // Update the object
+        let update_tx = mk_update_memory_tx(
+            entity.id,
+            1, // nonce incremented
+            1,
+            object_id,
+            b"updated data".to_vec(),
+        );
+        apply_update_memory_object_tx(&mut db, &update_tx, 3000).unwrap();
+
+        // Verify update
+        let obj = read_memory_object(&db, &entity.id, &object_id)
+            .unwrap()
+            .expect("Object should exist");
+        assert_eq!(obj.data, b"updated data".to_vec());
+        assert_eq!(obj.created_at, 2000); // unchanged
+        assert_eq!(obj.updated_at, 3000); // updated
+    }
+
+    #[test]
+    fn update_memory_object_not_found() {
+        let mut db = MemKv::new();
+        let entity = setup_test_entity_for_memory(&mut db);
+
+        // Try to update non-existent object
+        let update_tx = mk_update_memory_tx(
+            entity.id,
+            0,
+            1,
+            [0xFFu8; 32], // non-existent object ID
+            b"data".to_vec(),
+        );
+
+        let result = apply_update_memory_object_tx(&mut db, &update_tx, 2000);
+        assert!(matches!(result, Err(ExecError::MemoryObjectNotFound)));
+    }
+
+    #[test]
+    fn delete_memory_object_success() {
+        use novai_ai_entities::MemoryObjectType;
+
+        let mut db = MemKv::new();
+        let entity = setup_test_entity_for_memory(&mut db);
+
+        // Create an object first
+        let create_tx = mk_create_memory_tx(
+            entity.id,
+            0,
+            1,
+            MemoryObjectType::AnomalyLog,
+            b"anomaly data".to_vec(),
+        );
+        let object_id = apply_create_memory_object_tx(&mut db, &create_tx, 2000).unwrap();
+
+        // Verify it exists
+        let count_before = read_memory_count(&db, &entity.id).unwrap();
+        assert_eq!(count_before, 1);
+
+        // Delete the object
+        let delete_tx = mk_delete_memory_tx(
+            entity.id, 1, // nonce incremented
+            1, object_id,
+        );
+        apply_delete_memory_object_tx(&mut db, &delete_tx, 3000).unwrap();
+
+        // Verify deletion
+        let obj = read_memory_object(&db, &entity.id, &object_id).unwrap();
+        assert!(obj.is_none(), "Object should be deleted");
+
+        // Verify count was decremented
+        let count_after = read_memory_count(&db, &entity.id).unwrap();
+        assert_eq!(count_after, 0);
+    }
+
+    #[test]
+    fn delete_memory_object_not_found() {
+        let mut db = MemKv::new();
+        let entity = setup_test_entity_for_memory(&mut db);
+
+        // Try to delete non-existent object
+        let delete_tx = mk_delete_memory_tx(
+            entity.id,
+            0,
+            1,
+            [0xFFu8; 32], // non-existent object ID
+        );
+
+        let result = apply_delete_memory_object_tx(&mut db, &delete_tx, 2000);
+        assert!(matches!(result, Err(ExecError::MemoryObjectNotFound)));
+    }
+
+    #[test]
+    fn memory_object_crud_full_lifecycle() {
+        use novai_ai_entities::MemoryObjectType;
+
+        let mut db = MemKv::new();
+        let entity = setup_test_entity_for_memory(&mut db);
+        let mut nonce = 0u64;
+
+        // 1. Create
+        let create_tx = mk_create_memory_tx(
+            entity.id,
+            nonce,
+            1,
+            MemoryObjectType::EmbeddingCommitment,
+            b"embedding v1".to_vec(),
+        );
+        nonce += 1;
+        let object_id = apply_create_memory_object_tx(&mut db, &create_tx, 1000).unwrap();
+
+        // 2. Read
+        let obj = read_memory_object(&db, &entity.id, &object_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(obj.data, b"embedding v1".to_vec());
+
+        // 3. Update
+        let update_tx =
+            mk_update_memory_tx(entity.id, nonce, 1, object_id, b"embedding v2".to_vec());
+        nonce += 1;
+        apply_update_memory_object_tx(&mut db, &update_tx, 2000).unwrap();
+
+        let obj = read_memory_object(&db, &entity.id, &object_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(obj.data, b"embedding v2".to_vec());
+
+        // 4. Delete
+        let delete_tx = mk_delete_memory_tx(entity.id, nonce, 1, object_id);
+        apply_delete_memory_object_tx(&mut db, &delete_tx, 3000).unwrap();
+
+        let obj = read_memory_object(&db, &entity.id, &object_id).unwrap();
+        assert!(obj.is_none());
     }
 }

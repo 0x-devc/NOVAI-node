@@ -142,9 +142,9 @@ pub struct CongestionThresholds {
 impl Default for CongestionThresholds {
     fn default() -> Self {
         Self {
-            moderate_mempool_growth_pct: 150,  // 1.5x baseline
-            high_mempool_growth_pct: 200,      // 2x baseline
-            critical_mempool_growth_pct: 300,  // 3x baseline
+            moderate_mempool_growth_pct: 150, // 1.5x baseline
+            high_mempool_growth_pct: 200,     // 2x baseline
+            critical_mempool_growth_pct: 300, // 3x baseline
 
             moderate_block_fullness_pct: 70,
             high_block_fullness_pct: 85,
@@ -251,8 +251,10 @@ impl CongestionForecaster {
         let mut confidence: u64 = 100; // Base confidence
 
         // Increase confidence if multiple indicators agree
-        let mempool_signals_high = evidence.mempool_growth_pct >= self.thresholds.high_mempool_growth_pct;
-        let fullness_signals_high = evidence.block_fullness_pct >= self.thresholds.high_block_fullness_pct;
+        let mempool_signals_high =
+            evidence.mempool_growth_pct >= self.thresholds.high_mempool_growth_pct;
+        let fullness_signals_high =
+            evidence.block_fullness_pct >= self.thresholds.high_block_fullness_pct;
 
         if mempool_signals_high && fullness_signals_high {
             confidence += 50; // Strong agreement

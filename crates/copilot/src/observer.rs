@@ -1,22 +1,26 @@
 //! Main chain observer that ties statistics, detection, and reporting together.
 //!
 //! PURPOSE: Background observer that monitors chain state, detects anomalies,
-//! and publishes signals.
+//! and publishes signals. Also creates L1 memory objects for AI entities (Week 21).
 //!
 //! INVARIANTS:
 //! - Observer is non-blocking, runs in its own thread
 //! - Detection runs on every observation cycle
 //! - Signals are published immediately upon detection
+//! - Memory objects created at configurable intervals
 //!
 //! FAILURE MODES:
 //! - If state lock is poisoned, observation cycle is skipped
 //! - If signal publishing fails, anomaly is logged but not retried
+//! - If memory callback fails, error is logged but observation continues
 
 use crate::detector::{AnomalyDetector, AnomalyThresholds, DetectedAnomaly};
 use crate::reporter::AnomalyReporter;
 use crate::stats::ChainStats;
 use ed25519_dalek::SigningKey;
-use novai_ai_entities::{AiSignalV1, SignalPayload};
+use novai_ai_entities::{
+    AiSignalV1, ChainSummaryData, MemoryObjectType, SignalPayload, StatisticsSnapshotData,
+};
 use novai_types::Address;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -77,6 +81,64 @@ impl AnomalyCallback for LoggingCallback {
     }
 }
 
+// ============================================================================
+// MEMORY CALLBACKS (Week 21 - D21.5)
+// ============================================================================
+
+/// Callback for creating L1 memory objects.
+///
+/// Implementations should store the provided data as memory objects for the
+/// AI entity associated with this observer.
+pub trait MemoryCallback: Send + Sync {
+    /// Called when a chain summary should be stored.
+    ///
+    /// # Arguments
+    /// - `object_type`: The type of memory object (ChainSummary)
+    /// - `data`: Encoded chain summary data
+    fn on_chain_summary(&self, object_type: MemoryObjectType, data: Vec<u8>);
+
+    /// Called when a statistics snapshot should be stored.
+    ///
+    /// # Arguments
+    /// - `object_type`: The type of memory object (StatisticsSnapshot)
+    /// - `data`: Encoded statistics snapshot data
+    fn on_statistics_snapshot(&self, object_type: MemoryObjectType, data: Vec<u8>);
+}
+
+/// No-op memory callback for testing or when memory objects should not be created.
+pub struct NoopMemoryCallback;
+
+impl MemoryCallback for NoopMemoryCallback {
+    fn on_chain_summary(&self, _object_type: MemoryObjectType, _data: Vec<u8>) {
+        // Do nothing
+    }
+
+    fn on_statistics_snapshot(&self, _object_type: MemoryObjectType, _data: Vec<u8>) {
+        // Do nothing
+    }
+}
+
+/// Logging memory callback that prints when memory objects are created.
+pub struct LoggingMemoryCallback;
+
+impl MemoryCallback for LoggingMemoryCallback {
+    fn on_chain_summary(&self, object_type: MemoryObjectType, data: Vec<u8>) {
+        println!(
+            "📊 CHAIN SUMMARY: type={:?} data_len={}",
+            object_type,
+            data.len()
+        );
+    }
+
+    fn on_statistics_snapshot(&self, object_type: MemoryObjectType, data: Vec<u8>) {
+        println!(
+            "📈 STATISTICS SNAPSHOT: type={:?} data_len={}",
+            object_type,
+            data.len()
+        );
+    }
+}
+
 /// Configuration for the chain observer.
 #[derive(Debug, Clone)]
 pub struct ObserverConfig {
@@ -91,6 +153,18 @@ pub struct ObserverConfig {
 
     /// Whether to publish signals (can be disabled for testing).
     pub publish_enabled: bool,
+
+    // Week 21 - Memory object configuration (D21.5)
+    /// Interval (in observations) between statistics snapshots.
+    /// Set to 0 to disable.
+    pub snapshot_interval: u64,
+
+    /// Interval (in observations) between chain summaries.
+    /// Set to 0 to disable.
+    pub summary_interval: u64,
+
+    /// Whether memory object creation is enabled.
+    pub memory_enabled: bool,
 }
 
 impl Default for ObserverConfig {
@@ -100,6 +174,11 @@ impl Default for ObserverConfig {
             stats_window_size: 100,
             min_publish_confidence: 100, // Only publish if confident
             publish_enabled: true,
+            // Week 21 defaults - create snapshot every 10 observations,
+            // chain summary every 100 observations
+            snapshot_interval: 10,
+            summary_interval: 100,
+            memory_enabled: true,
         }
     }
 }
@@ -121,6 +200,13 @@ pub struct ObserverMetrics {
 
     /// Whether observer is currently running.
     pub running: AtomicBool,
+
+    // Week 21 - Memory object metrics (D21.5)
+    /// Total statistics snapshots created.
+    pub snapshots_created: AtomicU64,
+
+    /// Total chain summaries created.
+    pub summaries_created: AtomicU64,
 }
 
 impl ObserverMetrics {
@@ -146,6 +232,16 @@ impl ObserverMetrics {
     pub fn record_observation(&self) {
         self.observations.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Record a statistics snapshot creation.
+    pub fn record_snapshot(&self) {
+        self.snapshots_created.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a chain summary creation.
+    pub fn record_summary(&self) {
+        self.summaries_created.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Chain observer that monitors state and publishes anomaly signals.
@@ -170,6 +266,16 @@ pub struct ChainObserver {
 
     /// Last observed round (for detecting round changes).
     last_round: u64,
+
+    // Week 21 - Chain summary tracking (D21.5)
+    /// Height at start of current summary epoch.
+    summary_start_height: u64,
+
+    /// Cumulative tx count for current summary epoch.
+    summary_tx_count: u64,
+
+    /// Cumulative fee total for current summary epoch.
+    summary_fee_total: u64,
 }
 
 impl ChainObserver {
@@ -188,6 +294,9 @@ impl ChainObserver {
             metrics: Arc::new(ObserverMetrics::new()),
             last_height: 0,
             last_round: 0,
+            summary_start_height: 0,
+            summary_tx_count: 0,
+            summary_fee_total: 0,
         }
     }
 
@@ -201,6 +310,109 @@ impl ChainObserver {
     #[must_use]
     pub fn stats(&self) -> &ChainStats {
         &self.stats
+    }
+
+    // ========================================================================
+    // MEMORY OBJECT CREATION (Week 21 - D21.5)
+    // ========================================================================
+
+    /// Create a statistics snapshot from current state.
+    ///
+    /// Captures point-in-time metrics for AI analysis.
+    #[must_use]
+    pub fn create_statistics_snapshot<S: ObservableState>(
+        &self,
+        state: &S,
+    ) -> StatisticsSnapshotData {
+        StatisticsSnapshotData {
+            height: state.committed_height(),
+            mempool_size: self.stats.current_mempool_size(),
+            avg_fee: 0, // TODO: Track in future when we have fee data
+            fee_p95: 0, // TODO: Track in future when we have fee data
+            validator_count: state.validator_set().len() as u32,
+            avg_block_fullness: 50, // TODO: Track actual block fullness
+        }
+    }
+
+    /// Create a chain summary for the current epoch.
+    ///
+    /// Summarizes block statistics over a range of heights.
+    #[must_use]
+    pub fn create_chain_summary(&self) -> ChainSummaryData {
+        ChainSummaryData {
+            start_height: self.summary_start_height,
+            end_height: self.last_height,
+            tx_count: self.summary_tx_count,
+            fee_total: self.summary_fee_total,
+            avg_block_fullness: 50, // TODO: Track actual block fullness
+        }
+    }
+
+    /// Reset the chain summary epoch, starting fresh from current height.
+    pub fn reset_summary_epoch(&mut self) {
+        self.summary_start_height = self.last_height;
+        self.summary_tx_count = 0;
+        self.summary_fee_total = 0;
+    }
+
+    /// Record block data for chain summary accumulation.
+    ///
+    /// Call this when a new block is observed.
+    pub fn record_block_for_summary(&mut self, tx_count: u64, fee_total: u64) {
+        self.summary_tx_count = self.summary_tx_count.saturating_add(tx_count);
+        self.summary_fee_total = self.summary_fee_total.saturating_add(fee_total);
+    }
+
+    /// Perform one observation cycle with memory callback.
+    ///
+    /// This extends `observe` to also create memory objects at configured intervals.
+    ///
+    /// # Arguments
+    /// - `state`: Current observable state from the node
+    /// - `anomaly_callback`: Called for each detected anomaly
+    /// - `memory_callback`: Called when memory objects should be created
+    ///
+    /// # Returns
+    /// List of anomalies detected in this cycle.
+    pub fn observe_with_memory<S: ObservableState, A: AnomalyCallback, M: MemoryCallback>(
+        &mut self,
+        state: &S,
+        anomaly_callback: &A,
+        memory_callback: &M,
+    ) -> Vec<DetectedAnomaly> {
+        // Run normal observation
+        let anomalies = self.observe(state, anomaly_callback);
+
+        // Check if memory creation is enabled
+        if !self.config.memory_enabled {
+            return anomalies;
+        }
+
+        let obs_count = self.metrics.observations.load(Ordering::Relaxed);
+
+        // Create statistics snapshot at interval
+        if self.config.snapshot_interval > 0
+            && obs_count.is_multiple_of(self.config.snapshot_interval)
+        {
+            let snapshot = self.create_statistics_snapshot(state);
+            memory_callback
+                .on_statistics_snapshot(MemoryObjectType::StatisticsSnapshot, snapshot.encode());
+            self.metrics.record_snapshot();
+        }
+
+        // Create chain summary at interval
+        if self.config.summary_interval > 0
+            && obs_count.is_multiple_of(self.config.summary_interval)
+        {
+            let summary = self.create_chain_summary();
+            memory_callback.on_chain_summary(MemoryObjectType::ChainSummary, summary.encode());
+            self.metrics.record_summary();
+
+            // Reset summary epoch for next interval
+            self.reset_summary_epoch();
+        }
+
+        anomalies
     }
 
     /// Perform one observation cycle.
@@ -296,6 +508,9 @@ impl ChainObserver {
         self.stats.reset();
         self.last_height = 0;
         self.last_round = 0;
+        self.summary_start_height = 0;
+        self.summary_tx_count = 0;
+        self.summary_fee_total = 0;
     }
 }
 
@@ -535,5 +750,249 @@ mod tests {
 
         // Should not panic
         callback.on_anomaly(payload, signal);
+    }
+
+    // ========================================================================
+    // MEMORY CALLBACK TESTS (Week 21 - D21.5)
+    // ========================================================================
+
+    /// Collecting memory callback for testing.
+    struct CollectingMemoryCallback {
+        snapshots: Mutex<Vec<Vec<u8>>>,
+        summaries: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl CollectingMemoryCallback {
+        fn new() -> Self {
+            Self {
+                snapshots: Mutex::new(Vec::new()),
+                summaries: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn snapshot_count(&self) -> usize {
+            self.snapshots.lock().unwrap().len()
+        }
+
+        fn summary_count(&self) -> usize {
+            self.summaries.lock().unwrap().len()
+        }
+    }
+
+    impl MemoryCallback for CollectingMemoryCallback {
+        fn on_chain_summary(&self, _object_type: MemoryObjectType, data: Vec<u8>) {
+            self.summaries.lock().unwrap().push(data);
+        }
+
+        fn on_statistics_snapshot(&self, _object_type: MemoryObjectType, data: Vec<u8>) {
+            self.snapshots.lock().unwrap().push(data);
+        }
+    }
+
+    #[test]
+    fn noop_memory_callback_does_nothing() {
+        let callback = NoopMemoryCallback;
+
+        // Should not panic
+        callback.on_chain_summary(MemoryObjectType::ChainSummary, vec![1, 2, 3]);
+        callback.on_statistics_snapshot(MemoryObjectType::StatisticsSnapshot, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn observer_creates_statistics_snapshot() {
+        let config = ObserverConfig::default();
+        let observer = ChainObserver::new(test_signing_key(), config);
+
+        let mut state = MockState::new();
+        state.height = 100;
+        state.mempool = 75;
+
+        let snapshot = observer.create_statistics_snapshot(&state);
+
+        assert_eq!(snapshot.height, 100);
+        assert_eq!(snapshot.validator_count, 4);
+    }
+
+    #[test]
+    fn observer_creates_chain_summary() {
+        let config = ObserverConfig::default();
+        let mut observer = ChainObserver::new(test_signing_key(), config);
+
+        // Simulate some block observations
+        observer.last_height = 50;
+        observer.summary_start_height = 10;
+        observer.summary_tx_count = 500;
+        observer.summary_fee_total = 5000;
+
+        let summary = observer.create_chain_summary();
+
+        assert_eq!(summary.start_height, 10);
+        assert_eq!(summary.end_height, 50);
+        assert_eq!(summary.tx_count, 500);
+        assert_eq!(summary.fee_total, 5000);
+    }
+
+    #[test]
+    fn observer_resets_summary_epoch() {
+        let config = ObserverConfig::default();
+        let mut observer = ChainObserver::new(test_signing_key(), config);
+
+        observer.last_height = 100;
+        observer.summary_tx_count = 500;
+        observer.summary_fee_total = 5000;
+
+        observer.reset_summary_epoch();
+
+        assert_eq!(observer.summary_start_height, 100);
+        assert_eq!(observer.summary_tx_count, 0);
+        assert_eq!(observer.summary_fee_total, 0);
+    }
+
+    #[test]
+    fn observer_records_block_for_summary() {
+        let config = ObserverConfig::default();
+        let mut observer = ChainObserver::new(test_signing_key(), config);
+
+        observer.record_block_for_summary(10, 100);
+        observer.record_block_for_summary(20, 200);
+
+        assert_eq!(observer.summary_tx_count, 30);
+        assert_eq!(observer.summary_fee_total, 300);
+    }
+
+    #[test]
+    fn observe_with_memory_creates_snapshots_at_interval() {
+        let mut config = ObserverConfig::default();
+        config.snapshot_interval = 5;
+        config.summary_interval = 10;
+        config.memory_enabled = true;
+
+        let mut observer = ChainObserver::new(test_signing_key(), config);
+        let anomaly_callback = NoopCallback;
+        let memory_callback = CollectingMemoryCallback::new();
+
+        let state = MockState::new();
+
+        // Run 15 observations
+        for _ in 0..15 {
+            observer.observe_with_memory(&state, &anomaly_callback, &memory_callback);
+        }
+
+        // Should have 3 snapshots (at obs 5, 10, 15)
+        assert_eq!(memory_callback.snapshot_count(), 3);
+
+        // Should have 1 summary (at obs 10)
+        assert_eq!(memory_callback.summary_count(), 1);
+    }
+
+    #[test]
+    fn observe_with_memory_respects_disabled() {
+        let mut config = ObserverConfig::default();
+        config.snapshot_interval = 1;
+        config.summary_interval = 1;
+        config.memory_enabled = false; // Disabled
+
+        let mut observer = ChainObserver::new(test_signing_key(), config);
+        let anomaly_callback = NoopCallback;
+        let memory_callback = CollectingMemoryCallback::new();
+
+        let state = MockState::new();
+
+        // Run 10 observations
+        for _ in 0..10 {
+            observer.observe_with_memory(&state, &anomaly_callback, &memory_callback);
+        }
+
+        // No callbacks should have been made
+        assert_eq!(memory_callback.snapshot_count(), 0);
+        assert_eq!(memory_callback.summary_count(), 0);
+    }
+
+    #[test]
+    fn observer_metrics_track_memory_creation() {
+        let mut config = ObserverConfig::default();
+        config.snapshot_interval = 2;
+        config.summary_interval = 4;
+        config.memory_enabled = true;
+
+        let mut observer = ChainObserver::new(test_signing_key(), config);
+        let anomaly_callback = NoopCallback;
+        let memory_callback = NoopMemoryCallback;
+        let metrics = observer.metrics();
+
+        let state = MockState::new();
+
+        // Run 8 observations
+        for _ in 0..8 {
+            observer.observe_with_memory(&state, &anomaly_callback, &memory_callback);
+        }
+
+        // Should have 4 snapshots (at obs 2, 4, 6, 8)
+        assert_eq!(metrics.snapshots_created.load(Ordering::Relaxed), 4);
+
+        // Should have 2 summaries (at obs 4, 8)
+        assert_eq!(metrics.summaries_created.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn observer_full_reset_clears_summary_state() {
+        let config = ObserverConfig::default();
+        let mut observer = ChainObserver::new(test_signing_key(), config);
+
+        observer.last_height = 100;
+        observer.summary_start_height = 50;
+        observer.summary_tx_count = 500;
+        observer.summary_fee_total = 5000;
+
+        observer.reset();
+
+        assert_eq!(observer.last_height, 0);
+        assert_eq!(observer.summary_start_height, 0);
+        assert_eq!(observer.summary_tx_count, 0);
+        assert_eq!(observer.summary_fee_total, 0);
+    }
+
+    #[test]
+    fn statistics_snapshot_data_encodes_correctly() {
+        use novai_ai_entities::StatisticsSnapshotData;
+
+        let snapshot = StatisticsSnapshotData {
+            height: 1000,
+            mempool_size: 250,
+            avg_fee: 50,
+            fee_p95: 100,
+            validator_count: 4,
+            avg_block_fullness: 75,
+        };
+
+        let encoded = snapshot.encode();
+        let decoded = StatisticsSnapshotData::decode(&encoded).expect("Should decode");
+
+        assert_eq!(decoded.height, 1000);
+        assert_eq!(decoded.mempool_size, 250);
+        assert_eq!(decoded.validator_count, 4);
+        assert_eq!(decoded.avg_block_fullness, 75);
+    }
+
+    #[test]
+    fn chain_summary_data_encodes_correctly() {
+        use novai_ai_entities::ChainSummaryData;
+
+        let summary = ChainSummaryData {
+            start_height: 100,
+            end_height: 200,
+            tx_count: 500,
+            fee_total: 5000,
+            avg_block_fullness: 60,
+        };
+
+        let encoded = summary.encode();
+        let decoded = ChainSummaryData::decode(&encoded).expect("Should decode");
+
+        assert_eq!(decoded.start_height, 100);
+        assert_eq!(decoded.end_height, 200);
+        assert_eq!(decoded.tx_count, 500);
+        assert_eq!(decoded.fee_total, 5000);
+        assert_eq!(decoded.avg_block_fullness, 60);
     }
 }

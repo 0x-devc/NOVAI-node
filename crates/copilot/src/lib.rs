@@ -39,20 +39,22 @@ pub mod spam_reporter;
 pub mod spam_stats;
 pub mod stats;
 
-pub use detector::{AnomalyDetector, AnomalyKind, DetectedAnomaly};
-pub use observer::{ChainObserver, ObservableState};
-pub use reporter::AnomalyReporter;
-pub use spam_detector::{DetectedSpamPattern, SpamDetector, SpamPatternKind, SpamThresholds};
-pub use spam_observer::{SpamCallback, SpamObserver, SpamObserverConfig, SpamObserverMetrics};
-pub use spam_reporter::SpamReporter;
-pub use spam_stats::{SenderStats, SpamStats, TxRejectionReason};
 pub use congestion_forecaster::{
     BlockSizeRecommendation, CongestionForecast, CongestionForecaster, CongestionLevel,
     CongestionThresholds, FeeRecommendation, ForecastEvidence,
 };
 pub use congestion_reporter::CongestionReporter;
 pub use congestion_stats::CongestionStats;
+pub use detector::{AnomalyDetector, AnomalyKind, DetectedAnomaly};
+pub use observer::{
+    ChainObserver, MemoryCallback, NoopMemoryCallback, ObservableState, ObserverConfig,
+};
+pub use reporter::AnomalyReporter;
 pub use resource_budget::{ResourceBudget, ResourceTracker, ResourceUsage};
+pub use spam_detector::{DetectedSpamPattern, SpamDetector, SpamPatternKind, SpamThresholds};
+pub use spam_observer::{SpamCallback, SpamObserver, SpamObserverConfig, SpamObserverMetrics};
+pub use spam_reporter::SpamReporter;
+pub use spam_stats::{SenderStats, SpamStats, TxRejectionReason};
 pub use stats::{ChainStats, RingBuffer};
 
 #[cfg(test)]

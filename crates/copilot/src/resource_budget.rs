@@ -238,7 +238,9 @@ impl ResourceTracker {
 
     /// Check if task exceeded budget and log if so.
     fn check_and_log_exceeded(&mut self, task_id: &[u8; 32]) {
-        if let (Some(usage), Some(budget)) = (self.usage.get_mut(task_id), self.budgets.get(task_id)) {
+        if let (Some(usage), Some(budget)) =
+            (self.usage.get_mut(task_id), self.budgets.get(task_id))
+        {
             let was_exceeded = usage.exceeded_budget;
             usage.check_budget(budget);
 
@@ -269,7 +271,8 @@ impl ResourceTracker {
             let entity_usage = self.entity_usage.entry(entity).or_default();
             entity_usage.compute_units_used += usage.compute_units_used;
             entity_usage.storage_bytes_written += usage.storage_bytes_written;
-            entity_usage.peak_memory_bytes = entity_usage.peak_memory_bytes.max(usage.peak_memory_bytes);
+            entity_usage.peak_memory_bytes =
+                entity_usage.peak_memory_bytes.max(usage.peak_memory_bytes);
             if usage.exceeded_budget {
                 entity_usage.exceeded_budget = true;
             }

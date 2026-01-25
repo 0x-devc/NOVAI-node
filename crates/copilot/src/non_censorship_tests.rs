@@ -17,10 +17,10 @@ mod tests {
     use crate::spam_observer::{SpamCallback, SpamObserver, SpamObserverConfig};
     use crate::spam_stats::TxRejectionReason;
     use ed25519_dalek::SigningKey;
+    use mempool::{NonceProvider, TxMempool};
     use novai_ai_entities::{AiSignalType, AiSignalV1, SignalPayload};
     use novai_codec::encode_tx_v1_unsigned;
     use novai_crypto::{address_from_pubkey, sign_bytes};
-    use mempool::{NonceProvider, TxMempool};
     use novai_types::{Address, TxV1, TxVersion};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -209,7 +209,11 @@ mod tests {
         let block_txs = fresh_mempool.drain_ready(10, &fresh_nonces);
 
         // CRITICAL ASSERTION: Flagged sender's tx MUST be in block
-        assert_eq!(block_txs.len(), 1, "Transaction MUST be includable in block");
+        assert_eq!(
+            block_txs.len(),
+            1,
+            "Transaction MUST be includable in block"
+        );
         assert_eq!(
             block_txs[0].from, spammy_address,
             "Included tx must be from flagged sender"
@@ -263,10 +267,7 @@ mod tests {
             peer_state.connected, connected_before,
             "CRITICAL: Peer connection state MUST NOT change after spam detection"
         );
-        assert!(
-            peer_state.connected,
-            "CRITICAL: Peer MUST remain connected"
-        );
+        assert!(peer_state.connected, "CRITICAL: Peer MUST remain connected");
 
         // STEP 3: Peer can still submit new transactions
         // (Observer continues to accept observations from this peer)
@@ -336,7 +337,10 @@ mod tests {
         let contains_spam_5 = mempool.contains(&get_txid(0x20, 5));
         let contains_spam_9 = mempool.contains(&get_txid(0x20, 9));
 
-        assert_eq!(mempool_size_before, 12, "Should have 12 txs before detection");
+        assert_eq!(
+            mempool_size_before, 12,
+            "Should have 12 txs before detection"
+        );
 
         // STEP 2: Run spam detection
         observer.set_height(100);
@@ -394,11 +398,16 @@ mod tests {
 
     /// Helper to compute txid for test transactions
     fn get_txid(seed: u8, nonce: u64) -> novai_types::TxId {
-        let tx = make_signed_tx(seed, nonce, 100, match seed {
-            0x10 => b"normal",
-            0x20 => b"spam",
-            _ => b"tx",
-        });
+        let tx = make_signed_tx(
+            seed,
+            nonce,
+            100,
+            match seed {
+                0x10 => b"normal",
+                0x20 => b"spam",
+                _ => b"tx",
+            },
+        );
         novai_codec::txid_v1(&tx).expect("txid")
     }
 

@@ -11,11 +11,13 @@
 //! - `artifacts` - Content-addressed storage for off-chain data (Week 15)
 //! - `payload` - Signal payload format for off-chain storage (Week 15)
 //! - `verify` - Verification flow for payloads and memory (Week 15)
+//! - `memory` - On-chain memory objects for AI entities (Week 21)
 
 use blake3::Hasher;
 
 pub mod artifacts;
 pub mod gates;
+pub mod memory;
 pub mod payload;
 pub mod signals;
 pub mod tiers;
@@ -23,6 +25,7 @@ pub mod verify;
 
 pub use artifacts::*;
 pub use gates::*;
+pub use memory::*;
 use novai_types::Address;
 pub use payload::*;
 pub use signals::*;
