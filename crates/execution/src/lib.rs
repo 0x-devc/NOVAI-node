@@ -21,7 +21,8 @@ use novai_state::{
     WriteOp, KEY_FEE_POOL, KEY_SMT_ROOT,
 };
 
-use novai_governance::{decode_proposal_v1, encode_proposal_v1, Proposal, ProposalType};
+use novai_governance::{decode_proposal_v1, encode_proposal_v1, Proposal, ProposalState, ProposalType};
+use novai_ai_entities::tiers::ActionType;
 
 use novai_smt::hash::{empty_hash_at_height, Hash32};
 use novai_smt::node::Node;
@@ -121,6 +122,12 @@ pub enum ExecError<E> {
     InvalidProposalType,
     /// Proposer is not authorized to submit this proposal.
     UnauthorizedProposer,
+    // Week 25 - Adversarial hardening (A25.2)
+    /// Proposal with this ID already exists and is not in terminal state.
+    ProposalAlreadyExists,
+    // Week 25 - Adversarial hardening (A25.4)
+    /// Proposal contains a Tier 0 action which is NEVER allowed.
+    Tier0ActionForbidden,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -1044,7 +1051,20 @@ pub fn apply_governance_submit_tx<K: KvBatch>(
         }
     }
 
-    // Create proposal
+    // Week 25 Hardening (A25.4): Block Tier 0 actions at submission
+    // ParamChange and PolicyChange accept arbitrary data that could encode Tier 0 actions
+    if matches!(payload.proposal_type, ProposalType::ParamChange | ProposalType::PolicyChange) {
+        if let Some(&first_byte) = payload.proposal_data.first() {
+            // Tier 0 actions (ModifyConsensusRule=0, ModifyStateTransition=1) are NEVER allowed
+            if first_byte == ActionType::ModifyConsensusRule.to_byte()
+                || first_byte == ActionType::ModifyStateTransition.to_byte()
+            {
+                return Err(ExecError::Tier0ActionForbidden);
+            }
+        }
+    }
+
+    // Create proposal (computes ID from content)
     let mut proposal = Proposal::new(
         payload.proposal_type,
         payload.proposal_data,
@@ -1054,6 +1074,23 @@ pub fn apply_governance_submit_tx<K: KvBatch>(
         gate.expiry_blocks,
     );
 
+    let proposal_id = proposal.id;
+
+    // Week 25 Hardening (A25.2): Prevent overwriting non-terminal proposals
+    // Only allow resubmission if proposal doesn't exist OR is in terminal state
+    if let Some(existing) = read_proposal(db, &proposal_id)? {
+        match existing.state {
+            ProposalState::Executed | ProposalState::Rejected => {
+                // Terminal states - allow resubmission (creates fresh proposal)
+            }
+            _ => {
+                // Non-terminal (Submitted, Approved, Executable, or Expired)
+                // Reject to prevent timing reset attacks
+                return Err(ExecError::ProposalAlreadyExists);
+            }
+        }
+    }
+
     // For TimelockOnly gates (threshold == 0): auto-approve immediately
     // The timelock countdown starts from submission
     if gate.threshold == 0 {
@@ -1061,8 +1098,6 @@ pub fn apply_governance_submit_tx<K: KvBatch>(
             .approve(current_height, gate.timelock_blocks)
             .map_err(|_| ExecError::Overflow)?;
     }
-
-    let proposal_id = proposal.id;
 
     // Store proposal
     let op = write_proposal_op(&proposal);
@@ -1155,6 +1190,14 @@ pub fn apply_governance_execute_tx<K: KvBatch>(
             apply_module_rollback(db, &entity_id)?;
         }
         ProposalType::ParamChange | ProposalType::PolicyChange => {
+            // Week 25 Hardening (A25.4): Defense-in-depth check for Tier 0 actions
+            if let Some(&first_byte) = proposal.proposal_data.first() {
+                if first_byte == ActionType::ModifyConsensusRule.to_byte()
+                    || first_byte == ActionType::ModifyStateTransition.to_byte()
+                {
+                    return Err(ExecError::Tier0ActionForbidden);
+                }
+            }
             // These types would modify protocol parameters
             // For now, we just mark them as executed (implementation depends on specific params)
             // Full implementation would parse proposal_data and apply the parameter changes
