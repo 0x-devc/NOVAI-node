@@ -15,10 +15,13 @@
 //! - Any overflow -> reject deterministically.
 
 use novai_state::{
-    account_key, decode_account_v1, decode_fee_pool_v1, decode_smt_root_v1, encode_account_v1,
-    encode_fee_pool_v1, encode_smt_root_v1, smt_key_for_state_key, smt_node_key, AccountStateV1,
-    FeePoolV1, Kv, KvBatch, StateDecodeError, WriteOp, KEY_FEE_POOL, KEY_SMT_ROOT,
+    account_key, approval_gate_key, decode_account_v1, decode_fee_pool_v1, decode_smt_root_v1,
+    encode_account_v1, encode_fee_pool_v1, encode_smt_root_v1, governance_proposal_key,
+    smt_key_for_state_key, smt_node_key, AccountStateV1, FeePoolV1, Kv, KvBatch, StateDecodeError,
+    WriteOp, KEY_FEE_POOL, KEY_SMT_ROOT,
 };
+
+use novai_governance::{decode_proposal_v1, encode_proposal_v1, Proposal, ProposalType};
 
 use novai_smt::hash::{empty_hash_at_height, Hash32};
 use novai_smt::node::Node;
@@ -99,7 +102,25 @@ pub enum ExecError<E> {
     /// Derived view not found.
     DerivedViewNotFound,
     /// Invalid derived view schema.
-    InvalidDerivedViewSchema { schema_id: u32 },
+    InvalidDerivedViewSchema {
+        schema_id: u32,
+    },
+    // Week 24 - Module activation/rollback errors (D24.1)
+    /// AI entity not found in state.
+    EntityNotFound,
+    // Week 24 - Governance execution errors (D24.3)
+    /// Governance proposal not found.
+    ProposalNotFound,
+    /// Approval gate not found.
+    GateNotFound,
+    /// Proposal is not executable (wrong state or timelock not elapsed).
+    ProposalNotExecutable,
+    /// Proposal has expired.
+    ProposalExpired,
+    /// Invalid proposal type for the requested operation.
+    InvalidProposalType,
+    /// Proposer is not authorized to submit this proposal.
+    UnauthorizedProposer,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -233,6 +254,141 @@ pub const UPDATE_MEMORY_OBJECT_PAYLOAD_V1: u8 = 4;
 
 /// Delete memory object payload version.
 pub const DELETE_MEMORY_OBJECT_PAYLOAD_V1: u8 = 5;
+
+// ============================================================================
+// GOVERNANCE PAYLOADS (Week 24 - D24.3)
+// ============================================================================
+
+/// Submit governance proposal payload version.
+pub const SUBMIT_PROPOSAL_PAYLOAD_V1: u8 = 6;
+
+/// Execute governance proposal payload version.
+pub const EXECUTE_PROPOSAL_PAYLOAD_V1: u8 = 7;
+
+/// Submit Proposal payload (D24.3):
+/// `[version:1][proposal_type:1][gate_id:32][data_len_be:4][proposal_data:var]`
+///
+/// Minimum size: 38 bytes (empty data)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitProposalPayloadV1 {
+    /// Type of proposal.
+    pub proposal_type: ProposalType,
+    /// Gate ID that must approve this proposal.
+    pub gate_id: [u8; 32],
+    /// Encoded proposal data (interpretation depends on proposal_type).
+    /// For ModuleActivation/ModuleRollback: entity_id (32 bytes)
+    pub proposal_data: Vec<u8>,
+}
+
+/// Execute Proposal payload (D24.3):
+/// `[version:1][proposal_id:32]`
+///
+/// Fixed size: 33 bytes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecuteProposalPayloadV1 {
+    /// ID of the proposal to execute.
+    pub proposal_id: [u8; 32],
+}
+
+/// Deterministically encode a submit proposal payload.
+#[must_use]
+pub fn encode_submit_proposal_payload_v1(p: &SubmitProposalPayloadV1) -> Vec<u8> {
+    let mut out = Vec::with_capacity(38 + p.proposal_data.len());
+    out.push(SUBMIT_PROPOSAL_PAYLOAD_V1);
+    out.push(p.proposal_type.to_byte());
+    out.extend_from_slice(&p.gate_id);
+    #[allow(clippy::cast_possible_truncation)]
+    let data_len = p.proposal_data.len() as u32;
+    out.extend_from_slice(&data_len.to_be_bytes());
+    out.extend_from_slice(&p.proposal_data);
+    out
+}
+
+/// Deterministically decode a submit proposal payload.
+///
+/// # Errors
+/// Returns error if payload is malformed.
+pub fn decode_submit_proposal_payload_v1(
+    payload: &[u8],
+) -> Result<SubmitProposalPayloadV1, ExecError<()>> {
+    const MIN_LEN: usize = 38; // version + type + gate_id + data_len
+    if payload.len() < MIN_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: MIN_LEN,
+            got: payload.len(),
+        });
+    }
+
+    let ver = payload[0];
+    if ver != SUBMIT_PROPOSAL_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: SUBMIT_PROPOSAL_PAYLOAD_V1,
+            got: ver,
+        });
+    }
+
+    let proposal_type =
+        ProposalType::from_byte(payload[1]).ok_or(ExecError::InvalidProposalType)?;
+
+    let mut gate_id = [0u8; 32];
+    gate_id.copy_from_slice(&payload[2..34]);
+
+    let data_len =
+        u32::from_be_bytes([payload[34], payload[35], payload[36], payload[37]]) as usize;
+
+    if payload.len() != MIN_LEN + data_len {
+        return Err(ExecError::BadPayloadLength {
+            expected: MIN_LEN + data_len,
+            got: payload.len(),
+        });
+    }
+
+    let proposal_data = payload[38..].to_vec();
+
+    Ok(SubmitProposalPayloadV1 {
+        proposal_type,
+        gate_id,
+        proposal_data,
+    })
+}
+
+/// Deterministically encode an execute proposal payload.
+#[must_use]
+pub fn encode_execute_proposal_payload_v1(p: &ExecuteProposalPayloadV1) -> [u8; 33] {
+    let mut out = [0u8; 33];
+    out[0] = EXECUTE_PROPOSAL_PAYLOAD_V1;
+    out[1..33].copy_from_slice(&p.proposal_id);
+    out
+}
+
+/// Deterministically decode an execute proposal payload.
+///
+/// # Errors
+/// Returns error if payload is malformed.
+pub fn decode_execute_proposal_payload_v1(
+    payload: &[u8],
+) -> Result<ExecuteProposalPayloadV1, ExecError<()>> {
+    const LEN: usize = 33;
+    if payload.len() != LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: LEN,
+            got: payload.len(),
+        });
+    }
+
+    let ver = payload[0];
+    if ver != EXECUTE_PROPOSAL_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: EXECUTE_PROPOSAL_PAYLOAD_V1,
+            got: ver,
+        });
+    }
+
+    let mut proposal_id = [0u8; 32];
+    proposal_id.copy_from_slice(&payload[1..33]);
+
+    Ok(ExecuteProposalPayloadV1 { proposal_id })
+}
 
 /// Create Memory Object payload (D21.4):
 /// `[version:1][object_type:1][data_len_be:4][data:var]`
@@ -674,149 +830,10 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
 // ============================================================================
 
 use novai_ai_entities::{AiEntity, SignalCommitment};
-use novai_codec::encode_signal_commitment_v1;
+use novai_codec::{decode_ai_entity, encode_ai_entity_v2, encode_signal_commitment_v1};
 use novai_state::{
     ai_entity_key, ai_memory_key, ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
 };
-
-/// AI Entity encoding version.
-pub const AI_ENTITY_CODEC_V1: u8 = 1;
-
-/// Encode an `AiEntity` to canonical bytes.
-///
-/// Format: [version:1][code_hash:32][creator:32][autonomy_mode:1][capabilities:1]
-///         `[economic_balance_be:16][nonce_be:8][memory_root:32][params_root:32]`
-///         `[registered_at_be:8][last_active_at_be:8]`
-///
-/// Total: 1 + 32 + 32 + 1 + 1 + 16 + 8 + 32 + 32 + 8 + 8 = 171 bytes
-#[must_use]
-pub fn encode_ai_entity_v1(entity: &AiEntity) -> [u8; 171] {
-    let mut out = [0u8; 171];
-    let mut pos = 0;
-
-    out[pos] = AI_ENTITY_CODEC_V1;
-    pos += 1;
-
-    out[pos..pos + 32].copy_from_slice(&entity.code_hash);
-    pos += 32;
-
-    out[pos..pos + 32].copy_from_slice(&entity.creator);
-    pos += 32;
-
-    out[pos] = entity.autonomy_mode.to_byte();
-    pos += 1;
-
-    out[pos] = entity.capabilities.to_byte();
-    pos += 1;
-
-    out[pos..pos + 16].copy_from_slice(&entity.economic_balance.to_be_bytes());
-    pos += 16;
-
-    out[pos..pos + 8].copy_from_slice(&entity.nonce.to_be_bytes());
-    pos += 8;
-
-    out[pos..pos + 32].copy_from_slice(&entity.memory_root);
-    pos += 32;
-
-    out[pos..pos + 32].copy_from_slice(&entity.params_root);
-    pos += 32;
-
-    out[pos..pos + 8].copy_from_slice(&entity.registered_at.to_be_bytes());
-    pos += 8;
-
-    out[pos..pos + 8].copy_from_slice(&entity.last_active_at.to_be_bytes());
-
-    out
-}
-
-/// Decode an `AiEntity` from canonical bytes.
-///
-/// # Errors
-///
-/// Returns error if payload length or version is invalid.
-pub fn decode_ai_entity_v1(bytes: &[u8]) -> Result<AiEntity, ExecError<()>> {
-    const LEN: usize = 171;
-    if bytes.len() != LEN {
-        return Err(ExecError::BadPayloadLength {
-            expected: LEN,
-            got: bytes.len(),
-        });
-    }
-
-    let mut pos = 0;
-
-    let version = bytes[pos];
-    if version != AI_ENTITY_CODEC_V1 {
-        return Err(ExecError::BadPayloadVersion {
-            expected: AI_ENTITY_CODEC_V1,
-            got: version,
-        });
-    }
-    pos += 1;
-
-    let mut code_hash = [0u8; 32];
-    code_hash.copy_from_slice(&bytes[pos..pos + 32]);
-    pos += 32;
-
-    let mut creator = [0u8; 32];
-    creator.copy_from_slice(&bytes[pos..pos + 32]);
-    pos += 32;
-
-    let autonomy_mode = novai_ai_entities::AutonomyMode::from_byte(bytes[pos]).ok_or(
-        ExecError::BadPayloadVersion {
-            expected: 0,
-            got: bytes[pos],
-        },
-    )?;
-    pos += 1;
-
-    let capabilities = novai_ai_entities::Capabilities::from_byte(bytes[pos]);
-    pos += 1;
-
-    let mut bal_bytes = [0u8; 16];
-    bal_bytes.copy_from_slice(&bytes[pos..pos + 16]);
-    let economic_balance = u128::from_be_bytes(bal_bytes);
-    pos += 16;
-
-    let mut nonce_bytes = [0u8; 8];
-    nonce_bytes.copy_from_slice(&bytes[pos..pos + 8]);
-    let nonce = u64::from_be_bytes(nonce_bytes);
-    pos += 8;
-
-    let mut memory_root = [0u8; 32];
-    memory_root.copy_from_slice(&bytes[pos..pos + 32]);
-    pos += 32;
-
-    let mut params_root = [0u8; 32];
-    params_root.copy_from_slice(&bytes[pos..pos + 32]);
-    pos += 32;
-
-    let mut reg_bytes = [0u8; 8];
-    reg_bytes.copy_from_slice(&bytes[pos..pos + 8]);
-    let registered_at = u64::from_be_bytes(reg_bytes);
-    pos += 8;
-
-    let mut last_bytes = [0u8; 8];
-    last_bytes.copy_from_slice(&bytes[pos..pos + 8]);
-    let last_active_at = u64::from_be_bytes(last_bytes);
-
-    // Compute ID from code_hash and creator (deterministic)
-    let id = AiEntity::compute_id(&code_hash, &creator);
-
-    Ok(AiEntity {
-        id,
-        code_hash,
-        creator,
-        autonomy_mode,
-        capabilities,
-        economic_balance,
-        nonce,
-        memory_root,
-        params_root,
-        registered_at,
-        last_active_at,
-    })
-}
 
 /// Read an AI entity from storage.
 ///
@@ -831,15 +848,8 @@ pub fn read_ai_entity<K: Kv>(
     match db.get(&key).map_err(ExecError::Db)? {
         None => Ok(None),
         Some(bytes) => {
-            let entity = decode_ai_entity_v1(&bytes).map_err(|e| match e {
-                ExecError::BadPayloadLength { expected, got } => {
-                    ExecError::BadPayloadLength { expected, got }
-                }
-                ExecError::BadPayloadVersion { expected, got } => {
-                    ExecError::BadPayloadVersion { expected, got }
-                }
-                _ => ExecError::Overflow,
-            })?;
+            // decode_ai_entity handles both V1 and V2 formats
+            let entity = decode_ai_entity(&bytes).map_err(|_| ExecError::Overflow)?;
             Ok(Some(entity))
         }
     }
@@ -849,7 +859,7 @@ pub fn read_ai_entity<K: Kv>(
 #[must_use]
 pub fn write_ai_entity_op(entity: &AiEntity) -> WriteOp {
     let key = ai_entity_key(&entity.id);
-    let value = encode_ai_entity_v1(entity).to_vec();
+    let value = encode_ai_entity_v2(entity);
     WriteOp::Put(key, value)
 }
 
@@ -879,6 +889,288 @@ pub fn write_ai_memory_op(entity_id: &[u8; 32], slot: &[u8], value: Vec<u8>) -> 
 pub fn delete_ai_memory_op(entity_id: &[u8; 32], slot: &[u8]) -> WriteOp {
     let key = ai_memory_key(entity_id, slot);
     WriteOp::Delete(key)
+}
+
+// ============================================================================
+// MODULE ACTIVATION/ROLLBACK (Week 24 - D24.1)
+// ============================================================================
+
+/// Apply a `ModuleActivation` governance proposal.
+///
+/// Sets the AI entity's `is_active` flag to `true`.
+/// Idempotent: returns success if already active.
+///
+/// # Errors
+///
+/// Returns `EntityNotFound` if the entity does not exist.
+pub fn apply_module_activation<K: KvBatch>(
+    db: &mut K,
+    entity_id: &[u8; 32],
+) -> Result<(), ExecError<K::Error>> {
+    let mut entity = read_ai_entity(db, entity_id)?.ok_or(ExecError::EntityNotFound)?;
+
+    // Idempotent: no error if already active
+    if !entity.is_active {
+        entity.is_active = true;
+        let op = write_ai_entity_op(&entity);
+        db.apply_batch(&[op]).map_err(ExecError::Db)?;
+    }
+
+    Ok(())
+}
+
+/// Apply a `ModuleRollback` governance proposal.
+///
+/// Sets the AI entity's `is_active` flag to `false`.
+/// Idempotent: returns success if already inactive.
+///
+/// # Errors
+///
+/// Returns `EntityNotFound` if the entity does not exist.
+pub fn apply_module_rollback<K: KvBatch>(
+    db: &mut K,
+    entity_id: &[u8; 32],
+) -> Result<(), ExecError<K::Error>> {
+    let mut entity = read_ai_entity(db, entity_id)?.ok_or(ExecError::EntityNotFound)?;
+
+    // Idempotent: no error if already inactive
+    if entity.is_active {
+        entity.is_active = false;
+        let op = write_ai_entity_op(&entity);
+        db.apply_batch(&[op]).map_err(ExecError::Db)?;
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// GOVERNANCE PROPOSAL EXECUTION (Week 24 - D24.3)
+// ============================================================================
+
+/// Read a governance proposal from storage.
+///
+/// # Errors
+///
+/// Returns error if DB read fails or stored bytes are malformed.
+pub fn read_proposal<K: Kv>(
+    db: &K,
+    proposal_id: &[u8; 32],
+) -> Result<Option<Proposal>, ExecError<K::Error>> {
+    let key = governance_proposal_key(proposal_id);
+    match db.get(&key).map_err(ExecError::Db)? {
+        None => Ok(None),
+        Some(bytes) => {
+            let proposal = decode_proposal_v1(&bytes).map_err(|_| ExecError::Overflow)?;
+            Ok(Some(proposal))
+        }
+    }
+}
+
+/// Write a governance proposal to storage (returns `WriteOp` for batching).
+#[must_use]
+pub fn write_proposal_op(proposal: &Proposal) -> WriteOp {
+    let key = governance_proposal_key(&proposal.id);
+    let value = encode_proposal_v1(proposal);
+    WriteOp::Put(key, value)
+}
+
+/// Read an approval gate from storage.
+///
+/// # Errors
+///
+/// Returns error if DB read fails or stored bytes are malformed.
+pub fn read_approval_gate<K: Kv>(
+    db: &K,
+    gate_id: &[u8; 32],
+) -> Result<Option<novai_ai_entities::ApprovalGate>, ExecError<K::Error>> {
+    let key = approval_gate_key(gate_id);
+    match db.get(&key).map_err(ExecError::Db)? {
+        None => Ok(None),
+        Some(bytes) => {
+            let gate =
+                novai_codec::decode_approval_gate_v1(&bytes).map_err(|_| ExecError::Overflow)?;
+            Ok(Some(gate))
+        }
+    }
+}
+
+/// Apply a `SubmitProposal` transaction.
+///
+/// Creates a new governance proposal in Submitted state.
+///
+/// # Validation
+/// 1. Gate must exist
+/// 2. Proposal type must be valid
+/// 3. For ModuleActivation/Rollback: entity_id must be 32 bytes
+///
+/// # State Changes
+/// - Store proposal at `governance/proposals/{proposal_id}`
+///
+/// # Errors
+///
+/// Returns error if validation fails or DB operations fail.
+pub fn apply_governance_submit_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<[u8; 32], ExecError<K::Error>> {
+    // Decode payload
+    let payload = decode_submit_proposal_payload_v1(&tx.payload).map_err(|e| match e {
+        ExecError::BadPayloadLength { expected, got } => {
+            ExecError::BadPayloadLength { expected, got }
+        }
+        ExecError::BadPayloadVersion { expected, got } => {
+            ExecError::BadPayloadVersion { expected, got }
+        }
+        _ => ExecError::Overflow,
+    })?;
+
+    // Verify gate exists
+    let gate = read_approval_gate(db, &payload.gate_id)?.ok_or(ExecError::GateNotFound)?;
+
+    // Validate proposal data based on type
+    match payload.proposal_type {
+        ProposalType::ModuleActivation | ProposalType::ModuleRollback => {
+            // Proposal data must be entity_id (32 bytes)
+            if payload.proposal_data.len() != 32 {
+                return Err(ExecError::BadPayloadLength {
+                    expected: 32,
+                    got: payload.proposal_data.len(),
+                });
+            }
+        }
+        ProposalType::ParamChange | ProposalType::PolicyChange | ProposalType::EmergencyFreeze => {
+            // Other types have variable-length data, no specific validation here
+        }
+    }
+
+    // Create proposal
+    let mut proposal = Proposal::new(
+        payload.proposal_type,
+        payload.proposal_data,
+        tx.from,
+        payload.gate_id,
+        current_height,
+        gate.expiry_blocks,
+    );
+
+    // For TimelockOnly gates (threshold == 0): auto-approve immediately
+    // The timelock countdown starts from submission
+    if gate.threshold == 0 {
+        proposal
+            .approve(current_height, gate.timelock_blocks)
+            .map_err(|_| ExecError::Overflow)?;
+    }
+
+    let proposal_id = proposal.id;
+
+    // Store proposal
+    let op = write_proposal_op(&proposal);
+    db.apply_batch(&[op]).map_err(ExecError::Db)?;
+
+    Ok(proposal_id)
+}
+
+/// Apply a `ExecuteProposal` transaction.
+///
+/// Executes an approved proposal after timelock has elapsed.
+///
+/// # Validation
+/// 1. Proposal must exist
+/// 2. Proposal must be in Approved or Executable state
+/// 3. Timelock must have elapsed (current_height >= executable_at)
+/// 4. Proposal must not be expired
+///
+/// # State Changes
+/// - For ModuleActivation: Set entity.is_active = true
+/// - For ModuleRollback: Set entity.is_active = false
+/// - Update proposal state to Executed
+///
+/// # Errors
+///
+/// Returns error if validation fails or DB operations fail.
+pub fn apply_governance_execute_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
+    // Decode payload
+    let payload = decode_execute_proposal_payload_v1(&tx.payload).map_err(|e| match e {
+        ExecError::BadPayloadLength { expected, got } => {
+            ExecError::BadPayloadLength { expected, got }
+        }
+        ExecError::BadPayloadVersion { expected, got } => {
+            ExecError::BadPayloadVersion { expected, got }
+        }
+        _ => ExecError::Overflow,
+    })?;
+
+    // Read proposal
+    let mut proposal =
+        read_proposal(db, &payload.proposal_id)?.ok_or(ExecError::ProposalNotFound)?;
+
+    // Check expiry
+    if proposal.is_expired(current_height) {
+        return Err(ExecError::ProposalExpired);
+    }
+
+    // Check if proposal can be executed now
+    // For TimelockOnly gates, proposal was auto-approved at submission
+    // and will be executable once current_height >= executable_at
+    if !proposal.can_execute_at(current_height) {
+        return Err(ExecError::ProposalNotExecutable);
+    }
+
+    // Execute the proposal effect based on type
+    match proposal.proposal_type {
+        ProposalType::ModuleActivation => {
+            // proposal_data contains entity_id
+            if proposal.proposal_data.len() != 32 {
+                return Err(ExecError::InvalidProposalType);
+            }
+            let mut entity_id = [0u8; 32];
+            entity_id.copy_from_slice(&proposal.proposal_data);
+
+            apply_module_activation(db, &entity_id)?;
+        }
+        ProposalType::ModuleRollback => {
+            // proposal_data contains entity_id
+            if proposal.proposal_data.len() != 32 {
+                return Err(ExecError::InvalidProposalType);
+            }
+            let mut entity_id = [0u8; 32];
+            entity_id.copy_from_slice(&proposal.proposal_data);
+
+            apply_module_rollback(db, &entity_id)?;
+        }
+        ProposalType::EmergencyFreeze => {
+            // proposal_data contains entity_id for emergency freeze
+            if proposal.proposal_data.len() != 32 {
+                return Err(ExecError::InvalidProposalType);
+            }
+            let mut entity_id = [0u8; 32];
+            entity_id.copy_from_slice(&proposal.proposal_data);
+
+            // Emergency freeze = immediate deactivation
+            apply_module_rollback(db, &entity_id)?;
+        }
+        ProposalType::ParamChange | ProposalType::PolicyChange => {
+            // These types would modify protocol parameters
+            // For now, we just mark them as executed (implementation depends on specific params)
+            // Full implementation would parse proposal_data and apply the parameter changes
+        }
+    }
+
+    // Mark proposal as executed
+    proposal
+        .execute(current_height)
+        .map_err(|_| ExecError::ProposalNotExecutable)?;
+
+    // Store updated proposal
+    let op = write_proposal_op(&proposal);
+    db.apply_batch(&[op]).map_err(ExecError::Db)?;
+
+    Ok(())
 }
 
 // ============================================================================
@@ -1772,9 +2064,8 @@ pub fn get_derived_views_by_schema<K: Kv>(
     schema_id: u32,
 ) -> Result<Vec<DerivedView>, ExecError<K::Error>> {
     // Build prefix: "derived_views/by_schema/" ++ schema_id_be4 ++ "/"
-    let mut prefix = Vec::with_capacity(
-        KEY_PREFIX_DERIVED_VIEWS.len() + "by_schema/".len() + 4 + 1,
-    );
+    let mut prefix =
+        Vec::with_capacity(KEY_PREFIX_DERIVED_VIEWS.len() + "by_schema/".len() + 4 + 1);
     prefix.extend_from_slice(b"derived_views/by_schema/");
     prefix.extend_from_slice(&schema_id.to_be_bytes());
     prefix.push(b'/');
@@ -1810,9 +2101,8 @@ pub fn get_derived_views_by_creator<K: Kv>(
     creator: &[u8; 32],
 ) -> Result<Vec<DerivedView>, ExecError<K::Error>> {
     // Build prefix: "derived_views/by_creator/" ++ creator32 ++ "/"
-    let mut prefix = Vec::with_capacity(
-        KEY_PREFIX_DERIVED_VIEWS.len() + "by_creator/".len() + 32 + 1,
-    );
+    let mut prefix =
+        Vec::with_capacity(KEY_PREFIX_DERIVED_VIEWS.len() + "by_creator/".len() + 32 + 1);
     prefix.extend_from_slice(b"derived_views/by_creator/");
     prefix.extend_from_slice(creator);
     prefix.push(b'/');
@@ -2607,13 +2897,7 @@ mod tests {
             ..Capabilities::default()
         };
 
-        novai_ai_entities::AiEntity::new(
-            code_hash,
-            creator,
-            AutonomyMode::Advisory,
-            caps,
-            1000,
-        )
+        novai_ai_entities::AiEntity::new(code_hash, creator, AutonomyMode::Advisory, caps, 1000)
     }
 
     /// Helper: Create an AI entity WITHOUT derived view read capability.
@@ -2626,13 +2910,7 @@ mod tests {
             ..Capabilities::default()
         };
 
-        novai_ai_entities::AiEntity::new(
-            code_hash,
-            creator,
-            AutonomyMode::Advisory,
-            caps,
-            1000,
-        )
+        novai_ai_entities::AiEntity::new(code_hash, creator, AutonomyMode::Advisory, caps, 1000)
     }
 
     /// Helper: Create a test derived view.
@@ -2817,7 +3095,11 @@ mod tests {
 
         // Write the view
         let ops = write_derived_view_ops(&view);
-        assert_eq!(ops.len(), 3, "Should create 3 WriteOps (primary + 2 indices)");
+        assert_eq!(
+            ops.len(),
+            3,
+            "Should create 3 WriteOps (primary + 2 indices)"
+        );
 
         db.apply_batch(&ops).unwrap();
 
@@ -2966,7 +3248,9 @@ mod tests {
             total_volume: 0,
         }
         .encode();
-        assert!(DerivedView::new(DerivedSourceType::ChainAggregate, 1, 0, creator, data1).is_some());
+        assert!(
+            DerivedView::new(DerivedSourceType::ChainAggregate, 1, 0, creator, data1).is_some()
+        );
 
         // Schema 2: ActivityCount
         let data2 = novai_ai_entities::ActivityCountData {
@@ -2975,7 +3259,9 @@ mod tests {
             tx_count: 0,
         }
         .encode();
-        assert!(DerivedView::new(DerivedSourceType::ChainAggregate, 2, 0, creator, data2).is_some());
+        assert!(
+            DerivedView::new(DerivedSourceType::ChainAggregate, 2, 0, creator, data2).is_some()
+        );
 
         // Schema 3: PoolSize
         let data3 = novai_ai_entities::PoolSizeData {
@@ -2983,6 +3269,8 @@ mod tests {
             pool_size: 0,
         }
         .encode();
-        assert!(DerivedView::new(DerivedSourceType::ChainAggregate, 3, 0, creator, data3).is_some());
+        assert!(
+            DerivedView::new(DerivedSourceType::ChainAggregate, 3, 0, creator, data3).is_some()
+        );
     }
 }

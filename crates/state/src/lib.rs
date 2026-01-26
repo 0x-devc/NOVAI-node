@@ -142,6 +142,10 @@ pub const KEY_PREFIX_GOVERNANCE_LOG: &[u8] = b"governance/log/";
 /// Key: `proposals_by_state/{state_u8}/{proposal_id32}` → empty (presence is the index)
 pub const KEY_PREFIX_GOVERNANCE_PROPOSALS_BY_STATE: &[u8] = b"governance/proposals_by_state/";
 
+/// Canonical prefix for approval gate records.
+/// Key: `ai/gates/{gate_id32}` → ApprovalGate (encoded via gate codec)
+pub const KEY_PREFIX_APPROVAL_GATES: &[u8] = b"ai/gates/";
+
 /// Build the canonical key for an account record: `b"accounts/" ++ addr32`.
 ///
 /// `addr` must be exactly 32 bytes.
@@ -346,6 +350,14 @@ pub fn governance_proposal_by_state_key(state: u8, proposal_id: &[u8; 32]) -> Ve
     k.push(state);
     k.push(b'/');
     k.extend_from_slice(proposal_id);
+    k
+}
+
+/// Build canonical key for an approval gate: `b"ai/gates/" ++ gate_id32`.
+pub fn approval_gate_key(gate_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_APPROVAL_GATES.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_APPROVAL_GATES);
+    k.extend_from_slice(gate_id);
     k
 }
 
@@ -1081,10 +1093,7 @@ mod tests {
         let key_200 = derived_view_audit_key(&entity_id, 200);
         let key_max = derived_view_audit_key(&entity_id, u64::MAX);
 
-        assert!(
-            key_100 < key_200,
-            "Height 100 key must be < height 200 key"
-        );
+        assert!(key_100 < key_200, "Height 100 key must be < height 200 key");
         assert!(key_200 < key_max, "Height 200 key must be < max height key");
     }
 

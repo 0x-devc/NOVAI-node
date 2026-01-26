@@ -156,8 +156,8 @@ impl DerivedViewSchema {
     pub const fn expected_data_len(&self) -> Option<usize> {
         match self {
             Self::AggregateVolume => Some(32), // 8 + 8 + 16
-            Self::ActivityCount => Some(24),  // 8 + 8 + 8
-            Self::PoolSize => Some(24),       // 8 + 16
+            Self::ActivityCount => Some(24),   // 8 + 8 + 8
+            Self::PoolSize => Some(24),        // 8 + 16
         }
     }
 
@@ -813,20 +813,10 @@ mod tests {
         }
         .encode();
 
-        let id1 = DerivedView::compute_id(
-            DerivedSourceType::ChainAggregate,
-            1,
-            1000,
-            &creator,
-            &data,
-        );
-        let id2 = DerivedView::compute_id(
-            DerivedSourceType::ChainAggregate,
-            1,
-            1000,
-            &creator,
-            &data,
-        );
+        let id1 =
+            DerivedView::compute_id(DerivedSourceType::ChainAggregate, 1, 1000, &creator, &data);
+        let id2 =
+            DerivedView::compute_id(DerivedSourceType::ChainAggregate, 1, 1000, &creator, &data);
 
         assert_eq!(id1, id2, "View ID must be deterministic");
     }
@@ -841,13 +831,8 @@ mod tests {
         }
         .encode();
 
-        let id1 = DerivedView::compute_id(
-            DerivedSourceType::ChainAggregate,
-            1,
-            1000,
-            &creator,
-            &data,
-        );
+        let id1 =
+            DerivedView::compute_id(DerivedSourceType::ChainAggregate, 1, 1000, &creator, &data);
         let id2 = DerivedView::compute_id(
             DerivedSourceType::UserAuthorized, // different source
             1,
@@ -969,8 +954,8 @@ mod tests {
         }
         .encode();
 
-        let view = DerivedView::new(DerivedSourceType::ChainAggregate, 1, 1000, creator, data)
-            .unwrap();
+        let view =
+            DerivedView::new(DerivedSourceType::ChainAggregate, 1, 1000, creator, data).unwrap();
 
         let mut encoded = encode_derived_view_v1(&view);
         encoded[33] = 99; // Invalid source type at position 33
@@ -992,8 +977,8 @@ mod tests {
         }
         .encode();
 
-        let view = DerivedView::new(DerivedSourceType::ChainAggregate, 1, 1000, creator, data)
-            .unwrap();
+        let view =
+            DerivedView::new(DerivedSourceType::ChainAggregate, 1, 1000, creator, data).unwrap();
 
         let mut encoded = encode_derived_view_v1(&view);
         // Schema ID is at position 34-37 (after version, view_id, source_type)
@@ -1170,7 +1155,9 @@ mod tests {
             total_volume: 0,
         }
         .encode();
-        assert!(DerivedView::new(DerivedSourceType::ChainAggregate, 1, 0, creator, data1).is_some());
+        assert!(
+            DerivedView::new(DerivedSourceType::ChainAggregate, 1, 0, creator, data1).is_some()
+        );
 
         // Schema 2: ActivityCount
         let data2 = ActivityCountData {
@@ -1179,7 +1166,9 @@ mod tests {
             tx_count: 0,
         }
         .encode();
-        assert!(DerivedView::new(DerivedSourceType::ChainAggregate, 2, 0, creator, data2).is_some());
+        assert!(
+            DerivedView::new(DerivedSourceType::ChainAggregate, 2, 0, creator, data2).is_some()
+        );
 
         // Schema 3: PoolSize
         let data3 = PoolSizeData {
@@ -1187,6 +1176,8 @@ mod tests {
             pool_size: 0,
         }
         .encode();
-        assert!(DerivedView::new(DerivedSourceType::ChainAggregate, 3, 0, creator, data3).is_some());
+        assert!(
+            DerivedView::new(DerivedSourceType::ChainAggregate, 3, 0, creator, data3).is_some()
+        );
     }
 }

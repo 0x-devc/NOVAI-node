@@ -5,13 +5,17 @@
 
 use chrono::DateTime;
 use ed25519_dalek::VerifyingKey;
+use novai_ai_entities::gates::{ApprovalGate, GateType};
+use novai_ai_entities::{AiEntity, AutonomyMode, Capabilities};
+use novai_codec::{encode_ai_entity_v2, encode_approval_gate_v1};
 use novai_consensus_types::Block;
 use novai_smt::hash::{empty_hash_at_height, Hash32};
 use novai_smt::node::Node;
 use novai_smt::smt::{Smt, SmtError, SmtStore};
 use novai_state::{
-    account_key, decode_smt_root_v1, encode_account_v1, encode_smt_root_v1, smt_key_for_state_key,
-    smt_node_key, AccountStateV1, KvBatch, WriteOp, KEY_SMT_ROOT,
+    account_key, ai_entity_key, approval_gate_key, decode_smt_root_v1, encode_account_v1,
+    encode_smt_root_v1, smt_key_for_state_key, smt_node_key, AccountStateV1, KvBatch, WriteOp,
+    KEY_SMT_ROOT,
 };
 use novai_types::Address;
 use serde::{Deserialize, Serialize};
@@ -68,14 +72,65 @@ pub struct GenesisValidator {
     pub name: Option<String>,
 }
 
-/// Genesis AI entity configuration (schema only for Week 9).
+/// Genesis AI entity configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GenesisAIEntity {
-    /// Entity ID.
-    pub id: String,
-    /// Entity type (empty/reserved for future use).
+    /// Human-readable name for this entity.
+    pub name: String,
+    /// Code hash (64 hex characters = 32 bytes).
+    pub code_hash: String,
+    /// Creator address (64 hex characters = 32 bytes).
+    pub creator: String,
+    /// Autonomy mode: "advisory", "gated", or "autonomous".
+    #[serde(default = "default_autonomy_mode")]
+    pub autonomy_mode: String,
+    /// Initial balance for this entity.
     #[serde(default)]
-    pub entity_type: String,
+    pub initial_balance: String,
+    /// Capabilities flags (optional, defaults to match autonomy mode).
+    #[serde(default)]
+    pub capabilities: Option<GenesisCapabilities>,
+}
+
+fn default_autonomy_mode() -> String {
+    "advisory".to_string()
+}
+
+/// Genesis capabilities configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GenesisCapabilities {
+    #[serde(default)]
+    pub read_public_chain: bool,
+    #[serde(default)]
+    pub read_memory_objects: bool,
+    #[serde(default)]
+    pub emit_proposals: bool,
+    #[serde(default)]
+    pub request_execution: bool,
+    #[serde(default)]
+    pub read_nnpx_derived: bool,
+}
+
+/// Genesis approval gate configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GenesisApprovalGate {
+    /// Gate type: "multisig", "threshold", or "timelock_only".
+    pub gate_type: String,
+    /// Required approvers (list of 64-char hex addresses).
+    #[serde(default)]
+    pub required_approvers: Vec<String>,
+    /// Approval threshold (required signatures).
+    pub threshold: u32,
+    /// Timelock in blocks before execution.
+    pub timelock_blocks: u64,
+    /// Expiry in blocks after proposal.
+    pub expiry_blocks: u64,
+    /// Enable veto capability.
+    #[serde(default)]
+    pub veto_enabled: bool,
+    /// Enable freeze capability.
+    #[serde(default)]
+    pub freeze_enabled: bool,
 }
 
 /// Genesis configuration for blockchain initialization.
@@ -92,9 +147,12 @@ pub struct GenesisConfig {
     /// Initial account balances (address hex string -> amount string).
     #[serde(default)]
     pub accounts: BTreeMap<String, String>,
-    /// Initial AI entities (schema only, empty for Week 9).
+    /// Initial AI entities.
     #[serde(default)]
     pub ai_entities: Vec<GenesisAIEntity>,
+    /// Initial approval gates.
+    #[serde(default)]
+    pub approval_gates: Vec<GenesisApprovalGate>,
 }
 
 impl GenesisConfig {
@@ -189,6 +247,75 @@ impl GenesisConfig {
             })?;
         }
 
+        // Validate AI entities
+        for (idx, entity) in self.ai_entities.iter().enumerate() {
+            // code_hash must be 64 hex chars
+            if entity.code_hash.len() != 64 {
+                return Err(GenesisError::ValidationError(format!(
+                    "AI entity {idx} code_hash must be 64 hex characters"
+                )));
+            }
+            hex::decode(&entity.code_hash).map_err(|e| {
+                GenesisError::ValidationError(format!("AI entity {idx} code_hash invalid hex: {e}"))
+            })?;
+
+            // creator must be 64 hex chars
+            if entity.creator.len() != 64 {
+                return Err(GenesisError::ValidationError(format!(
+                    "AI entity {idx} creator must be 64 hex characters"
+                )));
+            }
+            hex::decode(&entity.creator).map_err(|e| {
+                GenesisError::ValidationError(format!("AI entity {idx} creator invalid hex: {e}"))
+            })?;
+
+            // autonomy_mode must be valid
+            match entity.autonomy_mode.as_str() {
+                "advisory" | "gated" | "autonomous" => {}
+                other => {
+                    return Err(GenesisError::ValidationError(format!(
+                        "AI entity {idx} invalid autonomy_mode: {other}"
+                    )));
+                }
+            }
+
+            // initial_balance must be parseable if provided
+            if !entity.initial_balance.is_empty() {
+                entity.initial_balance.parse::<u64>().map_err(|e| {
+                    GenesisError::ValidationError(format!(
+                        "AI entity {idx} initial_balance must be valid u64: {e}"
+                    ))
+                })?;
+            }
+        }
+
+        // Validate approval gates
+        for (idx, gate) in self.approval_gates.iter().enumerate() {
+            // gate_type must be valid
+            match gate.gate_type.as_str() {
+                "multisig" | "threshold" | "timelock_only" => {}
+                other => {
+                    return Err(GenesisError::ValidationError(format!(
+                        "Approval gate {idx} invalid gate_type: {other}"
+                    )));
+                }
+            }
+
+            // required_approvers must be valid addresses
+            for (j, approver) in gate.required_approvers.iter().enumerate() {
+                if approver.len() != 64 {
+                    return Err(GenesisError::ValidationError(format!(
+                        "Approval gate {idx} approver {j} must be 64 hex characters"
+                    )));
+                }
+                hex::decode(approver).map_err(|e| {
+                    GenesisError::ValidationError(format!(
+                        "Approval gate {idx} approver {j} invalid hex: {e}"
+                    ))
+                })?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -248,6 +375,77 @@ impl GenesisGenerator {
                 account_key(&addr),
                 encode_account_v1(&account).to_vec(),
             ));
+        }
+
+        // 2b. Write AI entities to state
+        for genesis_entity in &self.config.ai_entities {
+            let code_hash = Self::parse_hash(&genesis_entity.code_hash)?;
+            let creator = Self::parse_address(&genesis_entity.creator)?;
+
+            let autonomy_mode = match genesis_entity.autonomy_mode.as_str() {
+                "advisory" => AutonomyMode::Advisory,
+                "gated" => AutonomyMode::Gated,
+                "autonomous" => AutonomyMode::Autonomous,
+                _ => AutonomyMode::Advisory,
+            };
+
+            let capabilities = if let Some(caps) = &genesis_entity.capabilities {
+                Capabilities {
+                    read_public_chain: caps.read_public_chain,
+                    read_memory_objects: caps.read_memory_objects,
+                    emit_proposals: caps.emit_proposals,
+                    request_execution: caps.request_execution,
+                    read_nnpx_derived: caps.read_nnpx_derived,
+                    _reserved: [false; 3],
+                }
+            } else {
+                match autonomy_mode {
+                    AutonomyMode::Advisory => Capabilities::advisory(),
+                    AutonomyMode::Gated | AutonomyMode::Autonomous => Capabilities::gated(),
+                }
+            };
+
+            let mut entity = AiEntity::new(code_hash, creator, autonomy_mode, capabilities, 0);
+
+            if !genesis_entity.initial_balance.is_empty() {
+                let balance = genesis_entity
+                    .initial_balance
+                    .parse::<u64>()
+                    .map_err(|e| GenesisError::ValidationError(format!("Invalid balance: {e}")))?;
+                entity.economic_balance = u128::from(balance);
+            }
+
+            let encoded = encode_ai_entity_v2(&entity);
+            state_ops.push(WriteOp::Put(ai_entity_key(&entity.id), encoded));
+        }
+
+        // 2c. Write approval gates to state
+        for genesis_gate in &self.config.approval_gates {
+            let gate_type = match genesis_gate.gate_type.as_str() {
+                "multisig" => GateType::Multisig,
+                "threshold" => GateType::Threshold,
+                "timelock_only" => GateType::TimelockOnly,
+                _ => GateType::Multisig,
+            };
+
+            let mut approvers = Vec::new();
+            for approver_hex in &genesis_gate.required_approvers {
+                approvers.push(Self::parse_address(approver_hex)?);
+            }
+
+            let gate = ApprovalGate::new(
+                gate_type,
+                approvers,
+                genesis_gate.threshold,
+                genesis_gate.timelock_blocks,
+                genesis_gate.expiry_blocks,
+                genesis_gate.veto_enabled,
+                genesis_gate.freeze_enabled,
+            )
+            .map_err(|e| GenesisError::ValidationError(format!("Invalid gate: {e}")))?;
+
+            let encoded = encode_approval_gate_v1(&gate);
+            state_ops.push(WriteOp::Put(approval_gate_key(&gate.gate_id), encoded));
         }
 
         // 3. Compute SMT root from state operations
@@ -319,6 +517,22 @@ impl GenesisGenerator {
         let mut addr = [0u8; 32];
         addr.copy_from_slice(&bytes);
         Ok(addr)
+    }
+
+    /// Parse hex hash string to 32-byte array.
+    fn parse_hash(hash_hex: &str) -> Result<[u8; 32], GenesisError> {
+        if hash_hex.len() != 64 {
+            return Err(GenesisError::ValidationError(
+                "Hash must be 64 hex characters".to_string(),
+            ));
+        }
+
+        let bytes = hex::decode(hash_hex)
+            .map_err(|e| GenesisError::ValidationError(format!("Invalid hash hex: {e}")))?;
+
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&bytes);
+        Ok(hash)
     }
 }
 

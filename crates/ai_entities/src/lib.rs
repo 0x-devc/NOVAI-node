@@ -50,6 +50,35 @@ const AI_ENTITY_ID_DOMAIN: &[u8] = b"NOVAI_AI_ENTITY_ID_V1";
 /// Domain separator for module manifest ID computation.
 const MODULE_MANIFEST_ID_DOMAIN: &[u8] = b"NOVAI_MODULE_MANIFEST_V1";
 
+// ============================================================================
+// WELL-KNOWN MODULE IDENTIFIERS (Week 24 - Core Observer)
+// ============================================================================
+
+/// Well-known code hash for NOVAI Core Observer (testnet reference module).
+///
+/// Computed as: `blake3("NOVAI_CORE_OBSERVER_V1")`
+///
+/// The Core Observer is a reference AI module that:
+/// - Emits Anomaly signals when detecting unusual chain behavior
+/// - Emits CongestionForecast signals with predicted load
+/// - Stores ChainSummary and StatisticsSnapshot memory objects
+pub const CORE_OBSERVER_CODE_HASH: CodeHash = [
+    0x53, 0x1c, 0xc2, 0xd3, 0xeb, 0x0a, 0xc4, 0x7e, 0x92, 0x6f, 0xb5, 0x1e, 0x3a, 0xcc, 0xc1, 0x11,
+    0x5d, 0xd5, 0x49, 0x5e, 0x31, 0x76, 0xb1, 0x4b, 0xb0, 0x8d, 0x65, 0x98, 0x4e, 0xc7, 0x0f, 0x3a,
+];
+
+/// Protocol genesis creator address (well-known authority for genesis modules).
+///
+/// Computed as: `blake3("NOVAI_PROTOCOL_GENESIS_V1")`
+///
+/// Used as the `creator` field for protocol-defined AI modules registered
+/// at genesis. This is not a real cryptographic key - it's a deterministic
+/// placeholder that marks modules as "created by the protocol itself".
+pub const PROTOCOL_CREATOR: Address = [
+    0x5e, 0x04, 0x3a, 0x2b, 0x43, 0x63, 0x65, 0x79, 0x20, 0x27, 0xea, 0x58, 0x58, 0x05, 0x7a, 0xf1,
+    0x47, 0x9c, 0x06, 0x19, 0xd7, 0xf1, 0xf7, 0x64, 0x63, 0xf5, 0x07, 0xf5, 0xb0, 0x8f, 0xd7, 0x9f,
+];
+
 /// Autonomy mode determines how AI proposals are processed.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -199,6 +228,9 @@ pub struct AiEntity {
     pub registered_at: u64,
     /// Block height of last activity.
     pub last_active_at: u64,
+    /// Whether this entity is currently active (can execute).
+    /// Set via ModuleActivation/ModuleRollback governance proposals.
+    pub is_active: bool,
 }
 
 impl AiEntity {
@@ -232,6 +264,7 @@ impl AiEntity {
             params_root: [0u8; 32],
             registered_at,
             last_active_at: registered_at,
+            is_active: true,
         }
     }
 

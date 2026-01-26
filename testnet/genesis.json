@@ -33,5 +33,31 @@
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "1000000000",
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "500000000"
   },
-  "ai_entities": []
+  "ai_entities": [
+    {
+      "name": "novai-core-observer",
+      "code_hash": "531cc2d3eb0ac47e926fb51e3accc1115dd5495e3176b14bb08d65984ec70f3a",
+      "creator": "5e043a2b436365792027ea5858057af1479c0619d7f1f76463f507f5b08fd79f",
+      "autonomy_mode": "advisory",
+      "initial_balance": "1000000000",
+      "capabilities": {
+        "read_public_chain": true,
+        "read_memory_objects": true,
+        "emit_proposals": true,
+        "request_execution": false,
+        "read_nnpx_derived": false
+      }
+    }
+  ],
+  "approval_gates": [
+    {
+      "gate_type": "timelock_only",
+      "required_approvers": [],
+      "threshold": 0,
+      "timelock_blocks": 100,
+      "expiry_blocks": 1000,
+      "veto_enabled": false,
+      "freeze_enabled": false
+    }
+  ]
 }
