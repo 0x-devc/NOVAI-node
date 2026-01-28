@@ -35,6 +35,8 @@ pub struct ConsensusNode {
     pub peer_manager: Arc<PeerManager>,
     pub validator_set: Vec<Address>,
     pub validator_pubkeys: HashMap<Address, VerifyingKey>,
+    /// Cached (address, pubkey) pairs to avoid repeated allocations in hot path
+    pub validator_pubkeys_vec: Vec<(Address, VerifyingKey)>,
     pub qc_broadcasted: QcBroadcastCache,
     pub round_start_time: Arc<Mutex<Instant>>,
     pub timed_out_this_round: Arc<Mutex<bool>>,
@@ -50,6 +52,12 @@ impl ConsensusNode {
         let verifying_key = signing_key.verifying_key();
         let our_address = address_from_pubkey(&verifying_key);
 
+        // Pre-cache pubkeys as Vec to avoid repeated allocations in hot path
+        let validator_pubkeys_vec: Vec<(Address, VerifyingKey)> = validator_pubkeys
+            .iter()
+            .map(|(addr, pk)| (*addr, *pk))
+            .collect();
+
         Self {
             our_address,
             signing_key,
@@ -59,6 +67,7 @@ impl ConsensusNode {
             peer_manager: Arc::new(PeerManager::new()),
             validator_set,
             validator_pubkeys,
+            validator_pubkeys_vec,
             qc_broadcasted: Arc::new(Mutex::new(HashSet::new())),
             round_start_time: Arc::new(Mutex::new(Instant::now())),
             timed_out_this_round: Arc::new(Mutex::new(false)),
@@ -146,17 +155,11 @@ impl ConsensusNode {
     pub fn handle_timeout(&self, timeout: Timeout) -> Result<bool, String> {
         println!("⏰ Received timeout from {:?}", &timeout.voter[..4]);
 
-        let pubkeys_vec: Vec<(Address, VerifyingKey)> = self
-            .validator_pubkeys
-            .iter()
-            .map(|(addr, pk)| (*addr, *pk))
-            .collect();
-
         let mut state = self.state.lock().unwrap();
 
-        // Add timeout to state
+        // Add timeout to state (use cached pubkeys_vec to avoid allocation)
         state
-            .add_timeout(timeout, &pubkeys_vec)
+            .add_timeout(timeout, &self.validator_pubkeys_vec)
             .map_err(|e| format!("Add timeout failed: {:?}", e))?;
 
         // Try to advance round
@@ -595,32 +598,81 @@ impl ConsensusNode {
             }
         }
 
-        // 4. Verify block validity
-        let db = self.db.lock().unwrap();
-        let state = self.state.lock().unwrap();
+        // 4. Apply justify_qc if it advances our state (QC catch-up).
+        //    This fixes the race where proposal for N+1 arrives before the
+        //    standalone QC(N) broadcast. The justify_qc was already validated
+        //    above (correct height, quorum votes, proposer signature covers it).
+        //    Idempotent: cache_qc_and_check_commit is a no-op when the QC
+        //    does not dominate the current highest_qc.
+        // 5. Verify block validity, create vote, and cache block in single lock acquisition
+        let vote = {
+            let mut db = self.db.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
 
-        state
-            .verify_block(block, &*db)
-            .map_err(|e| format!("Block verification failed: {:?}", e))?;
+            // Check if justify_qc would advance our view
+            let dominated = match &state.highest_qc {
+                None => justify_qc.height > 0,
+                Some(existing) => {
+                    justify_qc.height > existing.height
+                        || (justify_qc.height == existing.height
+                            && justify_qc.round > existing.round)
+                }
+            };
 
-        // 5. Create vote
-        let vote = state
-            .create_vote(block, &self.signing_key)
-            .map_err(|e| format!("Vote creation failed: {:?}", e))?;
+            if dominated {
+                println!(
+                    "🔄 QC catch-up from proposal: advancing state with justify_qc height={} round={} (our highest_qc={:?})",
+                    justify_qc.height,
+                    justify_qc.round,
+                    state.highest_qc.as_ref().map(|q| (q.height, q.round))
+                );
 
-        drop(state);
-        drop(db);
+                let to_commit = state
+                    .cache_qc_and_check_commit(justify_qc.clone())
+                    .map_err(|e| format!("QC catch-up commit check failed: {:?}", e))?;
+
+                if !to_commit.is_empty() {
+                    let new_committed_height = to_commit.last().unwrap().height;
+                    state
+                        .persist_commit_atomic(
+                            &mut *db,
+                            &to_commit,
+                            justify_qc,
+                            new_committed_height,
+                            None,
+                        )
+                        .map_err(|e| format!("QC catch-up atomic persist failed: {:?}", e))?;
+                    state.apply_commits(&to_commit);
+                    println!(
+                        "💾 QC catch-up committed blocks up to height={}",
+                        new_committed_height
+                    );
+                } else {
+                    state
+                        .persist_highest_qc(&mut *db)
+                        .map_err(|e| format!("QC catch-up persist highest QC failed: {:?}", e))?;
+                }
+            }
+
+            state
+                .verify_block(block, &*db)
+                .map_err(|e| format!("Block verification failed: {:?}", e))?;
+
+            // 5. Create vote
+            let vote = state
+                .create_vote(block, &self.signing_key)
+                .map_err(|e| format!("Vote creation failed: {:?}", e))?;
+
+            // 6. Cache block for commit rule (combined to avoid re-acquiring lock)
+            state.check_no_fork(block);
+            state.cache_block(block.clone());
+
+            vote
+        };
 
         // Reset round timer - we received a valid proposal
         *self.round_start_time.lock().unwrap() = Instant::now();
         *self.timed_out_this_round.lock().unwrap() = false;
-
-        // 6. Cache block for commit rule (Week 7)
-        {
-            let mut state = self.state.lock().unwrap();
-            state.check_no_fork(block);
-            state.cache_block(block.clone());
-        }
 
         println!("✅ Voting for block at height={}", block.height);
 
@@ -629,18 +681,11 @@ impl ConsensusNode {
 
     /// Handle incoming vote.
     pub fn handle_vote(&self, vote: Vote) -> Result<(), String> {
-        println!("🗳️  Received vote from {:?}", &vote.voter[..4]);
-
         let mut state = self.state.lock().unwrap();
 
-        let pubkeys_vec: Vec<(Address, VerifyingKey)> = self
-            .validator_pubkeys
-            .iter()
-            .map(|(addr, pk)| (*addr, *pk))
-            .collect();
-
+        // Use cached pubkeys_vec to avoid allocation on every vote
         state
-            .add_vote(vote.clone(), &pubkeys_vec)
+            .add_vote(vote.clone(), &self.validator_pubkeys_vec)
             .map_err(|e| format!("Add vote failed: {:?}", e))?;
 
         // Log AI signal if present (advisory only)
@@ -657,26 +702,10 @@ impl ConsensusNode {
             self.validator_set[leader_idx] == self.our_address
         };
 
-        println!(
-            "DEBUG: Vote h={} r={}. Leader for proposal_height={}? {}",
-            vote.height,
-            vote.round,
-            vote.height.saturating_sub(1),
-            leader_for_vote
-        );
-
+        // Only leader forms QC - non-leaders just collect votes
         if !leader_for_vote {
-            println!(
-                "DEBUG: Not leader for height {}, skipping QC formation",
-                vote.height
-            );
             return Ok(());
         }
-
-        println!(
-            "DEBUG: Attempting QC formation for block_hash={:?}",
-            &vote.block_hash[..8]
-        );
 
         if let Some(qc) = state
             .try_form_qc(&vote.block_hash, &self.validator_set)

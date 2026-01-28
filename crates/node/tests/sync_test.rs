@@ -173,3 +173,165 @@ fn test_sync_from_peer_on_restart() {
 
     println!("✅ Node successfully synced from peer on restart");
 }
+
+/// Test: QC catch-up via justify_qc in proposal (race condition fix).
+///
+/// Scenario:
+///   1. Validator 3 has processed (cached) block 1 but has NOT received QC(1).
+///   2. Leader for height 2 (validator 1) forms QC(1) and immediately proposes
+///      block 2 with justify_qc = QC(1).
+///   3. The standalone QC(1) broadcast has not reached validator 3 yet.
+///   4. Validator 3 receives the proposal for height 2.
+///
+/// Without the fix:
+///   handle_proposal calls verify_block which checks expected_height based on
+///   highest_qc (None). expected_height = 1, but block.height = 2 → REJECTED.
+///
+/// With the fix:
+///   handle_proposal applies justify_qc first (QC catch-up), advancing
+///   highest_qc to QC(1). Then verify_block sees expected_height = 2 → ACCEPTED.
+#[test]
+fn test_qc_catchup_via_justify_qc_in_proposal() {
+    // Use deterministic keys matching main.rs (seed = index)
+    let validator_keys: Vec<SigningKey> = (0..4)
+        .map(|i| SigningKey::from_bytes(&[i as u8; 32]))
+        .collect();
+
+    let validator_set: Vec<novai_types::Address> = validator_keys
+        .iter()
+        .map(|sk| address_from_pubkey(&sk.verifying_key()))
+        .collect();
+
+    let validator_pubkeys: HashMap<novai_types::Address, ed25519_dalek::VerifyingKey> =
+        validator_keys
+            .iter()
+            .map(|sk| {
+                let pk = sk.verifying_key();
+                (address_from_pubkey(&pk), pk)
+            })
+            .collect();
+
+    // Node under test: validator 3 (not leader for heights 1 or 2)
+    // Leader for height 1: view_height=0, round=0 → idx=(0+0)%4=0 → validator 0
+    // Leader for height 2: view_height=1, round=0 → idx=(1+0)%4=1 → validator 1
+    let node = ConsensusNode::new(
+        validator_keys[3].clone(),
+        validator_set.clone(),
+        validator_pubkeys.clone(),
+    );
+
+    // --- Step 1: Create block 1 and cache it in the node's state ---
+    // (simulates: validator 3 received proposal for height 1, voted, cached it,
+    //  but has NOT yet received the QC for height 1)
+    let block1 = Block {
+        height: 1,
+        round: 0,
+        parent_hash: [0u8; 32],    // genesis parent
+        state_root: [0u8; 32],     // genesis root (MemKv returns this when empty)
+        txs: vec![],
+    };
+    let block1_hash = novai_consensus_types::block_hash(&block1);
+
+    {
+        let mut state = node.state.lock().unwrap();
+        // Cache block 1 (as if we voted on it via handle_proposal)
+        state.cache_block(block1.clone());
+        // Crucially: highest_qc is still None — the QC broadcast hasn't arrived
+        assert!(state.highest_qc.is_none(), "Precondition: no QC yet");
+    }
+
+    // --- Step 2: Build QC for height 1 with quorum votes ---
+    // 3 votes from validators 0, 1, 2 (quorum = 2f+1 = 3 for n=4)
+    let mut qc_votes = Vec::new();
+    for i in 0..3 {
+        let unsigned_vote = novai_consensus_types::Vote {
+            height: 1,
+            round: 0,
+            block_hash: block1_hash,
+            voter: validator_set[i],
+            signature: [0u8; 64],
+            ai_signal_commitment: None,
+        };
+        let unsigned_bytes =
+            novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
+        let domain_tag = b"NOVAI_VOTE_V1";
+        let mut to_sign = Vec::new();
+        to_sign.extend_from_slice(domain_tag);
+        to_sign.extend_from_slice(&unsigned_bytes);
+        let signature = novai_crypto::sign_bytes(&validator_keys[i], &to_sign);
+
+        qc_votes.push(novai_consensus_types::Vote {
+            signature,
+            ..unsigned_vote
+        });
+    }
+
+    let justify_qc = novai_consensus_types::QC {
+        height: 1,
+        round: 0,
+        block_hash: block1_hash,
+        votes: qc_votes,
+    };
+
+    // --- Step 3: Build proposal for height 2 from validator 1 (leader) ---
+    let block2 = Block {
+        height: 2,
+        round: 0,
+        parent_hash: block1_hash,  // parent is block 1
+        state_root: [0u8; 32],     // same genesis root (no txs executed)
+        txs: vec![],
+    };
+
+    let proposal = novai_consensus_types::Proposal {
+        block: block2.clone(),
+        justify_qc: justify_qc.clone(),
+    };
+
+    // Sign proposal with validator 1's key (the leader for height 2)
+    let unsigned_bytes =
+        novai_consensus_types::codec::encode_proposal_v1_unsigned(&proposal)
+            .expect("encode proposal");
+    let signature = novai_crypto::sign_bytes(&validator_keys[1], &unsigned_bytes);
+
+    let signed_proposal = novai_consensus_types::SignedProposal {
+        proposer: validator_set[1],
+        proposal,
+        signature,
+    };
+
+    // --- Step 4: Handle the proposal (this is where the fix matters) ---
+    let result = node.handle_proposal(signed_proposal);
+    assert!(
+        result.is_ok(),
+        "Proposal should be accepted after QC catch-up, got: {:?}",
+        result.err()
+    );
+
+    // --- Step 5: Verify post-conditions ---
+    {
+        let state = node.state.lock().unwrap();
+
+        // highest_qc should now be QC(1) (applied from justify_qc)
+        assert!(
+            state.highest_qc.is_some(),
+            "highest_qc should be set after QC catch-up"
+        );
+        let hqc = state.highest_qc.as_ref().unwrap();
+        assert_eq!(
+            hqc.height, 1,
+            "highest_qc should be for height 1"
+        );
+        assert_eq!(
+            hqc.block_hash, block1_hash,
+            "highest_qc should reference block 1"
+        );
+
+        // Block 2 should be cached
+        assert!(
+            state.block_cache.contains_key(&2),
+            "Block 2 should be cached after handle_proposal"
+        );
+    }
+
+    println!("✅ QC catch-up via justify_qc in proposal works correctly");
+}

@@ -226,7 +226,7 @@ fn main() {
             node.start_listener(bind_addr).expect("start listener");
 
             // Connect to peers (with retry)
-            std::thread::sleep(Duration::from_secs(1)); // Give time for others to start
+            std::thread::sleep(Duration::from_millis(200)); // Brief pause for listener to start
             for peer in &peers {
                 let peer_addr = peer.parse().expect("parse peer addr");
                 match node.connect_to_peer(peer_addr) {
@@ -236,7 +236,7 @@ fn main() {
             }
 
             println!("✅ Node started, waiting for peers...");
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(500));
 
             // Create dummy mempool and nonce provider for Week 6
             let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
@@ -306,9 +306,12 @@ fn main() {
             }
 
             // Simple consensus loop with timeout checking
+            // NOTE: 5ms sleep allows 200 iterations/sec for responsive consensus
             let mut last_proposal_attempt = std::time::Instant::now();
+            let mut last_status_log = std::time::Instant::now();
+            let mut last_sync_check = std::time::Instant::now();
             loop {
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(5));
 
                 // Check for timeout
                 if let Some(timeout) = node.check_timeout() {
@@ -324,8 +327,9 @@ fn main() {
                     }
                 }
 
-                // Check for sync timeout (5 seconds)
-                {
+                // Check for sync timeout every 500ms (not every loop iteration)
+                if last_sync_check.elapsed() >= Duration::from_millis(500) {
+                    last_sync_check = std::time::Instant::now();
                     let mut pending = node.pending_sync_request.lock().unwrap();
                     if let Some(ref request) = *pending {
                         if request.request_time.elapsed() >= Duration::from_secs(5) {
@@ -340,20 +344,28 @@ fn main() {
                     }
                 }
 
-                // Propose every 3 seconds (atomically checks leadership)
-                if last_proposal_attempt.elapsed() >= Duration::from_secs(3) {
+                // Propose every 100ms (must be less than BASE_TIMEOUT_MS for consensus to work)
+                // This allows up to 10 proposals/sec - balanced for stability
+                if last_proposal_attempt.elapsed() >= Duration::from_millis(100) {
                     last_proposal_attempt = std::time::Instant::now();
 
                     let mut mempool_guard = mempool.lock().unwrap();
                     match node.try_propose_block(&mut mempool_guard, &nonce_provider) {
                         Ok(true) => println!("👑 Proposed block successfully"),
-                        Ok(false) => println!("👂 Listening for proposals..."),
+                        Ok(false) => {
+                            // Only log status every 5 seconds to reduce noise
+                            if last_status_log.elapsed() >= Duration::from_secs(5) {
+                                last_status_log = std::time::Instant::now();
+                                let peer_count = node.peer_manager.peer_count();
+                                let state = node.state.lock().unwrap();
+                                println!(
+                                    "📊 Status: height={} round={} peers={}",
+                                    state.committed_height, state.round, peer_count
+                                );
+                            }
+                        }
                         Err(e) => println!("❌ Propose failed: {}", e),
                     }
-
-                    // Check peer count
-                    let peer_count = node.peer_manager.peer_count();
-                    println!("   Connected peers: {}", peer_count);
                 }
             }
         }

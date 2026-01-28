@@ -15,7 +15,9 @@ use std::collections::{HashMap, HashSet};
 
 /// Base timeout duration in milliseconds.
 /// This is the timeout for round 0.
-pub const BASE_TIMEOUT_MS: u64 = 2000; // 2 seconds
+/// NOTE: 1 second allows fast recovery from missed proposals while still
+/// giving enough time for vote collection on a local network.
+pub const BASE_TIMEOUT_MS: u64 = 1000; // 1 second
 
 /// Timeout multiplier for exponential backoff.
 /// Each round doubles the timeout.
@@ -1915,22 +1917,23 @@ mod tests {
     #[test]
     fn test_timeout_for_round_base_case() {
         assert_eq!(timeout_for_round(0), BASE_TIMEOUT_MS);
-        assert_eq!(timeout_for_round(0), 2000);
+        assert_eq!(timeout_for_round(0), 1000);
     }
 
     #[test]
     fn test_timeout_for_round_exponential_backoff() {
-        assert_eq!(timeout_for_round(1), 4000); // 2^1 * 2000
-        assert_eq!(timeout_for_round(2), 8000); // 2^2 * 2000
-        assert_eq!(timeout_for_round(3), 16000); // 2^3 * 2000
-        assert_eq!(timeout_for_round(4), 32000); // 2^4 * 2000
+        assert_eq!(timeout_for_round(1), 2000); // 2^1 * 1000
+        assert_eq!(timeout_for_round(2), 4000); // 2^2 * 1000
+        assert_eq!(timeout_for_round(3), 8000); // 2^3 * 1000
+        assert_eq!(timeout_for_round(4), 16000); // 2^4 * 1000
+        assert_eq!(timeout_for_round(5), 32000); // 2^5 * 1000
     }
 
     #[test]
     fn test_timeout_for_round_caps_at_max() {
-        // Round 5: 2^5 * 2000 = 64000 > 60000, so capped
-        assert_eq!(timeout_for_round(5), MAX_TIMEOUT_MS);
-        assert_eq!(timeout_for_round(5), 60000);
+        // Round 6: 2^6 * 1000 = 64000 > 60000, so capped
+        assert_eq!(timeout_for_round(6), MAX_TIMEOUT_MS);
+        assert_eq!(timeout_for_round(6), 60000);
 
         // Higher rounds also capped
         assert_eq!(timeout_for_round(10), MAX_TIMEOUT_MS);

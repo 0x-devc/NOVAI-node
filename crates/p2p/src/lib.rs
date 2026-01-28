@@ -228,14 +228,20 @@ impl PeerManager {
 
     /// Broadcast a message to all connected peers.
     ///
+    /// Pre-encodes the message once to avoid repeated serialization per peer.
+    ///
     /// # Errors
     /// Returns error if encoding fails (individual peer write failures are handled internally).
     ///
     /// # Panics
     /// Panics if the mutex is poisoned.
     pub fn broadcast(&self, msg: &NetworkMessage) -> Result<(), P2PError> {
+        // Pre-encode message once (avoid repeated serialization per peer)
+        let wire_bytes = encode_wire_message(msg)?;
+
         self.peers.lock().unwrap().retain_mut(|stream| {
-            if matches!(write_wire_message(stream, msg), Ok(())) {
+            // Write pre-encoded bytes directly
+            if stream.write_all(&wire_bytes).is_ok() && stream.flush().is_ok() {
                 true
             } else {
                 eprintln!("Peer disconnected, removing");

@@ -130,15 +130,16 @@ fn leader_crash_triggers_round_advance() {
 #[test]
 fn timeout_backoff_is_exponential() {
     assert_eq!(timeout_for_round(0), BASE_TIMEOUT_MS);
-    assert_eq!(timeout_for_round(0), 2000);
+    assert_eq!(timeout_for_round(0), 1000);
 
-    assert_eq!(timeout_for_round(1), 4000);
-    assert_eq!(timeout_for_round(2), 8000);
-    assert_eq!(timeout_for_round(3), 16000);
-    assert_eq!(timeout_for_round(4), 32000);
+    assert_eq!(timeout_for_round(1), 2000); // 2^1 * 1000
+    assert_eq!(timeout_for_round(2), 4000); // 2^2 * 1000
+    assert_eq!(timeout_for_round(3), 8000); // 2^3 * 1000
+    assert_eq!(timeout_for_round(4), 16000); // 2^4 * 1000
+    assert_eq!(timeout_for_round(5), 32000); // 2^5 * 1000
 
-    // Capped at MAX
-    assert_eq!(timeout_for_round(5), MAX_TIMEOUT_MS);
+    // Capped at MAX (2^6 * 1000 = 64000 > 60000)
+    assert_eq!(timeout_for_round(6), MAX_TIMEOUT_MS);
     assert_eq!(timeout_for_round(100), MAX_TIMEOUT_MS);
 
     println!("✅ timeout_backoff: Exponential backoff verified");
