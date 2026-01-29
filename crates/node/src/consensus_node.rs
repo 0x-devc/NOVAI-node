@@ -606,8 +606,10 @@ impl ConsensusNode {
         //    does not dominate the current highest_qc.
         // 5. Verify block validity, create vote, and cache block in single lock acquisition
         let vote = {
-            let mut db = self.db.lock().unwrap();
+            // Lock order: state → db (must match try_propose_block, handle_vote,
+            // handle_qc to prevent deadlock between main loop and receive threads).
             let mut state = self.state.lock().unwrap();
+            let mut db = self.db.lock().unwrap();
 
             // Check if justify_qc would advance our view
             let dominated = match &state.highest_qc {
