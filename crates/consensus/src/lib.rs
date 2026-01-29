@@ -353,8 +353,13 @@ impl ConsensusState {
             None => self.height + 1,
         };
 
-        // Verify vote is for expected height
+        // Accept votes for expected height only. Votes exactly 1 behind are
+        // expected stragglers (peer voted before seeing our latest QC) — drop
+        // them silently since QC already formed for that height.
         if vote.height != expected_height {
+            if vote.height + 1 == expected_height {
+                return Ok(()); // Stale vote, silently ignore
+            }
             return Err(ConsensusError::InvalidVote(format!(
                 "Vote height mismatch: expected {}, got {}",
                 expected_height, vote.height
