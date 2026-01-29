@@ -644,30 +644,43 @@ impl ConsensusNode {
                     state.highest_qc.as_ref().map(|q| (q.height, q.round))
                 );
 
-                let to_commit = state
-                    .cache_qc_and_check_commit(justify_qc.clone())
-                    .map_err(|e| format!("QC catch-up commit check failed: {:?}", e))?;
-
-                if !to_commit.is_empty() {
-                    let new_committed_height = to_commit.last().unwrap().height;
-                    state
-                        .persist_commit_atomic(
-                            &mut *db,
-                            &to_commit,
-                            justify_qc,
-                            new_committed_height,
-                            None,
-                        )
-                        .map_err(|e| format!("QC catch-up atomic persist failed: {:?}", e))?;
-                    state.apply_commits(&to_commit);
-                    println!(
-                        "💾 QC catch-up committed blocks up to height={}",
-                        new_committed_height
-                    );
-                } else {
-                    state
-                        .persist_highest_qc(&mut *db)
-                        .map_err(|e| format!("QC catch-up persist highest QC failed: {:?}", e))?;
+                match state.cache_qc_and_check_commit(justify_qc.clone()) {
+                    Ok(to_commit) if !to_commit.is_empty() => {
+                        let new_committed_height = to_commit.last().unwrap().height;
+                        state
+                            .persist_commit_atomic(
+                                &mut *db,
+                                &to_commit,
+                                justify_qc,
+                                new_committed_height,
+                                None,
+                            )
+                            .map_err(|e| format!("QC catch-up atomic persist failed: {:?}", e))?;
+                        state.apply_commits(&to_commit);
+                        println!(
+                            "💾 QC catch-up committed blocks up to height={}",
+                            new_committed_height
+                        );
+                    }
+                    Ok(_) => {
+                        state
+                            .persist_highest_qc(&mut *db)
+                            .map_err(|e| {
+                                format!("QC catch-up persist highest QC failed: {:?}", e)
+                            })?;
+                    }
+                    Err(e) => {
+                        // Commit chain incomplete — blocks missing from cache.
+                        // highest_qc was already updated by cache_qc_and_check_commit.
+                        // Continue to verify and vote; commits will happen when blocks
+                        // arrive via sync or future proposals.
+                        println!("⚠️ QC catch-up commit chain incomplete: {:?}", e);
+                        state
+                            .persist_highest_qc(&mut *db)
+                            .map_err(|e| {
+                                format!("QC catch-up persist highest QC failed: {:?}", e)
+                            })?;
+                    }
                 }
             }
 
@@ -740,31 +753,46 @@ impl ConsensusNode {
 
             println!("🎉 QC formed with {} votes!", qc.votes.len());
 
-            // CRITICAL: Process the QC locally before broadcasting
-            // This updates our own highest_qc and checks for commits
-            let to_commit = state
-                .cache_qc_and_check_commit(qc.clone())
-                .map_err(|e| format!("Commit check failed: {:?}", e))?;
-
-            // Apply commits if any
-            if !to_commit.is_empty() {
-                let mut db = self.db.lock().unwrap();
-                let new_committed_height = to_commit.last().unwrap().height;
-                state
-                    .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
-                    .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
-                state.apply_commits(&to_commit);
-                println!(
-                    "💾 Committed blocks up to height={} (formed QC locally)",
-                    new_committed_height
-                );
-            } else {
-                // Persist highest_qc even without commit
-                let mut db = self.db.lock().unwrap();
-                state
-                    .persist_highest_qc(&mut *db)
-                    .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
-                println!("💾 Persisted highest_qc={} (formed locally)", qc.height);
+            // Process the QC locally before broadcasting.
+            // Commit chain errors are non-fatal — highest_qc is updated
+            // regardless, and the QC MUST always be broadcast so other
+            // nodes can advance.
+            match state.cache_qc_and_check_commit(qc.clone()) {
+                Ok(to_commit) if !to_commit.is_empty() => {
+                    let mut db = self.db.lock().unwrap();
+                    let new_committed_height = to_commit.last().unwrap().height;
+                    state
+                        .persist_commit_atomic(
+                            &mut *db,
+                            &to_commit,
+                            &qc,
+                            new_committed_height,
+                            None,
+                        )
+                        .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
+                    state.apply_commits(&to_commit);
+                    println!(
+                        "💾 Committed blocks up to height={} (formed QC locally)",
+                        new_committed_height
+                    );
+                }
+                Ok(_) => {
+                    let mut db = self.db.lock().unwrap();
+                    state
+                        .persist_highest_qc(&mut *db)
+                        .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
+                    println!("💾 Persisted highest_qc={} (formed locally)", qc.height);
+                }
+                Err(e) => {
+                    // Commit chain incomplete — blocks missing from cache.
+                    // highest_qc was already updated. Persist it and ALWAYS
+                    // broadcast the QC so other nodes can advance.
+                    println!("⚠️ Commit chain incomplete (will sync): {:?}", e);
+                    let mut db = self.db.lock().unwrap();
+                    state
+                        .persist_highest_qc(&mut *db)
+                        .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
+                }
             }
 
             drop(state);
@@ -786,56 +814,63 @@ impl ConsensusNode {
         // Record current round before processing QC
         let old_round = state.round;
 
-        // Check commit rule and get blocks to commit
-        // Note: cache_qc_and_check_commit also updates highest_qc if dominated
-        let to_commit = state
-            .cache_qc_and_check_commit(qc.clone())
-            .map_err(|e| format!("Commit check failed: {:?}", e))?;
-
-        // Check if round was reset (view height advanced)
-        let round_was_reset = state.round == 0 && old_round != 0;
-
-        // Apply commits if any
-        if !to_commit.is_empty() {
-            let mut db = self.db.lock().unwrap();
-
-            // Calculate new committed height (last block in to_commit)
-            let new_committed_height = to_commit.last().unwrap().height;
-
-            // FIX B: Persist atomically BEFORE applying in-memory changes
-            state
-                .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
-                .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
-
-            // Now safe to apply in-memory commits
-            state.apply_commits(&to_commit);
-
-            println!(
-                "💾 Persisted state (atomic): committed_height={}, highest_qc={}",
-                state.committed_height(),
-                state.highest_qc.as_ref().map(|q| q.height).unwrap_or(0)
-            );
-        } else {
-            // FIX C: Even without commit, persist highest_qc if it was updated
-            if state.highest_qc.as_ref().map(|q| q.height) == Some(qc.height) {
-                // This QC became the new highest - persist it
+        // Check commit rule and get blocks to commit.
+        // Commit chain errors are non-fatal — highest_qc is updated regardless,
+        // and commits will happen when missing blocks arrive via sync.
+        let mut committed = false;
+        match state.cache_qc_and_check_commit(qc.clone()) {
+            Ok(to_commit) if !to_commit.is_empty() => {
+                let mut db = self.db.lock().unwrap();
+                let new_committed_height = to_commit.last().unwrap().height;
+                state
+                    .persist_commit_atomic(
+                        &mut *db,
+                        &to_commit,
+                        &qc,
+                        new_committed_height,
+                        None,
+                    )
+                    .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
+                state.apply_commits(&to_commit);
+                committed = true;
+                println!(
+                    "💾 Persisted state (atomic): committed_height={}, highest_qc={}",
+                    state.committed_height(),
+                    state.highest_qc.as_ref().map(|q| q.height).unwrap_or(0)
+                );
+            }
+            Ok(_) => {
+                if state.highest_qc.as_ref().map(|q| q.height) == Some(qc.height) {
+                    let mut db = self.db.lock().unwrap();
+                    state
+                        .persist_highest_qc(&mut *db)
+                        .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
+                    println!(
+                        "💾 Persisted highest_qc={} (no commit triggered)",
+                        qc.height
+                    );
+                }
+            }
+            Err(e) => {
+                // Commit chain incomplete — blocks missing from cache.
+                // highest_qc was already updated. Persist it and continue.
+                println!("⚠️ Commit chain incomplete (will sync): {:?}", e);
                 let mut db = self.db.lock().unwrap();
                 state
                     .persist_highest_qc(&mut *db)
                     .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
-                println!(
-                    "💾 Persisted highest_qc={} (no commit triggered)",
-                    qc.height
-                );
             }
         }
+
+        // Check if round was reset (view height advanced)
+        let round_was_reset = state.round == 0 && old_round != 0;
 
         // Release state lock before updating node-level flags
         drop(state);
 
-        // FIX: When round is reset due to QC/commit, reset the node-level timeout flags
+        // When round is reset due to QC/commit, reset the node-level timeout flags
         // so the node can start a fresh timeout cycle for the new height
-        if round_was_reset || !to_commit.is_empty() {
+        if round_was_reset || committed {
             *self.round_start_time.lock().unwrap() = Instant::now();
             *self.last_timeout_time.lock().unwrap() = None;
         }
