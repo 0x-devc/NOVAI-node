@@ -560,13 +560,10 @@ impl ConsensusState {
             )));
         }
 
-        // Verify timeout is for current round
-        if timeout.round != self.round {
-            return Err(ConsensusError::InvalidVote(format!(
-                "Timeout round mismatch: expected {}, got {}",
-                self.round, timeout.round
-            )));
-        }
+        // Accept timeouts for any round at the correct height.
+        // Timeouts for past rounds are harmless (won't form quorum since we've moved on).
+        // Timeouts for future rounds are buffered so quorum can form when we catch up.
+        // try_advance_round only checks rounds >= self.round for quorum.
 
         // Find voter's public key in validator set
         let pubkey = validator_pubkeys
@@ -577,11 +574,14 @@ impl ConsensusState {
                 ConsensusError::InvalidVote("Timeout voter not in validator set".to_string())
             })?;
 
-        // Check for duplicate timeout from same voter in this round
-        if self.timed_out_in_round.contains(&timeout.voter) {
-            return Err(ConsensusError::InvalidVote(
-                "Duplicate timeout from same voter in current round".to_string(),
-            ));
+        // Check for duplicate timeout from same voter in this specific round
+        let key = (timeout.height, timeout.round);
+        if let Some(existing) = self.pending_timeouts.get(&key) {
+            if existing.iter().any(|t| t.voter == timeout.voter) {
+                return Err(ConsensusError::InvalidVote(
+                    "Duplicate timeout from same voter in this round".to_string(),
+                ));
+            }
         }
 
         // Create unsigned timeout for verification
@@ -623,11 +623,7 @@ impl ConsensusState {
             }
         }
 
-        // Mark this voter as having timed out in this round
-        self.timed_out_in_round.insert(timeout.voter);
-
-        // Add timeout to pending timeouts
-        let key = (timeout.height, timeout.round);
+        // Add timeout to pending timeouts (dedup already checked above)
         self.pending_timeouts.entry(key).or_default().push(timeout);
 
         Ok(())
@@ -637,29 +633,39 @@ impl ConsensusState {
     ///
     /// Returns true if round was advanced, false otherwise.
     pub fn try_advance_round(&mut self, validator_set: &[Address]) -> bool {
-        // Expected timeout height is max(committed_height, highest_qc_height) + 1
         let expected_height = match &self.highest_qc {
             Some(qc) => std::cmp::max(self.height, qc.height) + 1,
             None => self.height + 1,
         };
 
-        let key = (expected_height, self.round);
-        let timeouts = match self.pending_timeouts.get(&key) {
-            Some(t) => t,
-            None => return false,
-        };
-
-        // Check if we have quorum: 2f+1 where n = 3f+1
         let n = validator_set.len();
         let f = (n - 1) / 3;
         let quorum = 2 * f + 1;
 
-        if timeouts.len() < quorum {
-            return false;
+        // Check current round and any future rounds for quorum.
+        // This handles the case where we buffered timeouts for rounds ahead of us.
+        let mut best_round = None;
+        for &(h, r) in self.pending_timeouts.keys() {
+            if h == expected_height && r >= self.round {
+                if let Some(timeouts) = self.pending_timeouts.get(&(h, r)) {
+                    if timeouts.len() >= quorum {
+                        match best_round {
+                            None => best_round = Some(r),
+                            Some(prev) if r > prev => best_round = Some(r),
+                            _ => {}
+                        }
+                    }
+                }
+            }
         }
 
-        // Advance round
-        self.round += 1;
+        let target_round = match best_round {
+            Some(r) => r,
+            None => return false,
+        };
+
+        // Advance to target_round + 1
+        self.round = target_round + 1;
         self.view_changes_total += 1;
 
         // Clear round-specific state
@@ -669,10 +675,10 @@ impl ConsensusState {
         self.last_proposed = None;
 
         println!(
-            "⏰ ROUND ADVANCED to round={} at height={} (received {} timeouts)",
+            "⏰ ROUND ADVANCED to round={} at height={} (quorum at round={})",
             self.round,
             expected_height,
-            timeouts.len()
+            target_round
         );
 
         true
@@ -1784,7 +1790,10 @@ mod tests {
 
         // Verify it was added
         assert_eq!(state.pending_timeouts.len(), 1);
-        assert!(state.timed_out_in_round.contains(&validator_set[1]));
+        let key = (1u64, 0u64);
+        let timeouts = state.pending_timeouts.get(&key).unwrap();
+        assert_eq!(timeouts.len(), 1);
+        assert_eq!(timeouts[0].voter, validator_set[1]);
     }
 
     #[test]

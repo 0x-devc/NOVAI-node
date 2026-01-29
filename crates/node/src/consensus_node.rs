@@ -39,7 +39,8 @@ pub struct ConsensusNode {
     pub validator_pubkeys_vec: Vec<(Address, VerifyingKey)>,
     pub qc_broadcasted: QcBroadcastCache,
     pub round_start_time: Arc<Mutex<Instant>>,
-    pub timed_out_this_round: Arc<Mutex<bool>>,
+    /// When we last broadcast a timeout for the current round (None = haven't timed out yet).
+    pub last_timeout_time: Arc<Mutex<Option<Instant>>>,
     pub pending_sync_request: Arc<Mutex<Option<PendingSyncRequest>>>,
 }
 
@@ -70,7 +71,7 @@ impl ConsensusNode {
             validator_pubkeys_vec,
             qc_broadcasted: Arc::new(Mutex::new(HashSet::new())),
             round_start_time: Arc::new(Mutex::new(Instant::now())),
-            timed_out_this_round: Arc::new(Mutex::new(false)),
+            last_timeout_time: Arc::new(Mutex::new(None)),
             pending_sync_request: Arc::new(Mutex::new(None)),
         }
     }
@@ -116,36 +117,41 @@ impl ConsensusNode {
     ///
     /// Returns Some(Timeout) if timeout duration elapsed and not already timed out.
     pub fn check_timeout(&self) -> Option<Timeout> {
-        let timed_out = *self.timed_out_this_round.lock().unwrap();
-        if timed_out {
-            return None; // Already timed out this round
-        }
-
         let start_time = *self.round_start_time.lock().unwrap();
         let state = self.state.lock().unwrap();
 
-        let timeout_duration =
-            std::time::Duration::from_millis(novai_consensus::timeout_for_round(state.round));
+        let timeout_ms = novai_consensus::timeout_for_round(state.round);
+        let timeout_duration = std::time::Duration::from_millis(timeout_ms);
 
-        if start_time.elapsed() >= timeout_duration {
-            // Create timeout
-            match state.create_timeout(&self.signing_key) {
-                Ok(timeout) => {
-                    *self.timed_out_this_round.lock().unwrap() = true;
-                    println!(
-                        "⏰ TIMEOUT triggered for round={} after {:?}",
-                        state.round,
-                        start_time.elapsed()
-                    );
-                    Some(timeout)
-                }
-                Err(e) => {
-                    eprintln!("❌ Failed to create timeout: {:?}", e);
-                    None
-                }
+        if start_time.elapsed() < timeout_duration {
+            return None; // Not yet timed out
+        }
+
+        // Allow re-broadcast after the full timeout duration to handle lost messages.
+        // This replaces the old boolean flag that permanently blocked re-timeout.
+        let last_timeout = *self.last_timeout_time.lock().unwrap();
+        if let Some(last) = last_timeout {
+            let rebroadcast_interval = std::time::Duration::from_millis(timeout_ms);
+            if last.elapsed() < rebroadcast_interval {
+                return None; // Too soon to re-broadcast
             }
-        } else {
-            None
+        }
+
+        // Create timeout
+        match state.create_timeout(&self.signing_key) {
+            Ok(timeout) => {
+                *self.last_timeout_time.lock().unwrap() = Some(Instant::now());
+                println!(
+                    "⏰ TIMEOUT triggered for round={} after {:?}",
+                    state.round,
+                    start_time.elapsed()
+                );
+                Some(timeout)
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to create timeout: {:?}", e);
+                None
+            }
         }
     }
 
@@ -168,7 +174,7 @@ impl ConsensusNode {
         if advanced {
             // Reset round timer
             *self.round_start_time.lock().unwrap() = Instant::now();
-            *self.timed_out_this_round.lock().unwrap() = false;
+            *self.last_timeout_time.lock().unwrap() = None;
 
             println!(
                 "⏰ ROUND ADVANCED to round={} at height={}",
@@ -472,6 +478,15 @@ impl ConsensusNode {
         // Cache our own proposed block so we can form QC when votes arrive
         state.cache_block(block.clone());
 
+        // Leader self-vote: add our own vote so we only need (quorum - 1) external votes.
+        // With 4 validators and quorum=3, this means we need 2 of 3 peers instead of all 3.
+        let self_vote = state
+            .create_vote(&block, &self.signing_key)
+            .map_err(|e| format!("Leader self-vote creation failed: {:?}", e))?;
+        state
+            .add_vote(self_vote, &self.validator_pubkeys_vec)
+            .map_err(|e| format!("Leader self-vote add failed: {:?}", e))?;
+
         // Build justify_qc for the proposal
         let justify_qc = if block.height == 1 {
             QC {
@@ -674,7 +689,7 @@ impl ConsensusNode {
 
         // Reset round timer - we received a valid proposal
         *self.round_start_time.lock().unwrap() = Instant::now();
-        *self.timed_out_this_round.lock().unwrap() = false;
+        *self.last_timeout_time.lock().unwrap() = None;
 
         println!("✅ Voting for block at height={}", block.height);
 
@@ -822,7 +837,7 @@ impl ConsensusNode {
         // so the node can start a fresh timeout cycle for the new height
         if round_was_reset || !to_commit.is_empty() {
             *self.round_start_time.lock().unwrap() = Instant::now();
-            *self.timed_out_this_round.lock().unwrap() = false;
+            *self.last_timeout_time.lock().unwrap() = None;
         }
 
         Ok(())
