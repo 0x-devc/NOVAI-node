@@ -796,6 +796,13 @@ impl ConsensusNode {
             }
 
             drop(state);
+
+            // Reset timeout timer — view height just advanced via our own QC.
+            // Without this, the stale round_start_time from the previous round
+            // causes immediate spurious timeouts that clear pending_votes.
+            *self.round_start_time.lock().unwrap() = Instant::now();
+            *self.last_timeout_time.lock().unwrap() = None;
+
             self.broadcast(NetworkMessage::Qc(qc))?;
         }
 
@@ -811,8 +818,9 @@ impl ConsensusNode {
         // get wiped out by apply_commits clearing pending_timeouts.
         let mut state = self.state.lock().unwrap();
 
-        // Record current round before processing QC
+        // Record current round and highest_qc height before processing QC
         let old_round = state.round;
+        let old_highest = state.highest_qc.as_ref().map(|q| q.height);
 
         // Check commit rule and get blocks to commit.
         // Commit chain errors are non-fatal — highest_qc is updated regardless,
@@ -862,15 +870,17 @@ impl ConsensusNode {
             }
         }
 
-        // Check if round was reset (view height advanced)
+        // Check if round was reset (view height advanced) or highest_qc advanced
+        let new_highest = state.highest_qc.as_ref().map(|q| q.height);
+        let qc_advanced = new_highest > old_highest;
         let round_was_reset = state.round == 0 && old_round != 0;
 
         // Release state lock before updating node-level flags
         drop(state);
 
-        // When round is reset due to QC/commit, reset the node-level timeout flags
-        // so the node can start a fresh timeout cycle for the new height
-        if round_was_reset || committed {
+        // When progress is made (round reset, commit, or QC advanced), reset the
+        // timeout timer so the new round gets a fresh timeout window.
+        if round_was_reset || committed || qc_advanced {
             *self.round_start_time.lock().unwrap() = Instant::now();
             *self.last_timeout_time.lock().unwrap() = None;
         }
