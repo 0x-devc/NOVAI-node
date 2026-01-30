@@ -14,7 +14,7 @@ use std::time::Duration;
 fn usage() {
     eprintln!(
         "usage:
-  novai-node run --port <port> [--peer <addr>]... --validator <index> [--metrics-port <port>]
+  novai-node run --port <port> [--peer <addr>]... --validator <index> [--metrics-port <port>] [--base-timeout <ms>]
   novai-node submit-tx <payload> [--nonce <u64>] [--fee <u64>] [--min-fee <u64>] [--cap <u64>]
   novai-node drain-mempool <payload> [<payload> ...] [--max <u64>] [--min-fee <u64>] [--cap <u64>]
 
@@ -146,6 +146,7 @@ fn main() {
             let mut peers: Vec<String> = Vec::new();
             let mut validator_idx: Option<usize> = None;
             let mut metrics_port: Option<u16> = None;
+            let mut base_timeout_ms: u64 = novai_consensus::BASE_TIMEOUT_MS;
 
             let rest: Vec<String> = args.collect();
             let mut i = 0;
@@ -167,6 +168,10 @@ fn main() {
                     "--metrics-port" => {
                         metrics_port =
                             Some(parse_u64(rest.get(i + 1).cloned(), "--metrics-port") as u16);
+                        i += 2;
+                    }
+                    "--base-timeout" => {
+                        base_timeout_ms = parse_u64(rest.get(i + 1).cloned(), "--base-timeout");
                         i += 2;
                     }
                     other => {
@@ -210,6 +215,7 @@ fn main() {
             println!("   Validator index: {}", validator_idx);
             println!("   Address: {:?}", &our_addr[..8]);
             println!("   Peers: {:?}", peers);
+            println!("   Base timeout: {}ms", base_timeout_ms);
 
             // Create node (clone our_key since we need it for copilot observer too)
             let observer_key = our_key.clone();
@@ -217,6 +223,7 @@ fn main() {
                 our_key,
                 validator_set.clone(),
                 validator_pubkeys,
+                base_timeout_ms,
             ));
 
             // Start listener

@@ -42,6 +42,9 @@ pub struct ConsensusNode {
     /// When we last broadcast a timeout for the current round (None = haven't timed out yet).
     pub last_timeout_time: Arc<Mutex<Option<Instant>>>,
     pub pending_sync_request: Arc<Mutex<Option<PendingSyncRequest>>>,
+    /// Configurable base timeout in milliseconds (default: BASE_TIMEOUT_MS = 1000).
+    /// Server environments may need higher values (e.g., 3000) to avoid spurious timeouts.
+    pub base_timeout_ms: u64,
 }
 
 impl ConsensusNode {
@@ -49,6 +52,7 @@ impl ConsensusNode {
         signing_key: SigningKey,
         validator_set: Vec<Address>,
         validator_pubkeys: HashMap<Address, VerifyingKey>,
+        base_timeout_ms: u64,
     ) -> Self {
         let verifying_key = signing_key.verifying_key();
         let our_address = address_from_pubkey(&verifying_key);
@@ -73,6 +77,7 @@ impl ConsensusNode {
             round_start_time: Arc::new(Mutex::new(Instant::now())),
             last_timeout_time: Arc::new(Mutex::new(None)),
             pending_sync_request: Arc::new(Mutex::new(None)),
+            base_timeout_ms,
         }
     }
 
@@ -120,7 +125,7 @@ impl ConsensusNode {
         let start_time = *self.round_start_time.lock().unwrap();
         let state = self.state.lock().unwrap();
 
-        let timeout_ms = novai_consensus::timeout_for_round(state.round);
+        let timeout_ms = novai_consensus::timeout_for_round_with_base(state.round, self.base_timeout_ms);
         let timeout_duration = std::time::Duration::from_millis(timeout_ms);
 
         if start_time.elapsed() < timeout_duration {
@@ -520,6 +525,13 @@ impl ConsensusNode {
         // Release locks before broadcasting
         drop(state);
         drop(db);
+
+        // Reset timeout timer — we just proposed, give ourselves a full fresh
+        // timeout window to collect votes. Without this, the stale round_start_time
+        // from the last received proposal can cause an immediate spurious timeout
+        // that clears pending_votes (including our self-vote) before QC forms.
+        *self.round_start_time.lock().unwrap() = Instant::now();
+        *self.last_timeout_time.lock().unwrap() = None;
 
         println!(
             "📤 Proposing block at height={} round={}",

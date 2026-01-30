@@ -27,25 +27,32 @@ pub const TIMEOUT_MULTIPLIER: u64 = 2;
 /// Prevents unbounded timeout growth.
 pub const MAX_TIMEOUT_MS: u64 = 60_000; // 60 seconds
 
-/// Calculate timeout duration for a given round.
+/// Calculate timeout duration for a given round using the default base timeout.
 ///
 /// Uses exponential backoff: `min(BASE_TIMEOUT_MS * 2^round, MAX_TIMEOUT_MS)`
-///
-/// # Examples
-/// - Round 0: 2000ms (2s)
-/// - Round 1: 4000ms (4s)
-/// - Round 2: 8000ms (8s)
-/// - Round 3: 16000ms (16s)
-/// - Round 4: 32000ms (32s)
-/// - Round 5+: 60000ms (60s, capped)
 #[must_use]
 pub fn timeout_for_round(round: u64) -> u64 {
+    timeout_for_round_with_base(round, BASE_TIMEOUT_MS)
+}
+
+/// Calculate timeout duration for a given round with a configurable base timeout.
+///
+/// Uses exponential backoff: `min(base_ms * 2^round, MAX_TIMEOUT_MS)`
+///
+/// # Examples (with base_ms=1000)
+/// - Round 0: 1000ms (1s)
+/// - Round 1: 2000ms (2s)
+/// - Round 2: 4000ms (4s)
+/// - Round 5: 32000ms (32s)
+/// - Round 6+: 60000ms (60s, capped)
+#[must_use]
+pub fn timeout_for_round_with_base(round: u64, base_ms: u64) -> u64 {
     // Prevent overflow: cap the shift at a reasonable value
     // 2^16 * 2000 = 131_072_000 which is > MAX_TIMEOUT_MS
     let effective_round = round.min(16);
 
     let timeout =
-        BASE_TIMEOUT_MS.saturating_mul(TIMEOUT_MULTIPLIER.saturating_pow(effective_round as u32));
+        base_ms.saturating_mul(TIMEOUT_MULTIPLIER.saturating_pow(effective_round as u32));
     timeout.min(MAX_TIMEOUT_MS)
 }
 
@@ -673,8 +680,12 @@ impl ConsensusState {
         self.round = target_round + 1;
         self.view_changes_total += 1;
 
-        // Clear round-specific state
-        self.pending_votes.clear();
+        // Clear round-specific state EXCEPT pending_votes.
+        // Votes are keyed by block_hash (unique per proposal). Keeping them
+        // across round advances allows QCs to form even if the proposer's
+        // round advanced before all votes arrived. Without this, the timeout
+        // spiral becomes unrecoverable: votes accumulate, get cleared by round
+        // advance, accumulate again, get cleared again — QC never forms.
         self.voted_in_round.clear();
         self.timed_out_in_round.clear();
         self.last_proposed = None;

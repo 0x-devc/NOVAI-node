@@ -25,8 +25,8 @@ fn test_block_request_response_roundtrip() {
     validator_pubkeys.insert(addr1, pk1);
     validator_pubkeys.insert(addr2, pk2);
 
-    let node1 = ConsensusNode::new(sk1, validator_set.clone(), validator_pubkeys.clone());
-    let _node2 = ConsensusNode::new(sk2, validator_set, validator_pubkeys);
+    let node1 = ConsensusNode::new(sk1, validator_set.clone(), validator_pubkeys.clone(), 1000);
+    let _node2 = ConsensusNode::new(sk2, validator_set, validator_pubkeys, 1000);
 
     // Manually store some blocks in node1's DB
     let block1 = Block {
@@ -92,8 +92,8 @@ fn test_sync_from_peer_on_restart() {
     validator_pubkeys.insert(addr1, pk1);
     validator_pubkeys.insert(addr2, pk2);
 
-    let node1 = ConsensusNode::new(sk1, validator_set.clone(), validator_pubkeys.clone());
-    let node2 = ConsensusNode::new(sk2, validator_set, validator_pubkeys);
+    let node1 = ConsensusNode::new(sk1, validator_set.clone(), validator_pubkeys.clone(), 1000);
+    let node2 = ConsensusNode::new(sk2, validator_set, validator_pubkeys, 1000);
 
     // Simulate node1 being ahead with committed blocks
     let block1 = Block {
@@ -218,6 +218,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
         validator_keys[3].clone(),
         validator_set.clone(),
         validator_pubkeys.clone(),
+        1000,
     );
 
     // --- Step 1: Create block 1 and cache it in the node's state ---
