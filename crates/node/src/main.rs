@@ -317,6 +317,7 @@ fn main() {
             let mut last_proposal_attempt = std::time::Instant::now();
             let mut last_status_log = std::time::Instant::now();
             let mut last_sync_check = std::time::Instant::now();
+            let mut last_sync_trigger = std::time::Instant::now();
             loop {
                 std::thread::sleep(Duration::from_millis(5));
 
@@ -349,6 +350,13 @@ fn main() {
                             *pending = None;
                         }
                     }
+                }
+
+                // Periodic sync: detect when committed_height is behind highest_qc
+                // and trigger block requests every 2 seconds
+                if last_sync_trigger.elapsed() >= Duration::from_secs(2) {
+                    last_sync_trigger = std::time::Instant::now();
+                    node.try_request_missing_blocks();
                 }
 
                 // Propose every 100ms (must be less than BASE_TIMEOUT_MS for consensus to work)

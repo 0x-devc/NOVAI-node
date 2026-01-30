@@ -244,6 +244,9 @@ impl ConsensusNode {
     }
 
     /// Handle incoming block request from a peer.
+    ///
+    /// Serves blocks from DB first, falling back to in-memory cache for blocks
+    /// that have been proposed/voted on but not yet committed.
     pub fn handle_block_request(
         &self,
         request: novai_consensus_types::BlockRequest,
@@ -255,18 +258,27 @@ impl ConsensusNode {
             &request.requester[..4]
         );
 
+        let state = self.state.lock().unwrap();
         let db = self.db.lock().unwrap();
 
-        // Load individual blocks, stop at first missing
+        // Load individual blocks from DB, falling back to in-memory cache
         let mut blocks = Vec::new();
         for height in request.start_height..=request.end_height {
             match ConsensusState::load_block(&*db, height) {
                 Ok(Some(block)) => blocks.push(block),
-                _ => break, // Stop at first missing block
+                _ => {
+                    // Fallback: check in-memory block cache
+                    if let Some(block) = state.block_cache.get(&height) {
+                        blocks.push(block.clone());
+                    } else {
+                        break; // Stop at first missing block
+                    }
+                }
             }
         }
 
         drop(db);
+        drop(state);
 
         println!(
             "📤 Sending {} blocks (requested {}-{}) to {:?}",
@@ -290,6 +302,10 @@ impl ConsensusNode {
     }
 
     /// Handle incoming block response from a peer.
+    ///
+    /// Accepts responses from ANY peer (we broadcast requests to all).
+    /// Caches received blocks in memory AND stores to DB, then retries
+    /// the commit rule with highest_qc.
     pub fn handle_block_response(
         &self,
         response: novai_consensus_types::BlockResponse,
@@ -300,38 +316,29 @@ impl ConsensusNode {
             &response.responder[..4]
         );
 
-        // Check if we have a pending request
-        let mut pending = self.pending_sync_request.lock().unwrap();
-        let pending_request = match pending.take() {
-            Some(req) if req.peer == response.responder => req,
-            Some(req) => {
-                // Got response from different peer, ignore but restore pending
-                *pending = Some(req);
+        // Clear pending request if we have one (accept from any peer)
+        {
+            let mut pending = self.pending_sync_request.lock().unwrap();
+            if pending.is_some() {
+                *pending = None;
+            } else {
+                // No pending request — unsolicited response, ignore
                 return Ok(());
             }
-            None => {
-                // No pending request, ignore
-                return Ok(());
-            }
-        };
-
-        drop(pending);
-
-        if response.blocks.is_empty() {
-            return Err(format!(
-                "Peer {:?} has no blocks for requested range {}-{}",
-                &response.responder[..4],
-                pending_request.start_height,
-                pending_request.end_height
-            ));
         }
 
+        if response.blocks.is_empty() {
+            println!("⚠️ Peer {:?} sent empty block response", &response.responder[..4]);
+            return Ok(());
+        }
+
+        // Lock order: state → db
+        let mut state = self.state.lock().unwrap();
         let mut db = self.db.lock().unwrap();
-        let state = self.state.lock().unwrap();
         let committed_height = state.committed_height;
 
         // Check that first block connects to our committed chain
-        if !response.blocks.is_empty() && response.blocks[0].height != committed_height + 1 {
+        if response.blocks[0].height != committed_height + 1 {
             return Err(format!(
                 "Block chain gap: committed_height={}, first block height={}",
                 committed_height, response.blocks[0].height
@@ -348,34 +355,72 @@ impl ConsensusNode {
             [0u8; 32] // Genesis parent
         };
 
-        drop(state);
-
         // Verify the blocks form a valid chain
         if let Err(e) = ConsensusState::verify_block_chain(&response.blocks, expected_parent_hash) {
             return Err(format!("Block chain verification failed: {:?}", e));
         }
 
-        // Store blocks to DB
+        // Store blocks to DB AND cache in memory for commit rule
         for block in &response.blocks {
             let key = novai_state::block_key(block.height);
             let value = novai_consensus_types::codec::encode_block_v1(block)
                 .map_err(|e| format!("Failed to encode block: {:?}", e))?;
             db.put(&key, &value)
                 .map_err(|e| format!("Failed to store block: {:?}", e))?;
+
+            // Cache in memory so commit rule can find them via block_by_hash
+            state.cache_block(block.clone());
         }
 
-        drop(db);
+        println!(
+            "📦 Cached {} synced blocks (heights {}-{})",
+            response.blocks.len(),
+            response.blocks.first().unwrap().height,
+            response.blocks.last().unwrap().height,
+        );
 
-        // Update committed_height in state
-        if let Some(last_block) = response.blocks.last() {
-            let mut state = self.state.lock().unwrap();
-            state.committed_height = last_block.height;
-
-            println!(
-                "✅ Synced to height {} ({} blocks applied)",
-                last_block.height,
-                response.blocks.len()
-            );
+        // Retry commit rule with current highest_qc
+        if let Some(hqc) = state.highest_qc.clone() {
+            match state.cache_qc_and_check_commit(hqc.clone()) {
+                Ok(to_commit) if !to_commit.is_empty() => {
+                    let new_committed_height = to_commit.last().unwrap().height;
+                    state
+                        .persist_commit_atomic(
+                            &mut *db,
+                            &to_commit,
+                            &hqc,
+                            new_committed_height,
+                            None,
+                        )
+                        .map_err(|e| format!("Sync commit persist failed: {:?}", e))?;
+                    state.apply_commits(&to_commit);
+                    println!(
+                        "✅ Synced and committed to height {} ({} blocks)",
+                        new_committed_height,
+                        to_commit.len()
+                    );
+                }
+                Ok(_) => {
+                    println!(
+                        "📦 Blocks cached but no commit yet (committed_height={})",
+                        state.committed_height
+                    );
+                }
+                Err(e) => {
+                    // Still missing some blocks — will retry on next QC or periodic sync
+                    println!("⚠️ Sync: still incomplete after caching: {:?}", e);
+                }
+            }
+        } else {
+            // No highest_qc — this is a restart catch-up scenario.
+            // Blocks are verified and stored in DB; advance committed_height directly.
+            if let Some(last_block) = response.blocks.last() {
+                state.committed_height = last_block.height;
+                println!(
+                    "✅ Restart sync: committed_height advanced to {}",
+                    last_block.height
+                );
+            }
         }
 
         Ok(())
@@ -632,6 +677,7 @@ impl ConsensusNode {
         //    Idempotent: cache_qc_and_check_commit is a no-op when the QC
         //    does not dominate the current highest_qc.
         // 5. Verify block validity, create vote, and cache block in single lock acquisition
+        let mut needs_sync = false;
         let vote = {
             // Lock order: state → db (must match try_propose_block, handle_vote,
             // handle_qc to prevent deadlock between main loop and receive threads).
@@ -684,9 +730,10 @@ impl ConsensusNode {
                     Err(e) => {
                         // Commit chain incomplete — blocks missing from cache.
                         // highest_qc was already updated by cache_qc_and_check_commit.
-                        // Continue to verify and vote; commits will happen when blocks
-                        // arrive via sync or future proposals.
+                        // Continue to verify and vote; sync will be triggered after
+                        // locks are dropped.
                         println!("⚠️ QC catch-up commit chain incomplete: {:?}", e);
+                        needs_sync = true;
                         state
                             .persist_highest_qc(&mut *db)
                             .map_err(|e| {
@@ -711,6 +758,11 @@ impl ConsensusNode {
 
             vote
         };
+
+        // Trigger block sync if commit chain was incomplete (locks are now dropped)
+        if needs_sync {
+            self.try_request_missing_blocks();
+        }
 
         // Reset round timer - we received a valid proposal
         *self.round_start_time.lock().unwrap() = Instant::now();
@@ -809,6 +861,9 @@ impl ConsensusNode {
 
             drop(state);
 
+            // Trigger block sync for missing blocks (locks are now dropped)
+            self.try_request_missing_blocks();
+
             // Reset timeout timer — view height just advanced via our own QC.
             // Without this, the stale round_start_time from the previous round
             // causes immediate spurious timeouts that clear pending_votes.
@@ -897,6 +952,11 @@ impl ConsensusNode {
             *self.last_timeout_time.lock().unwrap() = None;
         }
 
+        // Trigger block sync if commit chain was incomplete
+        if !committed {
+            self.try_request_missing_blocks();
+        }
+
         Ok(())
     }
 
@@ -918,6 +978,36 @@ impl ConsensusNode {
                         peer_addr, e
                     );
                     break;
+                }
+            }
+        }
+    }
+
+    /// Trigger a block sync request if committed_height is behind highest_qc.
+    ///
+    /// Called after "commit chain incomplete" errors to actually initiate sync
+    /// instead of just logging. Uses existing dedup via `pending_sync_request`.
+    /// MUST be called without holding the state lock.
+    pub fn try_request_missing_blocks(&self) {
+        let (committed, hqc_height) = {
+            let state = self.state.lock().unwrap();
+            let committed = state.committed_height;
+            let hqc_height = state.highest_qc.as_ref().map(|q| q.height).unwrap_or(0);
+            (committed, hqc_height)
+        };
+
+        // Need at least 3-chain gap to have committable blocks
+        if hqc_height <= committed + 2 {
+            return;
+        }
+
+        // request_blocks_from_peer already checks pending_sync_request for dedup
+        match self.request_blocks_from_peer(committed + 1, hqc_height) {
+            Ok(()) => {}
+            Err(e) => {
+                // Expected: "Sync request already pending" — not an error
+                if !e.contains("already pending") {
+                    println!("⚠️ Block sync request failed: {}", e);
                 }
             }
         }
