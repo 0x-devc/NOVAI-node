@@ -121,3 +121,15 @@ If module rollback does not stop the misbehavior:
 - ProposalType::EmergencyFreeze: `crates/governance/src/lib.rs:299`
 - Timelock config: `crates/governance/src/lib.rs:31-103`
 - Copilot anomaly detection: `crates/copilot/src/lib.rs`
+
+---
+
+## Drill Results
+
+### Drill Status: BLOCKED (2026-02-01)
+
+**Reason:** No operator-facing governance CLI exists. The `novai-node submit-tx` command accepts raw payloads but there is no way to construct properly encoded governance proposals (ParamChange, ModuleRollback, EmergencyFreeze) from the command line.
+
+**Action Items:**
+- [ ] Implement `novai-node governance propose <type> <params>` CLI subcommand
+- [ ] Once governance CLI exists, re-run drills for this playbook

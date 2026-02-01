@@ -176,3 +176,35 @@ The current testnet has limitations that a production system must address:
 - Quorum calculation: `2f+1 where f = (n-1)/3`
 - Leader selection: `crates/consensus/src/lib.rs:487-509`
 - Fork detection: `crates/consensus/src/lib.rs:926-950`
+
+---
+
+## Drill Results
+
+### Drill 1: Validator Kill & Recovery (2026-02-01)
+
+**Environment:** Private testnet, 4 validators (native binaries), height ~51,300
+
+**Execution:**
+- 22:44:12 UTC — Killed validator 3 (PID 189064) via `kill`
+- Consensus continued immediately with 3/4 validators (quorum maintained)
+- ~85 blocks produced in 30s with zero degradation
+- 22:45:18 UTC — Restarted validator 3 on port 9003
+
+**Recovery Result: PARTIAL FAILURE**
+- Validator 3 rejoined the network (3 peers connected)
+- Validator 3 participated in voting at current height
+- Block sync FAILED: requested entire chain (blocks 1-51434), sync timed out repeatedly
+- Validator 3 stuck at committed_height=0 despite voting at height 51434
+- Error: `StateError("Missing block at height 51415 (chain broken)")`
+
+**Findings:**
+1. ✅ BFT quorum (3/4) maintains liveness — no block production gap
+2. ❌ Block sync protocol cannot handle catch-up at 50k+ heights — requests entire chain from genesis
+3. ❌ No chunked sync or state snapshot mechanism exists for recovery
+4. ❌ Only recovery path would be full state wipe + bootstrap (no snapshot tooling exists)
+
+**Action Items:**
+- [ ] Implement chunked block sync (request ranges, not full chain)
+- [ ] Add state snapshot export/import for fast validator recovery
+- [ ] Add `novai-node sync-from <peer> --start-height <N>` CLI subcommand

@@ -156,3 +156,15 @@ watch -n 10 'curl -s http://localhost:8080/metrics | grep -E "committed_height|c
 - ModuleActivation timelock (5000 blocks): `crates/governance/src/lib.rs:39`
 - AutonomyMode: `crates/ai_entities/src/lib.rs:82-110`
 - Capabilities: `crates/ai_entities/src/lib.rs:112-198`
+
+---
+
+## Drill Results
+
+### Drill Status: BLOCKED (2026-02-01)
+
+**Reason:** No operator-facing governance CLI exists. The `novai-node submit-tx` command accepts raw payloads but there is no way to construct properly encoded governance proposals (ParamChange, ModuleRollback, EmergencyFreeze) from the command line.
+
+**Action Items:**
+- [ ] Implement `novai-node governance propose <type> <params>` CLI subcommand
+- [ ] Once governance CLI exists, re-run drills for this playbook
