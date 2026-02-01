@@ -205,6 +205,26 @@ The current testnet has limitations that a production system must address:
 4. ❌ Only recovery path would be full state wipe + bootstrap (no snapshot tooling exists)
 
 **Action Items:**
-- [ ] Implement chunked block sync (request ranges, not full chain)
+- [x] Implement chunked block sync (request ranges, not full chain) — fixed in 7b63783 + be1ca1a
 - [ ] Add state snapshot export/import for fast validator recovery
 - [ ] Add `novai-node sync-from <peer> --start-height <N>` CLI subcommand
+
+### Drill 2: Post-Fix Re-Test (2026-02-01)
+
+**Environment:** Private testnet, 4 validators (native binaries), chunked sync fix deployed (7b63783 + be1ca1a)
+
+**Execution:**
+- 23:20:14 UTC — Killed validator 3 at height 2058
+- 3/4 validators maintained consensus (height reached 2133 in ~60s)
+- 23:21:14 UTC — Restarted validator 3
+
+**Recovery Result: PASS**
+- Chunked sync requested blocks in 500-block batches:
+  - 1-500 (committed_height=500)
+  - 501-1000 (committed_height=1000)
+  - 1001-1500 (committed_height=1500)
+  - 1501-2000 (committed_height=2000)
+  - 2001-2137 (caught up)
+- Validator 3 fully recovered and committing normally at height 2701 within 30 seconds
+
+**Verdict:** PASS — Full automated recovery via chunked block sync
