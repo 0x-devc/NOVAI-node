@@ -383,7 +383,10 @@ impl ConsensusNode {
             response.blocks.last().unwrap().height,
         );
 
-        // Retry commit rule with current highest_qc
+        let last_received_height = response.blocks.last().unwrap().height;
+
+        // Try commit rule with current highest_qc (may succeed if we now
+        // have enough blocks for the 3-chain rule).
         if let Some(hqc) = state.highest_qc.clone() {
             match state.cache_qc_and_check_commit(hqc.clone()) {
                 Ok(to_commit) if !to_commit.is_empty() => {
@@ -404,27 +407,28 @@ impl ConsensusNode {
                         to_commit.len()
                     );
                 }
-                Ok(_) => {
-                    println!(
-                        "📦 Blocks cached but no commit yet (committed_height={})",
-                        state.committed_height
-                    );
-                }
-                Err(e) => {
-                    // Still missing some blocks — will retry on next QC or periodic sync
-                    println!("⚠️ Sync: still incomplete after caching: {:?}", e);
+                Ok(_) | Err(_) => {
+                    // Commit chain incomplete — not enough blocks to reach
+                    // highest_qc yet. This is expected during chunked sync.
                 }
             }
-        } else {
-            // No highest_qc — this is a restart catch-up scenario.
-            // Blocks are verified and stored in DB; advance committed_height directly.
-            if let Some(last_block) = response.blocks.last() {
-                state.committed_height = last_block.height;
-                println!(
-                    "✅ Restart sync: committed_height advanced to {}",
-                    last_block.height
-                );
-            }
+        }
+
+        // Advance committed_height for verified sync blocks even if the
+        // full commit chain to highest_qc isn't available yet.
+        // These blocks are chain-verified and stored to DB — they were
+        // already committed by network consensus.
+        if state.committed_height < last_received_height {
+            state.committed_height = last_received_height;
+            db.put(
+                novai_state::KEY_COMMITTED_HEIGHT,
+                &last_received_height.to_be_bytes(),
+            )
+            .map_err(|e| format!("Failed to persist committed_height: {:?}", e))?;
+            println!(
+                "📦 Sync: advanced committed_height to {} (chunk complete)",
+                last_received_height
+            );
         }
 
         // Drop locks before requesting next chunk
