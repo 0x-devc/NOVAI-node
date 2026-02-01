@@ -1,0 +1,153 @@
+# NOVAI Prometheus Alert Rules
+# D27.3 — 4 required alerts + 6 infrastructure alerts
+#
+# Placeholder metrics (novai_governance_proposals_total,
+# novai_executor_actions_total, novai_memory_objects_total)
+# will not fire until instrumented. This is intentional —
+# alerts are defined ahead of metrics so dashboards and
+# alertmanager routing are ready on day one.
+
+groups:
+  - name: novai_d27_alerts
+    interval: 15s
+    rules:
+      # D27.3 Alert 1: High Proposal Rate
+      # Fires when governance proposals exceed 100/hr.
+      # Playbook: ROLLBACK_BAD_PARAM (parameter spam) or
+      #           ROLLBACK_BAD_MODULE (AI-generated proposals)
+      - alert: HighProposalRate
+        expr: rate(novai_governance_proposals_total[1h]) * 3600 > 100
+        for: 5m
+        labels:
+          severity: warning
+          playbook: docs/playbooks/ROLLBACK_BAD_PARAM.md
+        annotations:
+          summary: "Governance proposal rate exceeds 100/hr"
+          description: >-
+            {{ $labels.instance }} is submitting
+            {{ $value | printf "%.0f" }} proposals/hr.
+            Investigate whether a module is spamming proposals.
+
+      # D27.3 Alert 2: Executor Repeated Failures
+      # Uses novai_current_round as proxy — elevated rounds
+      # indicate repeated proposal/execution failures.
+      # Will switch to novai_executor_actions_total once instrumented.
+      - alert: ExecutorRepeatedFailures
+        expr: novai_current_round > 3
+        for: 2m
+        labels:
+          severity: warning
+          playbook: docs/playbooks/ROLLBACK_BAD_MODULE.md
+        annotations:
+          summary: "Consensus round elevated — possible executor failures"
+          description: >-
+            {{ $labels.instance }} consensus round is {{ $value }},
+            indicating repeated proposal failures. Check executor logs.
+
+      # D27.3 Alert 3: Memory Growth Abnormal
+      # Fires when AI memory objects grow faster than 10%/hr.
+      # Placeholder — will not fire until novai_memory_objects_total
+      # is instrumented.
+      - alert: MemoryGrowthAbnormal
+        expr: deriv(novai_memory_objects_total[1h]) / novai_memory_objects_total > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          playbook: docs/playbooks/ROLLBACK_BAD_MODULE.md
+        annotations:
+          summary: "AI memory object growth exceeds 10%/hr"
+          description: >-
+            {{ $labels.instance }} memory objects growing at
+            {{ $value | printf "%.1f" }}x/hr. Review active AI modules.
+
+      # D27.3 Alert 4: Consensus Delayed
+      # Fires when committed_height stops advancing for 5+ minutes.
+      - alert: ConsensusDelayed
+        expr: changes(novai_committed_height[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+          playbook: docs/playbooks/EMERGENCY_FREEZE.md
+        annotations:
+          summary: "No new blocks committed in 5 minutes"
+          description: >-
+            {{ $labels.instance }} committed_height has not advanced
+            in 5 minutes. Consensus may be stalled.
+
+  - name: novai_infrastructure
+    interval: 30s
+    rules:
+      # Consensus completely stalled (10 minutes, no blocks)
+      - alert: ConsensusStalled
+        expr: changes(novai_committed_height[10m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+          playbook: docs/playbooks/EMERGENCY_FREEZE.md
+        annotations:
+          summary: "Consensus stalled — no blocks for 10 minutes"
+          description: >-
+            {{ $labels.instance }} has produced zero blocks in 10 minutes.
+            Immediate investigation required.
+
+      # Fewer than 3 peers (cannot form quorum in 4-validator set)
+      - alert: InsufficientPeers
+        expr: novai_peer_count < 3
+        for: 2m
+        labels:
+          severity: critical
+          playbook: docs/playbooks/VALIDATOR_COMPROMISE.md
+        annotations:
+          summary: "Peer count below quorum threshold"
+          description: >-
+            {{ $labels.instance }} has only {{ $value }} peers.
+            Quorum requires 3 of 4 validators.
+
+      # Round elevated (leader may be failing)
+      - alert: HighConsensusRound
+        expr: novai_current_round > 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consensus round elevated above 5"
+          description: >-
+            {{ $labels.instance }} round is {{ $value }}.
+            Leader may be failing or network partitioned.
+
+      # Frequent view changes (instability signal)
+      - alert: FrequentViewChanges
+        expr: rate(novai_consensus_view_changes_total[5m]) * 60 > 10
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "View changes exceeding 10/min"
+          description: >-
+            {{ $labels.instance }} is experiencing {{ $value | printf "%.1f" }}
+            view changes/min. Network may be unstable.
+
+      # Mempool approaching capacity
+      - alert: MempoolNearFull
+        expr: novai_mempool_size > 800
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mempool size exceeding 800 transactions"
+          description: >-
+            {{ $labels.instance }} mempool has {{ $value }} transactions.
+            Capacity is 1000.
+
+      # Validator falling behind peers
+      - alert: ValidatorLagging
+        expr: novai_committed_height < on() group_left max(novai_committed_height) - 5
+        for: 3m
+        labels:
+          severity: warning
+          playbook: docs/playbooks/VALIDATOR_COMPROMISE.md
+        annotations:
+          summary: "Validator lagging more than 5 blocks behind peers"
+          description: >-
+            {{ $labels.instance }} committed_height is {{ $value }},
+            more than 5 blocks behind the highest validator.

@@ -274,6 +274,346 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "type": "stat",
+      "title": "Governance Proposals",
+      "description": "Total governance proposals submitted (PLACEHOLDER — instrument novai_governance_proposals_total)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "expr": "novai_governance_proposals_total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "unit": "none",
+          "noValue": "not instrumented"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Executor Actions",
+      "description": "Total executor actions processed (PLACEHOLDER — instrument novai_executor_actions_total)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 20
+      },
+      "targets": [
+        {
+          "expr": "novai_executor_actions_total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 500
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          },
+          "unit": "none",
+          "noValue": "not instrumented"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Memory Objects",
+      "description": "Total AI memory objects stored on-chain (PLACEHOLDER — instrument novai_memory_objects_total)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 20
+      },
+      "targets": [
+        {
+          "expr": "novai_memory_objects_total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10000
+              },
+              {
+                "color": "red",
+                "value": 50000
+              }
+            ]
+          },
+          "unit": "none",
+          "noValue": "not instrumented"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "NNPX Pool Size",
+      "description": "Total value in the NNPX shielded pool (PLACEHOLDER — instrument novai_nnpx_pool_size)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 20
+      },
+      "targets": [
+        {
+          "expr": "novai_nnpx_pool_size",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none",
+          "noValue": "not instrumented"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Proposal Volume & Executor Actions (per hour)",
+      "description": "Governance proposal rate and executor action rate. Alerts if proposals > 100/hr. Placeholder metrics — will show data once instrumented.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "rate(novai_governance_proposals_total[1h]) * 3600",
+          "legendFormat": "proposals/hr",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(novai_executor_actions_total[1h]) * 3600",
+          "legendFormat": "executor actions/hr",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "AI Signal Frequency",
+      "description": "Rate of anomaly signals detected and published per minute",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "rate(novai_anomaly_signals_total[1m])",
+          "legendFormat": "detected/min",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(novai_anomaly_signals_published[1m])",
+          "legendFormat": "published/min",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Object Growth",
+      "description": "AI memory object count over time. Alert if growth > 10%/hr. Placeholder metric — will show data once instrumented.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "expr": "novai_memory_objects_total",
+          "legendFormat": "memory objects",
+          "refId": "A"
+        },
+        {
+          "expr": "deriv(novai_memory_objects_total[1h])",
+          "legendFormat": "growth rate/hr",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "NNPX Pool Size Over Time",
+      "description": "Total value in the NNPX shielded pool over time. Placeholder metric — will show data once instrumented.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "targets": [
+        {
+          "expr": "novai_nnpx_pool_size",
+          "legendFormat": "pool size",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2
+          },
+          "color": {
+            "fixedColor": "purple",
+            "mode": "fixed"
+          }
+        }
+      }
     }
   ],
   "refresh": "5s",
@@ -281,7 +621,8 @@
   "tags": [
     "novai",
     "blockchain",
-    "consensus"
+    "consensus",
+    "observability"
   ],
   "templating": {
     "list": [
@@ -302,6 +643,6 @@
   "timezone": "browser",
   "title": "NOVAI Node Metrics",
   "uid": "novai-node-metrics",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
