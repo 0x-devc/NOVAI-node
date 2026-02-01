@@ -13,6 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+/// Maximum number of blocks to request in a single sync chunk.
+/// Prevents timeout on large catch-up ranges (e.g., 50k+ blocks).
+pub const SYNC_CHUNK_SIZE: u64 = 500;
+
 /// Cache for tracking which QCs have been broadcasted (to avoid duplicates).
 type QcBroadcastCache = Arc<Mutex<HashSet<(u64, u64, [u8; 32])>>>;
 
@@ -422,6 +426,13 @@ impl ConsensusNode {
                 );
             }
         }
+
+        // Drop locks before requesting next chunk
+        drop(state);
+        drop(db);
+
+        // If still behind, request next chunk (chunked sync)
+        self.try_request_missing_blocks();
 
         Ok(())
     }
@@ -1001,8 +1012,11 @@ impl ConsensusNode {
             return;
         }
 
+        // Cap to SYNC_CHUNK_SIZE blocks per request to avoid timeout on large ranges
+        let end = std::cmp::min(committed + SYNC_CHUNK_SIZE, hqc_height);
+
         // request_blocks_from_peer already checks pending_sync_request for dedup
-        match self.request_blocks_from_peer(committed + 1, hqc_height) {
+        match self.request_blocks_from_peer(committed + 1, end) {
             Ok(()) => {}
             Err(e) => {
                 // Expected: "Sync request already pending" — not an error
