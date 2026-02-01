@@ -27,6 +27,12 @@ pub const TIMEOUT_MULTIPLIER: u64 = 2;
 /// Prevents unbounded timeout growth.
 pub const MAX_TIMEOUT_MS: u64 = 60_000; // 60 seconds
 
+/// Number of committed blocks to retain in memory caches.
+/// Provides safety margin for the 3-chain commit rule and sync requests.
+/// Blocks older than `committed_height - CACHE_RETAIN_DEPTH` are evicted
+/// from in-memory caches only (DB is never touched).
+pub const CACHE_RETAIN_DEPTH: u64 = 10;
+
 /// Calculate timeout duration for a given round using the default base timeout.
 ///
 /// Uses exponential backoff: `min(BASE_TIMEOUT_MS * 2^round, MAX_TIMEOUT_MS)`
@@ -889,7 +895,29 @@ impl ConsensusState {
 
             // Reset round to 0 after successful commit
             self.round = 0;
+
+            // Evict old blocks from in-memory caches to bound memory usage.
+            self.prune_old_blocks();
         }
+    }
+
+    /// Prune in-memory block and QC caches below the retention window.
+    ///
+    /// Keeps the last [`CACHE_RETAIN_DEPTH`] committed blocks as safety margin
+    /// for the 3-chain commit rule and peer sync requests.
+    ///
+    /// **Only prunes in-memory caches. Never deletes from database.**
+    /// Block sync serves historical blocks from DB.
+    pub fn prune_old_blocks(&mut self) {
+        if self.committed_height <= CACHE_RETAIN_DEPTH {
+            return;
+        }
+
+        let prune_below = self.committed_height - CACHE_RETAIN_DEPTH;
+
+        self.block_cache.retain(|&height, _| height >= prune_below);
+        self.qc_cache.retain(|&height, _| height >= prune_below);
+        self.block_by_hash.retain(|_, block| block.height >= prune_below);
     }
 
     /// Apply commits with AI hook integration.
