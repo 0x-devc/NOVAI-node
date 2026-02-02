@@ -2538,6 +2538,8 @@ name = "novai-p2p"
 version = "0.1.0"
 dependencies = [
  "novai-consensus-types",
+ "sha2",
+ "snow",
 ]
 
 [[package]]

@@ -16,8 +16,8 @@ use std::time::Duration;
 fn usage() {
     eprintln!(
         "usage:
-  novai-node run --port <port> --genesis <path> [--peer <addr>]... [--key-file <path>] [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>]
-  novai-node run --port <port> --dev-keys --validator <index> [--peer <addr>]... [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>]
+  novai-node run --port <port> --genesis <path> [--peer <addr>]... [--key-file <path>] [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
+  novai-node run --port <port> --dev-keys --validator <index> [--peer <addr>]... [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
   novai-node generate-key [--output <path>]
   novai-node submit-tx <payload> [--nonce <u64>] [--fee <u64>] [--min-fee <u64>] [--cap <u64>]
   novai-node drain-mempool <payload> [<payload> ...] [--max <u64>] [--min-fee <u64>] [--cap <u64>]
@@ -284,6 +284,7 @@ fn main() {
             let mut key_file: Option<String> = None;
             let mut genesis_path: Option<String> = None;
             let mut dev_keys = false;
+            let mut no_encryption = false;
 
             let rest: Vec<String> = args.collect();
             let mut i = 0;
@@ -335,6 +336,10 @@ fn main() {
                         dev_keys = true;
                         i += 1;
                     }
+                    "--no-encryption" => {
+                        no_encryption = true;
+                        i += 1;
+                    }
                     other => {
                         panic!("unknown flag: {other}");
                     }
@@ -345,17 +350,23 @@ fn main() {
             let metrics_port = metrics_port.unwrap_or(8080);
 
             // Resolve key + validator set based on mode
-            let (our_key, validator_set, validator_pubkeys): (
+            // Returns: (signing_key, validator_set, pubkeys, ed25519_seed, known_noise_keys)
+            #[allow(clippy::type_complexity)]
+            let (our_key, validator_set, validator_pubkeys, our_seed, known_noise_keys): (
                 ed25519_dalek::SigningKey,
                 Vec<Address>,
                 HashMap<Address, ed25519_dalek::VerifyingKey>,
+                [u8; 32],
+                Vec<[u8; 32]>,
             ) = if dev_keys {
                 // ── Dev-keys mode ──────────────────────────────────────
                 eprintln!("WARNING: using deterministic dev keys — NOT for production");
                 let idx = validator_idx.expect("--validator <index> required with --dev-keys");
 
-                let dev_validator_keys: Vec<ed25519_dalek::SigningKey> = (0..4)
-                    .map(|i| ed25519_dalek::SigningKey::from_bytes(&[i as u8; 32]))
+                let dev_seeds: Vec<[u8; 32]> = (0..4).map(|i| [i as u8; 32]).collect();
+                let dev_validator_keys: Vec<ed25519_dalek::SigningKey> = dev_seeds
+                    .iter()
+                    .map(ed25519_dalek::SigningKey::from_bytes)
                     .collect();
 
                 let dev_validator_set: Vec<Address> = dev_validator_keys
@@ -380,8 +391,15 @@ fn main() {
                     );
                 }
 
+                // Precompute X25519 noise keys for all dev validators
+                let noise_keys: Vec<[u8; 32]> = dev_seeds
+                    .iter()
+                    .map(novai_p2p::noise::noise_keypair_from_seed)
+                    .collect();
+
                 let key = dev_validator_keys[idx].clone();
-                (key, dev_validator_set, dev_validator_pubkeys)
+                let seed = dev_seeds[idx];
+                (key, dev_validator_set, dev_validator_pubkeys, seed, noise_keys)
             } else {
                 // ── Production mode ────────────────────────────────────
                 let gp = genesis_path.expect("--genesis <path> required (or use --dev-keys)");
@@ -395,6 +413,7 @@ fn main() {
                 let kf = key_file.unwrap_or_else(|| format!("{}/validator.key", base));
 
                 let our_key = load_key_file(&kf);
+                let seed = our_key.to_bytes();
                 let our_pk = our_key.verifying_key();
                 let our_addr = address_from_pubkey(&our_pk);
 
@@ -409,7 +428,9 @@ fn main() {
                 }
 
                 println!("🔑 Key loaded from: {}", kf);
-                (our_key, vs, vp)
+                // Production mode: no precomputed noise keys (peer verification skipped
+                // until a mechanism for distributing noise pubkeys is implemented)
+                (our_key, vs, vp, seed, Vec::new())
             };
 
             let our_addr = address_from_pubkey(&our_key.verifying_key());
@@ -455,6 +476,13 @@ fn main() {
                 }
             };
 
+            let encryption_enabled = !no_encryption;
+            if encryption_enabled {
+                println!("🔒 Transport: encrypted (Noise_XX_25519_ChaChaPoly_SHA256)");
+            } else {
+                println!("⚠️  Transport: PLAINTEXT (--no-encryption)");
+            }
+
             println!("🚀 Starting consensus node");
             println!("   Port: {}", port);
             println!("   Metrics port: {}", metrics_port);
@@ -464,13 +492,26 @@ fn main() {
 
             // Create node (clone our_key since we need it for copilot observer too)
             let observer_key = our_key.clone();
-            let node = Arc::new(ConsensusNode::new_with_storage(
+            let ed25519_seed = if encryption_enabled {
+                Some(our_seed)
+            } else {
+                None
+            };
+            let mut node = ConsensusNode::new_with_storage(
                 our_key,
                 validator_set.clone(),
                 validator_pubkeys,
                 base_timeout_ms,
                 storage,
-            ));
+                ed25519_seed,
+            );
+
+            // Set known noise keys for peer identity verification
+            if encryption_enabled && !known_noise_keys.is_empty() {
+                node.set_known_noise_keys(known_noise_keys);
+            }
+
+            let node = Arc::new(node);
 
             // Start listener
             let bind_addr = format!("127.0.0.1:{}", port)

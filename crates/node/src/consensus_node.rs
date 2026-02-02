@@ -4,11 +4,14 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use novai_consensus::{ConsensusError, ConsensusState};
 use novai_consensus_types::{SignedProposal, Timeout, Vote, QC};
 use novai_crypto::{address_from_pubkey, sign_bytes};
+use novai_p2p::noise::{
+    handshake_initiator, handshake_responder, is_known_validator, noise_keypair_from_seed,
+};
 use novai_p2p::{connect_to_peer, read_wire_message, start_listener, NetworkMessage, PeerManager};
 use novai_state::{Kv, KvBatch, MemKv, RocksKv, WriteOp};
 use novai_types::Address;
 use std::collections::{HashMap, HashSet};
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -107,6 +110,10 @@ pub struct ConsensusNode {
     /// Configurable base timeout in milliseconds (default: BASE_TIMEOUT_MS = 1000).
     /// Server environments may need higher values (e.g., 3000) to avoid spurious timeouts.
     pub base_timeout_ms: u64,
+    /// X25519 static key for Noise encryption (None = plaintext mode).
+    encryption_key: Option<[u8; 32]>,
+    /// Known validators' X25519 static keys for peer authentication.
+    known_noise_keys: Vec<[u8; 32]>,
 }
 
 impl ConsensusNode {
@@ -123,6 +130,7 @@ impl ConsensusNode {
             validator_pubkeys,
             base_timeout_ms,
             Storage::Memory(MemKv::new()),
+            None,
         )
     }
 
@@ -130,12 +138,16 @@ impl ConsensusNode {
     ///
     /// If the storage contains committed state from a previous run, the node
     /// recovers automatically via `ConsensusState::recover()`.
+    ///
+    /// `ed25519_seed` enables Noise encryption when `Some`. The seed is used
+    /// to derive an X25519 static key for the Noise XX handshake.
     pub fn new_with_storage(
         signing_key: SigningKey,
         validator_set: Vec<Address>,
         validator_pubkeys: HashMap<Address, VerifyingKey>,
         base_timeout_ms: u64,
         storage: Storage,
+        ed25519_seed: Option<[u8; 32]>,
     ) -> Self {
         let verifying_key = signing_key.verifying_key();
         let our_address = address_from_pubkey(&verifying_key);
@@ -162,6 +174,18 @@ impl ConsensusNode {
             }
         };
 
+        // Derive encryption key and known validator noise keys
+        let encryption_key = ed25519_seed.map(|s| noise_keypair_from_seed(&s));
+        let known_noise_keys: Vec<[u8; 32]> = if ed25519_seed.is_some() {
+            // We don't have raw seeds for other validators, but we DO have their
+            // X25519 public keys derived during handshake. For peer authentication,
+            // we build this list lazily. For dev-keys mode, main.rs will pass the
+            // precomputed list via set_known_noise_keys().
+            Vec::new()
+        } else {
+            Vec::new()
+        };
+
         Self {
             our_address,
             signing_key,
@@ -177,37 +201,116 @@ impl ConsensusNode {
             last_timeout_time: Arc::new(Mutex::new(None)),
             pending_sync_request: Arc::new(Mutex::new(None)),
             base_timeout_ms,
+            encryption_key,
+            known_noise_keys,
         }
     }
 
+    /// Set the known X25519 noise keys for peer identity verification.
+    ///
+    /// In dev-keys mode, all validator seeds are known so we can precompute
+    /// X25519 keys. In production mode, this is populated from genesis data.
+    pub fn set_known_noise_keys(&mut self, keys: Vec<[u8; 32]>) {
+        self.known_noise_keys = keys;
+    }
+
     /// Start listening for incoming connections.
+    ///
+    /// When encryption is enabled, performs a Noise XX responder handshake on
+    /// each accepted connection and verifies the remote peer's identity.
     pub fn start_listener(self: &Arc<Self>, bind_addr: SocketAddr) -> Result<(), String> {
         let node = Arc::clone(self);
-        start_listener(bind_addr, self.peer_manager.clone(), move |stream| {
+        start_listener(bind_addr, move |mut stream| {
             let node_clone = Arc::clone(&node);
             thread::spawn(move || {
-                node_clone.handle_peer_connection(stream);
+                if let Some(key) = node_clone.encryption_key {
+                    // Encrypted mode: Noise XX responder handshake
+                    match handshake_responder(&mut stream, &key) {
+                        Ok(result) => {
+                            if !node_clone.verify_peer_identity(&result.remote_static_key) {
+                                return;
+                            }
+                            node_clone.peer_manager.add_peer(Box::new(result.writer));
+                            node_clone.handle_peer_connection(result.reader);
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️ Noise handshake failed (responder): {:?}", e);
+                        }
+                    }
+                } else {
+                    // Plaintext mode
+                    let write_stream = match stream.try_clone() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("Failed to clone accepted stream: {e}");
+                            return;
+                        }
+                    };
+                    node_clone.peer_manager.add_peer(Box::new(write_stream));
+                    node_clone.handle_peer_connection(stream);
+                }
             });
         })
         .map_err(|e| format!("Failed to start listener: {:?}", e))
     }
 
     /// Connect to a peer and start reader thread.
+    ///
+    /// When encryption is enabled, performs a Noise XX initiator handshake
+    /// and verifies the remote peer's identity.
     pub fn connect_to_peer(self: &Arc<Self>, addr: SocketAddr) -> Result<(), String> {
-        let stream =
+        let mut stream =
             connect_to_peer(addr).map_err(|e| format!("Failed to connect to peer: {:?}", e))?;
 
-        let stream_clone = stream
-            .try_clone()
-            .map_err(|e| format!("Failed to clone stream: {:?}", e))?;
-        self.peer_manager.add_peer(stream_clone);
+        if let Some(key) = self.encryption_key {
+            // Encrypted mode: Noise XX initiator handshake
+            let result = handshake_initiator(&mut stream, &key)
+                .map_err(|e| format!("Noise handshake failed (initiator): {:?}", e))?;
 
-        let node = Arc::clone(self);
-        thread::spawn(move || {
-            node.handle_peer_connection(stream);
-        });
+            if !self.verify_peer_identity(&result.remote_static_key) {
+                return Err("Rejected: remote peer not in validator set".into());
+            }
+
+            self.peer_manager.add_peer(Box::new(result.writer));
+
+            let node = Arc::clone(self);
+            thread::spawn(move || {
+                node.handle_peer_connection(result.reader);
+            });
+        } else {
+            // Plaintext mode
+            let write_stream = stream
+                .try_clone()
+                .map_err(|e| format!("Failed to clone stream: {:?}", e))?;
+            self.peer_manager.add_peer(Box::new(write_stream));
+
+            let node = Arc::clone(self);
+            thread::spawn(move || {
+                node.handle_peer_connection(stream);
+            });
+        }
 
         Ok(())
+    }
+
+    /// Verify a remote peer's Noise static key against known validator keys.
+    ///
+    /// Returns `true` if the peer is authorized, `false` otherwise.
+    fn verify_peer_identity(&self, remote_static: &[u8; 32]) -> bool {
+        if self.known_noise_keys.is_empty() {
+            // No known keys configured — skip verification (production bootstrapping)
+            return true;
+        }
+
+        if is_known_validator(remote_static, &self.known_noise_keys) {
+            true
+        } else {
+            eprintln!(
+                "🚫 Rejected unknown peer: noise key {}",
+                hex::encode(remote_static)
+            );
+            false
+        }
     }
 
     /// Broadcast a message to all peers.
@@ -1065,22 +1168,18 @@ impl ConsensusNode {
     }
 
     /// Handle a peer connection (blocking, spawned per peer).
-    pub fn handle_peer_connection(self: Arc<Self>, mut stream: TcpStream) {
-        let peer_addr = stream.peer_addr().ok();
-        println!("📡 Starting receive loop for peer {:?}", peer_addr);
+    pub fn handle_peer_connection(self: Arc<Self>, mut reader: impl std::io::Read) {
+        println!("📡 Starting receive loop for peer");
 
         loop {
-            match read_wire_message(&mut stream) {
+            match read_wire_message(&mut reader) {
                 Ok(msg) => {
                     if let Err(e) = self.handle_network_message(msg) {
                         eprintln!("❌ Message handling failed: {}", e);
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "❌ Read failed from {:?}: {:?}, disconnecting",
-                        peer_addr, e
-                    );
+                    eprintln!("❌ Read failed from peer: {:?}, disconnecting", e);
                     break;
                 }
             }

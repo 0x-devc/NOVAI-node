@@ -5,6 +5,9 @@
 //! Clean-room implementation using `std::net` (no external P2P libraries).
 //! Suitable for localhost devnet and testing.
 
+pub mod noise;
+pub mod transport;
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -118,11 +121,11 @@ pub fn encode_wire_message(msg: &NetworkMessage) -> Result<Vec<u8>, P2PError> {
     Ok(wire)
 }
 
-/// Read one framed message from a TCP stream.
+/// Read one framed message from a stream.
 ///
 /// # Errors
 /// Returns error if read fails, message is malformed, or exceeds size limit.
-pub fn read_wire_message(stream: &mut TcpStream) -> Result<NetworkMessage, P2PError> {
+pub fn read_wire_message(stream: &mut impl Read) -> Result<NetworkMessage, P2PError> {
     // Read length prefix
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
@@ -187,11 +190,11 @@ pub fn read_wire_message(stream: &mut TcpStream) -> Result<NetworkMessage, P2PEr
     }
 }
 
-/// Write one framed message to a TCP stream.
+/// Write one framed message to a stream.
 ///
 /// # Errors
 /// Returns error if encoding or write fails.
-pub fn write_wire_message(stream: &mut TcpStream, msg: &NetworkMessage) -> Result<(), P2PError> {
+pub fn write_wire_message(stream: &mut (impl Write + ?Sized), msg: &NetworkMessage) -> Result<(), P2PError> {
     let wire = encode_wire_message(msg)?;
     stream.write_all(&wire)?;
     stream.flush()?;
@@ -199,8 +202,10 @@ pub fn write_wire_message(stream: &mut TcpStream, msg: &NetworkMessage) -> Resul
 }
 
 /// Minimal peer connection manager.
+///
+/// Stores write halves of peer connections (plain `TcpStream` or `NoiseWriter`).
 pub struct PeerManager {
-    peers: Arc<Mutex<Vec<TcpStream>>>,
+    peers: Arc<Mutex<Vec<Box<dyn Write + Send>>>>,
 }
 
 impl Default for PeerManager {
@@ -217,13 +222,13 @@ impl PeerManager {
         }
     }
 
-    /// Add a connected peer.
+    /// Add a connected peer's write half.
     ///
     /// # Panics
     /// Panics if the mutex is poisoned.
-    pub fn add_peer(&self, stream: TcpStream) {
+    pub fn add_peer(&self, writer: Box<dyn Write + Send>) {
         let mut peers = self.peers.lock().unwrap();
-        peers.push(stream);
+        peers.push(writer);
     }
 
     /// Broadcast a message to all connected peers.
@@ -236,12 +241,10 @@ impl PeerManager {
     /// # Panics
     /// Panics if the mutex is poisoned.
     pub fn broadcast(&self, msg: &NetworkMessage) -> Result<(), P2PError> {
-        // Pre-encode message once (avoid repeated serialization per peer)
         let wire_bytes = encode_wire_message(msg)?;
 
-        self.peers.lock().unwrap().retain_mut(|stream| {
-            // Write pre-encoded bytes directly
-            if stream.write_all(&wire_bytes).is_ok() && stream.flush().is_ok() {
+        self.peers.lock().unwrap().retain_mut(|writer| {
+            if writer.write_all(&wire_bytes).is_ok() && writer.flush().is_ok() {
                 true
             } else {
                 eprintln!("Peer disconnected, removing");
@@ -263,16 +266,15 @@ impl PeerManager {
 }
 
 /// Start a TCP listener for incoming peer connections.
-/// Callback is invoked for each new connection.
+///
+/// Callback is invoked for each accepted TCP connection. The caller is
+/// responsible for performing any handshake, adding the write half to
+/// `PeerManager`, and spawning a reader thread.
 ///
 /// # Errors
 /// Returns error if binding fails.
-///
-/// # Panics
-/// Panics if stream cloning fails.
 pub fn start_listener<F>(
     bind_addr: SocketAddr,
-    peer_manager: Arc<PeerManager>,
     on_peer_connected: F,
 ) -> Result<(), P2PError>
 where
@@ -287,12 +289,6 @@ where
             match stream {
                 Ok(stream) => {
                     println!("New peer connected from {:?}", stream.peer_addr());
-
-                    // Clone stream for peer manager
-                    let stream_clone = stream.try_clone().expect("clone stream");
-                    peer_manager.add_peer(stream_clone);
-
-                    // Give stream to callback for reading
                     on_peer_connected(stream);
                 }
                 Err(e) => {
