@@ -5,7 +5,7 @@ use novai_consensus::{ConsensusError, ConsensusState};
 use novai_consensus_types::{SignedProposal, Timeout, Vote, QC};
 use novai_crypto::{address_from_pubkey, sign_bytes};
 use novai_p2p::{connect_to_peer, read_wire_message, start_listener, NetworkMessage, PeerManager};
-use novai_state::{Kv, MemKv};
+use novai_state::{Kv, KvBatch, MemKv, RocksKv, WriteOp};
 use novai_types::Address;
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpStream};
@@ -16,6 +16,64 @@ use std::time::Instant;
 /// Maximum number of blocks to request in a single sync chunk.
 /// Prevents timeout on large catch-up ranges (e.g., 50k+ blocks).
 pub const SYNC_CHUNK_SIZE: u64 = 500;
+
+/// Storage backend for the consensus node.
+///
+/// Unifies `MemKv` (in-memory, volatile) and `RocksKv` (persistent, disk-backed)
+/// behind a single type so `ConsensusNode` is backend-agnostic.
+pub enum Storage {
+    Memory(MemKv),
+    Rocks(RocksKv),
+}
+
+impl Kv for Storage {
+    type Error = String;
+
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        match self {
+            Storage::Memory(kv) => kv.get(key).map_err(|()| "in-memory storage error".into()),
+            Storage::Rocks(kv) => kv.get(key).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), String> {
+        match self {
+            Storage::Memory(kv) => kv
+                .put(key, value)
+                .map_err(|()| "in-memory storage error".into()),
+            Storage::Rocks(kv) => kv.put(key, value).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn delete(&mut self, key: &[u8]) -> Result<(), String> {
+        match self {
+            Storage::Memory(kv) => kv
+                .delete(key)
+                .map_err(|()| "in-memory storage error".into()),
+            Storage::Rocks(kv) => kv.delete(key).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+        match self {
+            Storage::Memory(kv) => kv
+                .scan_prefix(prefix)
+                .map_err(|()| "in-memory storage error".into()),
+            Storage::Rocks(kv) => kv.scan_prefix(prefix).map_err(|e| e.to_string()),
+        }
+    }
+}
+
+impl KvBatch for Storage {
+    fn apply_batch(&mut self, ops: &[WriteOp]) -> Result<(), String> {
+        match self {
+            Storage::Memory(kv) => kv
+                .apply_batch(ops)
+                .map_err(|()| "in-memory storage error".into()),
+            Storage::Rocks(kv) => kv.apply_batch(ops).map_err(|e| e.to_string()),
+        }
+    }
+}
 
 /// Cache for tracking which QCs have been broadcasted (to avoid duplicates).
 type QcBroadcastCache = Arc<Mutex<HashSet<(u64, u64, [u8; 32])>>>;
@@ -35,7 +93,7 @@ pub struct ConsensusNode {
     pub signing_key: SigningKey,
     pub verifying_key: VerifyingKey,
     pub state: Arc<Mutex<ConsensusState>>,
-    pub db: Arc<Mutex<MemKv>>,
+    pub db: Arc<Mutex<Storage>>,
     pub peer_manager: Arc<PeerManager>,
     pub validator_set: Vec<Address>,
     pub validator_pubkeys: HashMap<Address, VerifyingKey>,
@@ -52,11 +110,32 @@ pub struct ConsensusNode {
 }
 
 impl ConsensusNode {
+    /// Create a node with in-memory storage (volatile — for tests and backward compat).
     pub fn new(
         signing_key: SigningKey,
         validator_set: Vec<Address>,
         validator_pubkeys: HashMap<Address, VerifyingKey>,
         base_timeout_ms: u64,
+    ) -> Self {
+        Self::new_with_storage(
+            signing_key,
+            validator_set,
+            validator_pubkeys,
+            base_timeout_ms,
+            Storage::Memory(MemKv::new()),
+        )
+    }
+
+    /// Create a node with the given storage backend.
+    ///
+    /// If the storage contains committed state from a previous run, the node
+    /// recovers automatically via `ConsensusState::recover()`.
+    pub fn new_with_storage(
+        signing_key: SigningKey,
+        validator_set: Vec<Address>,
+        validator_pubkeys: HashMap<Address, VerifyingKey>,
+        base_timeout_ms: u64,
+        storage: Storage,
     ) -> Self {
         let verifying_key = signing_key.verifying_key();
         let our_address = address_from_pubkey(&verifying_key);
@@ -67,12 +146,28 @@ impl ConsensusNode {
             .map(|(addr, pk)| (*addr, *pk))
             .collect();
 
+        // Attempt recovery from persistent state
+        let state = match ConsensusState::recover(our_address, &storage) {
+            Ok(recovered) => {
+                println!(
+                    "🔄 Recovered state: committed_height={}, highest_qc={}",
+                    recovered.committed_height,
+                    recovered.highest_qc.as_ref().map(|q| q.height).unwrap_or(0),
+                );
+                recovered
+            }
+            Err(e) => {
+                println!("ℹ️  No prior state to recover ({:?}), starting fresh", e);
+                ConsensusState::new(our_address)
+            }
+        };
+
         Self {
             our_address,
             signing_key,
             verifying_key,
-            state: Arc::new(Mutex::new(ConsensusState::new(our_address))),
-            db: Arc::new(Mutex::new(MemKv::new())),
+            state: Arc::new(Mutex::new(state)),
+            db: Arc::new(Mutex::new(storage)),
             peer_manager: Arc::new(PeerManager::new()),
             validator_set,
             validator_pubkeys,
@@ -129,7 +224,8 @@ impl ConsensusNode {
         let start_time = *self.round_start_time.lock().unwrap();
         let state = self.state.lock().unwrap();
 
-        let timeout_ms = novai_consensus::timeout_for_round_with_base(state.round, self.base_timeout_ms);
+        let timeout_ms =
+            novai_consensus::timeout_for_round_with_base(state.round, self.base_timeout_ms);
         let timeout_duration = std::time::Duration::from_millis(timeout_ms);
 
         if start_time.elapsed() < timeout_duration {
@@ -332,7 +428,10 @@ impl ConsensusNode {
         }
 
         if response.blocks.is_empty() {
-            println!("⚠️ Peer {:?} sent empty block response", &response.responder[..4]);
+            println!(
+                "⚠️ Peer {:?} sent empty block response",
+                &response.responder[..4]
+            );
             return Ok(());
         }
 
@@ -736,11 +835,9 @@ impl ConsensusNode {
                         );
                     }
                     Ok(_) => {
-                        state
-                            .persist_highest_qc(&mut *db)
-                            .map_err(|e| {
-                                format!("QC catch-up persist highest QC failed: {:?}", e)
-                            })?;
+                        state.persist_highest_qc(&mut *db).map_err(|e| {
+                            format!("QC catch-up persist highest QC failed: {:?}", e)
+                        })?;
                     }
                     Err(e) => {
                         // Commit chain incomplete — blocks missing from cache.
@@ -749,11 +846,9 @@ impl ConsensusNode {
                         // locks are dropped.
                         println!("⚠️ QC catch-up commit chain incomplete: {:?}", e);
                         needs_sync = true;
-                        state
-                            .persist_highest_qc(&mut *db)
-                            .map_err(|e| {
-                                format!("QC catch-up persist highest QC failed: {:?}", e)
-                            })?;
+                        state.persist_highest_qc(&mut *db).map_err(|e| {
+                            format!("QC catch-up persist highest QC failed: {:?}", e)
+                        })?;
                     }
                 }
             }
@@ -913,13 +1008,7 @@ impl ConsensusNode {
                 let mut db = self.db.lock().unwrap();
                 let new_committed_height = to_commit.last().unwrap().height;
                 state
-                    .persist_commit_atomic(
-                        &mut *db,
-                        &to_commit,
-                        &qc,
-                        new_committed_height,
-                        None,
-                    )
+                    .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
                     .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
                 state.apply_commits(&to_commit);
                 committed = true;

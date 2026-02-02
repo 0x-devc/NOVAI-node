@@ -2,11 +2,13 @@ use mempool::{NonceProvider, TxMempool};
 use novai_codec::txid_v1;
 use novai_copilot::observer::{AnomalyCallback, ChainObserver, ObservableState, ObserverConfig};
 use novai_crypto::{address_from_pubkey, generate_keypair, sign_tx_v1};
-use novai_node::consensus_node::ConsensusNode;
+use novai_node::consensus_node::{ConsensusNode, Storage};
 use novai_node::metrics;
+use novai_state::{MemKv, RocksKv};
 use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
 use std::env;
+use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,17 +16,20 @@ use std::time::Duration;
 fn usage() {
     eprintln!(
         "usage:
-  novai-node run --port <port> [--peer <addr>]... --validator <index> [--metrics-port <port>] [--base-timeout <ms>]
+  novai-node run --port <port> --genesis <path> [--peer <addr>]... [--key-file <path>] [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>]
+  novai-node run --port <port> --dev-keys --validator <index> [--peer <addr>]... [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>]
+  novai-node generate-key [--output <path>]
   novai-node submit-tx <payload> [--nonce <u64>] [--fee <u64>] [--min-fee <u64>] [--cap <u64>]
   novai-node drain-mempool <payload> [<payload> ...] [--max <u64>] [--min-fee <u64>] [--cap <u64>]
 
 examples:
-  novai-node run --port 9000 --validator 0
-  novai-node run --port 9001 --peer 127.0.0.1:9000 --validator 1 --metrics-port 8081
+  novai-node generate-key --output ~/.novai/data/validator.key
+  novai-node run --port 9000 --genesis testnet/genesis.json
+  novai-node run --port 9000 --genesis testnet/genesis.json --key-file ~/.novai/data/validator.key
+  novai-node run --port 9000 --dev-keys --validator 0
+  novai-node run --port 9001 --peer 127.0.0.1:9000 --dev-keys --validator 1 --metrics-port 8081
   novai-node submit-tx hello
-  novai-node submit-tx hello --fee 10 --nonce 0
   novai-node drain-mempool a b c
-  novai-node drain-mempool a b c --max 2
 "
     );
 }
@@ -132,6 +137,92 @@ fn short_id(id: &TxId) -> String {
     s
 }
 
+/// Load an Ed25519 signing key from a 32-byte seed file.
+fn load_key_file(path: &str) -> ed25519_dalek::SigningKey {
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|e| panic!("Failed to read key file {}: {}", path, e));
+    if bytes.len() != 32 {
+        panic!(
+            "Key file {} must be exactly 32 bytes (got {} bytes)",
+            path,
+            bytes.len()
+        );
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    ed25519_dalek::SigningKey::from_bytes(&seed)
+}
+
+/// Save a 32-byte Ed25519 seed to a file with 0600 permissions.
+fn save_key_file(path: &str, seed: &[u8; 32]) {
+    // Create parent directories if needed
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|e| panic!("Failed to create directory {}: {}", parent.display(), e));
+    }
+
+    let mut file = std::fs::File::create(path)
+        .unwrap_or_else(|e| panic!("Failed to create key file {}: {}", path, e));
+
+    // Set 0600 permissions before writing
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        file.set_permissions(perms)
+            .unwrap_or_else(|e| panic!("Failed to set permissions on {}: {}", path, e));
+    }
+
+    file.write_all(seed)
+        .unwrap_or_else(|e| panic!("Failed to write key file {}: {}", path, e));
+}
+
+/// Parse genesis.json and extract validator set (pubkeys + addresses).
+fn parse_genesis_validator_set(
+    genesis_path: &str,
+) -> (Vec<Address>, HashMap<Address, ed25519_dalek::VerifyingKey>) {
+    let json = std::fs::read_to_string(genesis_path)
+        .unwrap_or_else(|e| panic!("Failed to read genesis file {}: {}", genesis_path, e));
+    let parsed: serde_json::Value = serde_json::from_str(&json)
+        .unwrap_or_else(|e| panic!("Failed to parse genesis JSON {}: {}", genesis_path, e));
+
+    let validators = parsed["validators"]
+        .as_array()
+        .unwrap_or_else(|| panic!("genesis.json missing 'validators' array"));
+
+    let mut validator_set = Vec::new();
+    let mut validator_pubkeys = HashMap::new();
+
+    for (i, v) in validators.iter().enumerate() {
+        let pubkey_hex = v["pubkey"]
+            .as_str()
+            .unwrap_or_else(|| panic!("Validator {} missing 'pubkey' field", i));
+
+        let pubkey_bytes = hex::decode(pubkey_hex)
+            .unwrap_or_else(|e| panic!("Validator {} pubkey invalid hex: {}", i, e));
+
+        if pubkey_bytes.len() != 32 {
+            panic!(
+                "Validator {} pubkey must be 32 bytes (got {})",
+                i,
+                pubkey_bytes.len()
+            );
+        }
+
+        let mut pk_array = [0u8; 32];
+        pk_array.copy_from_slice(&pubkey_bytes);
+
+        let vk = novai_crypto::pubkey_from_bytes(&pk_array)
+            .unwrap_or_else(|e| panic!("Validator {} pubkey invalid Ed25519: {:?}", i, e));
+
+        let addr = address_from_pubkey(&vk);
+        validator_set.push(addr);
+        validator_pubkeys.insert(addr, vk);
+    }
+
+    (validator_set, validator_pubkeys)
+}
+
 fn main() {
     let mut args = env::args().skip(1);
     let Some(cmd) = args.next() else {
@@ -140,6 +231,47 @@ fn main() {
     };
 
     match cmd.as_str() {
+        "generate-key" => {
+            let rest: Vec<String> = args.collect();
+            let mut output_path: Option<String> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--output" => {
+                        output_path =
+                            Some(rest.get(i + 1).cloned().expect("missing --output value"));
+                        i += 2;
+                    }
+                    other => {
+                        panic!("unknown flag: {other}");
+                    }
+                }
+            }
+
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            let path = output_path.unwrap_or_else(|| format!("{}/.novai/data/validator.key", home));
+
+            // Check if file already exists to avoid accidental overwrite
+            if std::path::Path::new(&path).exists() {
+                eprintln!("ERROR: Key file already exists at {}", path);
+                eprintln!("Remove it first if you want to generate a new key.");
+                std::process::exit(1);
+            }
+
+            let (sk, pk) = generate_keypair();
+            let seed = sk.to_bytes();
+            save_key_file(&path, &seed);
+
+            let pubkey_hex = hex::encode(pk.as_bytes());
+            let addr = address_from_pubkey(&pk);
+            let addr_hex = hex::encode(addr);
+
+            println!("{}", pubkey_hex);
+            eprintln!("Key written to: {}", path);
+            eprintln!("Public key:     {}", pubkey_hex);
+            eprintln!("Address:        {}", addr_hex);
+        }
+
         "run" => {
             // Parse flags
             let mut port: Option<u16> = None;
@@ -147,6 +279,11 @@ fn main() {
             let mut validator_idx: Option<usize> = None;
             let mut metrics_port: Option<u16> = None;
             let mut base_timeout_ms: u64 = novai_consensus::BASE_TIMEOUT_MS;
+            let mut storage_backend: String = "rocksdb".to_string();
+            let mut data_dir: Option<String> = None;
+            let mut key_file: Option<String> = None;
+            let mut genesis_path: Option<String> = None;
+            let mut dev_keys = false;
 
             let rest: Vec<String> = args.collect();
             let mut i = 0;
@@ -174,6 +311,30 @@ fn main() {
                         base_timeout_ms = parse_u64(rest.get(i + 1).cloned(), "--base-timeout");
                         i += 2;
                     }
+                    "--storage" => {
+                        storage_backend =
+                            rest.get(i + 1).cloned().expect("missing --storage value");
+                        i += 2;
+                    }
+                    "--data-dir" => {
+                        data_dir =
+                            Some(rest.get(i + 1).cloned().expect("missing --data-dir value"));
+                        i += 2;
+                    }
+                    "--key-file" => {
+                        key_file =
+                            Some(rest.get(i + 1).cloned().expect("missing --key-file value"));
+                        i += 2;
+                    }
+                    "--genesis" => {
+                        genesis_path =
+                            Some(rest.get(i + 1).cloned().expect("missing --genesis value"));
+                        i += 2;
+                    }
+                    "--dev-keys" => {
+                        dev_keys = true;
+                        i += 1;
+                    }
                     other => {
                         panic!("unknown flag: {other}");
                     }
@@ -181,49 +342,134 @@ fn main() {
             }
 
             let port = port.expect("--port required");
-            let validator_idx = validator_idx.expect("--validator required");
-            let metrics_port = metrics_port.unwrap_or(8080); // Default to 8080
+            let metrics_port = metrics_port.unwrap_or(8080);
 
-            // Hardcoded 4-node validator set for devnet
-            // NOTE: Must match the number of nodes started by testnet-local.sh
-            let validator_keys: Vec<ed25519_dalek::SigningKey> = (0..4)
-                .map(|i| ed25519_dalek::SigningKey::from_bytes(&[i as u8; 32]))
-                .collect();
+            // Resolve key + validator set based on mode
+            let (our_key, validator_set, validator_pubkeys): (
+                ed25519_dalek::SigningKey,
+                Vec<Address>,
+                HashMap<Address, ed25519_dalek::VerifyingKey>,
+            ) = if dev_keys {
+                // ── Dev-keys mode ──────────────────────────────────────
+                eprintln!("WARNING: using deterministic dev keys — NOT for production");
+                let idx = validator_idx.expect("--validator <index> required with --dev-keys");
 
-            let validator_set: Vec<Address> = validator_keys
-                .iter()
-                .map(|sk| {
-                    let pk = sk.verifying_key();
-                    novai_crypto::address_from_pubkey(&pk)
-                })
-                .collect();
+                let dev_validator_keys: Vec<ed25519_dalek::SigningKey> = (0..4)
+                    .map(|i| ed25519_dalek::SigningKey::from_bytes(&[i as u8; 32]))
+                    .collect();
 
-            let validator_pubkeys: HashMap<Address, ed25519_dalek::VerifyingKey> = validator_keys
-                .iter()
-                .map(|sk| {
-                    let pk = sk.verifying_key();
-                    (novai_crypto::address_from_pubkey(&pk), pk)
-                })
-                .collect();
+                let dev_validator_set: Vec<Address> = dev_validator_keys
+                    .iter()
+                    .map(|sk| address_from_pubkey(&sk.verifying_key()))
+                    .collect();
 
-            let our_key = validator_keys[validator_idx].clone();
-            let our_addr = validator_set[validator_idx];
+                let dev_validator_pubkeys: HashMap<Address, ed25519_dalek::VerifyingKey> =
+                    dev_validator_keys
+                        .iter()
+                        .map(|sk| {
+                            let pk = sk.verifying_key();
+                            (address_from_pubkey(&pk), pk)
+                        })
+                        .collect();
+
+                if idx >= dev_validator_keys.len() {
+                    panic!(
+                        "--validator {} out of range (dev-keys supports 0..{})",
+                        idx,
+                        dev_validator_keys.len() - 1
+                    );
+                }
+
+                let key = dev_validator_keys[idx].clone();
+                (key, dev_validator_set, dev_validator_pubkeys)
+            } else {
+                // ── Production mode ────────────────────────────────────
+                let gp = genesis_path.expect("--genesis <path> required (or use --dev-keys)");
+
+                let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                let base = data_dir
+                    .as_deref()
+                    .map(String::from)
+                    .unwrap_or_else(|| format!("{}/.novai/data", home));
+
+                let kf = key_file.unwrap_or_else(|| format!("{}/validator.key", base));
+
+                let our_key = load_key_file(&kf);
+                let our_pk = our_key.verifying_key();
+                let our_addr = address_from_pubkey(&our_pk);
+
+                let (vs, vp) = parse_genesis_validator_set(&gp);
+
+                if !vs.contains(&our_addr) {
+                    let our_pubkey_hex = hex::encode(our_pk.as_bytes());
+                    panic!(
+                        "Our public key {} is not in the genesis validator set at {}",
+                        our_pubkey_hex, gp
+                    );
+                }
+
+                println!("🔑 Key loaded from: {}", kf);
+                (our_key, vs, vp)
+            };
+
+            let our_addr = address_from_pubkey(&our_key.verifying_key());
+
+            // Build storage backend
+            let storage = match storage_backend.as_str() {
+                "rocksdb" => {
+                    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    let base = data_dir
+                        .as_deref()
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("{}/.novai/data", home));
+                    // Use validator index for dev-keys, address prefix for production
+                    let db_subdir = if dev_keys {
+                        format!(
+                            "validator-{}",
+                            validator_idx.expect("validator_idx set in dev-keys")
+                        )
+                    } else {
+                        format!("validator-{}", &hex::encode(our_addr)[..16])
+                    };
+                    let db_path = format!("{}/{}", base, db_subdir);
+
+                    std::fs::create_dir_all(&db_path)
+                        .unwrap_or_else(|e| panic!("Failed to create data dir {}: {}", db_path, e));
+
+                    println!("💾 Storage: RocksDB");
+                    println!("   Path: {}", db_path);
+
+                    let rocks = RocksKv::open(&db_path)
+                        .unwrap_or_else(|e| panic!("Failed to open RocksDB at {}: {}", db_path, e));
+                    Storage::Rocks(rocks)
+                }
+                "memory" => {
+                    println!("⚠️  Storage: MEMORY (volatile — state lost on restart!)");
+                    Storage::Memory(MemKv::new())
+                }
+                other => {
+                    panic!(
+                        "unknown --storage value: {} (expected: rocksdb | memory)",
+                        other
+                    );
+                }
+            };
 
             println!("🚀 Starting consensus node");
             println!("   Port: {}", port);
             println!("   Metrics port: {}", metrics_port);
-            println!("   Validator index: {}", validator_idx);
-            println!("   Address: {:?}", &our_addr[..8]);
+            println!("   Address: {}", &hex::encode(our_addr)[..16]);
             println!("   Peers: {:?}", peers);
             println!("   Base timeout: {}ms", base_timeout_ms);
 
             // Create node (clone our_key since we need it for copilot observer too)
             let observer_key = our_key.clone();
-            let node = Arc::new(ConsensusNode::new(
+            let node = Arc::new(ConsensusNode::new_with_storage(
                 our_key,
                 validator_set.clone(),
                 validator_pubkeys,
                 base_timeout_ms,
+                storage,
             ));
 
             // Start listener

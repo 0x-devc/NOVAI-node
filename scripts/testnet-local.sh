@@ -127,7 +127,7 @@ launch_testnet() {
     tmux split-window -v -t "${SESSION_NAME}:nodes.1"
 
     # Start Node 0 (seed) - no peers
-    local cmd0="${BINARY} run --port ${PORTS[0]} --validator 0 --metrics-port ${METRICS_PORTS[0]} 2>&1 | tee ${LOG_DIR}/node-0.log"
+    local cmd0="${BINARY} run --port ${PORTS[0]} --dev-keys --validator 0 --metrics-port ${METRICS_PORTS[0]} 2>&1 | tee ${LOG_DIR}/node-0.log"
     tmux send-keys -t "${SESSION_NAME}:nodes.0" "echo '=== Node 0 (Seed) ===' && ${cmd0}" C-m
 
     # Give seed node time to start
@@ -142,7 +142,7 @@ launch_testnet() {
             peer_args="${peer_args} --peer 127.0.0.1:${PORTS[$j]}"
         done
 
-        local cmd="${BINARY} run --port ${PORTS[$i]}${peer_args} --validator ${i} --metrics-port ${METRICS_PORTS[$i]} 2>&1 | tee ${LOG_DIR}/node-${i}.log"
+        local cmd="${BINARY} run --port ${PORTS[$i]}${peer_args} --dev-keys --validator ${i} --metrics-port ${METRICS_PORTS[$i]} 2>&1 | tee ${LOG_DIR}/node-${i}.log"
         tmux send-keys -t "${SESSION_NAME}:nodes.${i}" "echo '=== Node ${i} ===' && ${cmd}" C-m
         sleep 1
     done

@@ -291,7 +291,7 @@ build_docker_command() {
         -e "RUST_LOG=info"
         --label "novai.validator.id=${VALIDATOR_ID}"
         "${NOVAI_IMAGE}"
-        run --port 9090 --validator "${VALIDATOR_ID}"
+        run --port 9090 --dev-keys --validator "${VALIDATOR_ID}"
     )
 
     for peer in "${PEERS[@]}"; do

@@ -340,7 +340,7 @@ deploy_validator_node() {
         --label "novai.validator.id=${validator_id}"
         --label "novai.testnet=true"
         "${NOVAI_IMAGE}"
-        run --port 9090 --validator "${validator_id}"
+        run --port 9090 --dev-keys --validator "${validator_id}"
     )
 
     if [[ "${validator_id}" -ne "${SEED_VALIDATOR}" ]]; then

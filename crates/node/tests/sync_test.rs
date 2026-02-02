@@ -227,8 +227,8 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
     let block1 = Block {
         height: 1,
         round: 0,
-        parent_hash: [0u8; 32],    // genesis parent
-        state_root: [0u8; 32],     // genesis root (MemKv returns this when empty)
+        parent_hash: [0u8; 32], // genesis parent
+        state_root: [0u8; 32],  // genesis root (MemKv returns this when empty)
         txs: vec![],
     };
     let block1_hash = novai_consensus_types::block_hash(&block1);
@@ -253,8 +253,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
             signature: [0u8; 64],
             ai_signal_commitment: None,
         };
-        let unsigned_bytes =
-            novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
+        let unsigned_bytes = novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
         let domain_tag = b"NOVAI_VOTE_V1";
         let mut to_sign = Vec::new();
         to_sign.extend_from_slice(domain_tag);
@@ -278,8 +277,8 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
     let block2 = Block {
         height: 2,
         round: 0,
-        parent_hash: block1_hash,  // parent is block 1
-        state_root: [0u8; 32],     // same genesis root (no txs executed)
+        parent_hash: block1_hash, // parent is block 1
+        state_root: [0u8; 32],    // same genesis root (no txs executed)
         txs: vec![],
     };
 
@@ -289,9 +288,8 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
     };
 
     // Sign proposal with validator 1's key (the leader for height 2)
-    let unsigned_bytes =
-        novai_consensus_types::codec::encode_proposal_v1_unsigned(&proposal)
-            .expect("encode proposal");
+    let unsigned_bytes = novai_consensus_types::codec::encode_proposal_v1_unsigned(&proposal)
+        .expect("encode proposal");
     let signature = novai_crypto::sign_bytes(&validator_keys[1], &unsigned_bytes);
 
     let signed_proposal = novai_consensus_types::SignedProposal {
@@ -318,10 +316,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
             "highest_qc should be set after QC catch-up"
         );
         let hqc = state.highest_qc.as_ref().unwrap();
-        assert_eq!(
-            hqc.height, 1,
-            "highest_qc should be for height 1"
-        );
+        assert_eq!(hqc.height, 1, "highest_qc should be for height 1");
         assert_eq!(
             hqc.block_hash, block1_hash,
             "highest_qc should reference block 1"
