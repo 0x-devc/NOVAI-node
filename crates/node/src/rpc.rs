@@ -432,6 +432,19 @@ fn handle_submit_tx(
         message: format!("Invalid transaction encoding: {:?}", e),
     })?;
 
+    // Size limit check (cheapest rejection point — before touching the mempool)
+    let tx_size = novai_codec::tx_encoded_size(&tx);
+    if tx_size > novai_types::MAX_TX_SIZE {
+        return Err(RpcError {
+            code: -32000,
+            message: format!(
+                "transaction too large: {} bytes exceeds limit of {} bytes",
+                tx_size,
+                novai_types::MAX_TX_SIZE
+            ),
+        });
+    }
+
     // Compute transaction ID
     let txid = txid_v1(&tx).map_err(|e| RpcError {
         code: -32000,

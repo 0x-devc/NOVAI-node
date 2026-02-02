@@ -11,6 +11,22 @@ pub type Hash32 = [u8; 32];
 pub type Nonce = u64;
 pub type Fee = u64;
 
+// ========== PROTOCOL SIZE LIMITS ==========
+// These are consensus-critical constants. Changing them requires a coordinated
+// upgrade across all validators (effectively a hard fork).
+
+/// Maximum encoded transaction size in bytes (128 KB).
+pub const MAX_TX_SIZE: usize = 128 * 1024;
+
+/// Maximum total block payload size in bytes (2 MB).
+pub const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
+
+/// Maximum number of transactions per block.
+pub const MAX_TXS_PER_BLOCK: usize = 500;
+
+/// Maximum total mempool size in bytes (64 MB).
+pub const MAX_MEMPOOL_BYTES: usize = 64 * 1024 * 1024;
+
 /// V1 signature: raw ed25519 signature bytes (64 bytes).
 pub type SignatureBytes = [u8; 64];
 

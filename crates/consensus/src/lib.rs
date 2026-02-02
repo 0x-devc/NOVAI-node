@@ -57,8 +57,7 @@ pub fn timeout_for_round_with_base(round: u64, base_ms: u64) -> u64 {
     // 2^16 * 2000 = 131_072_000 which is > MAX_TIMEOUT_MS
     let effective_round = round.min(16);
 
-    let timeout =
-        base_ms.saturating_mul(TIMEOUT_MULTIPLIER.saturating_pow(effective_round as u32));
+    let timeout = base_ms.saturating_mul(TIMEOUT_MULTIPLIER.saturating_pow(effective_round as u32));
     timeout.min(MAX_TIMEOUT_MS)
 }
 
@@ -187,8 +186,31 @@ impl ConsensusState {
             return Err(ConsensusError::NotLeader);
         }
 
-        // Drain ready transactions from mempool
-        let txs = mempool.drain_ready(1000, nonce_provider);
+        // Drain ready transactions from mempool with size-aware filtering.
+        // Drain up to MAX_TXS_PER_BLOCK candidates, then filter by cumulative
+        // block size. Txs that don't fit are returned to the mempool.
+        let mut candidates = mempool.drain_ready(
+            novai_types::MAX_TXS_PER_BLOCK,
+            nonce_provider,
+        );
+        let mut txs = Vec::new();
+        let mut block_bytes = 0usize;
+        let mut overflow = Vec::new();
+        for tx in candidates.drain(..) {
+            let size = novai_codec::tx_encoded_size(&tx);
+            if block_bytes + size > novai_types::MAX_BLOCK_SIZE {
+                overflow.push(tx);
+            } else {
+                block_bytes += size;
+                txs.push(tx);
+            }
+        }
+        // Re-insert overflow txs that didn't fit in this block.
+        // NOTE: re-inserted overflow txs lose original FIFO ordering. Acceptable
+        // for now; a size-aware drain_ready() would preserve ordering.
+        for tx in overflow {
+            let _ = mempool.reinsert_unchecked(tx);
+        }
 
         // Compute parent hash (from highest_qc if exists, else genesis)
         let parent_hash = if let Some(ref qc) = self.highest_qc {
@@ -232,6 +254,36 @@ impl ConsensusState {
         K: novai_state::Kv,
         K::Error: std::fmt::Debug,
     {
+        // --- Size limit enforcement (consensus-critical) ---
+        // Uses the same tx_encoded_size() as the block proposer. Any divergence
+        // between these checks would cause a consensus split.
+        if block.txs.len() > novai_types::MAX_TXS_PER_BLOCK {
+            return Err(ConsensusError::InvalidBlock(format!(
+                "block has {} txs, exceeds limit of {}",
+                block.txs.len(),
+                novai_types::MAX_TXS_PER_BLOCK
+            )));
+        }
+
+        let mut block_tx_bytes = 0usize;
+        for tx in &block.txs {
+            let size = novai_codec::tx_encoded_size(tx);
+            if size > novai_types::MAX_TX_SIZE {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "tx encoded size {} exceeds limit of {}",
+                    size, novai_types::MAX_TX_SIZE
+                )));
+            }
+            block_tx_bytes += size;
+        }
+
+        if block_tx_bytes > novai_types::MAX_BLOCK_SIZE {
+            return Err(ConsensusError::InvalidBlock(format!(
+                "block payload {} bytes exceeds limit of {}",
+                block_tx_bytes, novai_types::MAX_BLOCK_SIZE
+            )));
+        }
+
         // Expected height is max(committed_height, highest_qc_height) + 1
         let expected_height = match &self.highest_qc {
             Some(qc) => std::cmp::max(self.height, qc.height) + 1,
@@ -698,9 +750,7 @@ impl ConsensusState {
 
         println!(
             "⏰ ROUND ADVANCED to round={} at height={} (quorum at round={})",
-            self.round,
-            expected_height,
-            target_round
+            self.round, expected_height, target_round
         );
 
         true
@@ -917,7 +967,8 @@ impl ConsensusState {
 
         self.block_cache.retain(|&height, _| height >= prune_below);
         self.qc_cache.retain(|&height, _| height >= prune_below);
-        self.block_by_hash.retain(|_, block| block.height >= prune_below);
+        self.block_by_hash
+            .retain(|_, block| block.height >= prune_below);
     }
 
     /// Apply commits with AI hook integration.
@@ -2165,5 +2216,164 @@ mod tests {
         // Try to catch up to height 5 (less than committed)
         let count = state.catch_up_to(&db, 5).unwrap();
         assert_eq!(count, 0);
+    }
+
+    // ── Size-limit enforcement tests for verify_block ──────────────────
+
+    /// Helper: build a TxV1 with a payload of the given size.
+    fn make_tx_with_payload(payload_len: usize) -> novai_types::TxV1 {
+        novai_types::TxV1 {
+            version: novai_types::TxVersion::V1,
+            from: [0x11; 32],
+            pubkey: [0x22; 32],
+            nonce: 1,
+            fee: 10,
+            payload: vec![0xAB; payload_len],
+            sig: [0xCC; 64],
+        }
+    }
+
+    #[test]
+    fn verify_block_rejects_oversized_tx() {
+        use novai_state::MemKv;
+
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let state = ConsensusState::new(validator_set[0]);
+        let db = MemKv::new();
+
+        // A single tx whose encoded size exceeds MAX_TX_SIZE (128 KB).
+        // tx_encoded_size = TX_V1_OVERHEAD(149) + payload_len, so payload_len
+        // = MAX_TX_SIZE - 149 + 1 puts us 1 byte over the limit.
+        let payload_len = novai_types::MAX_TX_SIZE - novai_codec::TX_V1_OVERHEAD + 1;
+        let block = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs: vec![make_tx_with_payload(payload_len)],
+        };
+
+        let err = state.verify_block(&block, &db).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("tx encoded size") && msg.contains("exceeds limit"),
+            "expected oversized-tx error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn verify_block_rejects_too_many_txs() {
+        use novai_state::MemKv;
+
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let state = ConsensusState::new(validator_set[0]);
+        let db = MemKv::new();
+
+        // Block with MAX_TXS_PER_BLOCK + 1 tiny transactions.
+        let txs: Vec<novai_types::TxV1> = (0..novai_types::MAX_TXS_PER_BLOCK + 1)
+            .map(|_| make_tx_with_payload(0))
+            .collect();
+
+        let block = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs,
+        };
+
+        let err = state.verify_block(&block, &db).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("txs") && msg.contains("exceeds limit"),
+            "expected too-many-txs error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn verify_block_rejects_oversized_block_payload() {
+        use novai_state::MemKv;
+
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let state = ConsensusState::new(validator_set[0]);
+        let db = MemKv::new();
+
+        // Each tx is just under MAX_TX_SIZE but many of them push total over
+        // MAX_BLOCK_SIZE (2 MB). Use payload_len = MAX_TX_SIZE - TX_V1_OVERHEAD
+        // (exactly at the limit per-tx). Need ceil(MAX_BLOCK_SIZE / MAX_TX_SIZE) + 1 txs.
+        let per_tx_payload = novai_types::MAX_TX_SIZE - novai_codec::TX_V1_OVERHEAD;
+        let per_tx_size = novai_types::MAX_TX_SIZE; // TX_V1_OVERHEAD + per_tx_payload
+        let num_txs = novai_types::MAX_BLOCK_SIZE / per_tx_size + 1;
+        // Ensure we don't exceed MAX_TXS_PER_BLOCK (would trigger that error first).
+        assert!(
+            num_txs <= novai_types::MAX_TXS_PER_BLOCK,
+            "test setup: need {} txs but MAX_TXS_PER_BLOCK is {}",
+            num_txs,
+            novai_types::MAX_TXS_PER_BLOCK
+        );
+
+        let txs: Vec<novai_types::TxV1> = (0..num_txs)
+            .map(|_| make_tx_with_payload(per_tx_payload))
+            .collect();
+
+        let block = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs,
+        };
+
+        let err = state.verify_block(&block, &db).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("block payload") && msg.contains("exceeds limit"),
+            "expected oversized-block error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn verify_block_passes_size_checks_for_valid_block() {
+        use novai_state::MemKv;
+
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let state = ConsensusState::new(validator_set[0]);
+        let db = MemKv::new();
+
+        // A block with a few small txs — well within all size limits.
+        // verify_block will pass size checks then fail on height/state, which
+        // proves the size checks accepted the block.
+        let block = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs: vec![
+                make_tx_with_payload(100),
+                make_tx_with_payload(200),
+            ],
+        };
+
+        let result = state.verify_block(&block, &db);
+        // Should NOT be a size-limit error. It will fail on signature or state,
+        // but the point is it got past all three size checks.
+        match &result {
+            Ok(()) => {} // surprisingly passed everything — fine
+            Err(e) => {
+                let msg = format!("{:?}", e);
+                assert!(
+                    !msg.contains("exceeds limit"),
+                    "block within limits should not trigger size error, got: {}",
+                    msg
+                );
+            }
+        }
     }
 }

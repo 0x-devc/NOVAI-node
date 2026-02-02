@@ -121,6 +121,8 @@ pub enum TxMempoolError {
     InvalidPublicKey,
     AddressMismatch,
     CodecError,
+    TxTooLarge { size: usize, max: usize },
+    MempoolFull { current: usize, max: usize },
 }
 
 /// A mempool specifically for canonical TxV1.
@@ -137,6 +139,8 @@ pub struct TxMempool {
     min_fee: u64,
     fairness_cap_per_sender: usize,
     by_id: HashMap<TxId, TxV1>,
+    /// Total encoded bytes of all transactions currently in the mempool.
+    total_bytes: usize,
 }
 
 impl TxMempool {
@@ -145,7 +149,13 @@ impl TxMempool {
             min_fee,
             fairness_cap_per_sender: fairness_cap_per_sender.max(1),
             by_id: HashMap::new(),
+            total_bytes: 0,
         }
+    }
+
+    /// Total encoded bytes of all transactions currently in the mempool.
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     pub fn len(&self) -> usize {
@@ -165,7 +175,9 @@ impl TxMempool {
     }
 
     pub fn remove(&mut self, id: &TxId) -> Option<TxV1> {
-        self.by_id.remove(id)
+        let tx = self.by_id.remove(id)?;
+        self.total_bytes -= novai_codec::tx_encoded_size(&tx);
+        Some(tx)
     }
 
     /// Insert a TxV1 after enforcing Week 2 policy rules.
@@ -216,6 +228,22 @@ impl TxMempool {
             return Err(TxMempoolError::Duplicate);
         }
 
+        // size limits (defense-in-depth: also checked at RPC layer)
+        let size = novai_codec::tx_encoded_size(&tx);
+        if size > novai_types::MAX_TX_SIZE {
+            return Err(TxMempoolError::TxTooLarge {
+                size,
+                max: novai_types::MAX_TX_SIZE,
+            });
+        }
+        if self.total_bytes + size > novai_types::MAX_MEMPOOL_BYTES {
+            return Err(TxMempoolError::MempoolFull {
+                current: self.total_bytes,
+                max: novai_types::MAX_MEMPOOL_BYTES,
+            });
+        }
+
+        self.total_bytes += size;
         self.by_id.insert(id, tx);
         Ok(id)
     }
@@ -262,11 +290,31 @@ impl TxMempool {
 
         for id in selected_ids {
             if let Some(tx) = self.by_id.remove(&id) {
+                self.total_bytes -= novai_codec::tx_encoded_size(&tx);
                 out.push(tx);
             }
         }
 
         out
+    }
+
+    /// Re-insert a previously validated transaction without re-checking
+    /// signature, nonce, or fee.
+    ///
+    /// Safe because these txs were already validated before being drained
+    /// from the mempool. Used by the block proposal layer to return overflow
+    /// txs that didn't fit in the current block.
+    pub fn reinsert_unchecked(&mut self, tx: TxV1) -> Result<TxId, TxMempoolError> {
+        let id = txid_v1(&tx).map_err(|_| TxMempoolError::CodecError)?;
+
+        if self.by_id.contains_key(&id) {
+            return Err(TxMempoolError::Duplicate);
+        }
+
+        let size = novai_codec::tx_encoded_size(&tx);
+        self.total_bytes += size;
+        self.by_id.insert(id, tx);
+        Ok(id)
     }
 }
 
@@ -570,5 +618,101 @@ mod tests {
         assert!(payloads.contains(&b"s1_hi".to_vec()));
         assert!(payloads.contains(&b"s2_mid".to_vec()));
         assert!(!payloads.contains(&b"s1_lo".to_vec()));
+    }
+
+    // -----------------------------------------
+    // Size limit enforcement tests
+    // -----------------------------------------
+
+    #[test]
+    fn rejects_tx_too_large() {
+        let (sk, vk) = test_keypair(10);
+        let from: Address = address_from_pubkey(&vk);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from, 0);
+
+        let mut mp = TxMempool::new(1, 10);
+
+        // Create a tx with payload that pushes encoded size over MAX_TX_SIZE
+        let oversized_payload = vec![0xAA; novai_types::MAX_TX_SIZE]; // 128KB payload + 149 overhead > 128KB
+        let tx = make_signed_tx(&sk, &vk, 0, 1, &oversized_payload);
+        let err = mp.insert(tx, &np).unwrap_err();
+        assert!(
+            matches!(err, TxMempoolError::TxTooLarge { .. }),
+            "expected TxTooLarge, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_mempool_full() {
+        let (sk, vk) = test_keypair(11);
+        let from: Address = address_from_pubkey(&vk);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from, 0);
+
+        let mut mp = TxMempool::new(1, 1000);
+
+        // Fill the mempool close to MAX_MEMPOOL_BYTES.
+        // Each tx with 1-byte payload is 150 bytes encoded (TX_V1_OVERHEAD + 1).
+        // Insert enough txs to nearly fill 64MB, then verify the next one fails.
+        // For speed, we use a large payload per tx to fill faster.
+        let payload_size = 64 * 1024; // 64KB payload per tx
+        let tx_size = novai_codec::TX_V1_OVERHEAD + payload_size;
+        let count_to_fill = novai_types::MAX_MEMPOOL_BYTES / tx_size; // ~1023
+
+        for i in 0..count_to_fill {
+            let payload = vec![0xBB; payload_size];
+            let tx = make_signed_tx(&sk, &vk, i as u64, 1, &payload);
+            mp.insert(tx, &np).unwrap();
+            np.set(from, (i + 1) as u64);
+        }
+
+        // Now the mempool should be nearly full. One more should fail.
+        let payload = vec![0xCC; payload_size];
+        let tx = make_signed_tx(&sk, &vk, count_to_fill as u64, 1, &payload);
+        let err = mp.insert(tx, &np).unwrap_err();
+        assert!(
+            matches!(err, TxMempoolError::MempoolFull { .. }),
+            "expected MempoolFull, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn total_bytes_tracks_through_insert_drain_remove() {
+        let (sk, vk) = test_keypair(12);
+        let from: Address = address_from_pubkey(&vk);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from, 0);
+
+        let mut mp = TxMempool::new(1, 10);
+        assert_eq!(mp.total_bytes(), 0);
+
+        // Insert two txs
+        let tx_a = make_signed_tx(&sk, &vk, 0, 10, b"aaa");
+        let tx_b = make_signed_tx(&sk, &vk, 1, 5, b"bbb");
+        let size_a = novai_codec::tx_encoded_size(&tx_a);
+        let size_b = novai_codec::tx_encoded_size(&tx_b);
+
+        let _id_a = mp.insert(tx_a, &np).unwrap();
+        assert_eq!(mp.total_bytes(), size_a);
+
+        mp.insert(tx_b, &np).unwrap();
+        assert_eq!(mp.total_bytes(), size_a + size_b);
+
+        // Drain one (nonce 0 is ready)
+        let drained = mp.drain_ready(1, &np);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(mp.total_bytes(), size_b);
+
+        // Remove the other
+        np.set(from, 1);
+        let id_b = novai_codec::txid_v1(&make_signed_tx(&sk, &vk, 1, 5, b"bbb")).unwrap();
+        mp.remove(&id_b);
+        assert_eq!(mp.total_bytes(), 0);
     }
 }

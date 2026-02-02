@@ -215,3 +215,76 @@ pub fn txid_v1(tx: &TxV1) -> Result<TxId, CodecError> {
     out.copy_from_slice(hash.as_bytes());
     Ok(out)
 }
+
+/// Fixed overhead of a V1 signed transaction encoding (everything except payload).
+/// 1(version) + 32(from) + 32(pubkey) + 8(nonce) + 8(fee) + 4(payload_len) + 64(sig) = 149
+pub const TX_V1_OVERHEAD: usize = 149;
+
+/// Compute the canonical encoded size of a signed `TxV1` without allocating.
+///
+/// Uses the same field layout as `encode_tx_v1_signed` so the result is
+/// identical to `encode_tx_v1_signed(tx).unwrap().len()`. This function
+/// MUST be used at all enforcement layers (RPC, mempool, block proposal,
+/// consensus validation) to prevent consensus divergence.
+pub fn tx_encoded_size(tx: &TxV1) -> usize {
+    TX_V1_OVERHEAD + tx.payload.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use novai_types::TxVersion;
+
+    /// Verify tx_encoded_size() matches actual encode_tx_v1_signed().len()
+    /// for several payload sizes. This is consensus-critical: any divergence
+    /// between the formula and the actual encoding would cause validators to
+    /// disagree on size limit enforcement.
+    #[test]
+    fn tx_encoded_size_matches_actual_encoding() {
+        let payloads: &[&[u8]] = &[
+            b"",                        // empty payload
+            b"hello",                   // small payload
+            &[0xAB; 1024],             // 1 KB
+            &[0xCD; 64 * 1024],        // 64 KB
+        ];
+
+        for payload in payloads {
+            let tx = TxV1 {
+                version: TxVersion::V1,
+                from: [0x11; 32],
+                pubkey: [0x22; 32],
+                nonce: 42,
+                fee: 100,
+                payload: payload.to_vec(),
+                sig: [0xCC; 64],
+            };
+
+            let actual_bytes = encode_tx_v1_signed(&tx).expect("encode must succeed");
+            let computed_size = tx_encoded_size(&tx);
+
+            assert_eq!(
+                computed_size,
+                actual_bytes.len(),
+                "tx_encoded_size mismatch for payload len={}",
+                payload.len()
+            );
+        }
+    }
+
+    #[test]
+    fn tx_v1_overhead_is_correct() {
+        // An empty-payload tx should encode to exactly TX_V1_OVERHEAD bytes
+        let tx = TxV1 {
+            version: TxVersion::V1,
+            from: [0; 32],
+            pubkey: [0; 32],
+            nonce: 0,
+            fee: 0,
+            payload: vec![],
+            sig: [0; 64],
+        };
+
+        let encoded = encode_tx_v1_signed(&tx).expect("encode must succeed");
+        assert_eq!(encoded.len(), TX_V1_OVERHEAD);
+    }
+}
