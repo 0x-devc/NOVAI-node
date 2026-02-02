@@ -103,24 +103,13 @@
 **Gaps**: No golden vector test for the P2P wire framing format (MessageKind + length prefix). Covered implicitly by `crates/p2p/src/lib.rs` unit test `encode_decode_vote_roundtrip`.
 
 ### 7. No Clippy Warnings
-**Status**: ❌ FAIL
-**Evidence**: 164 clippy warnings as of 2026-02-02 (cargo clippy --all-targets).
-**Breakdown** (top categories):
-| Count | Warning |
-|-------|---------|
-| 61 | `variables can be used directly in the format! string` |
-| 15 | `casting i32 to u64 may lose the sign of the value` |
-| 11 | `redundant clone` |
-| 11 | `item in documentation is missing backticks` |
-| 6 | `casting u128 to i128 may wrap around the value` |
-| 5 | `use of deprecated function encode_ai_entity_v1` |
-| 5 | `this could be a const fn` |
-| 5 | `casting usize to u8 may truncate the value` |
-| 4 | `these match arms have identical bodies` |
-| 4 | `casts from u64 to u128 can be expressed infallibly using From` |
-
-**Distribution**: 126 warnings in `novai-execution` (mostly test files), 10 in `genesis`, 7 in `novai-ai-entities`, 3 in `novai-copilot`. Library code accounts for ~18 warnings; test code accounts for ~146.
-**Action Required**: Fix or suppress with justified `#[allow()]` before mainnet launch. The cast warnings in test files are low-risk but the deprecated function calls and truncation warnings in library code should be addressed.
+**Status**: ✅ PASS
+**Evidence**: 0 clippy warnings as of 2026-02-02 (`cargo clippy --all-targets` = clean).
+**Resolution**: All 164 warnings resolved in commit `9bbcfff`. Fixes applied across 16 files:
+- **Library code** (4 files): doc backtick fixes, `field_reassign_with_default` → struct initializer, match arm dedup, `map_or_else`, `struct_excessive_bools` allow on config struct.
+- **Test code** (12 files): format string inlining (61), cast fixes via `u8::try_from`/`u128::from` (30+), redundant clone removal (11), doc backticks (11), match arm dedup (4), `const fn` (5), deprecated fn `#[allow(deprecated)]` on v1 backward-compat golden vector tests (5).
+- No blanket `#[allow()]` at module level. Every suppression is item-level with a justifying comment.
+- No public API changes.
 
 ### 8. All Tests Passing
 **Status**: ✅ PASS
@@ -157,8 +146,8 @@
 | Governance timelocks | ✅ PASS |
 | NNPX boundary tests | ✅ PASS |
 | Golden vectors | ✅ PASS |
-| Clippy warnings | ❌ FAIL (164 warnings) |
+| Clippy warnings | ✅ PASS (0 warnings) |
 | All tests passing | ✅ PASS (923/923) |
 | License compliance | ✅ PASS |
 
-**Overall**: 8/9 items passing. 1 failure (clippy warnings — pending resolution).
+**Overall**: 9/9 items passing. All checks green.
