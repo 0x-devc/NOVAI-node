@@ -21,8 +21,7 @@
 #![allow(clippy::doc_markdown)]
 
 use novai_ai_entities::{
-    encode_private_payload_commitment_v1, PrivatePayloadCommitment,
-    PRIVATE_PAYLOAD_COMMITMENT_LEN,
+    encode_private_payload_commitment_v1, PrivatePayloadCommitment, PRIVATE_PAYLOAD_COMMITMENT_LEN,
 };
 
 // ============================================================================
@@ -38,31 +37,30 @@ fn test_all_commitments_same_encoded_size() {
     // EXPECTED: Every commitment encodes to exactly 129 bytes.
 
     let test_payloads: Vec<Vec<u8>> = vec![
-        vec![],                          // empty
-        vec![0x00],                      // single zero byte
-        vec![0xFF],                      // single max byte
-        vec![0x42; 32],                  // 32 bytes (hash-sized)
-        vec![0xAA; 64],                  // 64 bytes
-        vec![0xBB; 128],                 // 128 bytes
-        vec![0xCC; 256],                 // 256 bytes
-        vec![0xDD; 1024],               // 1 KB
-        vec![0xEE; 4096],               // 4 KB
-        vec![0xFF; 65536],              // 64 KB
-        vec![0x11; 1_000_000],          // 1 MB
+        vec![],                // empty
+        vec![0x00],            // single zero byte
+        vec![0xFF],            // single max byte
+        vec![0x42; 32],        // 32 bytes (hash-sized)
+        vec![0xAA; 64],        // 64 bytes
+        vec![0xBB; 128],       // 128 bytes
+        vec![0xCC; 256],       // 256 bytes
+        vec![0xDD; 1024],      // 1 KB
+        vec![0xEE; 4096],      // 4 KB
+        vec![0xFF; 65536],     // 64 KB
+        vec![0x11; 1_000_000], // 1 MB
         b"transfer:100:alice->bob".to_vec(),
         b"transfer:999999999999:whale->exchange".to_vec(),
         b"swap:1:token_a:token_b".to_vec(),
         b"swap:1000000:token_a:token_b".to_vec(),
-        (0u8..=255).collect(),           // all byte values
+        (0u8..=255).collect(), // all byte values
     ];
 
     for (i, payload) in test_payloads.iter().enumerate() {
         let mut secret = [0u8; 32];
-        secret[0] = i as u8;
+        secret[0] = u8::try_from(i).expect("index fits in u8");
         let pubkey = [0x42u8; 32];
 
-        let commitment =
-            PrivatePayloadCommitment::new(payload, &secret, i as u64, pubkey);
+        let commitment = PrivatePayloadCommitment::new(payload, &secret, i as u64, pubkey);
         let encoded = encode_private_payload_commitment_v1(&commitment);
 
         assert_eq!(
@@ -81,6 +79,8 @@ fn test_all_commitments_same_encoded_size() {
 // A26.2-T2: SMALL PAYLOAD SAME SIZE AS LARGE
 // ============================================================================
 
+// Precision loss acceptable for test metric calculations
+#[allow(clippy::cast_precision_loss)]
 #[test]
 fn test_small_payload_same_size_as_large() {
     // ATTACK: Compare the encoded size of a commitment from a 1-byte payload
@@ -96,10 +96,8 @@ fn test_small_payload_same_size_as_large() {
     let secret = [0x01u8; 32];
     let pubkey = [0xAAu8; 32];
 
-    let tiny_commitment =
-        PrivatePayloadCommitment::new(tiny_payload, &secret, 0, pubkey);
-    let large_commitment =
-        PrivatePayloadCommitment::new(&large_payload, &secret, 1, pubkey);
+    let tiny_commitment = PrivatePayloadCommitment::new(tiny_payload, &secret, 0, pubkey);
+    let large_commitment = PrivatePayloadCommitment::new(&large_payload, &secret, 1, pubkey);
 
     let tiny_encoded = encode_private_payload_commitment_v1(&tiny_commitment);
     let large_encoded = encode_private_payload_commitment_v1(&large_commitment);
@@ -147,9 +145,9 @@ fn test_different_value_amounts_same_commitment_size() {
 
     for (i, value) in values.iter().enumerate() {
         // Simulate an encrypted payload containing the value
-        let payload = format!("encrypted:value={}", value);
+        let payload = format!("encrypted:value={value}");
         let mut secret = [0u8; 32];
-        secret[0] = i as u8;
+        secret[0] = u8::try_from(i).expect("index fits in u8");
         let pubkey = [0x42u8; 32];
 
         let commitment =
@@ -170,11 +168,10 @@ fn test_different_value_amounts_same_commitment_size() {
     for (i, value) in values.iter().enumerate() {
         let payload = value.to_be_bytes();
         let mut secret = [0u8; 32];
-        secret[0] = (i + 100) as u8;
+        secret[0] = u8::try_from(i + 100).expect("index + 100 fits in u8");
         let pubkey = [0x42u8; 32];
 
-        let commitment =
-            PrivatePayloadCommitment::new(&payload, &secret, (i + 100) as u64, pubkey);
+        let commitment = PrivatePayloadCommitment::new(&payload, &secret, (i + 100) as u64, pubkey);
         let encoded = encode_private_payload_commitment_v1(&commitment);
 
         assert_eq!(
@@ -206,10 +203,8 @@ fn test_empty_payload_same_size() {
     let secret = [0x42u8; 32];
     let pubkey = [0xAAu8; 32];
 
-    let empty_commitment =
-        PrivatePayloadCommitment::new(empty_payload, &secret, 0, pubkey);
-    let nonempty_commitment =
-        PrivatePayloadCommitment::new(nonempty_payload, &secret, 1, pubkey);
+    let empty_commitment = PrivatePayloadCommitment::new(empty_payload, &secret, 0, pubkey);
+    let nonempty_commitment = PrivatePayloadCommitment::new(nonempty_payload, &secret, 1, pubkey);
 
     let empty_encoded = encode_private_payload_commitment_v1(&empty_commitment);
     let nonempty_encoded = encode_private_payload_commitment_v1(&nonempty_commitment);
@@ -217,14 +212,12 @@ fn test_empty_payload_same_size() {
     assert_eq!(
         empty_encoded.len(),
         PRIVATE_PAYLOAD_COMMITMENT_LEN,
-        "Empty payload must produce {} byte commitment",
-        PRIVATE_PAYLOAD_COMMITMENT_LEN,
+        "Empty payload must produce {PRIVATE_PAYLOAD_COMMITMENT_LEN} byte commitment",
     );
     assert_eq!(
         nonempty_encoded.len(),
         PRIVATE_PAYLOAD_COMMITMENT_LEN,
-        "Non-empty payload must produce {} byte commitment",
-        PRIVATE_PAYLOAD_COMMITMENT_LEN,
+        "Non-empty payload must produce {PRIVATE_PAYLOAD_COMMITMENT_LEN} byte commitment",
     );
     assert_eq!(
         empty_encoded.len(),
@@ -235,8 +228,7 @@ fn test_empty_payload_same_size() {
     // Verify the empty payload still produces a valid commitment hash
     // (not all zeros or some degenerate value)
     assert_ne!(
-        empty_commitment.commitment_hash,
-        [0u8; 32],
+        empty_commitment.commitment_hash, [0u8; 32],
         "Empty payload must still produce a non-zero commitment hash"
     );
 }
@@ -268,8 +260,7 @@ fn test_nullifier_fixed_size() {
 
     for secret in &secrets {
         for &counter in &counters {
-            let nullifier =
-                PrivatePayloadCommitment::compute_nullifier(secret, counter);
+            let nullifier = PrivatePayloadCommitment::compute_nullifier(secret, counter);
 
             assert_eq!(
                 nullifier.len(),
@@ -375,7 +366,7 @@ fn test_encoded_commitment_golden_size() {
         + 32           // commitment_hash (blake3)
         + 32           // nullifier (blake3)
         + 32           // encryption_pubkey (X25519)
-        + 32;          // zk_proof (blake3 stub)
+        + 32; // zk_proof (blake3 stub)
     assert_eq!(
         PRIVATE_PAYLOAD_COMMITMENT_LEN, expected,
         "Encoding size must equal version(1) + 4*hash(32) = 129"
@@ -399,10 +390,7 @@ fn test_encoded_commitment_golden_size() {
     );
 
     // Lock the version byte
-    assert_eq!(
-        golden_encoded[0], 1,
-        "Golden vector version byte must be 1"
-    );
+    assert_eq!(golden_encoded[0], 1, "Golden vector version byte must be 1");
 
     // Lock the field boundaries
     assert_eq!(

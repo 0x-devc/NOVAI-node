@@ -97,6 +97,8 @@ fn default_autonomy_mode() -> String {
 }
 
 /// Genesis capabilities configuration.
+// Bools are the correct representation for individual capability flags in this config struct
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct GenesisCapabilities {
     #[serde(default)]
@@ -114,7 +116,7 @@ pub struct GenesisCapabilities {
 /// Genesis approval gate configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GenesisApprovalGate {
-    /// Gate type: "multisig", "threshold", or "timelock_only".
+    /// Gate type: "multisig", "threshold", or "`timelock_only`".
     pub gate_type: String,
     /// Required approvers (list of 64-char hex addresses).
     #[serde(default)]
@@ -383,27 +385,26 @@ impl GenesisGenerator {
             let creator = Self::parse_address(&genesis_entity.creator)?;
 
             let autonomy_mode = match genesis_entity.autonomy_mode.as_str() {
-                "advisory" => AutonomyMode::Advisory,
                 "gated" => AutonomyMode::Gated,
                 "autonomous" => AutonomyMode::Autonomous,
+                // Default to Advisory for "advisory" and any unrecognized mode
                 _ => AutonomyMode::Advisory,
             };
 
-            let capabilities = if let Some(caps) = &genesis_entity.capabilities {
-                Capabilities {
+            let capabilities = genesis_entity.capabilities.as_ref().map_or_else(
+                || match autonomy_mode {
+                    AutonomyMode::Advisory => Capabilities::advisory(),
+                    AutonomyMode::Gated | AutonomyMode::Autonomous => Capabilities::gated(),
+                },
+                |caps| Capabilities {
                     read_public_chain: caps.read_public_chain,
                     read_memory_objects: caps.read_memory_objects,
                     emit_proposals: caps.emit_proposals,
                     request_execution: caps.request_execution,
                     read_nnpx_derived: caps.read_nnpx_derived,
                     _reserved: [false; 3],
-                }
-            } else {
-                match autonomy_mode {
-                    AutonomyMode::Advisory => Capabilities::advisory(),
-                    AutonomyMode::Gated | AutonomyMode::Autonomous => Capabilities::gated(),
-                }
-            };
+                },
+            );
 
             let mut entity = AiEntity::new(code_hash, creator, autonomy_mode, capabilities, 0);
 
@@ -422,9 +423,9 @@ impl GenesisGenerator {
         // 2c. Write approval gates to state
         for genesis_gate in &self.config.approval_gates {
             let gate_type = match genesis_gate.gate_type.as_str() {
-                "multisig" => GateType::Multisig,
                 "threshold" => GateType::Threshold,
                 "timelock_only" => GateType::TimelockOnly,
+                // Default to Multisig for "multisig" and any unrecognized type
                 _ => GateType::Multisig,
             };
 

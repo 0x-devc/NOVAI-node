@@ -18,10 +18,9 @@
 use novai_ai_entities::{AiEntity, ApprovalGate, AutonomyMode, Capabilities, GateType};
 use novai_codec::encode_approval_gate_v1;
 use novai_execution::{
-    apply_governance_execute_tx, apply_governance_submit_tx,
-    encode_execute_proposal_payload_v1, encode_submit_proposal_payload_v1,
-    read_proposal, write_ai_entity_op, ExecError, ExecuteProposalPayloadV1,
-    SubmitProposalPayloadV1,
+    apply_governance_execute_tx, apply_governance_submit_tx, encode_execute_proposal_payload_v1,
+    encode_submit_proposal_payload_v1, read_proposal, write_ai_entity_op, ExecError,
+    ExecuteProposalPayloadV1, SubmitProposalPayloadV1,
 };
 use novai_governance::{ProposalState, ProposalType};
 use novai_state::{approval_gate_key, KvBatch, MemKv, WriteOp};
@@ -100,6 +99,8 @@ fn create_execute_payload(proposal_id: [u8; 32]) -> Vec<u8> {
 }
 
 /// Create a test transaction.
+// Test helper that constructs a struct from args; Vec param prevents const.
+#[allow(clippy::missing_const_for_fn)]
 fn create_tx(from: [u8; 32], nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
     TxV1 {
         version: TxVersion::V1,
@@ -129,8 +130,11 @@ fn attack_execute_before_timelock_rejected() {
     store_gate(&mut db, &gate);
 
     // Submit proposal at height 500
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 500).unwrap();
 
@@ -143,8 +147,7 @@ fn attack_execute_before_timelock_rejected() {
         let result = apply_governance_execute_tx(&mut db, &execute_tx, attack_height);
         assert!(
             matches!(result, Err(ExecError::ProposalNotExecutable)),
-            "SECURITY VIOLATION: Execution succeeded at height {} (before timelock 600)",
-            attack_height
+            "SECURITY VIOLATION: Execution succeeded at height {attack_height} (before timelock 600)",
         );
     }
 
@@ -169,8 +172,11 @@ fn attack_execute_one_block_before_timelock_rejected() {
     store_gate(&mut db, &gate);
 
     // Submit at height 1000, executable at 1050
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 1000).unwrap();
 
@@ -201,8 +207,11 @@ fn execute_at_exact_timelock_succeeds() {
     store_gate(&mut db, &gate);
 
     // Submit at height 500, executable at 600
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 500).unwrap();
 
@@ -213,8 +222,7 @@ fn execute_at_exact_timelock_succeeds() {
     let result = apply_governance_execute_tx(&mut db, &execute_tx, 600);
     assert!(
         result.is_ok(),
-        "Execution at exact timelock height should succeed: {:?}",
-        result
+        "Execution at exact timelock height should succeed: {result:?}",
     );
 
     // Verify proposal is now executed
@@ -238,8 +246,11 @@ fn execute_after_timelock_before_expiry_succeeds() {
     store_gate(&mut db, &gate);
 
     // Submit at height 500, executable at 600, expires at 1500
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 500).unwrap();
 
@@ -250,8 +261,7 @@ fn execute_after_timelock_before_expiry_succeeds() {
     let result = apply_governance_execute_tx(&mut db, &execute_tx, 800);
     assert!(
         result.is_ok(),
-        "Execution after timelock should succeed: {:?}",
-        result
+        "Execution after timelock should succeed: {result:?}",
     );
 }
 
@@ -271,9 +281,12 @@ fn attack_execute_after_expiry_rejected() {
     store_gate(&mut db, &gate);
 
     // Submit at height 500, executable at 510, expires at 600
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
-    let submit_tx = create_tx(entity_id, 0, 100, submit_payload.clone());
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
+    let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
 
     for attack_height in [600, 601, 700, 1000] {
         // Fresh DB state for each test
@@ -287,8 +300,7 @@ fn attack_execute_after_expiry_rejected() {
         let result = apply_governance_execute_tx(&mut db2, &execute_tx2, attack_height);
         assert!(
             matches!(result, Err(ExecError::ProposalExpired)),
-            "SECURITY VIOLATION: Execution succeeded at height {} (after expiry 600)",
-            attack_height
+            "SECURITY VIOLATION: Execution succeeded at height {attack_height} (after expiry 600)",
         );
     }
 }
@@ -305,8 +317,11 @@ fn attack_execute_at_exact_expiry_rejected() {
     store_gate(&mut db, &gate);
 
     // Submit at height 500, expires at 600 (500 + 100)
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 500).unwrap();
 
@@ -338,8 +353,11 @@ fn attack_same_block_submit_execute_rejected() {
     store_gate(&mut db, &gate);
 
     // Submit at height 500
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 500).unwrap();
 
@@ -367,8 +385,11 @@ fn same_block_submit_execute_with_zero_timelock_succeeds() {
     store_gate(&mut db, &gate);
 
     // Submit at height 500
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 500).unwrap();
 
@@ -379,8 +400,7 @@ fn same_block_submit_execute_with_zero_timelock_succeeds() {
     let result = apply_governance_execute_tx(&mut db, &execute_tx, 500);
     assert!(
         result.is_ok(),
-        "Zero-timelock same-block execution should succeed: {:?}",
-        result
+        "Zero-timelock same-block execution should succeed: {result:?}",
     );
 }
 
@@ -401,8 +421,11 @@ fn attack_height_overflow_handled_gracefully() {
 
     // Submit at very high height (near u64::MAX)
     let high_height = u64::MAX - 500;
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
 
     // This should use saturating_add internally, so executable_at won't overflow
@@ -419,8 +442,7 @@ fn attack_height_overflow_handled_gracefully() {
     // Key point: NO PANIC - test passes if we reach this point
     assert!(
         result.is_ok() || matches!(result, Err(ExecError::ProposalExpired)),
-        "Height overflow should be handled gracefully, got: {:?}",
-        result
+        "Height overflow should be handled gracefully, got: {result:?}",
     );
 }
 
@@ -440,8 +462,11 @@ fn attack_rapid_execution_attempts_all_rejected() {
     store_gate(&mut db, &gate);
 
     // Submit at height 500
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 500).unwrap();
 
@@ -483,8 +508,11 @@ fn comprehensive_timelock_boundary_test() {
     // Submit at height 1000
     // executable_at = 1000 + 50 = 1050
     // expires_at = 1000 + 200 = 1200
-    let submit_payload =
-        create_submit_payload(ProposalType::ModuleRollback, adversarial_gate_id(), entity_id);
+    let submit_payload = create_submit_payload(
+        ProposalType::ModuleRollback,
+        adversarial_gate_id(),
+        entity_id,
+    );
     let submit_tx = create_tx(entity_id, 0, 100, submit_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 1000).unwrap();
 
@@ -502,9 +530,7 @@ fn comprehensive_timelock_boundary_test() {
         let result = apply_governance_execute_tx(&mut db_copy, &tx, h);
         assert!(
             matches!(result, Err(ExecError::ProposalNotExecutable)),
-            "Height {}: Expected ProposalNotExecutable, got {:?}",
-            h,
-            result
+            "Height {h}: Expected ProposalNotExecutable, got {result:?}",
         );
     }
 
@@ -513,12 +539,7 @@ fn comprehensive_timelock_boundary_test() {
         let mut db_copy = db.clone();
         let tx = create_tx(entity_id, 1, 100, execute_payload.clone());
         let result = apply_governance_execute_tx(&mut db_copy, &tx, h);
-        assert!(
-            result.is_ok(),
-            "Height {}: Expected Ok, got {:?}",
-            h,
-            result
-        );
+        assert!(result.is_ok(), "Height {h}: Expected Ok, got {result:?}",);
     }
 
     // At and after expiry (sample points)
@@ -528,9 +549,7 @@ fn comprehensive_timelock_boundary_test() {
         let result = apply_governance_execute_tx(&mut db_copy, &tx, h);
         assert!(
             matches!(result, Err(ExecError::ProposalExpired)),
-            "Height {}: Expected ProposalExpired, got {:?}",
-            h,
-            result
+            "Height {h}: Expected ProposalExpired, got {result:?}",
         );
     }
 }

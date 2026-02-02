@@ -23,10 +23,9 @@
 use novai_ai_entities::{AiEntity, ApprovalGate, AutonomyMode, Capabilities, GateType};
 use novai_codec::encode_approval_gate_v1;
 use novai_execution::{
-    apply_governance_execute_tx, apply_governance_submit_tx,
-    encode_execute_proposal_payload_v1, encode_submit_proposal_payload_v1,
-    read_ai_entity, read_proposal, write_ai_entity_op, ExecError,
-    ExecuteProposalPayloadV1, SubmitProposalPayloadV1,
+    apply_governance_execute_tx, apply_governance_submit_tx, encode_execute_proposal_payload_v1,
+    encode_submit_proposal_payload_v1, read_ai_entity, read_proposal, write_ai_entity_op,
+    ExecError, ExecuteProposalPayloadV1, SubmitProposalPayloadV1,
 };
 use novai_governance::ProposalType;
 use novai_state::{approval_gate_key, KvBatch, MemKv, WriteOp};
@@ -80,11 +79,7 @@ fn store_entity(db: &mut MemKv, entity: &AiEntity) {
     db.apply_batch(&[write_ai_entity_op(entity)]).unwrap();
 }
 
-fn create_submit_payload(
-    proposal_type: ProposalType,
-    gate_id: [u8; 32],
-    data: Vec<u8>,
-) -> Vec<u8> {
+fn create_submit_payload(proposal_type: ProposalType, gate_id: [u8; 32], data: Vec<u8>) -> Vec<u8> {
     let payload = SubmitProposalPayloadV1 {
         proposal_type,
         gate_id,
@@ -98,7 +93,8 @@ fn create_execute_payload(proposal_id: [u8; 32]) -> Vec<u8> {
     encode_execute_proposal_payload_v1(&payload).to_vec()
 }
 
-fn create_tx(from: [u8; 32], nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
+// const: pure struct construction with no runtime logic
+const fn create_tx(from: [u8; 32], nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
     TxV1 {
         version: TxVersion::V1,
         from,
@@ -115,6 +111,7 @@ fn create_tx(from: [u8; 32], nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
 // ============================================================================
 
 #[test]
+#[allow(clippy::cast_sign_loss)] // loop counter `i` is always non-negative
 fn attack_mass_proposal_generation() {
     let mut db = MemKv::new();
 
@@ -132,41 +129,35 @@ fn attack_mass_proposal_generation() {
     store_gate(&mut db, &gate);
 
     // ATTACK: Generate 1000 proposals rapidly
-    let spam_count = 1000;
+    let spam_count: u32 = 1000;
     let mut successful_proposals: u32 = 0;
     let mut unique_proposal_ids = HashSet::new();
 
-    let start_height = 1000;
+    let start_height: u64 = 1000;
 
     for i in 0..spam_count {
         // Each proposal has unique data to get unique proposal_id
         let mut proposal_data = target_id.to_vec();
-        proposal_data.extend_from_slice(&(i as u64).to_be_bytes());
+        proposal_data.extend_from_slice(&u64::from(i).to_be_bytes());
 
         // Use ParamChange since it accepts variable data
-        let submit_payload = create_submit_payload(
-            ProposalType::ParamChange,
-            spam_gate_id(),
-            proposal_data,
-        );
+        let submit_payload =
+            create_submit_payload(ProposalType::ParamChange, spam_gate_id(), proposal_data);
 
-        let submit_tx = create_tx(attacker_id, i as u64, 100, submit_payload);
+        let submit_tx = create_tx(attacker_id, u64::from(i), 100, submit_payload);
 
-        match apply_governance_submit_tx(&mut db, &submit_tx, start_height + i as u64) {
-            Ok(proposal_id) => {
-                successful_proposals += 1;
-                unique_proposal_ids.insert(proposal_id);
-            }
-            Err(_) => {
-                // Rate limiting or other rejection
-            }
+        if let Ok(proposal_id) =
+            apply_governance_submit_tx(&mut db, &submit_tx, start_height + u64::from(i))
+        {
+            successful_proposals += 1;
+            unique_proposal_ids.insert(proposal_id);
         }
     }
 
     // FINDING: Document actual behavior
     println!("=== A25.1.1 MASS PROPOSAL ATTACK RESULTS ===");
-    println!("Spam attempts: {}", spam_count);
-    println!("Successful proposals: {}", successful_proposals);
+    println!("Spam attempts: {spam_count}");
+    println!("Successful proposals: {successful_proposals}");
     println!("Unique proposal IDs: {}", unique_proposal_ids.len());
 
     // Verify all proposals have unique IDs (no collisions)
@@ -178,8 +169,8 @@ fn attack_mass_proposal_generation() {
 
     // SECURITY OBSERVATION:
     // If successful_proposals == spam_count, there's no rate limiting
-    if successful_proposals == spam_count as u32 {
-        println!("WARNING: No rate limiting detected - all {} proposals accepted", spam_count);
+    if successful_proposals == spam_count {
+        println!("WARNING: No rate limiting detected - all {spam_count} proposals accepted");
         println!("RECOMMENDATION: Implement per-account proposal rate limiting");
     }
 }
@@ -189,6 +180,8 @@ fn attack_mass_proposal_generation() {
 // ============================================================================
 
 #[test]
+#[allow(clippy::cast_sign_loss)] // loop counter `i` is always non-negative
+#[allow(clippy::cast_possible_truncation)] // max_affordable is bounded by initial_balance/fee ratio
 fn attack_fee_exhaustion_behavior() {
     let mut db = MemKv::new();
 
@@ -207,12 +200,12 @@ fn attack_fee_exhaustion_behavior() {
 
     // ATTACK: Try to submit many proposals with fees
     let fee_per_proposal: u64 = 100;
-    let max_affordable = (initial_balance / fee_per_proposal as u128) as u32;
+    let max_affordable = (initial_balance / u128::from(fee_per_proposal)) as u32;
 
     println!("=== A25.1.2 FEE EXHAUSTION ATTACK ===");
-    println!("Initial balance: {}", initial_balance);
-    println!("Fee per proposal: {}", fee_per_proposal);
-    println!("Max affordable proposals (if fees deducted): {}", max_affordable);
+    println!("Initial balance: {initial_balance}");
+    println!("Fee per proposal: {fee_per_proposal}");
+    println!("Max affordable proposals (if fees deducted): {max_affordable}");
 
     let mut successful_proposals: u32 = 0;
     let spam_attempts = 200;
@@ -221,11 +214,8 @@ fn attack_fee_exhaustion_behavior() {
         let mut proposal_data = target_id.to_vec();
         proposal_data.extend_from_slice(&(i as u64).to_be_bytes());
 
-        let submit_payload = create_submit_payload(
-            ProposalType::ParamChange,
-            spam_gate_id(),
-            proposal_data,
-        );
+        let submit_payload =
+            create_submit_payload(ProposalType::ParamChange, spam_gate_id(), proposal_data);
 
         let submit_tx = create_tx(attacker_id, i as u64, fee_per_proposal, submit_payload);
 
@@ -234,9 +224,9 @@ fn attack_fee_exhaustion_behavior() {
                 successful_proposals += 1;
             }
             Err(e) => {
-                println!("Proposal {} failed: {:?}", i, e);
+                println!("Proposal {i} failed: {e:?}");
                 if matches!(e, ExecError::InsufficientFunds { .. }) {
-                    println!("Fee exhaustion detected at proposal {}", i);
+                    println!("Fee exhaustion detected at proposal {i}");
                     break;
                 }
             }
@@ -247,17 +237,17 @@ fn attack_fee_exhaustion_behavior() {
     let final_attacker = read_ai_entity(&db, &attacker_id).unwrap().unwrap();
     let balance_change = initial_balance.saturating_sub(final_attacker.economic_balance);
 
-    println!("Successful proposals: {}", successful_proposals);
+    println!("Successful proposals: {successful_proposals}");
     println!("Final balance: {}", final_attacker.economic_balance);
-    println!("Balance consumed: {}", balance_change);
+    println!("Balance consumed: {balance_change}");
 
     // FINDING: Document whether fees are actually deducted
     if balance_change == 0 && successful_proposals > 0 {
         println!("FINDING: Proposal submission does NOT deduct fees from proposer");
-        println!("Attacker submitted {} proposals without losing balance", successful_proposals);
+        println!("Attacker submitted {successful_proposals} proposals without losing balance");
         println!("RECOMMENDATION: Deduct proposal submission fee or require stake");
     } else if successful_proposals <= max_affordable {
-        println!("SECURE: Fee deduction limits spam to {} proposals", successful_proposals);
+        println!("SECURE: Fee deduction limits spam to {successful_proposals} proposals");
     }
 }
 
@@ -266,6 +256,7 @@ fn attack_fee_exhaustion_behavior() {
 // ============================================================================
 
 #[test]
+#[allow(clippy::cast_sign_loss)] // loop counter `i` is always non-negative
 fn legitimate_proposal_works_under_spam() {
     let mut db = MemKv::new();
 
@@ -289,17 +280,14 @@ fn legitimate_proposal_works_under_spam() {
     println!("=== A25.1.3 LEGITIMATE PROPOSAL UNDER SPAM ===");
     println!("Phase 1: Spammer submitting 500 proposals...");
 
-    for i in 0..500 {
+    for i in 0u64..500 {
         let mut spam_data = [0xFFu8; 32].to_vec();
-        spam_data.extend_from_slice(&(i as u64).to_be_bytes());
+        spam_data.extend_from_slice(&i.to_be_bytes());
 
-        let spam_payload = create_submit_payload(
-            ProposalType::ParamChange,
-            spam_gate_id(),
-            spam_data,
-        );
-        let spam_tx = create_tx(spammer_id, i as u64, 100, spam_payload);
-        let _ = apply_governance_submit_tx(&mut db, &spam_tx, 1000 + i as u64);
+        let spam_payload =
+            create_submit_payload(ProposalType::ParamChange, spam_gate_id(), spam_data);
+        let spam_tx = create_tx(spammer_id, i, 100, spam_payload);
+        let _ = apply_governance_submit_tx(&mut db, &spam_tx, 1000 + i);
     }
 
     // Phase 2: Legitimate user submits real proposal
@@ -321,24 +309,25 @@ fn legitimate_proposal_works_under_spam() {
 
     assert_eq!(proposal.proposal_type, ProposalType::ModuleRollback);
     assert_eq!(proposal.proposer, legitimate_id);
-    println!("Legitimate proposal created: {:02x}{:02x}{:02x}{:02x}...",
-        legitimate_proposal_id[0], legitimate_proposal_id[1],
-        legitimate_proposal_id[2], legitimate_proposal_id[3]);
+    println!(
+        "Legitimate proposal created: {:02x}{:02x}{:02x}{:02x}...",
+        legitimate_proposal_id[0],
+        legitimate_proposal_id[1],
+        legitimate_proposal_id[2],
+        legitimate_proposal_id[3]
+    );
 
     // Phase 3: More spam after legitimate proposal
     println!("Phase 3: More spam after legitimate proposal...");
 
-    for i in 500..700 {
+    for i in 500u64..700 {
         let mut spam_data = [0xEEu8; 32].to_vec();
-        spam_data.extend_from_slice(&(i as u64).to_be_bytes());
+        spam_data.extend_from_slice(&i.to_be_bytes());
 
-        let spam_payload = create_submit_payload(
-            ProposalType::ParamChange,
-            spam_gate_id(),
-            spam_data,
-        );
-        let spam_tx = create_tx(spammer_id, i as u64, 100, spam_payload);
-        let _ = apply_governance_submit_tx(&mut db, &spam_tx, 1600 + (i - 500) as u64);
+        let spam_payload =
+            create_submit_payload(ProposalType::ParamChange, spam_gate_id(), spam_data);
+        let spam_tx = create_tx(spammer_id, i, 100, spam_payload);
+        let _ = apply_governance_submit_tx(&mut db, &spam_tx, 1600 + (i - 500));
     }
 
     // Phase 4: Execute legitimate proposal (after timelock)
@@ -350,8 +339,7 @@ fn legitimate_proposal_works_under_spam() {
     let result = apply_governance_execute_tx(&mut db, &execute_tx, 1520);
     assert!(
         result.is_ok(),
-        "Legitimate proposal must execute despite spam: {:?}",
-        result
+        "Legitimate proposal must execute despite spam: {result:?}",
     );
 
     // Verify target was rolled back
@@ -369,6 +357,7 @@ fn legitimate_proposal_works_under_spam() {
 // ============================================================================
 
 #[test]
+#[allow(clippy::cast_sign_loss)] // loop index `i` is always non-negative
 fn attack_large_data_proposals() {
     let mut db = MemKv::new();
 
@@ -389,18 +378,19 @@ fn attack_large_data_proposals() {
         let mut large_data = vec![0xAAu8; size];
         large_data[0..8].copy_from_slice(&(i as u64).to_be_bytes());
 
-        let submit_payload = create_submit_payload(
-            ProposalType::ParamChange,
-            spam_gate_id(),
-            large_data,
-        );
+        let submit_payload =
+            create_submit_payload(ProposalType::ParamChange, spam_gate_id(), large_data);
 
         let submit_tx = create_tx(attacker_id, i as u64, 100, submit_payload);
         let result = apply_governance_submit_tx(&mut db, &submit_tx, 1000 + i as u64);
 
         let success = result.is_ok();
         results.push((size, success));
-        println!("Data size {} bytes: {}", size, if success { "ACCEPTED" } else { "REJECTED" });
+        println!(
+            "Data size {} bytes: {}",
+            size,
+            if success { "ACCEPTED" } else { "REJECTED" }
+        );
     }
 
     // Document findings
@@ -432,20 +422,20 @@ fn duplicate_proposals_have_same_id() {
 
     // Submit identical proposals
     let proposal_data = target_id.to_vec();
-    let submit_payload = create_submit_payload(
-        ProposalType::ModuleRollback,
-        spam_gate_id(),
-        proposal_data.clone(),
-    );
+    let submit_payload =
+        create_submit_payload(ProposalType::ModuleRollback, spam_gate_id(), proposal_data);
 
     let tx1 = create_tx(user_id, 0, 100, submit_payload.clone());
     let id1 = apply_governance_submit_tx(&mut db, &tx1, 1000).unwrap();
 
     println!("=== A25.1.5 DUPLICATE PROPOSAL TEST ===");
-    println!("Proposal 1 ID: {:02x}{:02x}{:02x}{:02x}...", id1[0], id1[1], id1[2], id1[3]);
+    println!(
+        "Proposal 1 ID: {:02x}{:02x}{:02x}{:02x}...",
+        id1[0], id1[1], id1[2], id1[3]
+    );
 
     // Week 25 Hardening: Second submission should be REJECTED (ProposalAlreadyExists)
-    let tx2 = create_tx(user_id, 1, 100, submit_payload.clone());
+    let tx2 = create_tx(user_id, 1, 100, submit_payload);
     let result2 = apply_governance_submit_tx(&mut db, &tx2, 1001);
 
     match result2 {
@@ -454,17 +444,23 @@ fn duplicate_proposals_have_same_id() {
             println!("FINDING: Duplicate proposals rejected - prevents timing reset attacks");
         }
         Ok(id2) => {
-            println!("Proposal 2 ID: {:02x}{:02x}{:02x}{:02x}...", id2[0], id2[1], id2[2], id2[3]);
+            println!(
+                "Proposal 2 ID: {:02x}{:02x}{:02x}{:02x}...",
+                id2[0], id2[1], id2[2], id2[3]
+            );
             panic!("VULNERABILITY: Duplicate submission should be rejected");
         }
         Err(e) => {
-            panic!("Unexpected error: {:?}", e);
+            panic!("Unexpected error: {e:?}");
         }
     }
 
     // Original proposal should remain unchanged
     let proposal = read_proposal(&db, &id1).unwrap().unwrap();
-    assert_eq!(proposal.submitted_at, 1000, "Original proposal should be unchanged");
+    assert_eq!(
+        proposal.submitted_at, 1000,
+        "Original proposal should be unchanged"
+    );
 }
 
 // ============================================================================
@@ -498,11 +494,8 @@ fn different_proposers_get_different_ids() {
         spam_gate_id(),
         proposal_data.clone(),
     );
-    let payload2 = create_submit_payload(
-        ProposalType::ModuleRollback,
-        spam_gate_id(),
-        proposal_data,
-    );
+    let payload2 =
+        create_submit_payload(ProposalType::ModuleRollback, spam_gate_id(), proposal_data);
 
     let tx1 = create_tx(user1_id, 0, 100, payload1);
     let tx2 = create_tx(user2_id, 0, 100, payload2);
@@ -511,8 +504,14 @@ fn different_proposers_get_different_ids() {
     let id2 = apply_governance_submit_tx(&mut db, &tx2, 1001).unwrap();
 
     println!("=== A25.1.6 DIFFERENT PROPOSERS TEST ===");
-    println!("User 1 proposal: {:02x}{:02x}{:02x}{:02x}...", id1[0], id1[1], id1[2], id1[3]);
-    println!("User 2 proposal: {:02x}{:02x}{:02x}{:02x}...", id2[0], id2[1], id2[2], id2[3]);
+    println!(
+        "User 1 proposal: {:02x}{:02x}{:02x}{:02x}...",
+        id1[0], id1[1], id1[2], id1[3]
+    );
+    println!(
+        "User 2 proposal: {:02x}{:02x}{:02x}{:02x}...",
+        id2[0], id2[1], id2[2], id2[3]
+    );
 
     // Different proposers should get different proposal IDs
     assert_ne!(id1, id2, "Different proposers get different proposal IDs");
@@ -542,22 +541,22 @@ fn attack_rapid_sequential_submissions() {
     println!("=== A25.1.7 RAPID SEQUENTIAL SUBMISSIONS ===");
 
     // ATTACK: Submit 100 proposals all at the SAME block height
-    let same_height = 1000;
+    let same_height: u64 = 1000;
     let mut accepted = 0;
 
-    for i in 0..100 {
+    for i in 0u64..100 {
         let mut data = vec![0xBBu8; 32];
-        data.extend_from_slice(&(i as u64).to_be_bytes());
+        data.extend_from_slice(&i.to_be_bytes());
 
         let payload = create_submit_payload(ProposalType::ParamChange, spam_gate_id(), data);
-        let tx = create_tx(attacker_id, i as u64, 100, payload);
+        let tx = create_tx(attacker_id, i, 100, payload);
 
         if apply_governance_submit_tx(&mut db, &tx, same_height).is_ok() {
             accepted += 1;
         }
     }
 
-    println!("Proposals submitted at same height {}: {}", same_height, accepted);
+    println!("Proposals submitted at same height {same_height}: {accepted}");
 
     // Document finding
     if accepted == 100 {

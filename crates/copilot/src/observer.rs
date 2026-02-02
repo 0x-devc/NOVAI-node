@@ -862,10 +862,12 @@ mod tests {
 
     #[test]
     fn observe_with_memory_creates_snapshots_at_interval() {
-        let mut config = ObserverConfig::default();
-        config.snapshot_interval = 5;
-        config.summary_interval = 10;
-        config.memory_enabled = true;
+        let config = ObserverConfig {
+            snapshot_interval: 5,
+            summary_interval: 10,
+            memory_enabled: true,
+            ..Default::default()
+        };
 
         let mut observer = ChainObserver::new(test_signing_key(), config);
         let anomaly_callback = NoopCallback;
@@ -887,10 +889,12 @@ mod tests {
 
     #[test]
     fn observe_with_memory_respects_disabled() {
-        let mut config = ObserverConfig::default();
-        config.snapshot_interval = 1;
-        config.summary_interval = 1;
-        config.memory_enabled = false; // Disabled
+        let config = ObserverConfig {
+            snapshot_interval: 1,
+            summary_interval: 1,
+            memory_enabled: false, // Disabled
+            ..Default::default()
+        };
 
         let mut observer = ChainObserver::new(test_signing_key(), config);
         let anomaly_callback = NoopCallback;
@@ -910,10 +914,12 @@ mod tests {
 
     #[test]
     fn observer_metrics_track_memory_creation() {
-        let mut config = ObserverConfig::default();
-        config.snapshot_interval = 2;
-        config.summary_interval = 4;
-        config.memory_enabled = true;
+        let config = ObserverConfig {
+            snapshot_interval: 2,
+            summary_interval: 4,
+            memory_enabled: true,
+            ..Default::default()
+        };
 
         let mut observer = ChainObserver::new(test_signing_key(), config);
         let anomaly_callback = NoopCallback;

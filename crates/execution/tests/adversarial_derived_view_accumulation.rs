@@ -18,16 +18,13 @@
 //! - Privacy budget is a KNOWN GAP (stub, not enforced)
 //! - Derived views cannot be parameterized by individual address
 //!
-//! KNOWN FINDING: PrivacyBudget is a stub (D23.4). can_read() always returns
-//! true, consume() records but does not enforce, replenish() is a no-op.
+//! KNOWN FINDING: `PrivacyBudget` is a stub (D23.4). `can_read()` always returns
+//! true, `consume()` records but does not enforce, `replenish()` is a no-op.
 //! This must be hardened in a future week.
 
-#![allow(clippy::doc_markdown)]
-
 use novai_ai_entities::{
-    AggregateVolumeData, ActivityCountData, DerivedSourceType, DerivedView,
-    DerivedViewSchema, PoolSizeData, PrivacyBudget, MAX_PRIVACY_BUDGET,
-    PRIVACY_BUDGET_PER_VIEW,
+    ActivityCountData, AggregateVolumeData, DerivedSourceType, DerivedView, DerivedViewSchema,
+    PoolSizeData, PrivacyBudget, MAX_PRIVACY_BUDGET, PRIVACY_BUDGET_PER_VIEW,
 };
 
 // ============================================================================
@@ -61,7 +58,7 @@ fn test_single_derived_view_reveals_only_aggregate() {
         DerivedViewSchema::AggregateVolume.to_id(),
         100,
         creator,
-        encoded_data.clone(),
+        encoded_data,
     )
     .expect("Valid AggregateVolume view");
 
@@ -108,6 +105,8 @@ fn test_single_derived_view_reveals_only_aggregate() {
 // A26.4-T2: MULTIPLE VIEWS SAME SCHEMA REVEAL NOTHING INDIVIDUAL
 // ============================================================================
 
+// Test uses u128-to-i128 casts for volume/count diffs that fit well within i128 range
+#[allow(clippy::cast_possible_wrap)]
 #[test]
 fn test_multiple_views_same_schema_reveal_nothing_individual() {
     // ATTACK: Create two AggregateVolume views for consecutive, non-overlapping
@@ -209,8 +208,8 @@ fn test_multiple_views_same_schema_reveal_nothing_individual() {
     // Attacker knows: 100 txs in window A, 150 txs in window B
     // Combined with volume: avg tx in A = 50000/100 = 500, avg in B ≈ 533
     // But this is AVERAGE, not individual. Still aggregate-only.
-    let avg_a = data_a.total_volume / count_data_a.tx_count as u128;
-    let avg_b = data_b.total_volume / count_data_b.tx_count as u128;
+    let avg_a = data_a.total_volume / u128::from(count_data_a.tx_count);
+    let avg_b = data_b.total_volume / u128::from(count_data_b.tx_count);
     assert_eq!(avg_a, 500);
     assert_eq!(avg_b, 533); // 80000/150 = 533.33, truncated
 
@@ -222,6 +221,8 @@ fn test_multiple_views_same_schema_reveal_nothing_individual() {
 // A26.4-T3: CROSS SCHEMA ACCUMULATION REVEALS NOTHING
 // ============================================================================
 
+// Test uses u128-to-i128 casts for pool size diffs that fit well within i128 range
+#[allow(clippy::cast_possible_wrap)]
 #[test]
 fn test_cross_schema_accumulation_reveals_nothing() {
     // ATTACK: Combine AggregateVolume, ActivityCount, and PoolSize views from
@@ -306,7 +307,7 @@ fn test_cross_schema_accumulation_reveals_nothing() {
     let pool_b = PoolSizeData::decode(&pool_before.data).unwrap();
     let pool_a = PoolSizeData::decode(&pool_after.data).unwrap();
 
-    let avg_tx_size = vol.total_volume / cnt.tx_count as u128;
+    let avg_tx_size = vol.total_volume / u128::from(cnt.tx_count);
     let net_inflow = pool_a.pool_size as i128 - pool_b.pool_size as i128;
 
     assert_eq!(avg_tx_size, 200);
@@ -340,6 +341,8 @@ fn test_cross_schema_accumulation_reveals_nothing() {
 // A26.4-T4: TEMPORAL ACCUMULATION ACROSS HEIGHTS
 // ============================================================================
 
+// Test uses u128-to-i128 casts for pool size deltas that fit well within i128 range
+#[allow(clippy::cast_possible_wrap)]
 #[test]
 fn test_temporal_accumulation_across_heights() {
     // ATTACK: Observe PoolSize snapshots at every block height. If only one
@@ -479,10 +482,7 @@ fn test_privacy_budget_stub_documented() {
     // GAP 3: replenish() is a complete no-op
     let budget_before = budget.clone();
     budget.replenish(999_999); // Even a huge block height does nothing
-    assert_eq!(
-        budget, budget_before,
-        "KNOWN GAP: replenish() is a no-op"
-    );
+    assert_eq!(budget, budget_before, "KNOWN GAP: replenish() is a no-op");
 
     // GAP 4: Unlimited queries are possible
     // Simulate an attacker performing 10,000 reads
@@ -544,7 +544,7 @@ fn test_derived_view_cannot_be_parameterized_by_individual() {
     );
 
     // If attacker tries to append an address to the data, schema validation fails
-    let mut tampered_data = legit_data.clone();
+    let mut tampered_data = legit_data;
     tampered_data.extend_from_slice(&attacker_target);
     assert_eq!(tampered_data.len(), 64);
 
@@ -575,7 +575,7 @@ fn test_derived_view_cannot_be_parameterized_by_individual() {
     .encode();
     assert_eq!(act_data.len(), 24);
 
-    let mut tampered_act = act_data.clone();
+    let mut tampered_act = act_data;
     tampered_act.extend_from_slice(&attacker_target);
     assert!(
         !DerivedViewSchema::ActivityCount.validate_data(&tampered_act),
@@ -590,7 +590,7 @@ fn test_derived_view_cannot_be_parameterized_by_individual() {
     .encode();
     assert_eq!(pool_data.len(), 24);
 
-    let mut tampered_pool = pool_data.clone();
+    let mut tampered_pool = pool_data;
     tampered_pool.extend_from_slice(&attacker_target);
     assert!(
         !DerivedViewSchema::PoolSize.validate_data(&tampered_pool),
@@ -608,8 +608,14 @@ fn test_derived_view_cannot_be_parameterized_by_individual() {
     }
 
     // Verify: No unknown schemas can be created
-    assert!(DerivedViewSchema::from_id(0).is_none(), "Schema 0 is invalid");
-    assert!(DerivedViewSchema::from_id(4).is_none(), "Schema 4 does not exist");
+    assert!(
+        DerivedViewSchema::from_id(0).is_none(),
+        "Schema 0 is invalid"
+    );
+    assert!(
+        DerivedViewSchema::from_id(4).is_none(),
+        "Schema 4 does not exist"
+    );
     assert!(
         DerivedViewSchema::from_id(255).is_none(),
         "Schema 255 does not exist"

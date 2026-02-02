@@ -191,7 +191,8 @@ fn test_malicious_wasm_memory_isolation() {
 
     // Attempt 1: Attacker tries to read victim's NNPX data
     let victim_nnpx_key: Vec<u8> = [KEY_PREFIX_NNPX_COMMITMENTS, &victim_id[..]].concat();
-    let result: Result<(), ExecError<()>> = validate_nnpx_access(&victim_nnpx_key, &attacker_caller);
+    let result: Result<(), ExecError<()>> =
+        validate_nnpx_access(&victim_nnpx_key, &attacker_caller);
     assert!(
         matches!(result, Err(ExecError::NnpxAccessDenied)),
         "Attacker must be denied access to victim's NNPX data"
@@ -221,8 +222,7 @@ fn test_malicious_wasm_memory_isolation() {
     victim_memory_key.extend_from_slice(b"/config");
 
     // Both pass NNPX check (not nnpx/ keys)
-    let result: Result<(), ExecError<()>> =
-        validate_nnpx_access(&own_memory_key, &attacker_caller);
+    let result: Result<(), ExecError<()>> = validate_nnpx_access(&own_memory_key, &attacker_caller);
     assert!(result.is_ok(), "Own memory key should pass NNPX check");
 
     let result: Result<(), ExecError<()>> =
@@ -266,7 +266,7 @@ fn test_malicious_module_cannot_bypass_gas_limit() {
             k.extend_from_slice(&i.to_be_bytes());
             k
         } else {
-            format!("accounts/{}", i).into_bytes()
+            format!("accounts/{i}").into_bytes()
         };
 
         let result: Result<(), ExecError<()>> = validate_nnpx_access(&key, &ai_caller);
@@ -370,10 +370,7 @@ fn test_malicious_module_cannot_emit_invalid_write_ops() {
             b"fake_commitment".to_vec(),
         ),
         // Try to mark a nullifier as spent
-        WriteOp::Put(
-            [KEY_PREFIX_NNPX_NULLIFIERS, &[0xCDu8; 32]].concat(),
-            vec![],
-        ),
+        WriteOp::Put([KEY_PREFIX_NNPX_NULLIFIERS, &[0xCDu8; 32]].concat(), vec![]),
         // Try to write encrypted payload
         WriteOp::Put(
             [KEY_PREFIX_NNPX_ENCRYPTED, &[0xEFu8; 32]].concat(),
@@ -388,41 +385,31 @@ fn test_malicious_module_cannot_emit_invalid_write_ops() {
     // All of these WriteOps target private keys
     for (i, op) in malicious_ops.iter().enumerate() {
         let key = match op {
-            WriteOp::Put(k, _) => k,
-            WriteOp::Delete(k) => k,
+            WriteOp::Put(k, _) | WriteOp::Delete(k) => k,
         };
 
         assert!(
             is_private_key(key),
-            "Malicious WriteOp #{} targets a private key but was not detected",
-            i,
+            "Malicious WriteOp #{i} targets a private key but was not detected",
         );
     }
 
     // Legitimate WriteOps targeting public keys should NOT be flagged
     let legitimate_ops: Vec<WriteOp> = vec![
         WriteOp::Put(b"accounts/alice".to_vec(), b"balance".to_vec()),
-        WriteOp::Put(
-            b"ai/memory/entity123/config".to_vec(),
-            b"data".to_vec(),
-        ),
-        WriteOp::Put(
-            b"derived_views/view123".to_vec(),
-            b"aggregate".to_vec(),
-        ),
+        WriteOp::Put(b"ai/memory/entity123/config".to_vec(), b"data".to_vec()),
+        WriteOp::Put(b"derived_views/view123".to_vec(), b"aggregate".to_vec()),
         WriteOp::Delete(b"ai/memory/entity123/temp".to_vec()),
     ];
 
     for (i, op) in legitimate_ops.iter().enumerate() {
         let key = match op {
-            WriteOp::Put(k, _) => k,
-            WriteOp::Delete(k) => k,
+            WriteOp::Put(k, _) | WriteOp::Delete(k) => k,
         };
 
         assert!(
             !is_private_key(key),
-            "Legitimate WriteOp #{} was incorrectly flagged as private",
-            i,
+            "Legitimate WriteOp #{i} was incorrectly flagged as private",
         );
     }
 
@@ -436,8 +423,7 @@ fn test_malicious_module_cannot_emit_invalid_write_ops() {
         request_execution: true,
         _reserved: [false; 3],
     };
-    let result: Result<(), ExecError<()>> =
-        validate_ai_entity_no_nnpx_capability(&malicious_caps);
+    let result: Result<(), ExecError<()>> = validate_ai_entity_no_nnpx_capability(&malicious_caps);
     assert!(
         matches!(result, Err(ExecError::NnpxAccessDenied)),
         "Registration with read_nnpx_derived=true must be blocked"
@@ -454,8 +440,10 @@ fn test_malicious_module_cannot_emit_invalid_write_ops() {
             !preset.read_nnpx_derived,
             "Standard capability preset must not include read_nnpx_derived"
         );
-        let result: Result<(), ExecError<()>> =
-            validate_ai_entity_no_nnpx_capability(preset);
-        assert!(result.is_ok(), "Standard preset must pass registration check");
+        let result: Result<(), ExecError<()>> = validate_ai_entity_no_nnpx_capability(preset);
+        assert!(
+            result.is_ok(),
+            "Standard preset must pass registration check"
+        );
     }
 }

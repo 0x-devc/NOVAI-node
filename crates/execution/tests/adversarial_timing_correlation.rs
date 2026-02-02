@@ -22,8 +22,7 @@
 #![allow(clippy::doc_markdown)]
 
 use novai_ai_entities::{
-    encode_private_payload_commitment_v1, PrivatePayloadCommitment,
-    PRIVATE_PAYLOAD_COMMITMENT_LEN,
+    encode_private_payload_commitment_v1, PrivatePayloadCommitment, PRIVATE_PAYLOAD_COMMITMENT_LEN,
 };
 use std::collections::HashSet;
 
@@ -44,8 +43,7 @@ fn test_commitment_hash_reveals_no_timing() {
     let encrypted_payload = b"encrypted_transaction_data_v1";
 
     // "Created at height 100"
-    let hash_at_height_100 =
-        PrivatePayloadCommitment::compute_commitment_hash(encrypted_payload);
+    let hash_at_height_100 = PrivatePayloadCommitment::compute_commitment_hash(encrypted_payload);
 
     // "Created at height 999999"
     let hash_at_height_999999 =
@@ -78,21 +76,11 @@ fn test_commitment_creation_is_constant_time_structurally() {
     // are computed via blake3 hashing with fixed output sizes.
 
     // Small payload
-    let small = PrivatePayloadCommitment::new(
-        b"x",
-        &[0x01u8; 32],
-        0,
-        [0xAAu8; 32],
-    );
+    let small = PrivatePayloadCommitment::new(b"x", &[0x01u8; 32], 0, [0xAAu8; 32]);
 
     // Large payload
     let large_payload = vec![0xFFu8; 100_000];
-    let large = PrivatePayloadCommitment::new(
-        &large_payload,
-        &[0x02u8; 32],
-        0,
-        [0xBBu8; 32],
-    );
+    let large = PrivatePayloadCommitment::new(&large_payload, &[0x02u8; 32], 0, [0xBBu8; 32]);
 
     // Both produce the same struct layout: 4 fields, each exactly 32 bytes
     assert_eq!(small.commitment_hash.len(), 32);
@@ -212,8 +200,7 @@ fn test_nullifiers_from_different_spends_unlinkable() {
         // (probability of >4 shared prefix bytes is ~1/2^32)
         assert!(
             shared_prefix_len < 8,
-            "Sequential nullifiers should not share long prefixes (got {} shared bytes)",
-            shared_prefix_len
+            "Sequential nullifiers should not share long prefixes (got {shared_prefix_len} shared bytes)",
         );
     }
 
@@ -254,12 +241,7 @@ fn test_commitment_timing_metadata_absent() {
     //
     // NO timestamp, block height, or creation time fields exist.
 
-    let commitment = PrivatePayloadCommitment::new(
-        b"payload",
-        &[0x01u8; 32],
-        0,
-        [0xAAu8; 32],
-    );
+    let commitment = PrivatePayloadCommitment::new(b"payload", &[0x01u8; 32], 0, [0xAAu8; 32]);
 
     // Encode to bytes and verify the exact layout
     let encoded = encode_private_payload_commitment_v1(&commitment);
@@ -311,20 +293,25 @@ fn test_multiple_commitments_same_block_indistinguishable() {
     // Simulate 10 different private transactions in the same block
     let commitments: Vec<PrivatePayloadCommitment> = (0..10)
         .map(|i| {
-            let payload = format!("encrypted_tx_{}", i);
+            let payload = format!("encrypted_tx_{i}");
             let mut secret = [0u8; 32];
-            secret[0] = i as u8;
+            secret[0] = u8::try_from(i).expect("loop index fits in u8");
             let mut pubkey = [0u8; 32];
-            pubkey[0] = (i + 100) as u8;
+            pubkey[0] = u8::try_from(i + 100).expect("loop index + 100 fits in u8");
 
-            PrivatePayloadCommitment::new(payload.as_bytes(), &secret, i as u64, pubkey)
+            PrivatePayloadCommitment::new(
+                payload.as_bytes(),
+                &secret,
+                u64::try_from(i).expect("fits in u64"),
+                pubkey,
+            )
         })
         .collect();
 
     // All must encode to exactly the same size
     let encoded: Vec<[u8; PRIVATE_PAYLOAD_COMMITMENT_LEN]> = commitments
         .iter()
-        .map(|c| encode_private_payload_commitment_v1(c))
+        .map(encode_private_payload_commitment_v1)
         .collect();
 
     for (i, enc) in encoded.iter().enumerate() {
@@ -452,9 +439,9 @@ fn test_commitment_batch_indistinguishability() {
         .enumerate()
         .map(|(i, (name, payload))| {
             let mut secret = [0u8; 32];
-            secret[0] = i as u8;
+            secret[0] = u8::try_from(i).expect("index fits in u8");
             let mut pubkey = [0u8; 32];
-            pubkey[0] = (i + 50) as u8;
+            pubkey[0] = u8::try_from(i + 50).expect("index + 50 fits in u8");
 
             let c = PrivatePayloadCommitment::new(payload, &secret, i as u64, pubkey);
             (name.to_string(), c)

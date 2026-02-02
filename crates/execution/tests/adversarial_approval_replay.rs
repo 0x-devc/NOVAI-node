@@ -22,10 +22,9 @@
 use novai_ai_entities::{AiEntity, ApprovalGate, AutonomyMode, Capabilities, GateType};
 use novai_codec::encode_approval_gate_v1;
 use novai_execution::{
-    apply_governance_execute_tx, apply_governance_submit_tx,
-    encode_execute_proposal_payload_v1, encode_submit_proposal_payload_v1,
-    read_proposal, write_ai_entity_op, ExecError, ExecuteProposalPayloadV1,
-    SubmitProposalPayloadV1,
+    apply_governance_execute_tx, apply_governance_submit_tx, encode_execute_proposal_payload_v1,
+    encode_submit_proposal_payload_v1, read_proposal, write_ai_entity_op, ExecError,
+    ExecuteProposalPayloadV1, SubmitProposalPayloadV1,
 };
 use novai_governance::{Proposal, ProposalState, ProposalType};
 use novai_state::{approval_gate_key, KvBatch, MemKv, WriteOp};
@@ -108,11 +107,7 @@ fn store_entity(db: &mut MemKv, entity: &AiEntity) {
 }
 
 /// Create a submit proposal payload.
-fn create_submit_payload(
-    proposal_type: ProposalType,
-    gate_id: [u8; 32],
-    data: Vec<u8>,
-) -> Vec<u8> {
+fn create_submit_payload(proposal_type: ProposalType, gate_id: [u8; 32], data: Vec<u8>) -> Vec<u8> {
     let payload = SubmitProposalPayloadV1 {
         proposal_type,
         gate_id,
@@ -128,6 +123,8 @@ fn create_execute_payload(proposal_id: [u8; 32]) -> Vec<u8> {
 }
 
 /// Create a test transaction.
+// Test helper with simple construction; const not possible due to Vec payload.
+#[allow(clippy::missing_const_for_fn)]
 fn create_tx(from: [u8; 32], nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
     TxV1 {
         version: TxVersion::V1,
@@ -172,7 +169,8 @@ fn proposal_id_is_deterministic() {
     let data = b"set MIN_FEE=100".to_vec();
 
     // Submit first proposal
-    let payload = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), data.clone());
+    let payload =
+        create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), data.clone());
     let tx1 = create_tx(proposer, 0, 100, payload);
     let result1 = apply_governance_submit_tx(&mut db, &tx1, 100);
     assert!(result1.is_ok());
@@ -194,7 +192,7 @@ fn proposal_id_is_deterministic() {
     println!("FINDING: Proposal ID is deterministic from content");
 
     // If we try to submit again with same content, what happens?
-    let payload2 = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), data.clone());
+    let payload2 = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), data);
     let tx2 = create_tx(proposer, 1, 100, payload2);
     let result2 = apply_governance_submit_tx(&mut db, &tx2, 101);
 
@@ -208,7 +206,7 @@ fn proposal_id_is_deterministic() {
             }
         }
         Err(e) => {
-            println!("FINDING: Resubmission rejected with: {:?}", e);
+            println!("FINDING: Resubmission rejected with: {e:?}");
             println!("SECURITY IMPLICATION: Duplicate proposals prevented");
         }
     }
@@ -235,7 +233,8 @@ fn attack_resubmit_to_reset_timing() {
     let data = b"malicious_action".to_vec();
 
     // Submit proposal at height 100
-    let payload = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), data.clone());
+    let payload =
+        create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), data.clone());
     let tx1 = create_tx(entity_id, 0, 100, payload);
     let result = apply_governance_submit_tx(&mut db, &tx1, 100);
     assert!(result.is_ok());
@@ -250,7 +249,7 @@ fn attack_resubmit_to_reset_timing() {
     let original_executable_at = proposal.executable_at;
 
     // Now "resubmit" at a later height - does it change approval timing?
-    let payload2 = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), data.clone());
+    let payload2 = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), data);
     let tx2 = create_tx(entity_id, 1, 100, payload2);
     let result2 = apply_governance_submit_tx(&mut db, &tx2, 120);
 
@@ -261,7 +260,7 @@ fn attack_resubmit_to_reset_timing() {
                 // Same ID - proposal was overwritten
                 if new_proposal.executable_at > original_executable_at {
                     println!("WARNING: Resubmission RESET approval timing!");
-                    println!("Original executable_at: {}", original_executable_at);
+                    println!("Original executable_at: {original_executable_at}");
                     println!("New executable_at: {}", new_proposal.executable_at);
                     println!("ATTACK VECTOR: Can delay legitimate proposals");
                 } else if new_proposal.executable_at == original_executable_at {
@@ -272,7 +271,7 @@ fn attack_resubmit_to_reset_timing() {
             }
         }
         Err(e) => {
-            println!("FINDING: Resubmission prevented: {:?}", e);
+            println!("FINDING: Resubmission prevented: {e:?}");
         }
     }
 }
@@ -320,13 +319,16 @@ fn attack_gate_switching() {
     // Read the multisig proposal
     let multisig_proposal = read_proposal(&db, &multisig_proposal_id).unwrap().unwrap();
     println!("Multisig proposal state: {:?}", multisig_proposal.state);
-    println!("Multisig proposal gate: {:02x?}", &multisig_proposal.gate_id[..4]);
+    println!(
+        "Multisig proposal gate: {:02x?}",
+        &multisig_proposal.gate_id[..4]
+    );
 
     // Attacker submits same action to TimelockOnly gate
     let payload_timelock = create_submit_payload(
         ProposalType::ParamChange,
         timelock_gate_id(),
-        sensitive_action.clone(),
+        sensitive_action,
     );
     let tx_timelock = create_tx(entity_id, 1, 100, payload_timelock);
     let result_timelock = apply_governance_submit_tx(&mut db, &tx_timelock, 101);
@@ -337,7 +339,9 @@ fn attack_gate_switching() {
     println!("Multisig proposal ID: {:02x?}", &multisig_proposal_id[..8]);
     println!("Timelock proposal ID: {:02x?}", &timelock_proposal_id[..8]);
 
-    if multisig_proposal_id != timelock_proposal_id {
+    if multisig_proposal_id == timelock_proposal_id {
+        println!("FINDING: Gate switching blocked - same ID prevents duplicate");
+    } else {
         println!("FINDING: Different gates produce different proposal IDs");
         println!("SECURITY: Gate ID is part of proposal ID computation");
 
@@ -350,8 +354,6 @@ fn attack_gate_switching() {
             println!("TimelockOnly version is auto-approved");
             println!("RECOMMENDATION: Consider action-level uniqueness checks");
         }
-    } else {
-        println!("FINDING: Gate switching blocked - same ID prevents duplicate");
     }
 }
 
@@ -375,7 +377,11 @@ fn attack_timelockonly_bypass() {
 
     // Attacker creates a "dangerous" proposal using TimelockOnly gate
     let dangerous_action = b"upgrade_consensus_to_pow".to_vec();
-    let payload = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), dangerous_action);
+    let payload = create_submit_payload(
+        ProposalType::ParamChange,
+        timelock_gate_id(),
+        dangerous_action,
+    );
     let tx = create_tx(entity_id, 0, 100, payload);
     let result = apply_governance_submit_tx(&mut db, &tx, 100);
     assert!(result.is_ok());
@@ -384,7 +390,10 @@ fn attack_timelockonly_bypass() {
     let proposal = read_proposal(&db, &proposal_id).unwrap().unwrap();
     println!("Dangerous action submitted via TimelockOnly gate");
     println!("State: {:?}", proposal.state);
-    println!("Auto-approved: {}", proposal.state == ProposalState::Approved);
+    println!(
+        "Auto-approved: {}",
+        proposal.state == ProposalState::Approved
+    );
 
     // Try to execute after timelock
     let exec_payload = create_execute_payload(proposal_id);
@@ -398,7 +407,7 @@ fn attack_timelockonly_bypass() {
             println!("RECOMMENDATION: Restrict which actions can use TimelockOnly");
         }
         Err(e) => {
-            println!("FINDING: Execution blocked: {:?}", e);
+            println!("FINDING: Execution blocked: {e:?}");
         }
     }
 }
@@ -419,12 +428,7 @@ fn document_approval_model() {
     store_entity(&mut db, &entity);
 
     // Create a multisig gate requiring 2 approvals
-    let multisig_gate = create_multisig_gate(
-        vec![approver_1(), approver_2()],
-        2,
-        50,
-        200,
-    );
+    let multisig_gate = create_multisig_gate(vec![approver_1(), approver_2()], 2, 50, 200);
     store_gate(&mut db, &multisig_gate);
 
     // Create two different proposals to the same gate
@@ -454,8 +458,16 @@ fn document_approval_model() {
     let proposal_a = read_proposal(&db, &proposal_id_a).unwrap().unwrap();
     let proposal_b = read_proposal(&db, &proposal_id_b).unwrap().unwrap();
 
-    println!("Proposal A: {:02x?}, state: {:?}", &proposal_id_a[..8], proposal_a.state);
-    println!("Proposal B: {:02x?}, state: {:?}", &proposal_id_b[..8], proposal_b.state);
+    println!(
+        "Proposal A: {:02x?}, state: {:?}",
+        &proposal_id_a[..8],
+        proposal_a.state
+    );
+    println!(
+        "Proposal B: {:02x?}, state: {:?}",
+        &proposal_id_b[..8],
+        proposal_b.state
+    );
 
     println!();
     println!("CURRENT APPROVAL MODEL:");
@@ -492,7 +504,11 @@ fn attack_expired_proposal_resubmission() {
     let action = b"delayed_action".to_vec();
 
     // Submit at height 100
-    let payload = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), action.clone());
+    let payload = create_submit_payload(
+        ProposalType::ParamChange,
+        timelock_gate_id(),
+        action.clone(),
+    );
     let tx = create_tx(entity_id, 0, 100, payload);
     let result = apply_governance_submit_tx(&mut db, &tx, 100);
     assert!(result.is_ok());
@@ -512,12 +528,12 @@ fn attack_expired_proposal_resubmission() {
             println!("Confirmed: Proposal expired at height 160");
         }
         other => {
-            println!("Unexpected result: {:?}", other);
+            println!("Unexpected result: {other:?}");
         }
     }
 
     // Can attacker resubmit to get a fresh expiry?
-    let payload2 = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), action.clone());
+    let payload2 = create_submit_payload(ProposalType::ParamChange, timelock_gate_id(), action);
     let tx2 = create_tx(entity_id, 2, 100, payload2);
     let result2 = apply_governance_submit_tx(&mut db, &tx2, 170);
 
@@ -534,7 +550,7 @@ fn attack_expired_proposal_resubmission() {
             }
         }
         Err(e) => {
-            println!("FINDING: Resubmission blocked: {:?}", e);
+            println!("FINDING: Resubmission blocked: {e:?}");
         }
     }
 }
@@ -584,7 +600,7 @@ fn attack_double_execution() {
             println!("Error: ProposalNotExecutable (already executed)");
         }
         Err(e) => {
-            println!("SECURE: Double execution prevented with: {:?}", e);
+            println!("SECURE: Double execution prevented with: {e:?}");
         }
         Ok(()) => {
             println!("VULNERABILITY: Double execution succeeded!");

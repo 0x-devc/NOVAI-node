@@ -4,33 +4,30 @@
 //! the governance system.
 //!
 //! BACKGROUND:
-//! - Tier 0 actions (ModifyConsensusRule, ModifyStateTransition) should
+//! - Tier 0 actions (`ModifyConsensusRule`, `ModifyStateTransition`) should
 //!   NEVER be executable by AI entities
-//! - The tiering system is defined in ai_entities/tiers.rs
-//! - The governance system uses ProposalType, not ActionType
+//! - The tiering system is defined in `ai_entities/tiers.rs`
+//! - The governance system uses `ProposalType`, not `ActionType`
 //!
 //! ATTACK VECTORS:
-//! - Embed Tier 0 action bytes in ParamChange proposals
-//! - Embed Tier 0 action bytes in PolicyChange proposals
-//! - Attempt direct ActionType::ModifyConsensusRule via proposal_data
+//! - Embed Tier 0 action bytes in `ParamChange` proposals
+//! - Embed Tier 0 action bytes in `PolicyChange` proposals
+//! - Attempt direct `ActionType::ModifyConsensusRule` via `proposal_data`
 //!
 //! EXPECTED RESULTS:
 //! - All Tier 0 execution attempts should be rejected
 //! - OR: Document that enforcement is missing (hardening needed)
 //!
 //! FINDINGS DOCUMENTATION:
-//! This file documents the gap between ActionType tiering and ProposalType
+//! This file documents the gap between `ActionType` tiering and `ProposalType`
 //! governance systems.
-
-#![allow(clippy::doc_markdown)]
 
 use novai_ai_entities::tiers::{tier_for_action, ActionTier, ActionType};
 use novai_ai_entities::{AiEntity, ApprovalGate, AutonomyMode, Capabilities, GateType};
 use novai_codec::encode_approval_gate_v1;
 use novai_execution::{
-    apply_governance_execute_tx, apply_governance_submit_tx,
-    encode_execute_proposal_payload_v1, encode_submit_proposal_payload_v1,
-    read_proposal, write_ai_entity_op, ExecuteProposalPayloadV1,
+    apply_governance_execute_tx, apply_governance_submit_tx, encode_execute_proposal_payload_v1,
+    encode_submit_proposal_payload_v1, read_proposal, write_ai_entity_op, ExecuteProposalPayloadV1,
     SubmitProposalPayloadV1,
 };
 use novai_governance::ProposalType;
@@ -46,7 +43,7 @@ fn tier0_gate_id() -> [u8; 32] {
     *blake3::hash(b"NOVAI_TIER0_ATTACK_GATE_V1").as_bytes()
 }
 
-/// Create a TimelockOnly gate (auto-approve for quick testing).
+/// Create a `TimelockOnly` gate (auto-approve for quick testing).
 fn create_timelock_gate(timelock_blocks: u64, expiry_blocks: u64) -> ApprovalGate {
     ApprovalGate {
         gate_id: tier0_gate_id(),
@@ -90,11 +87,7 @@ fn store_entity(db: &mut MemKv, entity: &AiEntity) {
 }
 
 /// Create a submit proposal payload.
-fn create_submit_payload(
-    proposal_type: ProposalType,
-    gate_id: [u8; 32],
-    data: Vec<u8>,
-) -> Vec<u8> {
+fn create_submit_payload(proposal_type: ProposalType, gate_id: [u8; 32], data: Vec<u8>) -> Vec<u8> {
     let payload = SubmitProposalPayloadV1 {
         proposal_type,
         gate_id,
@@ -110,7 +103,7 @@ fn create_execute_payload(proposal_id: [u8; 32]) -> Vec<u8> {
 }
 
 /// Create a test transaction.
-fn create_tx(from: [u8; 32], nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
+const fn create_tx(from: [u8; 32], nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
     TxV1 {
         version: TxVersion::V1,
         from,
@@ -157,12 +150,16 @@ fn verify_tier0_classification() {
         let tier = tier_for_action(&action);
         let executable = tier.is_ai_executable();
 
-        println!("{:?}:", action);
-        println!("  Tier: {:?}", tier);
-        println!("  AI Executable: {}", executable);
+        println!("{action:?}:");
+        println!("  Tier: {tier:?}");
+        println!("  AI Executable: {executable}");
 
-        assert_eq!(tier, ActionTier::Tier0Never, "{:?} should be Tier0Never", action);
-        assert!(!executable, "{:?} should NOT be AI executable", action);
+        assert_eq!(
+            tier,
+            ActionTier::Tier0Never,
+            "{action:?} should be Tier0Never",
+        );
+        assert!(!executable, "{action:?} should NOT be AI executable");
     }
 
     println!();
@@ -174,7 +171,7 @@ fn verify_tier0_classification() {
 // A25.4.2: ATTEMPT TIER 0 VIA PARAMCHANGE
 // ============================================================================
 
-/// Attempt to embed Tier 0 action in a ParamChange proposal.
+/// Attempt to embed Tier 0 action in a `ParamChange` proposal.
 #[test]
 fn attack_tier0_via_paramchange() {
     println!("=== A25.4.2 TIER 0 VIA PARAMCHANGE ===");
@@ -190,9 +187,15 @@ fn attack_tier0_via_paramchange() {
 
     // Embed a "consensus rule change" in ParamChange proposal_data
     let malicious_data = encode_consensus_rule_change();
-    println!("Malicious payload: {:02x?}", &malicious_data[..8.min(malicious_data.len())]);
+    println!(
+        "Malicious payload: {:02x?}",
+        &malicious_data[..8.min(malicious_data.len())]
+    );
     println!("Contains ActionType byte: {}", malicious_data[0]);
-    println!("ActionType::ModifyConsensusRule = {}", ActionType::ModifyConsensusRule.to_byte());
+    println!(
+        "ActionType::ModifyConsensusRule = {}",
+        ActionType::ModifyConsensusRule.to_byte()
+    );
 
     let payload = create_submit_payload(ProposalType::ParamChange, tier0_gate_id(), malicious_data);
     let tx = create_tx(attacker_id, 0, 100, payload);
@@ -216,12 +219,12 @@ fn attack_tier0_via_paramchange() {
                     println!("RECOMMENDATION: Add ActionType validation to ParamChange execution");
                 }
                 Err(e) => {
-                    println!("FINDING: Execution blocked with: {:?}", e);
+                    println!("FINDING: Execution blocked with: {e:?}");
                 }
             }
         }
         Err(e) => {
-            println!("FINDING: Submission blocked with: {:?}", e);
+            println!("FINDING: Submission blocked with: {e:?}");
             println!("SECURE: Tier 0 content rejected at submission");
         }
     }
@@ -231,7 +234,7 @@ fn attack_tier0_via_paramchange() {
 // A25.4.3: ATTEMPT TIER 0 VIA POLICYCHANGE
 // ============================================================================
 
-/// Attempt to embed Tier 0 action in a PolicyChange proposal.
+/// Attempt to embed Tier 0 action in a `PolicyChange` proposal.
 #[test]
 fn attack_tier0_via_policychange() {
     println!("=== A25.4.3 TIER 0 VIA POLICYCHANGE ===");
@@ -247,9 +250,13 @@ fn attack_tier0_via_policychange() {
 
     // Embed a "state transition change" in PolicyChange proposal_data
     let malicious_data = encode_state_transition_change();
-    println!("Malicious payload: {:02x?}", &malicious_data[..8.min(malicious_data.len())]);
+    println!(
+        "Malicious payload: {:02x?}",
+        &malicious_data[..8.min(malicious_data.len())]
+    );
 
-    let payload = create_submit_payload(ProposalType::PolicyChange, tier0_gate_id(), malicious_data);
+    let payload =
+        create_submit_payload(ProposalType::PolicyChange, tier0_gate_id(), malicious_data);
     let tx = create_tx(attacker_id, 0, 100, payload);
     let result = apply_governance_submit_tx(&mut db, &tx, 100);
 
@@ -268,12 +275,12 @@ fn attack_tier0_via_policychange() {
                     println!("RECOMMENDATION: Add ActionType validation to PolicyChange execution");
                 }
                 Err(e) => {
-                    println!("FINDING: Execution blocked with: {:?}", e);
+                    println!("FINDING: Execution blocked with: {e:?}");
                 }
             }
         }
         Err(e) => {
-            println!("FINDING: Submission blocked with: {:?}", e);
+            println!("FINDING: Submission blocked with: {e:?}");
         }
     }
 }
@@ -309,7 +316,7 @@ fn attack_exhaustive_tier0_attempts() {
             let mut db = MemKv::new();
 
             let attacker = create_test_entity(
-                format!("attacker_{}_{}", action_name, proposal_name).as_bytes(),
+                format!("attacker_{action_name}_{proposal_name}").as_bytes(),
                 10_000_000_000,
                 true,
             );
@@ -329,30 +336,27 @@ fn attack_exhaustive_tier0_attempts() {
 
             let submit_result = apply_governance_submit_tx(&mut db, &tx, 100);
 
-            let status = match submit_result {
-                Ok(proposal_id) => {
-                    let exec_payload = create_execute_payload(proposal_id);
-                    let exec_tx = create_tx(attacker_id, 1, 100, exec_payload);
-                    let exec_result = apply_governance_execute_tx(&mut db, &exec_tx, 111);
+            let status = submit_result.map_or("Blocked at submission", |proposal_id| {
+                let exec_payload = create_execute_payload(proposal_id);
+                let exec_tx = create_tx(attacker_id, 1, 100, exec_payload);
+                let exec_result = apply_governance_execute_tx(&mut db, &exec_tx, 111);
 
-                    match exec_result {
-                        Ok(()) => {
-                            vulnerabilities += 1;
-                            "EXECUTED (VULN!)"
-                        }
-                        Err(_) => "Blocked at execution"
+                match exec_result {
+                    Ok(()) => {
+                        vulnerabilities += 1;
+                        "EXECUTED (VULN!)"
                     }
+                    Err(_) => "Blocked at execution",
                 }
-                Err(_) => "Blocked at submission"
-            };
+            });
 
-            println!("  {} via {}: {}", action_name, proposal_name, status);
+            println!("  {action_name} via {proposal_name}: {status}");
         }
     }
 
     println!();
     if vulnerabilities > 0 {
-        println!("WARNING: {} vulnerability(ies) found!", vulnerabilities);
+        println!("WARNING: {vulnerabilities} vulnerability(ies) found!");
         println!("RECOMMENDATION: Implement ActionType validation in governance execution");
     } else {
         println!("FINDING: All Tier 0 attempts blocked");
@@ -363,7 +367,7 @@ fn attack_exhaustive_tier0_attempts() {
 // A25.4.5: DOCUMENT DESIGN GAP
 // ============================================================================
 
-/// Document the architectural gap between ActionType and ProposalType.
+/// Document the architectural gap between `ActionType` and `ProposalType`.
 #[test]
 fn document_tier_enforcement_gap() {
     println!("=== A25.4.5 TIER ENFORCEMENT ARCHITECTURE ANALYSIS ===");

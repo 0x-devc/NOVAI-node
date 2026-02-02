@@ -26,10 +26,9 @@
 use novai_ai_entities::{AiEntity, ApprovalGate, AutonomyMode, Capabilities, GateType};
 use novai_codec::encode_approval_gate_v1;
 use novai_execution::{
-    apply_governance_execute_tx, apply_governance_submit_tx,
-    encode_execute_proposal_payload_v1, encode_submit_proposal_payload_v1,
-    read_ai_entity, write_ai_entity_op, ExecuteProposalPayloadV1,
-    SubmitProposalPayloadV1,
+    apply_governance_execute_tx, apply_governance_submit_tx, encode_execute_proposal_payload_v1,
+    encode_submit_proposal_payload_v1, read_ai_entity, write_ai_entity_op,
+    ExecuteProposalPayloadV1, SubmitProposalPayloadV1,
 };
 use novai_governance::ProposalType;
 use novai_state::{approval_gate_key, KvBatch, MemKv, WriteOp};
@@ -88,11 +87,7 @@ fn store_entity(db: &mut MemKv, entity: &AiEntity) {
 }
 
 /// Create a submit proposal payload.
-fn create_submit_payload(
-    proposal_type: ProposalType,
-    gate_id: [u8; 32],
-    data: Vec<u8>,
-) -> Vec<u8> {
+fn create_submit_payload(proposal_type: ProposalType, gate_id: [u8; 32], data: Vec<u8>) -> Vec<u8> {
     let payload = SubmitProposalPayloadV1 {
         proposal_type,
         gate_id,
@@ -108,7 +103,7 @@ fn create_execute_payload(proposal_id: [u8; 32]) -> Vec<u8> {
 }
 
 /// Create a test transaction.
-fn create_tx(from: [u8; 32], nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
+const fn create_tx(from: [u8; 32], nonce: u64, fee: u64, payload: Vec<u8>) -> TxV1 {
     TxV1 {
         version: TxVersion::V1,
         from,
@@ -172,8 +167,14 @@ fn conflicting_activate_then_rollback() {
     assert!(result1.is_ok(), "Activation should succeed");
 
     let entity_after_activate = read_ai_entity(&db, &target_id).unwrap().unwrap();
-    println!("After activation: is_active = {}", entity_after_activate.is_active);
-    assert!(entity_after_activate.is_active, "Entity should be active after activation");
+    println!(
+        "After activation: is_active = {}",
+        entity_after_activate.is_active
+    );
+    assert!(
+        entity_after_activate.is_active,
+        "Entity should be active after activation"
+    );
 
     // Execute ROLLBACK second (same block height)
     let exec_rollback_tx = create_tx(executor_id, 2, 100, create_execute_payload(rollback_id));
@@ -181,8 +182,14 @@ fn conflicting_activate_then_rollback() {
     assert!(result2.is_ok(), "Rollback should succeed");
 
     let entity_after_rollback = read_ai_entity(&db, &target_id).unwrap().unwrap();
-    println!("After rollback: is_active = {}", entity_after_rollback.is_active);
-    assert!(!entity_after_rollback.is_active, "Entity should be inactive after rollback");
+    println!(
+        "After rollback: is_active = {}",
+        entity_after_rollback.is_active
+    );
+    assert!(
+        !entity_after_rollback.is_active,
+        "Entity should be inactive after rollback"
+    );
 
     println!();
     println!("FINDING: Conflicting proposals execute in order");
@@ -237,7 +244,10 @@ fn conflicting_rollback_then_activate() {
     apply_governance_execute_tx(&mut db, &exec_rollback_tx, 100).unwrap();
 
     let entity_after_rollback = read_ai_entity(&db, &target_id).unwrap().unwrap();
-    println!("After rollback: is_active = {}", entity_after_rollback.is_active);
+    println!(
+        "After rollback: is_active = {}",
+        entity_after_rollback.is_active
+    );
 
     // Execute ACTIVATE second
     let exec_activate_tx = create_tx(executor_id, 2, 100, create_execute_payload(activate_id));
@@ -246,7 +256,10 @@ fn conflicting_rollback_then_activate() {
     let entity_final = read_ai_entity(&db, &target_id).unwrap().unwrap();
     println!("After activate: is_active = {}", entity_final.is_active);
 
-    assert!(entity_final.is_active, "Final state should be active (last executed wins)");
+    assert!(
+        entity_final.is_active,
+        "Final state should be active (last executed wins)"
+    );
 
     println!();
     println!("FINDING: Last execution wins - order matters");
@@ -285,7 +298,10 @@ fn attack_self_deactivation() {
 
     match result {
         Ok(proposal_id) => {
-            println!("Self-deactivation proposal submitted: {:02x?}", &proposal_id[..8]);
+            println!(
+                "Self-deactivation proposal submitted: {:02x?}",
+                &proposal_id[..8]
+            );
 
             // Try to execute
             let exec_tx = create_tx(attacker_id, 1, 100, create_execute_payload(proposal_id));
@@ -303,12 +319,12 @@ fn attack_self_deactivation() {
                     }
                 }
                 Err(e) => {
-                    println!("FINDING: Self-deactivation blocked at execution: {:?}", e);
+                    println!("FINDING: Self-deactivation blocked at execution: {e:?}");
                 }
             }
         }
         Err(e) => {
-            println!("FINDING: Self-deactivation blocked at submission: {:?}", e);
+            println!("FINDING: Self-deactivation blocked at submission: {e:?}");
         }
     }
 }
@@ -336,11 +352,7 @@ fn attack_rapid_sequential_execution() {
     // Submit many activation proposals from different "proposers"
     let mut proposal_ids = Vec::new();
     for i in 0..10 {
-        let proposer = create_test_entity(
-            format!("proposer_{}", i).as_bytes(),
-            10_000_000_000,
-            true,
-        );
+        let proposer = create_test_entity(format!("proposer_{i}").as_bytes(), 10_000_000_000, true);
         store_entity(&mut db, &proposer);
 
         let payload = create_submit_payload(
@@ -361,7 +373,12 @@ fn attack_rapid_sequential_execution() {
 
     let mut success_count = 0;
     for (i, (_, proposal_id)) in proposal_ids.iter().enumerate() {
-        let exec_tx = create_tx(executor.id, i as u64, 100, create_execute_payload(*proposal_id));
+        let exec_tx = create_tx(
+            executor.id,
+            i as u64,
+            100,
+            create_execute_payload(*proposal_id),
+        );
         let result = apply_governance_execute_tx(&mut db, &exec_tx, 100);
 
         if result.is_ok() {
@@ -369,12 +386,19 @@ fn attack_rapid_sequential_execution() {
         }
     }
 
-    println!("Executed: {}/{} proposals succeeded", success_count, proposal_ids.len());
+    println!(
+        "Executed: {}/{} proposals succeeded",
+        success_count,
+        proposal_ids.len()
+    );
 
     let final_entity = read_ai_entity(&db, &target_id).unwrap().unwrap();
     println!("Final state: is_active = {}", final_entity.is_active);
 
-    assert!(final_entity.is_active, "Entity should be active after any activation");
+    assert!(
+        final_entity.is_active,
+        "Entity should be active after any activation"
+    );
     println!();
     println!("FINDING: Multiple activations are idempotent");
     println!("SECURITY: No race condition - operations complete atomically");
@@ -402,7 +426,7 @@ fn attack_toggle_state() {
     let mut proposal_ids = Vec::new();
     for i in 0..20 {
         let proposer = create_test_entity(
-            format!("toggle_proposer_{}", i).as_bytes(),
+            format!("toggle_proposer_{i}").as_bytes(),
             10_000_000_000,
             true,
         );
@@ -414,7 +438,8 @@ fn attack_toggle_state() {
             ProposalType::ModuleRollback
         };
 
-        let payload = create_submit_payload(proposal_type, reentrancy_gate_id(), target_id.to_vec());
+        let payload =
+            create_submit_payload(proposal_type, reentrancy_gate_id(), target_id.to_vec());
         let tx = create_tx(proposer.id, 0, 100, payload);
         let proposal_id = apply_governance_submit_tx(&mut db, &tx, 100).unwrap();
         proposal_ids.push((proposal_type, proposal_id));
@@ -428,7 +453,12 @@ fn attack_toggle_state() {
 
     let mut state_history = Vec::new();
     for (i, (ptype, proposal_id)) in proposal_ids.iter().enumerate() {
-        let exec_tx = create_tx(executor.id, i as u64, 100, create_execute_payload(*proposal_id));
+        let exec_tx = create_tx(
+            executor.id,
+            i as u64,
+            100,
+            create_execute_payload(*proposal_id),
+        );
         apply_governance_execute_tx(&mut db, &exec_tx, 100).unwrap();
 
         let entity = read_ai_entity(&db, &target_id).unwrap().unwrap();
@@ -442,9 +472,13 @@ fn attack_toggle_state() {
             ProposalType::ModuleRollback => false,
             _ => unreachable!(),
         };
-        let status = if *is_active == expected { "OK" } else { "MISMATCH!" };
-        if i < 5 || i >= 15 {
-            println!("  {}: {:?} -> is_active={} [{}]", i, ptype, is_active, status);
+        let status = if *is_active == expected {
+            "OK"
+        } else {
+            "MISMATCH!"
+        };
+        if !(5..15).contains(&i) {
+            println!("  {i}: {ptype:?} -> is_active={is_active} [{status}]",);
         } else if i == 5 {
             println!("  ... (10 more transitions)");
         }
@@ -453,7 +487,10 @@ fn attack_toggle_state() {
     // Final state should match last operation (rollback = false)
     let final_entity = read_ai_entity(&db, &target_id).unwrap().unwrap();
     // Last proposal (index 19) is rollback
-    assert!(!final_entity.is_active, "Final state should be inactive (last was rollback)");
+    assert!(
+        !final_entity.is_active,
+        "Final state should be inactive (last was rollback)"
+    );
 
     println!();
     println!("FINDING: State toggles correctly with each execution");

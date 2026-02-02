@@ -242,10 +242,10 @@ mod tests {
     #[test]
     fn tx_encoded_size_matches_actual_encoding() {
         let payloads: &[&[u8]] = &[
-            b"",                        // empty payload
-            b"hello",                   // small payload
-            &[0xAB; 1024],             // 1 KB
-            &[0xCD; 64 * 1024],        // 64 KB
+            b"",                // empty payload
+            b"hello",           // small payload
+            &[0xAB; 1024],      // 1 KB
+            &[0xCD; 64 * 1024], // 64 KB
         ];
 
         for payload in payloads {

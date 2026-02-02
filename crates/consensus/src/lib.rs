@@ -189,10 +189,7 @@ impl ConsensusState {
         // Drain ready transactions from mempool with size-aware filtering.
         // Drain up to MAX_TXS_PER_BLOCK candidates, then filter by cumulative
         // block size. Txs that don't fit are returned to the mempool.
-        let mut candidates = mempool.drain_ready(
-            novai_types::MAX_TXS_PER_BLOCK,
-            nonce_provider,
-        );
+        let mut candidates = mempool.drain_ready(novai_types::MAX_TXS_PER_BLOCK, nonce_provider);
         let mut txs = Vec::new();
         let mut block_bytes = 0usize;
         let mut overflow = Vec::new();
@@ -271,7 +268,8 @@ impl ConsensusState {
             if size > novai_types::MAX_TX_SIZE {
                 return Err(ConsensusError::InvalidBlock(format!(
                     "tx encoded size {} exceeds limit of {}",
-                    size, novai_types::MAX_TX_SIZE
+                    size,
+                    novai_types::MAX_TX_SIZE
                 )));
             }
             block_tx_bytes += size;
@@ -280,7 +278,8 @@ impl ConsensusState {
         if block_tx_bytes > novai_types::MAX_BLOCK_SIZE {
             return Err(ConsensusError::InvalidBlock(format!(
                 "block payload {} bytes exceeds limit of {}",
-                block_tx_bytes, novai_types::MAX_BLOCK_SIZE
+                block_tx_bytes,
+                novai_types::MAX_BLOCK_SIZE
             )));
         }
 
@@ -2355,10 +2354,7 @@ mod tests {
             round: 0,
             parent_hash: [0u8; 32],
             state_root: [0u8; 32],
-            txs: vec![
-                make_tx_with_payload(100),
-                make_tx_with_payload(200),
-            ],
+            txs: vec![make_tx_with_payload(100), make_tx_with_payload(200)],
         };
 
         let result = state.verify_block(&block, &db);

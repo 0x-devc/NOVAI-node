@@ -10,7 +10,7 @@
 //! 3. Problem detection triggers anomaly signal
 //! 4. Rollback proposal can be submitted
 //! 5. After timelock, rollback executes
-//! 6. Module is_active = false after rollback
+//! 6. Module `is_active` = false after rollback
 //!
 //! This is the final verification that the AI module governance
 //! lifecycle works end-to-end on testnet.
@@ -41,6 +41,8 @@ use novai_types::{TxV1, TxVersion};
 /// 3. Roll back problematic modules through governance
 /// 4. Deactivate modules to protect the network
 #[test]
+// Test covers the full activate→problem→rollback→deactivate lifecycle in a single flow.
+#[allow(clippy::too_many_lines)]
 fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
     println!("\n=== D24.5 ROLLBACK WORKFLOW TEST ===\n");
 
@@ -160,8 +162,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
 
     // Module emits some normal prediction signals
     for i in 0..3 {
-        let prediction_hash =
-            blake3::hash(format!("prediction:market:day_{}", i).as_bytes()).into();
+        let prediction_hash = blake3::hash(format!("prediction:market:day_{i}").as_bytes()).into();
         let signal_payload = SignalCommitmentPayloadV1 {
             signal_hash: prediction_hash,
             signal_type: AiSignalType::Prediction,

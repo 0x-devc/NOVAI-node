@@ -215,9 +215,7 @@ fn write_handshake_msg(stream: &mut TcpStream, payload: &[u8]) -> io::Result<()>
     Ok(())
 }
 
-fn set_handshake_timeout(
-    stream: &TcpStream,
-) -> io::Result<(Option<Duration>, Option<Duration>)> {
+fn set_handshake_timeout(stream: &TcpStream) -> io::Result<(Option<Duration>, Option<Duration>)> {
     let prev_read = stream.read_timeout()?;
     let prev_write = stream.write_timeout()?;
     let timeout = Some(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS));

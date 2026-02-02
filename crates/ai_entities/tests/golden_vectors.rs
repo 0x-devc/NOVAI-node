@@ -6,6 +6,8 @@
 //! ```
 
 use novai_ai_entities::{AiEntity, AutonomyMode, Capabilities};
+// Golden vector tests intentionally use v1 codec to verify backward compatibility
+#[allow(deprecated)]
 use novai_codec::ai_entity_codec::{decode_ai_entity_v1, encode_ai_entity_v1};
 use std::fs;
 use std::path::PathBuf;
@@ -30,6 +32,7 @@ fn golden_test_entity() -> AiEntity {
 }
 
 #[test]
+#[allow(deprecated)] // Intentionally tests v1 codec for backward compatibility
 fn golden_ai_entity_v1() {
     let entity = golden_test_entity();
     let bytes = encode_ai_entity_v1(&entity);
@@ -61,6 +64,7 @@ fn golden_ai_entity_v1() {
 }
 
 #[test]
+#[allow(deprecated)] // Intentionally tests v1 codec for backward compatibility
 fn golden_vector_is_stable_across_runs() {
     // This test verifies that encoding the same entity twice
     // produces identical bytes, catching any nondeterminism.
@@ -76,6 +80,7 @@ fn golden_vector_is_stable_across_runs() {
 }
 
 #[test]
+#[allow(deprecated)] // Intentionally tests v1 codec for backward compatibility
 fn golden_vector_has_correct_length() {
     let entity = golden_test_entity();
     let bytes = encode_ai_entity_v1(&entity);

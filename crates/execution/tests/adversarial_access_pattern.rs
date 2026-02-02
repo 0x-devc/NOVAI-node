@@ -22,17 +22,16 @@
 #![allow(clippy::doc_markdown)]
 
 use novai_ai_entities::{
-    ActivityCountData, AggregateVolumeData, AiEntity, AutonomyMode, Capabilities, DerivedSourceType,
-    DerivedView, DerivedViewSchema, PoolSizeData,
+    ActivityCountData, AggregateVolumeData, AiEntity, AutonomyMode, Capabilities,
+    DerivedSourceType, DerivedView, DerivedViewSchema, PoolSizeData,
 };
 use novai_execution::{
-    create_derived_view_audit_entry, is_derived_view, is_private_key,
-    read_derived_view_with_audit, validate_derived_view_access, validate_nnpx_access,
-    write_derived_view_ops, Caller, ExecError,
+    create_derived_view_audit_entry, is_derived_view, is_private_key, read_derived_view_with_audit,
+    validate_derived_view_access, validate_nnpx_access, write_derived_view_ops, Caller, ExecError,
 };
 use novai_state::{
-    derived_view_audit_key, KvBatch, MemKv, WriteOp, KEY_PREFIX_NNPX,
-    KEY_PREFIX_NNPX_COMMITMENTS, KEY_PREFIX_NNPX_ENCRYPTED, KEY_PREFIX_NNPX_NULLIFIERS,
+    derived_view_audit_key, KvBatch, MemKv, WriteOp, KEY_PREFIX_NNPX, KEY_PREFIX_NNPX_COMMITMENTS,
+    KEY_PREFIX_NNPX_ENCRYPTED, KEY_PREFIX_NNPX_NULLIFIERS,
 };
 
 // ============================================================================
@@ -83,11 +82,17 @@ fn store_test_view(db: &mut MemKv, schema_id: u32, creator: [u8; 32], height: u6
             pool_size: 5_000_000,
         }
         .encode(),
-        _ => panic!("Unknown schema_id {}", schema_id),
+        _ => panic!("Unknown schema_id {schema_id}"),
     };
 
-    let view = DerivedView::new(DerivedSourceType::ChainAggregate, schema_id, height, creator, data)
-        .expect("Valid derived view");
+    let view = DerivedView::new(
+        DerivedSourceType::ChainAggregate,
+        schema_id,
+        height,
+        creator,
+        data,
+    )
+    .expect("Valid derived view");
 
     let ops = write_derived_view_ops(&view);
     db.apply_batch(&ops).unwrap();
@@ -178,8 +183,7 @@ fn test_ai_cannot_enumerate_nnpx_keys() {
         let result: Result<(), ExecError<()>> = validate_nnpx_access(&key, &ai_caller);
         assert!(
             matches!(result, Err(ExecError::NnpxAccessDenied)),
-            "AI must be denied access to nnpx/ + byte 0x{:02x}",
-            suffix_byte,
+            "AI must be denied access to nnpx/ + byte 0x{suffix_byte:02x}",
         );
     }
 
@@ -187,14 +191,15 @@ fn test_ai_cannot_enumerate_nnpx_keys() {
     for i in 0..20 {
         let mut key = KEY_PREFIX_NNPX.to_vec();
         // Append deterministic "random" bytes
-        let suffix: Vec<u8> = (0..64).map(|j| ((i * 37 + j * 13) % 256) as u8).collect();
+        let suffix: Vec<u8> = (0..64)
+            .map(|j: i32| u8::try_from((i * 37 + j * 13) % 256).expect("mod 256 fits in u8"))
+            .collect();
         key.extend_from_slice(&suffix);
 
         let result: Result<(), ExecError<()>> = validate_nnpx_access(&key, &ai_caller);
         assert!(
             matches!(result, Err(ExecError::NnpxAccessDenied)),
-            "AI must be denied access to nnpx/ with random suffix #{}",
-            i,
+            "AI must be denied access to nnpx/ with random suffix #{i}",
         );
     }
 }
@@ -236,14 +241,14 @@ fn test_ai_cannot_read_nnpx_via_account_key_prefix_manipulation() {
 
     // Keys that do NOT start with nnpx/ are allowed (even if they mention "nnpx")
     let allowed_keys: Vec<&[u8]> = vec![
-        b"accounts/nnpx/something",         // "nnpx" is in value, not prefix
-        b"ai/entities/nnpx_reader",          // mentions nnpx but not prefix
-        b"derived_views/nnpx_aggregate",     // derived view namespace
-        b"nnp",                              // incomplete prefix
-        b"nnpx",                             // missing trailing slash
-        b"NNPX/commitments/abc",             // wrong case
-        b"xnnpx/commitments/abc",            // wrong prefix
-        b" nnpx/commitments/abc",            // leading space
+        b"accounts/nnpx/something",      // "nnpx" is in value, not prefix
+        b"ai/entities/nnpx_reader",      // mentions nnpx but not prefix
+        b"derived_views/nnpx_aggregate", // derived view namespace
+        b"nnp",                          // incomplete prefix
+        b"nnpx",                         // missing trailing slash
+        b"NNPX/commitments/abc",         // wrong case
+        b"xnnpx/commitments/abc",        // wrong prefix
+        b" nnpx/commitments/abc",        // leading space
     ];
 
     for key in &allowed_keys {
@@ -280,8 +285,7 @@ fn test_ai_reads_only_reveal_derived_view_ids() {
     let view_id = view.view_id;
 
     // Read the view (generates audit entry)
-    let (read_view, audit_op) =
-        read_derived_view_with_audit(&db, &entity, &view_id, 5000).unwrap();
+    let (read_view, audit_op) = read_derived_view_with_audit(&db, &entity, &view_id, 5000).unwrap();
 
     // Verify we got the correct view back
     assert_eq!(read_view.view_id, view_id);
@@ -312,7 +316,11 @@ fn test_ai_reads_only_reveal_derived_view_ids() {
             assert_eq!(recorded_height, 5000, "Audit must record correct height");
 
             // Value is ONLY the view_id (32 bytes) - NO view content
-            assert_eq!(value.len(), 32, "Audit value must be exactly 32 bytes (view_id only)");
+            assert_eq!(
+                value.len(),
+                32,
+                "Audit value must be exactly 32 bytes (view_id only)"
+            );
             assert_eq!(
                 value.as_slice(),
                 &view_id,
@@ -369,8 +377,7 @@ fn test_audit_log_does_not_leak_query_content() {
                 assert_eq!(
                     value.len(),
                     32,
-                    "Audit value must be 32 bytes at height {}",
-                    height
+                    "Audit value must be 32 bytes at height {height}",
                 );
                 assert_eq!(value.as_slice(), view_id.as_slice());
 
@@ -520,8 +527,7 @@ fn test_access_pattern_across_schemas_reveals_nothing() {
 
     // Verify pool size is independent of volume (different aggregate)
     assert_ne!(
-        pool.pool_size,
-        vol.total_volume,
+        pool.pool_size, vol.total_volume,
         "Pool size and volume are independent aggregates"
     );
 }
@@ -578,7 +584,11 @@ fn test_ai_cannot_read_derived_view_with_forged_capability() {
     // Attempt 3: Validate that capability byte encoding is correct
     // (ensure bit 4 being off means read_nnpx_derived=false)
     let caps_byte = max_caps_no_derived.to_byte();
-    assert_eq!(caps_byte & (1 << 4), 0, "Bit 4 must be 0 when read_nnpx_derived=false");
+    assert_eq!(
+        caps_byte & (1 << 4),
+        0,
+        "Bit 4 must be 0 when read_nnpx_derived=false"
+    );
 
     // Attempt 4: Decode from a byte with bit 4 set → read_nnpx_derived=true
     let forged_byte = caps_byte | (1 << 4);

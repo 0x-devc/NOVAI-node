@@ -21,8 +21,10 @@ use novai_state::{
     WriteOp, KEY_FEE_POOL, KEY_SMT_ROOT,
 };
 
-use novai_governance::{decode_proposal_v1, encode_proposal_v1, Proposal, ProposalState, ProposalType};
 use novai_ai_entities::tiers::ActionType;
+use novai_governance::{
+    decode_proposal_v1, encode_proposal_v1, Proposal, ProposalState, ProposalType,
+};
 
 use novai_smt::hash::{empty_hash_at_height, Hash32};
 use novai_smt::node::Node;
@@ -282,8 +284,8 @@ pub struct SubmitProposalPayloadV1 {
     pub proposal_type: ProposalType,
     /// Gate ID that must approve this proposal.
     pub gate_id: [u8; 32],
-    /// Encoded proposal data (interpretation depends on proposal_type).
-    /// For ModuleActivation/ModuleRollback: entity_id (32 bytes)
+    /// Encoded proposal data (interpretation depends on `proposal_type`).
+    /// For `ModuleActivation`/`ModuleRollback`: `entity_id` (32 bytes)
     pub proposal_data: Vec<u8>,
 }
 
@@ -1008,7 +1010,7 @@ pub fn read_approval_gate<K: Kv>(
 /// # Validation
 /// 1. Gate must exist
 /// 2. Proposal type must be valid
-/// 3. For ModuleActivation/Rollback: entity_id must be 32 bytes
+/// 3. For `ModuleActivation`/`Rollback`: `entity_id` must be 32 bytes
 ///
 /// # State Changes
 /// - Store proposal at `governance/proposals/{proposal_id}`
@@ -1053,7 +1055,10 @@ pub fn apply_governance_submit_tx<K: KvBatch>(
 
     // Week 25 Hardening (A25.4): Block Tier 0 actions at submission
     // ParamChange and PolicyChange accept arbitrary data that could encode Tier 0 actions
-    if matches!(payload.proposal_type, ProposalType::ParamChange | ProposalType::PolicyChange) {
+    if matches!(
+        payload.proposal_type,
+        ProposalType::ParamChange | ProposalType::PolicyChange
+    ) {
         if let Some(&first_byte) = payload.proposal_data.first() {
             // Tier 0 actions (ModifyConsensusRule=0, ModifyStateTransition=1) are NEVER allowed
             if first_byte == ActionType::ModifyConsensusRule.to_byte()
@@ -1113,12 +1118,12 @@ pub fn apply_governance_submit_tx<K: KvBatch>(
 /// # Validation
 /// 1. Proposal must exist
 /// 2. Proposal must be in Approved or Executable state
-/// 3. Timelock must have elapsed (current_height >= executable_at)
+/// 3. Timelock must have elapsed (`current_height` >= `executable_at`)
 /// 4. Proposal must not be expired
 ///
 /// # State Changes
-/// - For ModuleActivation: Set entity.is_active = true
-/// - For ModuleRollback: Set entity.is_active = false
+/// - For `ModuleActivation`: Set `entity.is_active` = true
+/// - For `ModuleRollback`: Set `entity.is_active` = false
 /// - Update proposal state to Executed
 ///
 /// # Errors

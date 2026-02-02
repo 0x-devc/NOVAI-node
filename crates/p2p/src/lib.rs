@@ -194,7 +194,10 @@ pub fn read_wire_message(stream: &mut impl Read) -> Result<NetworkMessage, P2PEr
 ///
 /// # Errors
 /// Returns error if encoding or write fails.
-pub fn write_wire_message(stream: &mut (impl Write + ?Sized), msg: &NetworkMessage) -> Result<(), P2PError> {
+pub fn write_wire_message(
+    stream: &mut (impl Write + ?Sized),
+    msg: &NetworkMessage,
+) -> Result<(), P2PError> {
     let wire = encode_wire_message(msg)?;
     stream.write_all(&wire)?;
     stream.flush()?;
@@ -273,10 +276,7 @@ impl PeerManager {
 ///
 /// # Errors
 /// Returns error if binding fails.
-pub fn start_listener<F>(
-    bind_addr: SocketAddr,
-    on_peer_connected: F,
-) -> Result<(), P2PError>
+pub fn start_listener<F>(bind_addr: SocketAddr, on_peer_connected: F) -> Result<(), P2PError>
 where
     F: Fn(TcpStream) + Send + 'static,
 {
