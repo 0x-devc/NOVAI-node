@@ -2557,6 +2557,7 @@ dependencies = [
  "novai-consensus-types",
  "sha2",
  "snow",
+ "x25519-dalek",
 ]
 
 [[package]]

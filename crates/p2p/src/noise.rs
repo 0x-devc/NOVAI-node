@@ -47,6 +47,18 @@ pub fn noise_keypair_from_seed(ed25519_seed: &[u8; 32]) -> [u8; 32] {
     key
 }
 
+/// Derive an X25519 **public** key from an Ed25519 seed.
+///
+/// First derives the private key via `noise_keypair_from_seed`, then computes
+/// the corresponding X25519 public key. Use this for peer identity verification.
+#[must_use]
+pub fn noise_pubkey_from_seed(ed25519_seed: &[u8; 32]) -> [u8; 32] {
+    let private_key = noise_keypair_from_seed(ed25519_seed);
+    let secret = x25519_dalek::StaticSecret::from(private_key);
+    let public = x25519_dalek::PublicKey::from(&secret);
+    public.to_bytes()
+}
+
 /// Encrypted writer half of a Noise-wrapped TCP connection.
 ///
 /// Chunks plaintext into ≤`NOISE_MAX_PLAINTEXT_CHUNK`-byte segments,
@@ -530,12 +542,13 @@ mod tests {
 
     #[test]
     fn is_known_validator_matches() {
-        let key_a = noise_keypair_from_seed(&[0u8; 32]);
-        let key_b = noise_keypair_from_seed(&[1u8; 32]);
+        // Use PUBLIC keys for validator matching (as received during handshake)
+        let pubkey_a = noise_pubkey_from_seed(&[0u8; 32]);
+        let pubkey_b = noise_pubkey_from_seed(&[1u8; 32]);
 
-        let known = vec![key_a, key_b];
-        assert!(is_known_validator(&key_a, &known));
-        assert!(is_known_validator(&key_b, &known));
+        let known = vec![pubkey_a, pubkey_b];
+        assert!(is_known_validator(&pubkey_a, &known));
+        assert!(is_known_validator(&pubkey_b, &known));
         assert!(!is_known_validator(&[99u8; 32], &known));
     }
 }

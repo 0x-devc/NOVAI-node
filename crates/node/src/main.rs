@@ -391,10 +391,10 @@ fn main() {
                     );
                 }
 
-                // Precompute X25519 noise keys for all dev validators
+                // Precompute X25519 noise PUBLIC keys for all dev validators
                 let noise_keys: Vec<[u8; 32]> = dev_seeds
                     .iter()
-                    .map(novai_p2p::noise::noise_keypair_from_seed)
+                    .map(novai_p2p::noise::noise_pubkey_from_seed)
                     .collect();
 
                 let key = dev_validator_keys[idx].clone();
