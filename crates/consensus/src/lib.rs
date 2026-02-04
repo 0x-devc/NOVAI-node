@@ -968,6 +968,15 @@ impl ConsensusState {
         self.qc_cache.retain(|&height, _| height >= prune_below);
         self.block_by_hash
             .retain(|_, block| block.height >= prune_below);
+
+        // MEMORY LEAK FIX: Prune pending_votes for long-committed blocks.
+        // Keep votes only if ANY vote in the Vec has height >= prune_below.
+        self.pending_votes
+            .retain(|_, votes| votes.iter().any(|v| v.height >= prune_below));
+
+        // MEMORY LEAK FIX: Prune pending_timeouts for old heights.
+        self.pending_timeouts
+            .retain(|&(height, _), _| height >= prune_below);
     }
 
     /// Apply commits with AI hook integration.
