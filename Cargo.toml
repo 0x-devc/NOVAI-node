@@ -16,6 +16,7 @@ members = [
     "crates/consensus",
     "crates/genesis",
     "tools/tx-generator",
+    "tools/genesis-generator",
 ]
 
 resolver = "2"

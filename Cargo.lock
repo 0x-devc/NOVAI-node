@@ -1104,6 +1104,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "genesis-generator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "genesis",
+ "hex",
+ "novai-consensus-types",
+ "novai-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"

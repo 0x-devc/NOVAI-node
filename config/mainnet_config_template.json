@@ -1,0 +1,57 @@
+{
+    "_comment": "NOVAI Mainnet Genesis Configuration Template",
+    "_version": "1.0.0",
+    "_instructions": "Replace all <PLACEHOLDER> values before genesis ceremony",
+
+    "chain_id": "novai-mainnet-1",
+    "protocol_version": 1,
+    "timestamp": "<GENESIS_TIMESTAMP_RFC3339>",
+
+    "validators": [
+        {
+            "pubkey": "<VALIDATOR_1_PUBKEY_64_HEX>",
+            "initial_stake": "1000000000000",
+            "name": "validator-1"
+        },
+        {
+            "pubkey": "<VALIDATOR_2_PUBKEY_64_HEX>",
+            "initial_stake": "1000000000000",
+            "name": "validator-2"
+        },
+        {
+            "pubkey": "<VALIDATOR_3_PUBKEY_64_HEX>",
+            "initial_stake": "1000000000000",
+            "name": "validator-3"
+        },
+        {
+            "pubkey": "<VALIDATOR_4_PUBKEY_64_HEX>",
+            "initial_stake": "1000000000000",
+            "name": "validator-4"
+        }
+    ],
+
+    "accounts": {
+        "<TREASURY_ADDRESS_64_HEX>": "1000000000000000",
+        "<FOUNDATION_ADDRESS_64_HEX>": "500000000000000",
+        "<ECOSYSTEM_ADDRESS_64_HEX>": "300000000000000"
+    },
+
+    "_ai_entities_note": "AI entities are registered post-genesis via governance transactions. This array is empty at genesis.",
+    "ai_entities": [],
+
+    "approval_gates": [
+        {
+            "gate_type": "multisig",
+            "required_approvers": [
+                "<APPROVER_1_ADDRESS_64_HEX>",
+                "<APPROVER_2_ADDRESS_64_HEX>",
+                "<APPROVER_3_ADDRESS_64_HEX>"
+            ],
+            "threshold": 2,
+            "timelock_blocks": 1000,
+            "expiry_blocks": 50000,
+            "veto_enabled": true,
+            "freeze_enabled": false
+        }
+    ]
+}
