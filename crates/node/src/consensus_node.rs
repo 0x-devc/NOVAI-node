@@ -230,7 +230,10 @@ impl ConsensusNode {
                             if !node_clone.verify_peer_identity(&result.remote_static_key) {
                                 return;
                             }
-                            node_clone.peer_manager.add_peer(Box::new(result.writer));
+                            if !node_clone.peer_manager.add_peer(Box::new(result.writer)) {
+                                tracing::warn!("Peer rejected: connection limit reached");
+                                return;
+                            }
                             node_clone.handle_peer_connection(result.reader);
                         }
                         Err(e) => {
@@ -246,7 +249,10 @@ impl ConsensusNode {
                             return;
                         }
                     };
-                    node_clone.peer_manager.add_peer(Box::new(write_stream));
+                    if !node_clone.peer_manager.add_peer(Box::new(write_stream)) {
+                        tracing::warn!("Peer rejected: connection limit reached");
+                        return;
+                    }
                     node_clone.handle_peer_connection(stream);
                 }
             });
@@ -271,7 +277,9 @@ impl ConsensusNode {
                 return Err("Rejected: remote peer not in validator set".into());
             }
 
-            self.peer_manager.add_peer(Box::new(result.writer));
+            if !self.peer_manager.add_peer(Box::new(result.writer)) {
+                return Err("Peer rejected: connection limit reached".into());
+            }
 
             let node = Arc::clone(self);
             thread::spawn(move || {
@@ -282,7 +290,9 @@ impl ConsensusNode {
             let write_stream = stream
                 .try_clone()
                 .map_err(|e| format!("Failed to clone stream: {:?}", e))?;
-            self.peer_manager.add_peer(Box::new(write_stream));
+            if !self.peer_manager.add_peer(Box::new(write_stream)) {
+                return Err("Peer rejected: connection limit reached".into());
+            }
 
             let node = Arc::clone(self);
             thread::spawn(move || {

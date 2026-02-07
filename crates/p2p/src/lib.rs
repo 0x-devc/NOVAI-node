@@ -204,6 +204,9 @@ pub fn write_wire_message(
     Ok(())
 }
 
+/// Maximum number of simultaneous peer connections.
+pub const MAX_PEERS: usize = 128;
+
 /// Minimal peer connection manager.
 ///
 /// Stores write halves of peer connections (plain `TcpStream` or `NoiseWriter`).
@@ -227,11 +230,19 @@ impl PeerManager {
 
     /// Add a connected peer's write half.
     ///
+    /// Returns `false` if the peer was rejected because the connection
+    /// limit ([`MAX_PEERS`]) has been reached.
+    ///
     /// # Panics
     /// Panics if the mutex is poisoned.
-    pub fn add_peer(&self, writer: Box<dyn Write + Send>) {
+    pub fn add_peer(&self, writer: Box<dyn Write + Send>) -> bool {
         let mut peers = self.peers.lock().unwrap();
+        if peers.len() >= MAX_PEERS {
+            tracing::warn!(max = MAX_PEERS, "Peer connection rejected: at capacity");
+            return false;
+        }
         peers.push(writer);
+        true
     }
 
     /// Broadcast a message to all connected peers.
