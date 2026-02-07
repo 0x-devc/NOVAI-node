@@ -72,29 +72,41 @@ impl Default for SpamThresholds {
 pub enum SpamPatternKind {
     /// Sender has high rate of invalid/rejected transactions.
     HighInvalidRate {
+        /// Address of the offending sender.
         sender: Address,
+        /// Number of invalid transactions from this sender.
         invalid_count: u64,
+        /// Total transactions submitted by this sender.
         total_count: u64,
+        /// Rejection percentage (0-100).
         rejection_pct: u64,
     },
 
     /// Sender is submitting transactions at abnormally high rate.
     HighTxRate {
+        /// Address of the high-rate sender.
         sender: Address,
+        /// Number of transactions in the observation window.
         tx_count: u64,
+        /// Rate threshold that was exceeded.
         threshold: u64,
     },
 
     /// Mempool size spiked significantly above baseline.
     MempoolSpike {
+        /// Current mempool transaction count.
         current_size: u64,
+        /// Baseline mempool size.
         baseline_size: u64,
     },
 
     /// Sender flooding with low-fee transactions.
     LowFeeFlood {
+        /// Address of the flooding sender.
         sender: Address,
+        /// Number of low-fee transactions from this sender.
         low_fee_count: u64,
+        /// Fee threshold below which transactions are counted.
         threshold_fee: u64,
     },
 }

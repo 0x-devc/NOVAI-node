@@ -95,11 +95,17 @@ impl SenderStats {
 /// Reason a transaction was rejected (for statistics only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxRejectionReason {
+    /// Transaction signature failed verification.
     InvalidSignature,
+    /// Transaction nonce is below the expected account nonce.
     NonceTooLow,
+    /// Transaction fee is below the minimum policy threshold.
     FeeTooLow,
+    /// Transaction is a duplicate of one already in the mempool.
     Duplicate,
+    /// Transaction `from` address does not match the signing public key.
     AddressMismatch,
+    /// Any other rejection reason.
     Other,
 }
 

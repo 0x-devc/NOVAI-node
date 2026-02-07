@@ -79,23 +79,35 @@ impl Default for AnomalyThresholds {
 pub enum AnomalyKind {
     /// Validator missed significantly more blocks than average.
     MissedBlocks {
+        /// Address of the underperforming validator.
         validator: Address,
+        /// Number of blocks missed by this validator.
         missed_count: u64,
+        /// Average missed blocks across all validators.
         average_missed: u64,
     },
 
     /// Vote delay significantly exceeded p95.
-    VoteDelay { delay_ms: u64, p95_delay_ms: u64 },
+    VoteDelay {
+        /// Observed vote delay in milliseconds.
+        delay_ms: u64,
+        /// 95th-percentile vote delay baseline.
+        p95_delay_ms: u64,
+    },
 
     /// Peer count changed significantly from baseline.
     PeerChurn {
+        /// Current number of connected peers.
         current_peers: u64,
+        /// Expected baseline peer count.
         baseline_peers: u64,
     },
 
     /// Mempool size significantly exceeded normal.
     MempoolCongestion {
+        /// Current mempool transaction count.
         current_size: u64,
+        /// Baseline mempool size.
         baseline_size: u64,
     },
 }
