@@ -350,7 +350,9 @@ impl ArtifactStore for HttpFetchStore {
 
                     // Read body with size limit
                     let mut content = Vec::new();
-                    let mut reader = response.into_reader().take(MAX_ARTIFACT_SIZE as u64 + 1);
+                    let reader = response.into_reader();
+                    let mut reader =
+                        std::io::Read::take(reader, MAX_ARTIFACT_SIZE as u64 + 1);
 
                     std::io::Read::read_to_end(&mut reader, &mut content).map_err(|e| {
                         ArtifactError::NetworkError(format!("failed to read response: {}", e))
