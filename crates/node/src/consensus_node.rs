@@ -471,12 +471,17 @@ impl ConsensusNode {
             "Received block request"
         );
 
+        // Clamp range to SYNC_CHUNK_SIZE to prevent malicious large requests
+        let clamped_end = request
+            .end_height
+            .min(request.start_height.saturating_add(SYNC_CHUNK_SIZE - 1));
+
         let state = self.state.lock().unwrap();
         let db = self.db.lock().unwrap();
 
         // Load individual blocks from DB, falling back to in-memory cache
         let mut blocks = Vec::new();
-        for height in request.start_height..=request.end_height {
+        for height in request.start_height..=clamped_end {
             match ConsensusState::load_block(&*db, height) {
                 Ok(Some(block)) => blocks.push(block),
                 _ => {
