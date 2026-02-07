@@ -48,17 +48,23 @@ pub fn pubkey_from_bytes(bytes: &[u8; 32]) -> Result<VerifyingKey, CryptoError> 
     VerifyingKey::from_bytes(bytes).map_err(|_| CryptoError::InvalidPublicKey)
 }
 
-/// Week 2 rule: sign TxV1 over canonical *unsigned* bytes (everything except `sig`).
+/// Week 2 rule: sign TxV1 over domain-tagged canonical *unsigned* bytes.
 pub fn sign_tx_v1(sk: &SigningKey, tx: &mut TxV1) -> Result<(), CryptoError> {
     let unsigned = encode_tx_v1_unsigned(tx).map_err(CryptoError::Codec)?;
-    tx.sig = sign_bytes(sk, &unsigned);
+    let mut to_sign = Vec::with_capacity(b"NOVAI_TX_V1".len() + unsigned.len());
+    to_sign.extend_from_slice(b"NOVAI_TX_V1");
+    to_sign.extend_from_slice(&unsigned);
+    tx.sig = sign_bytes(sk, &to_sign);
     Ok(())
 }
 
-/// Week 2 rule: verify TxV1 signature over canonical *unsigned* bytes.
+/// Week 2 rule: verify TxV1 signature over domain-tagged canonical *unsigned* bytes.
 pub fn verify_tx_v1(pk: &VerifyingKey, tx: &TxV1) -> Result<bool, CryptoError> {
     let unsigned = encode_tx_v1_unsigned(tx).map_err(CryptoError::Codec)?;
-    Ok(verify_bytes(pk, &unsigned, &tx.sig))
+    let mut to_verify = Vec::with_capacity(b"NOVAI_TX_V1".len() + unsigned.len());
+    to_verify.extend_from_slice(b"NOVAI_TX_V1");
+    to_verify.extend_from_slice(&unsigned);
+    Ok(verify_bytes(pk, &to_verify, &tx.sig))
 }
 
 /// Test helper: build a TxV1 with valid keypair, signature, and address.
