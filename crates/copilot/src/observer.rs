@@ -74,9 +74,11 @@ pub struct LoggingCallback;
 
 impl AnomalyCallback for LoggingCallback {
     fn on_anomaly(&self, _payload: SignalPayload, signal: AiSignalV1) {
-        println!(
-            "🚨 ANOMALY DETECTED: height={} confidence={} type={:?}",
-            signal.height, signal.confidence, signal.signal_type
+        tracing::warn!(
+            height = signal.height,
+            confidence = signal.confidence,
+            signal_type = ?signal.signal_type,
+            "ANOMALY DETECTED"
         );
     }
 }
@@ -123,18 +125,18 @@ pub struct LoggingMemoryCallback;
 
 impl MemoryCallback for LoggingMemoryCallback {
     fn on_chain_summary(&self, object_type: MemoryObjectType, data: Vec<u8>) {
-        println!(
-            "📊 CHAIN SUMMARY: type={:?} data_len={}",
-            object_type,
-            data.len()
+        tracing::debug!(
+            object_type = ?object_type,
+            data_len = data.len(),
+            "CHAIN SUMMARY"
         );
     }
 
     fn on_statistics_snapshot(&self, object_type: MemoryObjectType, data: Vec<u8>) {
-        println!(
-            "📈 STATISTICS SNAPSHOT: type={:?} data_len={}",
-            object_type,
-            data.len()
+        tracing::debug!(
+            object_type = ?object_type,
+            data_len = data.len(),
+            "STATISTICS SNAPSHOT"
         );
     }
 }

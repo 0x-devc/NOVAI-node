@@ -154,7 +154,7 @@ pub fn start_rpc_server(bind_addr: &str, mempool: Arc<Mutex<TxMempool>>) -> Resu
 
     let server = Server::http(addr).map_err(|e| format!("failed to start RPC server: {e}"))?;
 
-    println!("🔌 RPC server listening on http://{}", addr);
+    tracing::info!(%addr, "RPC server listening");
 
     thread::spawn(move || {
         for mut request in server.incoming_requests() {
@@ -261,10 +261,7 @@ pub fn start_rpc_server_with_state(
 
     let server = Server::http(addr).map_err(|e| format!("failed to start RPC server: {e}"))?;
 
-    println!(
-        "🔌 RPC server listening on http://{} (with state queries)",
-        addr
-    );
+    tracing::info!(%addr, "RPC server listening (with state queries)");
 
     thread::spawn(move || {
         for mut request in server.incoming_requests() {

@@ -468,7 +468,7 @@ impl ConsensusState {
 
         // Advisory AI signal logging (does NOT affect vote validity)
         if let Some(commitment) = vote.ai_signal_commitment {
-            println!("📊 Vote includes AI signal: {:?}", commitment);
+            tracing::debug!(?commitment, "Vote includes AI signal");
         }
 
         // Mark this voter as having voted in this round
@@ -747,9 +747,11 @@ impl ConsensusState {
         self.timed_out_in_round.clear();
         self.last_proposed = None;
 
-        println!(
-            "⏰ ROUND ADVANCED to round={} at height={} (quorum at round={})",
-            self.round, expected_height, target_round
+        tracing::info!(
+            round = self.round,
+            height = expected_height,
+            quorum_round = target_round,
+            "ROUND ADVANCED"
         );
 
         true
@@ -927,10 +929,10 @@ impl ConsensusState {
             self.block_cache.remove(&block.height);
 
             // Log commit
-            println!(
-                "✅ COMMITTED block at height={} (state_root={:?})",
-                block.height,
-                &block.state_root[..4]
+            tracing::info!(
+                height = block.height,
+                state_root = ?&block.state_root[..4],
+                "COMMITTED block"
             );
         }
 
@@ -1397,9 +1399,11 @@ impl ConsensusState {
         // Update height to match target
         self.height = target_height;
 
-        println!(
-            "🔄 CATCH-UP complete: loaded {} blocks (heights {}..={})",
-            count, start_height, target_height
+        tracing::info!(
+            count,
+            start_height,
+            target_height,
+            "CATCH-UP complete"
         );
 
         Ok(count)
@@ -1437,11 +1441,11 @@ impl ConsensusState {
                 for block in blocks {
                     state.cache_block(block);
                 }
-                println!(
-                    "🔄 RECOVERY: Cached {} blocks (heights {}..={})",
-                    state.block_cache.len(),
+                tracing::info!(
+                    cached = state.block_cache.len(),
                     start,
-                    state.committed_height
+                    end = state.committed_height,
+                    "RECOVERY: Cached blocks"
                 );
             }
         }
@@ -1464,10 +1468,10 @@ impl ConsensusState {
         // Determine current height from committed height
         let height = committed_height;
 
-        println!(
-            "🔄 RECOVERED consensus state: committed_height={}, highest_qc={:?}",
+        tracing::info!(
             committed_height,
-            highest_qc.as_ref().map(|q| q.height)
+            highest_qc = ?highest_qc.as_ref().map(|q| q.height),
+            "RECOVERED consensus state"
         );
 
         Ok(Self {

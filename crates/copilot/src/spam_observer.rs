@@ -67,9 +67,11 @@ pub struct LoggingSpamCallback;
 
 impl SpamCallback for LoggingSpamCallback {
     fn on_spam_detected(&self, _payload: SignalPayload, signal: AiSignalV1) {
-        println!(
-            "⚠️  SPAM DETECTED (advisory): height={} confidence={} type={:?}",
-            signal.height, signal.confidence, signal.signal_type
+        tracing::warn!(
+            height = signal.height,
+            confidence = signal.confidence,
+            signal_type = ?signal.signal_type,
+            "SPAM DETECTED (advisory)"
         );
     }
 }

@@ -13,6 +13,7 @@ novai-execution = { path = "../execution", version = "0.1.0" }
 novai-state = { path = "../state", version = "0.1.0" }
 mempool = { path = "../mempool", version = "0.1.0" }
 ed25519-dalek = "=2.1.1"
+tracing = "0.1"
 
 [dev-dependencies]
 rand_core = { version = "0.6", features = ["getrandom"] }

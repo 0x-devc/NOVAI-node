@@ -161,15 +161,15 @@ impl ConsensusNode {
         // Attempt recovery from persistent state
         let state = match ConsensusState::recover(our_address, &storage) {
             Ok(recovered) => {
-                println!(
-                    "🔄 Recovered state: committed_height={}, highest_qc={}",
-                    recovered.committed_height,
-                    recovered.highest_qc.as_ref().map(|q| q.height).unwrap_or(0),
+                tracing::info!(
+                    committed_height = recovered.committed_height,
+                    highest_qc = recovered.highest_qc.as_ref().map(|q| q.height).unwrap_or(0),
+                    "Recovered state"
                 );
                 recovered
             }
             Err(e) => {
-                println!("ℹ️  No prior state to recover ({:?}), starting fresh", e);
+                tracing::info!(?e, "No prior state to recover, starting fresh");
                 ConsensusState::new(our_address)
             }
         };
@@ -234,7 +234,7 @@ impl ConsensusNode {
                             node_clone.handle_peer_connection(result.reader);
                         }
                         Err(e) => {
-                            eprintln!("⚠️ Noise handshake failed (responder): {:?}", e);
+                            tracing::warn!(?e, "Noise handshake failed (responder)");
                         }
                     }
                 } else {
@@ -242,7 +242,7 @@ impl ConsensusNode {
                     let write_stream = match stream.try_clone() {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("Failed to clone accepted stream: {e}");
+                            tracing::error!("Failed to clone accepted stream: {e}");
                             return;
                         }
                     };
@@ -305,9 +305,9 @@ impl ConsensusNode {
         if is_known_validator(remote_static, &self.known_noise_keys) {
             true
         } else {
-            eprintln!(
-                "🚫 Rejected unknown peer: noise key {}",
-                hex::encode(remote_static)
+            tracing::warn!(
+                noise_key = %hex::encode(remote_static),
+                "Rejected unknown peer"
             );
             false
         }
@@ -349,15 +349,15 @@ impl ConsensusNode {
         match state.create_timeout(&self.signing_key) {
             Ok(timeout) => {
                 *self.last_timeout_time.lock().unwrap() = Some(Instant::now());
-                println!(
-                    "⏰ TIMEOUT triggered for round={} after {:?}",
-                    state.round,
-                    start_time.elapsed()
+                tracing::info!(
+                    round = state.round,
+                    elapsed = ?start_time.elapsed(),
+                    "TIMEOUT triggered"
                 );
                 Some(timeout)
             }
             Err(e) => {
-                eprintln!("❌ Failed to create timeout: {:?}", e);
+                tracing::error!(?e, "Failed to create timeout");
                 None
             }
         }
@@ -367,7 +367,7 @@ impl ConsensusNode {
     ///
     /// Returns Ok(true) if round was advanced, Ok(false) otherwise.
     pub fn handle_timeout(&self, timeout: Timeout) -> Result<bool, String> {
-        println!("⏰ Received timeout from {:?}", &timeout.voter[..4]);
+        tracing::debug!(voter = ?&timeout.voter[..4], "Received timeout");
 
         let mut state = self.state.lock().unwrap();
 
@@ -384,10 +384,10 @@ impl ConsensusNode {
             *self.round_start_time.lock().unwrap() = Instant::now();
             *self.last_timeout_time.lock().unwrap() = None;
 
-            println!(
-                "⏰ ROUND ADVANCED to round={} at height={}",
-                state.round,
-                state.height + 1
+            tracing::info!(
+                round = state.round,
+                height = state.height + 1,
+                "ROUND ADVANCED"
             );
         }
 
@@ -423,11 +423,11 @@ impl ConsensusNode {
             end_height,
         };
 
-        println!(
-            "📥 Requesting blocks {}-{} from peer {:?}",
+        tracing::debug!(
             start_height,
             end_height,
-            &peer[..4]
+            peer = ?&peer[..4],
+            "Requesting blocks"
         );
 
         // Store pending request
@@ -454,11 +454,11 @@ impl ConsensusNode {
         &self,
         request: novai_consensus_types::BlockRequest,
     ) -> Result<(), String> {
-        println!(
-            "📤 Received block request for {}-{} from {:?}",
-            request.start_height,
-            request.end_height,
-            &request.requester[..4]
+        tracing::debug!(
+            start_height = request.start_height,
+            end_height = request.end_height,
+            requester = ?&request.requester[..4],
+            "Received block request"
         );
 
         let state = self.state.lock().unwrap();
@@ -483,12 +483,12 @@ impl ConsensusNode {
         drop(db);
         drop(state);
 
-        println!(
-            "📤 Sending {} blocks (requested {}-{}) to {:?}",
-            blocks.len(),
-            request.start_height,
-            request.end_height,
-            &request.requester[..4]
+        tracing::debug!(
+            count = blocks.len(),
+            start_height = request.start_height,
+            end_height = request.end_height,
+            requester = ?&request.requester[..4],
+            "Sending blocks"
         );
 
         // Send response with whatever blocks we have
@@ -513,10 +513,10 @@ impl ConsensusNode {
         &self,
         response: novai_consensus_types::BlockResponse,
     ) -> Result<(), String> {
-        println!(
-            "📥 Received {} blocks from {:?}",
-            response.blocks.len(),
-            &response.responder[..4]
+        tracing::debug!(
+            count = response.blocks.len(),
+            responder = ?&response.responder[..4],
+            "Received blocks"
         );
 
         // Clear pending request if we have one (accept from any peer)
@@ -531,9 +531,9 @@ impl ConsensusNode {
         }
 
         if response.blocks.is_empty() {
-            println!(
-                "⚠️ Peer {:?} sent empty block response",
-                &response.responder[..4]
+            tracing::warn!(
+                responder = ?&response.responder[..4],
+                "Peer sent empty block response"
             );
             return Ok(());
         }
@@ -578,11 +578,11 @@ impl ConsensusNode {
             state.cache_block(block.clone());
         }
 
-        println!(
-            "📦 Cached {} synced blocks (heights {}-{})",
-            response.blocks.len(),
-            response.blocks.first().unwrap().height,
-            response.blocks.last().unwrap().height,
+        tracing::info!(
+            count = response.blocks.len(),
+            start = response.blocks.first().unwrap().height,
+            end = response.blocks.last().unwrap().height,
+            "Cached synced blocks"
         );
 
         let last_received_height = response.blocks.last().unwrap().height;
@@ -603,10 +603,10 @@ impl ConsensusNode {
                         )
                         .map_err(|e| format!("Sync commit persist failed: {:?}", e))?;
                     state.apply_commits(&to_commit);
-                    println!(
-                        "✅ Synced and committed to height {} ({} blocks)",
-                        new_committed_height,
-                        to_commit.len()
+                    tracing::info!(
+                        committed_height = new_committed_height,
+                        count = to_commit.len(),
+                        "Synced and committed"
                     );
                 }
                 Ok(_) | Err(_) => {
@@ -627,9 +627,9 @@ impl ConsensusNode {
                 &last_received_height.to_be_bytes(),
             )
             .map_err(|e| format!("Failed to persist committed_height: {:?}", e))?;
-            println!(
-                "📦 Sync: advanced committed_height to {} (chunk complete)",
-                last_received_height
+            tracing::info!(
+                committed_height = last_received_height,
+                "Sync: advanced committed_height (chunk complete)"
             );
         }
 
@@ -709,10 +709,7 @@ impl ConsensusNode {
         drop(state);
         drop(db);
 
-        println!(
-            "📤 Proposing block at height={} round={}",
-            block.height, block.round
-        );
+        tracing::debug!(height = block.height, round = block.round, "Proposing block");
 
         self.broadcast(NetworkMessage::SignedProposal(signed_proposal))
     }
@@ -795,10 +792,7 @@ impl ConsensusNode {
         *self.round_start_time.lock().unwrap() = Instant::now();
         *self.last_timeout_time.lock().unwrap() = None;
 
-        println!(
-            "📤 Proposing block at height={} round={}",
-            block.height, block.round
-        );
+        tracing::debug!(height = block.height, round = block.round, "Proposing block");
 
         self.broadcast(NetworkMessage::SignedProposal(signed_proposal))?;
         Ok(true)
@@ -806,10 +800,7 @@ impl ConsensusNode {
 
     /// Handle incoming proposal.
     pub fn handle_proposal(&self, signed_proposal: SignedProposal) -> Result<(), String> {
-        println!(
-            "📥 Received proposal from {:?}",
-            &signed_proposal.proposer[..4]
-        );
+        tracing::debug!(proposer = ?&signed_proposal.proposer[..4], "Received proposal");
 
         let block = &signed_proposal.proposal.block;
 
@@ -912,11 +903,11 @@ impl ConsensusNode {
             };
 
             if dominated {
-                println!(
-                    "🔄 QC catch-up from proposal: advancing state with justify_qc height={} round={} (our highest_qc={:?})",
-                    justify_qc.height,
-                    justify_qc.round,
-                    state.highest_qc.as_ref().map(|q| (q.height, q.round))
+                tracing::info!(
+                    qc_height = justify_qc.height,
+                    qc_round = justify_qc.round,
+                    our_highest_qc = ?state.highest_qc.as_ref().map(|q| (q.height, q.round)),
+                    "QC catch-up from proposal"
                 );
 
                 match state.cache_qc_and_check_commit(justify_qc.clone()) {
@@ -932,9 +923,9 @@ impl ConsensusNode {
                             )
                             .map_err(|e| format!("QC catch-up atomic persist failed: {:?}", e))?;
                         state.apply_commits(&to_commit);
-                        println!(
-                            "💾 QC catch-up committed blocks up to height={}",
-                            new_committed_height
+                        tracing::info!(
+                            committed_height = new_committed_height,
+                            "QC catch-up committed blocks"
                         );
                     }
                     Ok(_) => {
@@ -947,7 +938,7 @@ impl ConsensusNode {
                         // highest_qc was already updated by cache_qc_and_check_commit.
                         // Continue to verify and vote; sync will be triggered after
                         // locks are dropped.
-                        println!("⚠️ QC catch-up commit chain incomplete: {:?}", e);
+                        tracing::warn!(?e, "QC catch-up commit chain incomplete");
                         needs_sync = true;
                         state.persist_highest_qc(&mut *db).map_err(|e| {
                             format!("QC catch-up persist highest QC failed: {:?}", e)
@@ -981,7 +972,7 @@ impl ConsensusNode {
         *self.round_start_time.lock().unwrap() = Instant::now();
         *self.last_timeout_time.lock().unwrap() = None;
 
-        println!("✅ Voting for block at height={}", block.height);
+        tracing::info!(height = block.height, "Voting for block");
 
         self.broadcast(NetworkMessage::Vote(vote))
     }
@@ -997,7 +988,7 @@ impl ConsensusNode {
 
         // Log AI signal if present (advisory only)
         if let Some(commitment) = vote.ai_signal_commitment {
-            println!("📊 Node received vote with AI signal: {:?}", commitment);
+            tracing::debug!(?commitment, "Node received vote with AI signal");
         }
 
         // Check if we're leader for the block's height
@@ -1028,7 +1019,7 @@ impl ConsensusNode {
                 sent.insert(key);
             }
 
-            println!("🎉 QC formed with {} votes!", qc.votes.len());
+            tracing::info!(votes = qc.votes.len(), "QC formed");
 
             // Process the QC locally before broadcasting.
             // Commit chain errors are non-fatal — highest_qc is updated
@@ -1048,9 +1039,9 @@ impl ConsensusNode {
                         )
                         .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
                     state.apply_commits(&to_commit);
-                    println!(
-                        "💾 Committed blocks up to height={} (formed QC locally)",
-                        new_committed_height
+                    tracing::info!(
+                        committed_height = new_committed_height,
+                        "Committed blocks (formed QC locally)"
                     );
                 }
                 Ok(_) => {
@@ -1058,13 +1049,13 @@ impl ConsensusNode {
                     state
                         .persist_highest_qc(&mut *db)
                         .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
-                    println!("💾 Persisted highest_qc={} (formed locally)", qc.height);
+                    tracing::debug!(qc_height = qc.height, "Persisted highest_qc (formed locally)");
                 }
                 Err(e) => {
                     // Commit chain incomplete — blocks missing from cache.
                     // highest_qc was already updated. Persist it and ALWAYS
                     // broadcast the QC so other nodes can advance.
-                    println!("⚠️ Commit chain incomplete (will sync): {:?}", e);
+                    tracing::warn!(?e, "Commit chain incomplete (will sync)");
                     let mut db = self.db.lock().unwrap();
                     state
                         .persist_highest_qc(&mut *db)
@@ -1091,7 +1082,7 @@ impl ConsensusNode {
 
     /// Handle incoming QC.
     pub fn handle_qc(&self, qc: QC) -> Result<(), String> {
-        println!("📜 Received QC for height={} round={}", qc.height, qc.round);
+        tracing::debug!(height = qc.height, round = qc.round, "Received QC");
 
         // CRITICAL FIX: Hold state lock across cache_qc_and_check_commit AND apply_commits
         // to prevent race condition where timeouts arriving between the two operations
@@ -1115,10 +1106,10 @@ impl ConsensusNode {
                     .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
                 state.apply_commits(&to_commit);
                 committed = true;
-                println!(
-                    "💾 Persisted state (atomic): committed_height={}, highest_qc={}",
-                    state.committed_height(),
-                    state.highest_qc.as_ref().map(|q| q.height).unwrap_or(0)
+                tracing::debug!(
+                    committed_height = state.committed_height(),
+                    highest_qc = state.highest_qc.as_ref().map(|q| q.height).unwrap_or(0),
+                    "Persisted state (atomic)"
                 );
             }
             Ok(_) => {
@@ -1127,16 +1118,16 @@ impl ConsensusNode {
                     state
                         .persist_highest_qc(&mut *db)
                         .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
-                    println!(
-                        "💾 Persisted highest_qc={} (no commit triggered)",
-                        qc.height
+                    tracing::debug!(
+                        qc_height = qc.height,
+                        "Persisted highest_qc (no commit triggered)"
                     );
                 }
             }
             Err(e) => {
                 // Commit chain incomplete — blocks missing from cache.
                 // highest_qc was already updated. Persist it and continue.
-                println!("⚠️ Commit chain incomplete (will sync): {:?}", e);
+                tracing::warn!(?e, "Commit chain incomplete (will sync)");
                 let mut db = self.db.lock().unwrap();
                 state
                     .persist_highest_qc(&mut *db)
@@ -1169,17 +1160,17 @@ impl ConsensusNode {
 
     /// Handle a peer connection (blocking, spawned per peer).
     pub fn handle_peer_connection(self: Arc<Self>, mut reader: impl std::io::Read) {
-        println!("📡 Starting receive loop for peer");
+        tracing::debug!("Starting receive loop for peer");
 
         loop {
             match read_wire_message(&mut reader) {
                 Ok(msg) => {
                     if let Err(e) = self.handle_network_message(msg) {
-                        eprintln!("❌ Message handling failed: {}", e);
+                        tracing::error!(%e, "Message handling failed");
                     }
                 }
                 Err(e) => {
-                    eprintln!("❌ Read failed from peer: {:?}, disconnecting", e);
+                    tracing::error!(?e, "Read failed from peer, disconnecting");
                     break;
                 }
             }
@@ -1213,7 +1204,7 @@ impl ConsensusNode {
             Err(e) => {
                 // Expected: "Sync request already pending" — not an error
                 if !e.contains("already pending") {
-                    println!("⚠️ Block sync request failed: {}", e);
+                    tracing::warn!(%e, "Block sync request failed");
                 }
             }
         }

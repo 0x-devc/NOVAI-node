@@ -137,7 +137,7 @@ where
 
     let server = Server::http(addr).map_err(|e| format!("failed to start HTTP server: {e}"))?;
 
-    println!("📊 Metrics server listening on http://{}", addr);
+    tracing::info!(%addr, "Metrics server listening");
 
     thread::spawn(move || {
         for request in server.incoming_requests() {

@@ -250,7 +250,7 @@ impl PeerManager {
             if writer.write_all(&wire_bytes).is_ok() && writer.flush().is_ok() {
                 true
             } else {
-                eprintln!("Peer disconnected, removing");
+                tracing::debug!("Peer disconnected, removing");
                 false
             }
         });
@@ -282,17 +282,17 @@ where
 {
     let listener = TcpListener::bind(bind_addr)?;
 
-    println!("P2P listener started on {bind_addr}");
+    tracing::info!("P2P listener started on {bind_addr}");
 
     thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    println!("New peer connected from {:?}", stream.peer_addr());
+                    tracing::info!("New peer connected from {:?}", stream.peer_addr());
                     on_peer_connected(stream);
                 }
                 Err(e) => {
-                    eprintln!("Failed to accept connection: {e}");
+                    tracing::error!("Failed to accept connection: {e}");
                 }
             }
         }
@@ -307,7 +307,7 @@ where
 /// Returns error if connection fails.
 pub fn connect_to_peer(addr: SocketAddr) -> Result<TcpStream, P2PError> {
     let stream = TcpStream::connect(addr)?;
-    println!("Connected to peer at {addr}");
+    tracing::info!("Connected to peer at {addr}");
     Ok(stream)
 }
 

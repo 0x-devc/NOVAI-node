@@ -109,9 +109,11 @@ impl AnomalyCallback for LoggingAnomalyCallback {
         _payload: novai_ai_entities::SignalPayload,
         signal: novai_ai_entities::AiSignalV1,
     ) {
-        println!(
-            "🚨 ANOMALY: height={} confidence={} type={:?}",
-            signal.height, signal.confidence, signal.signal_type
+        tracing::warn!(
+            height = signal.height,
+            confidence = signal.confidence,
+            signal_type = ?signal.signal_type,
+            "ANOMALY"
         );
     }
 }
@@ -224,6 +226,14 @@ fn parse_genesis_validator_set(
 }
 
 fn main() {
+    // Initialize structured logging (controlled via RUST_LOG env var)
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("novai=info".parse().unwrap()),
+        )
+        .init();
+
     let mut args = env::args().skip(1);
     let Some(cmd) = args.next() else {
         usage();
@@ -253,8 +263,7 @@ fn main() {
 
             // Check if file already exists to avoid accidental overwrite
             if std::path::Path::new(&path).exists() {
-                eprintln!("ERROR: Key file already exists at {}", path);
-                eprintln!("Remove it first if you want to generate a new key.");
+                tracing::error!(path = %path, "Key file already exists — remove it first to generate a new key");
                 std::process::exit(1);
             }
 
@@ -267,9 +276,7 @@ fn main() {
             let addr_hex = hex::encode(addr);
 
             println!("{}", pubkey_hex);
-            eprintln!("Key written to: {}", path);
-            eprintln!("Public key:     {}", pubkey_hex);
-            eprintln!("Address:        {}", addr_hex);
+            tracing::info!(path = %path, pubkey = %pubkey_hex, address = %addr_hex, "Key generated");
         }
 
         "run" => {
@@ -360,7 +367,7 @@ fn main() {
                 Vec<[u8; 32]>,
             ) = if dev_keys {
                 // ── Dev-keys mode ──────────────────────────────────────
-                eprintln!("WARNING: using deterministic dev keys — NOT for production");
+                tracing::warn!("Using deterministic dev keys — NOT for production");
                 let idx = validator_idx.expect("--validator <index> required with --dev-keys");
 
                 let dev_seeds: Vec<[u8; 32]> = (0..4).map(|i| [i as u8; 32]).collect();
@@ -427,7 +434,7 @@ fn main() {
                     );
                 }
 
-                println!("🔑 Key loaded from: {}", kf);
+                tracing::info!(key_file = %kf, "Key loaded");
                 // Production mode: no precomputed noise keys (peer verification skipped
                 // until a mechanism for distributing noise pubkeys is implemented)
                 (our_key, vs, vp, seed, Vec::new())
@@ -457,15 +464,14 @@ fn main() {
                     std::fs::create_dir_all(&db_path)
                         .unwrap_or_else(|e| panic!("Failed to create data dir {}: {}", db_path, e));
 
-                    println!("💾 Storage: RocksDB");
-                    println!("   Path: {}", db_path);
+                    tracing::info!(backend = "RocksDB", path = %db_path, "Storage initialized");
 
                     let rocks = RocksKv::open(&db_path)
                         .unwrap_or_else(|e| panic!("Failed to open RocksDB at {}: {}", db_path, e));
                     Storage::Rocks(rocks)
                 }
                 "memory" => {
-                    println!("⚠️  Storage: MEMORY (volatile — state lost on restart!)");
+                    tracing::warn!("Storage: MEMORY (volatile — state lost on restart!)");
                     Storage::Memory(MemKv::new())
                 }
                 other => {
@@ -478,17 +484,19 @@ fn main() {
 
             let encryption_enabled = !no_encryption;
             if encryption_enabled {
-                println!("🔒 Transport: encrypted (Noise_XX_25519_ChaChaPoly_SHA256)");
+                tracing::info!("Transport: encrypted (Noise_XX_25519_ChaChaPoly_SHA256)");
             } else {
-                println!("⚠️  Transport: PLAINTEXT (--no-encryption)");
+                tracing::warn!("Transport: PLAINTEXT (--no-encryption)");
             }
 
-            println!("🚀 Starting consensus node");
-            println!("   Port: {}", port);
-            println!("   Metrics port: {}", metrics_port);
-            println!("   Address: {}", &hex::encode(our_addr)[..16]);
-            println!("   Peers: {:?}", peers);
-            println!("   Base timeout: {}ms", base_timeout_ms);
+            tracing::info!(
+                port,
+                metrics_port,
+                address = %&hex::encode(our_addr)[..16],
+                peers = ?peers,
+                base_timeout_ms,
+                "Starting consensus node"
+            );
 
             // Create node (clone our_key since we need it for copilot observer too)
             let observer_key = our_key.clone();
@@ -524,12 +532,12 @@ fn main() {
             for peer in &peers {
                 let peer_addr = peer.parse().expect("parse peer addr");
                 match node.connect_to_peer(peer_addr) {
-                    Ok(_) => println!("✅ Connected to peer {}", peer),
-                    Err(e) => println!("⚠️  Failed to connect to {}: {}", peer, e),
+                    Ok(_) => tracing::info!(peer = %peer, "Connected to peer"),
+                    Err(e) => tracing::warn!(peer = %peer, %e, "Failed to connect to peer"),
                 }
             }
 
-            println!("✅ Node started, waiting for peers...");
+            tracing::info!("Node started, waiting for peers...");
             std::thread::sleep(Duration::from_millis(500));
 
             // Create dummy mempool and nonce provider for Week 6
@@ -552,13 +560,13 @@ fn main() {
                 let callback = LoggingAnomalyCallback;
 
                 std::thread::spawn(move || {
-                    println!("🤖 Copilot observer started");
+                    tracing::info!("Copilot observer started");
                     loop {
                         std::thread::sleep(Duration::from_millis(500));
                         let mut obs = observer.lock().unwrap();
                         let anomalies = obs.observe(&observable_state, &callback);
                         if !anomalies.is_empty() {
-                            println!("   Detected {} anomalies this cycle", anomalies.len());
+                            tracing::info!(count = anomalies.len(), "Detected anomalies this cycle");
                         }
                     }
                 });
@@ -596,7 +604,7 @@ fn main() {
 
             let metrics_addr = format!("0.0.0.0:{}", metrics_port);
             if let Err(e) = metrics::start_metrics_server(&metrics_addr, metrics_collect) {
-                eprintln!("❌ Failed to start metrics server: {}", e);
+                tracing::error!(%e, "Failed to start metrics server");
             }
 
             // Simple consensus loop with timeout checking
@@ -610,15 +618,15 @@ fn main() {
 
                 // Check for timeout
                 if let Some(timeout) = node.check_timeout() {
-                    println!("⏰ Broadcasting timeout...");
+                    tracing::debug!("Broadcasting timeout...");
                     if let Err(e) =
                         node.broadcast(novai_p2p::NetworkMessage::Timeout(timeout.clone()))
                     {
-                        println!("❌ Timeout broadcast failed: {}", e);
+                        tracing::error!(%e, "Timeout broadcast failed");
                     }
                     // Handle our own timeout
                     if let Err(e) = node.handle_timeout(timeout) {
-                        println!("❌ Handle timeout failed: {}", e);
+                        tracing::error!(%e, "Handle timeout failed");
                     }
                 }
 
@@ -628,11 +636,11 @@ fn main() {
                     let mut pending = node.pending_sync_request.lock().unwrap();
                     if let Some(ref request) = *pending {
                         if request.request_time.elapsed() >= Duration::from_secs(5) {
-                            println!(
-                                "⏰ Sync request timed out (peer {:?}, blocks {}-{})",
-                                &request.peer[..4],
-                                request.start_height,
-                                request.end_height
+                            tracing::warn!(
+                                peer = ?&request.peer[..4],
+                                start_height = request.start_height,
+                                end_height = request.end_height,
+                                "Sync request timed out"
                             );
                             *pending = None;
                         }
@@ -653,20 +661,22 @@ fn main() {
 
                     let mut mempool_guard = mempool.lock().unwrap();
                     match node.try_propose_block(&mut mempool_guard, &nonce_provider) {
-                        Ok(true) => println!("👑 Proposed block successfully"),
+                        Ok(true) => tracing::info!("Proposed block successfully"),
                         Ok(false) => {
                             // Only log status every 5 seconds to reduce noise
                             if last_status_log.elapsed() >= Duration::from_secs(5) {
                                 last_status_log = std::time::Instant::now();
                                 let peer_count = node.peer_manager.peer_count();
                                 let state = node.state.lock().unwrap();
-                                println!(
-                                    "📊 Status: height={} round={} peers={}",
-                                    state.committed_height, state.round, peer_count
+                                tracing::debug!(
+                                    height = state.committed_height,
+                                    round = state.round,
+                                    peers = peer_count,
+                                    "Status"
                                 );
                             }
                         }
-                        Err(e) => println!("❌ Propose failed: {}", e),
+                        Err(e) => tracing::error!(%e, "Propose failed"),
                     }
                 }
             }
