@@ -111,6 +111,8 @@ pub enum ExecError<E> {
     // Week 24 - Module activation/rollback errors (D24.1)
     /// AI entity not found in state.
     EntityNotFound,
+    /// AI entity is not active (rolled back or deactivated via governance).
+    EntityNotActive,
     // Week 24 - Governance execution errors (D24.3)
     /// Governance proposal not found.
     ProposalNotFound,
@@ -1270,6 +1272,11 @@ pub fn apply_signal_commitment_tx<K: KvBatch>(
     let mut entity =
         read_ai_entity(db, &payload.issuer_entity_id)?.ok_or(ExecError::IssuerNotFound)?;
 
+    // W5-06: Reject operations from deactivated entities
+    if !entity.is_active {
+        return Err(ExecError::EntityNotActive);
+    }
+
     // D14.2: Validate emit_proposals capability
     if !entity.capabilities.emit_proposals {
         return Err(ExecError::IssuerMissingCapability);
@@ -1432,6 +1439,11 @@ pub fn apply_create_memory_object_tx<K: KvBatch>(
     // Load and validate AI entity
     let mut entity = read_ai_entity(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
 
+    // W5-06: Reject operations from deactivated entities
+    if !entity.is_active {
+        return Err(ExecError::EntityNotActive);
+    }
+
     // Validate capability
     if !entity.capabilities.read_memory_objects {
         return Err(ExecError::IssuerMissingCapability);
@@ -1549,6 +1561,11 @@ pub fn apply_update_memory_object_tx<K: KvBatch>(
     // Load and validate AI entity
     let mut entity = read_ai_entity(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
 
+    // W5-06: Reject operations from deactivated entities
+    if !entity.is_active {
+        return Err(ExecError::EntityNotActive);
+    }
+
     // Validate nonce
     if tx.nonce != entity.nonce {
         return Err(ExecError::NonceMismatch {
@@ -1641,6 +1658,11 @@ pub fn apply_delete_memory_object_tx<K: KvBatch>(
 
     // Load and validate AI entity
     let mut entity = read_ai_entity(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
+
+    // W5-06: Reject operations from deactivated entities
+    if !entity.is_active {
+        return Err(ExecError::EntityNotActive);
+    }
 
     // Validate nonce
     if tx.nonce != entity.nonce {
