@@ -1,0 +1,96 @@
+{
+  "_template": "THIS IS A TEMPLATE — replace all REPLACE_ME values before use",
+  "chain_id": "novai-mainnet-1",
+  "protocol_version": 1,
+  "timestamp": "2026-02-04T12:00:00Z",
+  "validators": [
+    {
+      "pubkey": "VALIDATOR_0_PUBKEY_REPLACE_ME_00000000000000000000000000000000",
+      "initial_stake": "10000000000",
+      "name": "validator-0"
+    },
+    {
+      "pubkey": "VALIDATOR_1_PUBKEY_REPLACE_ME_00000000000000000000000000000000",
+      "initial_stake": "10000000000",
+      "name": "validator-1"
+    },
+    {
+      "pubkey": "VALIDATOR_2_PUBKEY_REPLACE_ME_00000000000000000000000000000000",
+      "initial_stake": "10000000000",
+      "name": "validator-2"
+    },
+    {
+      "pubkey": "VALIDATOR_3_PUBKEY_REPLACE_ME_00000000000000000000000000000000",
+      "initial_stake": "10000000000",
+      "name": "validator-3"
+    },
+    {
+      "pubkey": "VALIDATOR_4_PUBKEY_REPLACE_ME_00000000000000000000000000000000",
+      "initial_stake": "10000000000",
+      "name": "validator-4"
+    }
+  ],
+  "accounts": {
+    "TREASURY_ADDRESS_REPLACE_ME_000000000000000000000000000000000000": "100000000000000",
+    "FOUNDATION_ADDR_REPLACE_ME_0000000000000000000000000000000000000": "50000000000000"
+  },
+  "protocol_params": {
+    "base_timeout_ms": 1000,
+    "max_timeout_ms": 60000,
+    "timeout_multiplier": 2,
+    "max_tx_size": 131072,
+    "max_block_size": 2097152
+  },
+  "executor_config": {
+    "mode": "whitelist",
+    "allowed_actions": [
+      "module_activation",
+      "module_rollback",
+      "tier1_param_update"
+    ],
+    "default_action": "proposal_only",
+    "ai_execution_enabled": false
+  },
+  "ai_entities": [
+    {
+      "name": "novai-chain-observer",
+      "code_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "creator": "FOUNDATION_ADDR_REPLACE_ME_0000000000000000000000000000000000000",
+      "autonomy_mode": "advisory",
+      "initial_balance": "1000000000",
+      "capabilities": {
+        "read_public_chain": true,
+        "read_memory_objects": true,
+        "emit_proposals": true,
+        "request_execution": false,
+        "read_nnpx_derived": false
+      }
+    }
+  ],
+  "approval_gates": [
+    {
+      "gate_type": "multisig",
+      "required_approvers": [
+        "VALIDATOR_0_ADDRESS_REPLACE_ME_0000000000000000000000000000000000",
+        "VALIDATOR_1_ADDRESS_REPLACE_ME_0000000000000000000000000000000000",
+        "VALIDATOR_2_ADDRESS_REPLACE_ME_0000000000000000000000000000000000",
+        "VALIDATOR_3_ADDRESS_REPLACE_ME_0000000000000000000000000000000000",
+        "VALIDATOR_4_ADDRESS_REPLACE_ME_0000000000000000000000000000000000"
+      ],
+      "threshold": 3,
+      "timelock_blocks": 1000,
+      "expiry_blocks": 50000,
+      "veto_enabled": true,
+      "freeze_enabled": true
+    },
+    {
+      "gate_type": "timelock_only",
+      "required_approvers": [],
+      "threshold": 0,
+      "timelock_blocks": 100,
+      "expiry_blocks": 10000,
+      "veto_enabled": false,
+      "freeze_enabled": false
+    }
+  ]
+}
