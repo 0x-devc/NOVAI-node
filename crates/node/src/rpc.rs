@@ -23,10 +23,15 @@ use novai_execution::{get_signals_by_height, get_signals_by_issuer, get_signals_
 use novai_state::MemKv;
 use novai_types::{Address, TxV1};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 use tiny_http::{Response, Server, StatusCode};
+
+/// Maximum RPC requests per second before rate limiting kicks in.
+const MAX_RPC_REQUESTS_PER_SEC: usize = 100;
 
 /// No-op nonce provider that accepts all nonces.
 ///
@@ -157,7 +162,17 @@ pub fn start_rpc_server(bind_addr: &str, mempool: Arc<Mutex<TxMempool>>) -> Resu
     tracing::info!(%addr, "RPC server listening");
 
     thread::spawn(move || {
+        let mut recent_requests: VecDeque<Instant> = VecDeque::new();
+
         for mut request in server.incoming_requests() {
+            // Rate limiting: sliding 1-second window
+            if rpc_rate_limited(&mut recent_requests) {
+                let _ = request.respond(
+                    Response::from_string("Too Many Requests")
+                        .with_status_code(StatusCode(429)),
+                );
+                continue;
+            }
             // Read request body
             let mut body = String::new();
             if let Err(e) = request.as_reader().read_to_string(&mut body) {
@@ -264,7 +279,17 @@ pub fn start_rpc_server_with_state(
     tracing::info!(%addr, "RPC server listening (with state queries)");
 
     thread::spawn(move || {
+        let mut recent_requests: VecDeque<Instant> = VecDeque::new();
+
         for mut request in server.incoming_requests() {
+            // Rate limiting: sliding 1-second window
+            if rpc_rate_limited(&mut recent_requests) {
+                let _ = request.respond(
+                    Response::from_string("Too Many Requests")
+                        .with_status_code(StatusCode(429)),
+                );
+                continue;
+            }
             // Read request body
             let mut body = String::new();
             if let Err(e) = request.as_reader().read_to_string(&mut body) {
@@ -561,6 +586,22 @@ fn handle_get_signals_by_type(
             .map(SignalCommitmentJson::from)
             .collect(),
     })
+}
+
+/// Check and enforce the sliding-window rate limit.
+///
+/// Returns `true` if the request should be rejected (rate exceeded).
+fn rpc_rate_limited(recent: &mut VecDeque<Instant>) -> bool {
+    let now = Instant::now();
+    let one_sec_ago = now - Duration::from_secs(1);
+    while recent.front().is_some_and(|&t| t < one_sec_ago) {
+        recent.pop_front();
+    }
+    if recent.len() >= MAX_RPC_REQUESTS_PER_SEC {
+        return true;
+    }
+    recent.push_back(now);
+    false
 }
 
 /// Helper to create JSON response.
