@@ -28,8 +28,8 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use novai_consensus_types::codec::encode_block_v1;
 use genesis::{GenesisConfig, GenesisGenerator, GenesisState};
+use novai_consensus_types::codec::encode_block_v1;
 use novai_state::MemKv;
 use std::fs;
 use std::path::PathBuf;
@@ -170,8 +170,12 @@ fn handle_output_mode(
     state_root_hex: &str,
 ) -> Result<()> {
     // Create output directory
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+    fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
 
     info!("Writing genesis files to: {}", output_dir.display());
 
@@ -255,8 +259,14 @@ fn format_summary(
     lines.push(String::new());
 
     lines.push("Genesis Block:".to_string());
-    lines.push(format!("  Height:      {}", genesis_state.genesis_block.height));
-    lines.push(format!("  Round:       {}", genesis_state.genesis_block.round));
+    lines.push(format!(
+        "  Height:      {}",
+        genesis_state.genesis_block.height
+    ));
+    lines.push(format!(
+        "  Round:       {}",
+        genesis_state.genesis_block.round
+    ));
     lines.push(format!(
         "  Parent Hash: {}",
         hex::encode(genesis_state.genesis_block.parent_hash)
@@ -297,7 +307,10 @@ fn format_summary(
     if !config.ai_entities.is_empty() {
         lines.push(format!("AI Entities: {} total", config.ai_entities.len()));
         for (i, entity) in config.ai_entities.iter().enumerate() {
-            lines.push(format!("  [{i}] {} ({})", entity.name, entity.autonomy_mode));
+            lines.push(format!(
+                "  [{i}] {} ({})",
+                entity.name, entity.autonomy_mode
+            ));
         }
         lines.push(String::new());
     }
