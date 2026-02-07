@@ -33,15 +33,15 @@ use tiny_http::{Response, Server, StatusCode};
 /// Maximum RPC requests per second before rate limiting kicks in.
 const MAX_RPC_REQUESTS_PER_SEC: usize = 100;
 
-/// No-op nonce provider that accepts all nonces.
+/// Sized wrapper around a shared `NonceProvider` trait object.
 ///
-/// TODO: Replace with actual state-backed nonce provider that queries
-/// current account nonces from the execution engine.
-struct NoOpNonceProvider;
+/// Needed because `TxMempool::insert` takes `&impl NonceProvider` (requires
+/// `Sized`), but the RPC server holds an `Arc<dyn NonceProvider>`.
+struct SharedNonceProvider(Arc<dyn NonceProvider + Send + Sync>);
 
-impl NonceProvider for NoOpNonceProvider {
-    fn expected_nonce(&self, _from: &Address) -> u64 {
-        0 // Accept all nonces for now
+impl NonceProvider for SharedNonceProvider {
+    fn expected_nonce(&self, from: &Address) -> u64 {
+        self.0.expected_nonce(from)
     }
 }
 
@@ -149,10 +149,15 @@ struct SignalQueryResult {
 /// # Arguments
 /// - `bind_addr` - Address to bind the HTTP server (e.g., "0.0.0.0:9545")
 /// - `mempool` - Shared mempool for transaction submission
+/// - `nonce_provider` - Provides expected nonces for transaction validation
 ///
 /// # Errors
 /// Returns error if the server cannot bind to the address (e.g., port in use).
-pub fn start_rpc_server(bind_addr: &str, mempool: Arc<Mutex<TxMempool>>) -> Result<(), String> {
+pub fn start_rpc_server(
+    bind_addr: &str,
+    mempool: Arc<Mutex<TxMempool>>,
+    nonce_provider: Arc<dyn NonceProvider + Send + Sync>,
+) -> Result<(), String> {
     let addr: SocketAddr = bind_addr
         .parse()
         .map_err(|e| format!("invalid address: {e}"))?;
@@ -163,6 +168,7 @@ pub fn start_rpc_server(bind_addr: &str, mempool: Arc<Mutex<TxMempool>>) -> Resu
 
     thread::spawn(move || {
         let mut recent_requests: VecDeque<Instant> = VecDeque::new();
+        let nonce = SharedNonceProvider(nonce_provider);
 
         for mut request in server.incoming_requests() {
             // Rate limiting: sliding 1-second window
@@ -216,24 +222,26 @@ pub fn start_rpc_server(bind_addr: &str, mempool: Arc<Mutex<TxMempool>>) -> Resu
 
             // Route to method handler
             let http_response = match rpc_request.method.as_str() {
-                "novai_submitTransaction" => match handle_submit_tx(&rpc_request, &mempool) {
-                    Ok(result) => {
-                        let response = RpcResponse {
-                            jsonrpc: "2.0",
-                            result: serde_json::to_value(&result).unwrap(),
-                            id: rpc_request.id,
-                        };
-                        json_response(response)
+                "novai_submitTransaction" => {
+                    match handle_submit_tx(&rpc_request, &mempool, &nonce) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
                     }
-                    Err(error) => {
-                        let response = RpcErrorResponse {
-                            jsonrpc: "2.0",
-                            error,
-                            id: rpc_request.id,
-                        };
-                        json_response(response)
-                    }
-                },
+                }
                 _ => {
                     let response = RpcErrorResponse {
                         jsonrpc: "2.0",
@@ -261,6 +269,7 @@ pub fn start_rpc_server(bind_addr: &str, mempool: Arc<Mutex<TxMempool>>) -> Resu
 /// # Arguments
 /// - `bind_addr` - Address to bind the HTTP server (e.g., "0.0.0.0:9545")
 /// - `mempool` - Shared mempool for transaction submission
+/// - `nonce_provider` - Provides expected nonces for transaction validation
 /// - `db` - Shared state database for signal queries
 ///
 /// # Errors
@@ -268,6 +277,7 @@ pub fn start_rpc_server(bind_addr: &str, mempool: Arc<Mutex<TxMempool>>) -> Resu
 pub fn start_rpc_server_with_state(
     bind_addr: &str,
     mempool: Arc<Mutex<TxMempool>>,
+    nonce_provider: Arc<dyn NonceProvider + Send + Sync>,
     db: Arc<Mutex<MemKv>>,
 ) -> Result<(), String> {
     let addr: SocketAddr = bind_addr
@@ -280,6 +290,7 @@ pub fn start_rpc_server_with_state(
 
     thread::spawn(move || {
         let mut recent_requests: VecDeque<Instant> = VecDeque::new();
+        let nonce = SharedNonceProvider(nonce_provider);
 
         for mut request in server.incoming_requests() {
             // Rate limiting: sliding 1-second window
@@ -333,24 +344,26 @@ pub fn start_rpc_server_with_state(
 
             // Route to method handler
             let http_response = match rpc_request.method.as_str() {
-                "novai_submitTransaction" => match handle_submit_tx(&rpc_request, &mempool) {
-                    Ok(result) => {
-                        let response = RpcResponse {
-                            jsonrpc: "2.0",
-                            result: serde_json::to_value(&result).unwrap(),
-                            id: rpc_request.id,
-                        };
-                        json_response(response)
+                "novai_submitTransaction" => {
+                    match handle_submit_tx(&rpc_request, &mempool, &nonce) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
                     }
-                    Err(error) => {
-                        let response = RpcErrorResponse {
-                            jsonrpc: "2.0",
-                            error,
-                            id: rpc_request.id,
-                        };
-                        json_response(response)
-                    }
-                },
+                }
                 // Week 14 - D14.5: Signal query methods
                 "novai_getSignalsByHeight" => {
                     match handle_get_signals_by_height(&rpc_request, &db) {
@@ -434,6 +447,7 @@ pub fn start_rpc_server_with_state(
 fn handle_submit_tx(
     request: &RpcRequest,
     mempool: &Arc<Mutex<TxMempool>>,
+    nonce_provider: &SharedNonceProvider,
 ) -> Result<SubmitTxResult, RpcError> {
     // Parse parameters
     let params: SubmitTxParams =
@@ -475,8 +489,7 @@ fn handle_submit_tx(
 
     // Submit to mempool
     let mut mempool = mempool.lock().unwrap();
-    let nonce_provider = NoOpNonceProvider;
-    mempool.insert(tx, &nonce_provider).map_err(|e| RpcError {
+    mempool.insert(tx, nonce_provider).map_err(|e| RpcError {
         code: -32001,
         message: format!("Mempool rejected transaction: {:?}", e),
     })?;
