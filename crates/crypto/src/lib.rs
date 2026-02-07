@@ -23,9 +23,10 @@ pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
 }
 
 /// Derive the canonical 32-byte Address from a public key:
-/// address = blake3(pubkey_bytes)
+/// address = blake3(NOVAI_ADDRESS_V1 || pubkey_bytes)
 pub fn address_from_pubkey(pk: &VerifyingKey) -> Address {
     let mut hasher = Hasher::new();
+    hasher.update(b"NOVAI_ADDRESS_V1");
     hasher.update(pk.as_bytes());
     *hasher.finalize().as_bytes()
 }
