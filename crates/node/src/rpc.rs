@@ -33,6 +33,9 @@ use tiny_http::{Response, Server, StatusCode};
 /// Maximum RPC requests per second before rate limiting kicks in.
 const MAX_RPC_REQUESTS_PER_SEC: usize = 100;
 
+/// Maximum height range for signal queries (prevents massive result sets).
+const MAX_SIGNAL_QUERY_RANGE: u64 = 10_000;
+
 /// Sized wrapper around a shared `NonceProvider` trait object.
 ///
 /// Needed because `TxMempool::insert` takes `&impl NonceProvider` (requires
@@ -540,6 +543,16 @@ fn handle_get_signals_by_issuer(
             message: format!("Invalid params: {}", e),
         })?;
 
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {} heights per query",
+                MAX_SIGNAL_QUERY_RANGE
+            ),
+        });
+    }
+
     // Decode issuer hex
     let issuer_bytes = hex::decode(&params.issuer).map_err(|e| RpcError {
         code: -32602,
@@ -579,6 +592,16 @@ fn handle_get_signals_by_type(
             code: -32602,
             message: format!("Invalid params: {}", e),
         })?;
+
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {} heights per query",
+                MAX_SIGNAL_QUERY_RANGE
+            ),
+        });
+    }
 
     // Validate signal type
     let signal_type = AiSignalType::from_byte(params.signal_type).ok_or_else(|| RpcError {
