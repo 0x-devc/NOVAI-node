@@ -92,9 +92,9 @@ impl NoiseWriter {
             .map_err(|e| io::Error::other(format!("noise encrypt: {e}")))?;
 
         // Safety net: nonce must never wrap
-        self.send_nonce = self.send_nonce.checked_add(1).unwrap_or_else(|| {
-            panic!("NoiseWriter send nonce overflow — this should never happen");
-        });
+        self.send_nonce = self.send_nonce.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "NoiseWriter send nonce overflow")
+        })?;
 
         // Frame: [chunk_len: u16 BE][ciphertext]
         #[allow(clippy::cast_possible_truncation)]
@@ -180,9 +180,9 @@ impl NoiseReader {
                 io::Error::new(io::ErrorKind::InvalidData, format!("noise decrypt: {e}"))
             })?;
 
-        self.recv_nonce = self.recv_nonce.checked_add(1).unwrap_or_else(|| {
-            panic!("NoiseReader recv nonce overflow — this should never happen");
-        });
+        self.recv_nonce = self.recv_nonce.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "NoiseReader recv nonce overflow")
+        })?;
 
         self.buf = plaintext;
         self.buf.truncate(len);
