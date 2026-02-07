@@ -269,6 +269,10 @@ impl AuditLogEntry {
 /// Domain separator for proposal ID computation.
 const PROPOSAL_ID_DOMAIN: &[u8] = b"NOVAI_PROPOSAL_ID_V1";
 
+/// Domain separator for approval digest computation.
+/// Used to cryptographically bind an approver to a specific proposal.
+const APPROVAL_DIGEST_DOMAIN: &[u8] = b"NOVAI_APPROVAL_V1";
+
 /// Unique identifier for a governance proposal.
 pub type ProposalId = [u8; 32];
 
@@ -650,6 +654,22 @@ impl Proposal {
         self.state = ProposalState::Expired;
         Ok(())
     }
+}
+
+/// Compute a domain-separated approval digest binding an approver to a specific proposal.
+///
+/// Digest = blake3(APPROVAL_DIGEST_DOMAIN || approver || proposal_id)
+///
+/// Future approval transactions MUST sign this digest to cryptographically bind
+/// the approval to the exact proposal being approved, preventing cross-proposal
+/// replay attacks (audit finding W5-04).
+#[must_use]
+pub fn compute_approval_digest(approver: &Address, proposal_id: &ProposalId) -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(APPROVAL_DIGEST_DOMAIN);
+    hasher.update(approver);
+    hasher.update(proposal_id);
+    *hasher.finalize().as_bytes()
 }
 
 /// Errors that can occur during proposal operations.
@@ -1087,5 +1107,41 @@ mod tests {
         let expired = AuditLogEntry::expired(proposal_id, 500);
         assert_eq!(expired.action, AuditAction::Expired);
         assert_eq!(expired.actor, None); // System-initiated, no actor
+    }
+
+    // ========================================================================
+    // APPROVAL DIGEST TESTS (W5-04 hardening)
+    // ========================================================================
+
+    #[test]
+    fn approval_digest_is_deterministic() {
+        let approver = [0xAAu8; 32];
+        let proposal_id = [0xBBu8; 32];
+        let d1 = compute_approval_digest(&approver, &proposal_id);
+        let d2 = compute_approval_digest(&approver, &proposal_id);
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn approval_digest_changes_with_proposal_id() {
+        let approver = [0xAAu8; 32];
+        let proposal_a = [0x01u8; 32];
+        let proposal_b = [0x02u8; 32];
+        let da = compute_approval_digest(&approver, &proposal_a);
+        let db = compute_approval_digest(&approver, &proposal_b);
+        assert_ne!(
+            da, db,
+            "different proposal_id must produce different digest"
+        );
+    }
+
+    #[test]
+    fn approval_digest_changes_with_approver() {
+        let proposal_id = [0xBBu8; 32];
+        let approver_a = [0x01u8; 32];
+        let approver_b = [0x02u8; 32];
+        let da = compute_approval_digest(&approver_a, &proposal_id);
+        let db = compute_approval_digest(&approver_b, &proposal_id);
+        assert_ne!(da, db, "different approver must produce different digest");
     }
 }
