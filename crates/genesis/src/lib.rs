@@ -406,6 +406,13 @@ impl GenesisGenerator {
                 },
             );
 
+            // W6-05: Block read_nnpx_derived at genesis registration
+            if capabilities.read_nnpx_derived {
+                return Err(GenesisError::ValidationError(
+                    "AI entity cannot be registered with read_nnpx_derived capability".to_string(),
+                ));
+            }
+
             let mut entity = AiEntity::new(code_hash, creator, autonomy_mode, capabilities, 0);
 
             if !genesis_entity.initial_balance.is_empty() {
