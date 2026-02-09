@@ -803,16 +803,19 @@ pub fn timeout_for_round_with_base(round: u64, base_ms: u64) -> u64 {
 - **Description**: Several HashMaps used for local state caching
 - **Impact**: None - all are lookup-only, never iterated for ordering
 - **Mitigation**: Already correct; iteration-independence documented in module header
+- **Remediation**: NO FIX NEEDED — verified correct, lookup-only usage
 
 **W4-02** (INFO): Vote arrival order doesn't affect QC encoding
 - **Location**: `consensus_types/src/codec.rs:188-190`
 - **Description**: Votes in QC are sorted by voter before encoding
 - **Impact**: None - encoding is deterministic regardless of arrival order
+- **Remediation**: NO FIX NEEDED — encoding already deterministic
 
 **W4-03** (INFO): Mempool drain order is deterministic
 - **Location**: `mempool/src/lib.rs:267-270`
 - **Description**: HashMap iteration followed by sort (fee DESC, txid ASC)
 - **Impact**: None - sort ensures deterministic block contents
+- **Remediation**: NO FIX NEEDED — sort guarantees determinism
 
 ### 4.3 Summary
 
@@ -1095,12 +1098,14 @@ pub fn validate_ai_entity_no_nnpx_capability<E>(
 - **Description**: ActionType/ActionTier system is not directly connected to ProposalType governance system
 - **Mitigation**: ParamChange/PolicyChange currently mark-as-executed without applying data (accidental safety)
 - **Risk**: LOW currently, but requires attention when implementing actual param/policy changes
+- **Remediation**: NO FIX NEEDED — requires attention only when implementing actual param/policy changes (future work)
 
 **W5-02** (INFO): PrivacyBudget is a STUB
 - **Location**: `ai_entities/src/derived_views.rs:175`
 - **Description**: `PrivacyBudget` struct exists but `consume()` is not enforced
 - **Impact**: AI could theoretically make unlimited derived view queries
 - **Note**: Documented as Week 23 limitation, not a vulnerability
+- **Remediation**: NO FIX NEEDED — documented stub, not a vulnerability
 
 ### 5.10 Pass 1 Summary
 
@@ -1336,18 +1341,21 @@ pub fn new<C: Fn(SignalPayload, AiSignalV1) + Send + 'static>(callback: C) -> Se
 - **Description**: Proposals can be executed in the same block as approval with timelock=0
 - **Assessment**: By design - allows emergency governance actions
 - **Risk**: LOW - requires gate approval regardless
+- **Remediation**: NO FIX NEEDED — intentional design for emergency governance
 
 **W5-04** (MEDIUM): Approval signatures not cryptographically bound
 - **Location**: `adversarial_approval_replay.rs:40-50`
 - **Description**: Approvals stored as Vec<Address>, not signed against proposal_id
 - **Mitigation**: Per-proposal storage prevents direct replay
 - **Risk**: MEDIUM - should be hardened before mainnet
+- **Remediation**: REMEDIATED — commit 3851289
 
 **W5-05** (INFO): Autonomy upgrade mechanism not implemented
 - **Location**: `execution/src/lib.rs:1197-1209`
 - **Description**: PolicyChange marks-as-executed without changing autonomy mode
 - **Assessment**: SAFETY FEATURE - prevents uncontrolled escalation
 - **Risk**: NONE - this is the correct current state
+- **Remediation**: NO FIX NEEDED — intentional safety feature preventing uncontrolled escalation
 
 ### 5.13 Pass 2 Summary
 
@@ -1491,6 +1499,7 @@ pub fn validate_nnpx_access<E>(key: &[u8], caller: &Caller) -> Result<(), ExecEr
 - **Mitigation**: Economic controls (balance, fees) provide practical limits
 - **Risk**: LOW - may be intentional design; rolled-back modules retain state
 - **Recommendation**: Consider adding explicit `is_active` check or documenting intentional design
+- **Remediation**: REMEDIATED — commit 33ce8e2 (added `EntityNotActive` check in 4 execution paths)
 
 ### 5.16 Final Checklist (Wave 5 Requirements)
 
@@ -1814,6 +1823,9 @@ impl ZkVerifier for StubZkVerifier {
 | W6-01 | INFO | ZK verifier is a stub (expected, documented) |
 | W6-02 | INFO | Privacy budget not enforced (same as W5-02) |
 
+- **W6-01 Remediation**: NO FIX NEEDED — expected stub per audit methodology, documented for post-Week 30
+- **W6-02 Remediation**: NO FIX NEEDED — documented limitation, same as W5-02
+
 **No critical or medium findings in Pass 1.**
 
 ### 6.10 Pass 1 Summary
@@ -1984,11 +1996,16 @@ let capabilities = genesis_entity.capabilities.as_ref().map_or_else(
 | W6-05 | LOW | Registration-time `read_nnpx_derived` blocking not enforced |
 | W6-06 | INFO | No stealth address implementation (expected) |
 
+- **W6-03 Remediation**: NO FIX NEEDED — infrastructure ready, transaction types planned for future week
+- **W6-04 Remediation**: NO FIX NEEDED — intentional design, encryption happens off-chain
+- **W6-06 Remediation**: NO FIX NEEDED — expected stub per audit methodology
+
 **W6-05 Details (LOW)**:
 - `validate_ai_entity_no_nnpx_capability()` exists but is only called in tests
 - Genesis can set `read_nnpx_derived: true` without validation
 - **Mitigation**: `read_nnpx_derived` only affects derived views, NOT raw NNPX access
 - Raw NNPX access is blocked by `validate_nnpx_access()` at execution time (hard boundary)
+- **Remediation**: REMEDIATED — commit e733079 (genesis rejects `read_nnpx_derived: true` at entity registration)
 
 ### 6.13 Wave 6 Final Summary
 
@@ -2140,17 +2157,20 @@ let capabilities = genesis_entity.capabilities.as_ref().map_or_else(
 - **Evidence**: 23 public functions, only 9 tests (0.27% ratio)
 - **Risk**: Node runtime logic less tested than core crates
 - **Mitigation**: Integration tests in consensus/chaos cover some paths
+- **Remediation**: NO FIX NEEDED — coverage improvement is feature work for future weeks
 
 **W7-02** (LOW): P2P crate has minimal test coverage
 - **Location**: `crates/p2p/`
 - **Evidence**: 989 LOC, only 9 tests (0.91% ratio)
 - **Risk**: Network layer edge cases may be untested
 - **Mitigation**: Chaos tests exercise P2P through integration
+- **Remediation**: NO FIX NEEDED — coverage improvement is feature work for future weeks
 
 **W7-03** (INFO): Types crate has no tests
 - **Location**: `crates/types/`
 - **Evidence**: 0 tests for 118 LOC
 - **Assessment**: Acceptable - types crate contains only type definitions and constants
+- **Remediation**: NO FIX NEEDED — types-only crate, no logic to test
 
 ### 7.9 Property-Based Testing
 
@@ -2159,6 +2179,7 @@ let capabilities = genesis_entity.capabilities.as_ref().map_or_else(
 - **Evidence**: `proptest = "~1.4"` in dev-dependencies
 - **Finding**: No `proptest!` macro usage found in any test file
 - **Assessment**: Dependency may be dead code or planned for future use
+- **Remediation**: REMEDIATED — commit 97cf71e (removed unused proptest dev-dependency)
 
 ### 7.10 Wave 7 Pass 1 Summary
 
@@ -2329,6 +2350,7 @@ let proposal_id_1 = result1.unwrap();
 - All integration tests use synchronous simulation
 - Async behavior tested through chaos framework timing
 - May miss async-specific edge cases (race conditions, cancellation)
+- **Remediation**: NO FIX NEEDED — async test infrastructure is feature work for future weeks
 
 #### 7.13.4 Boundary/Edge Case Tests
 
@@ -2512,6 +2534,7 @@ pub struct Capabilities {
 | `zk-logging` | crypto | Enable ZK proof logging |
 
 **W8-01** (INFO): `http-fetch` feature has compilation error (see W2-01)
+- **Remediation**: NO FIX NEEDED — duplicate of W2-01, feature flag is opt-in and not used in production
 
 ### 8.4 Error Handling Architecture
 
@@ -2594,6 +2617,7 @@ pub struct Capabilities {
 **W8-02** (LOW): Inconsistent module documentation headers
 - Only governance has full PURPOSE/INVARIANTS/FAILURE pattern
 - Most crates have minimal module-level docs
+- **Remediation**: NO FIX NEEDED — documentation improvement for future weeks
 
 #### 8.7.2 Architecture Documentation (VERIFIED)
 
@@ -2653,6 +2677,7 @@ pub struct Capabilities {
 **W8-03** (INFO): Enums lack `#[non_exhaustive]` for API stability
 - Adding variants is technically a breaking change
 - Mitigated by interface freeze policy
+- **Remediation**: NO FIX NEEDED — design decision, mitigated by interface freeze policy
 
 ### 8.10 Wave 8 Pass 1 Summary
 
@@ -2738,6 +2763,7 @@ println!(
 - No log levels (debug, info, warn, error)
 - No machine-parseable format
 - Should be `tracing::info!()` or similar
+- **Remediation**: NO FIX NEEDED — already remediated; consensus and copilot crates use `tracing` macros, node uses `tracing-subscriber`
 
 #### 8.12.3 Async Architecture (VERIFIED - SYNCHRONOUS)
 
@@ -2794,6 +2820,7 @@ let state = self.state.lock().unwrap();
 **W8-05** (INFO): Lock unwrap panics on poisoning
 - `lock().unwrap()` panics if another thread panicked while holding lock
 - Acceptable for validator nodes (panic = restart)
+- **Remediation**: NO FIX NEEDED — acceptable behavior for validator nodes, panic triggers restart
 
 **VERIFIED**: No obvious deadlock patterns.
 
@@ -2814,6 +2841,7 @@ This is a comment about releasing Mutex guards, not impl Drop.
 - RocksDB may not flush on abrupt termination
 - Peer connections not cleanly closed
 - Background threads not stopped
+- **Remediation**: NO FIX NEEDED — feature work for future weeks
 
 #### 8.12.6 Panic Paths Analysis
 
@@ -2835,6 +2863,7 @@ This is a comment about releasing Mutex guards, not impl Drop.
 **W8-07** (INFO): Execution crate has one panic path
 - `execution/lib.rs:3022`: `panic!("Audit should be a Put, not Delete")`
 - In WriteOp validation - indicates programmer error
+- **Remediation**: NO FIX NEEDED — intentional safety panic for programmer error detection
 
 #### 8.12.7 Clone Efficiency (VERIFIED)
 
