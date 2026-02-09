@@ -658,7 +658,7 @@ impl Proposal {
 
 /// Compute a domain-separated approval digest binding an approver to a specific proposal.
 ///
-/// Digest = blake3(APPROVAL_DIGEST_DOMAIN || approver || proposal_id)
+/// Digest = `blake3(APPROVAL_DIGEST_DOMAIN || approver || proposal_id)`
 ///
 /// Future approval transactions MUST sign this digest to cryptographically bind
 /// the approval to the exact proposal being approved, preventing cross-proposal
