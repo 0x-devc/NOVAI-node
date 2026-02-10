@@ -65,6 +65,8 @@ pub enum ExecError<E> {
         needed: u128,
     },
     Overflow,
+    /// Codec/decode failure for non-state data (entity, proposal, gate, signal, memory object).
+    CodecDecode(String),
     NonceOverflow,
     // Week 14 - Signal commitment errors (D14.2)
     /// Issuer entity ID not found in state.
@@ -860,7 +862,8 @@ pub fn read_ai_entity<K: Kv>(
         None => Ok(None),
         Some(bytes) => {
             // decode_ai_entity handles both V1 and V2 formats
-            let entity = decode_ai_entity(&bytes).map_err(|_| ExecError::Overflow)?;
+            let entity =
+                decode_ai_entity(&bytes).map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
             Ok(Some(entity))
         }
     }
@@ -971,7 +974,8 @@ pub fn read_proposal<K: Kv>(
     match db.get(&key).map_err(ExecError::Db)? {
         None => Ok(None),
         Some(bytes) => {
-            let proposal = decode_proposal_v1(&bytes).map_err(|_| ExecError::Overflow)?;
+            let proposal =
+                decode_proposal_v1(&bytes).map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
             Ok(Some(proposal))
         }
     }
@@ -998,8 +1002,8 @@ pub fn read_approval_gate<K: Kv>(
     match db.get(&key).map_err(ExecError::Db)? {
         None => Ok(None),
         Some(bytes) => {
-            let gate =
-                novai_codec::decode_approval_gate_v1(&bytes).map_err(|_| ExecError::Overflow)?;
+            let gate = novai_codec::decode_approval_gate_v1(&bytes)
+                .map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
             Ok(Some(gate))
         }
     }
@@ -1103,7 +1107,7 @@ pub fn apply_governance_submit_tx<K: KvBatch>(
     if gate.threshold == 0 {
         proposal
             .approve(current_height, gate.timelock_blocks)
-            .map_err(|_| ExecError::Overflow)?;
+            .map_err(|_| ExecError::ProposalNotExecutable)?;
     }
 
     // Store proposal
@@ -1386,7 +1390,8 @@ pub fn read_memory_object<K: Kv>(
     match db.get(&key).map_err(ExecError::Db)? {
         None => Ok(None),
         Some(bytes) => {
-            let obj = decode_memory_object_v1(&bytes).map_err(|_| ExecError::Overflow)?;
+            let obj = decode_memory_object_v1(&bytes)
+                .map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
             Ok(Some(obj))
         }
     }
@@ -1755,7 +1760,8 @@ pub fn get_memory_objects_by_entity<K: Kv>(
 
     let mut results = Vec::with_capacity(entries.len());
     for (_key, value) in entries {
-        let obj = decode_memory_object_v1(&value).map_err(|_| ExecError::Overflow)?;
+        let obj = decode_memory_object_v1(&value)
+            .map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
         results.push(obj);
     }
 
@@ -1791,7 +1797,8 @@ pub fn get_signals_by_height<K: Kv>(
 
     let mut results = Vec::with_capacity(entries.len());
     for (_key, value) in entries {
-        let commitment = decode_signal_commitment_v1(&value).map_err(|_| ExecError::Overflow)?;
+        let commitment = decode_signal_commitment_v1(&value)
+            .map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
         results.push(commitment);
     }
 
@@ -1820,7 +1827,8 @@ pub fn get_signals_by_issuer<K: Kv>(
 
     let mut results = Vec::new();
     for (_key, value) in entries {
-        let commitment = decode_signal_commitment_v1(&value).map_err(|_| ExecError::Overflow)?;
+        let commitment = decode_signal_commitment_v1(&value)
+            .map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
         // Filter by height range
         if commitment.height >= start_height && commitment.height <= end_height {
             results.push(commitment);
@@ -1852,7 +1860,8 @@ pub fn get_signals_by_type<K: Kv>(
 
     let mut results = Vec::new();
     for (_key, value) in entries {
-        let commitment = decode_signal_commitment_v1(&value).map_err(|_| ExecError::Overflow)?;
+        let commitment = decode_signal_commitment_v1(&value)
+            .map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
         // Filter by height range
         if commitment.height >= start_height && commitment.height <= end_height {
             results.push(commitment);
