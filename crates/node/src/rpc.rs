@@ -177,8 +177,7 @@ pub fn start_rpc_server(
             // Rate limiting: sliding 1-second window
             if rpc_rate_limited(&mut recent_requests) {
                 let _ = request.respond(
-                    Response::from_string("Too Many Requests")
-                        .with_status_code(StatusCode(429)),
+                    Response::from_string("Too Many Requests").with_status_code(StatusCode(429)),
                 );
                 continue;
             }
@@ -299,8 +298,7 @@ pub fn start_rpc_server_with_state(
             // Rate limiting: sliding 1-second window
             if rpc_rate_limited(&mut recent_requests) {
                 let _ = request.respond(
-                    Response::from_string("Too Many Requests")
-                        .with_status_code(StatusCode(429)),
+                    Response::from_string("Too Many Requests").with_status_code(StatusCode(429)),
                 );
                 continue;
             }

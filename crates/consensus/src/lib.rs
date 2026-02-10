@@ -1399,12 +1399,7 @@ impl ConsensusState {
         // Update height to match target
         self.height = target_height;
 
-        tracing::info!(
-            count,
-            start_height,
-            target_height,
-            "CATCH-UP complete"
-        );
+        tracing::info!(count, start_height, target_height, "CATCH-UP complete");
 
         Ok(count)
     }

@@ -566,7 +566,10 @@ fn main() {
                         let mut obs = observer.lock().unwrap();
                         let anomalies = obs.observe(&observable_state, &callback);
                         if !anomalies.is_empty() {
-                            tracing::info!(count = anomalies.len(), "Detected anomalies this cycle");
+                            tracing::info!(
+                                count = anomalies.len(),
+                                "Detected anomalies this cycle"
+                            );
                         }
                     }
                 });
