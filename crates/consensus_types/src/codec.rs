@@ -432,51 +432,8 @@ pub fn decode_vote_v1_signed(buf: &[u8]) -> Result<Vote, CodecError> {
 /// # Errors
 /// Returns error if buffer is too short, too many votes, or data is malformed.
 pub fn decode_qc_v1(buf: &[u8]) -> Result<QC, CodecError> {
-    if buf.len() < 1 + 8 + 8 + 32 + 4 {
-        return Err(CodecError::BufferTooShort);
-    }
-
     let mut input = buf;
-
-    let version = read_u8(&mut input)?;
-    if version != 1 {
-        return Err(CodecError::UnsupportedVersion);
-    }
-
-    let height = read_u64_be(&mut input)?;
-    let round = read_u64_be(&mut input)?;
-    let block_hash = read_32(&mut input)?;
-
-    let vote_count = read_u32_be(&mut input)?;
-    #[allow(clippy::cast_possible_truncation)]
-    if vote_count > (MAX_VOTES_PER_QC as u32) {
-        return Err(CodecError::TooManyVotes);
-    }
-
-    let mut votes = Vec::with_capacity(vote_count as usize);
-    for _ in 0..vote_count {
-        let vote_height = read_u64_be(&mut input)?;
-        let vote_round = read_u64_be(&mut input)?;
-        let vote_block_hash = read_32(&mut input)?;
-        let vote_voter = read_32(&mut input)?;
-        let signature = read_64(&mut input)?;
-
-        votes.push(Vote {
-            height: vote_height,
-            round: vote_round,
-            block_hash: vote_block_hash,
-            voter: vote_voter,
-            signature,
-            ai_signal_commitment: None,
-        });
-    }
-
-    Ok(QC {
-        height,
-        round,
-        block_hash,
-        votes,
-    })
+    decode_qc_v1_internal(&mut input)
 }
 
 /// Decode a `SignedProposal` from wire format.
@@ -884,6 +841,47 @@ mod tests {
         let bytes1 = encode_qc_v1(&qc).unwrap();
         let bytes2 = encode_qc_v1(&qc).unwrap();
         assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn qc_roundtrip_with_signal_commitments() {
+        let vote_no_signal = Vote {
+            height: 5,
+            round: 2,
+            block_hash: [0x11; 32],
+            voter: [0xaa; 32],
+            signature: [0xee; 64],
+            ai_signal_commitment: None,
+        };
+        let vote_with_signal = Vote {
+            height: 5,
+            round: 2,
+            block_hash: [0x11; 32],
+            voter: [0xbb; 32],
+            signature: [0xff; 64],
+            ai_signal_commitment: Some([0xcc; 32]),
+        };
+
+        let qc = QC {
+            height: 5,
+            round: 2,
+            block_hash: [0x11; 32],
+            votes: vec![vote_no_signal, vote_with_signal],
+        };
+
+        let bytes = encode_qc_v1(&qc).unwrap();
+        let decoded = decode_qc_v1(&bytes).unwrap();
+
+        assert_eq!(decoded.height, qc.height);
+        assert_eq!(decoded.round, qc.round);
+        assert_eq!(decoded.block_hash, qc.block_hash);
+        assert_eq!(decoded.votes.len(), 2);
+
+        // Votes are sorted by voter during encoding
+        assert_eq!(decoded.votes[0].voter, [0xaa; 32]);
+        assert_eq!(decoded.votes[0].ai_signal_commitment, None);
+        assert_eq!(decoded.votes[1].voter, [0xbb; 32]);
+        assert_eq!(decoded.votes[1].ai_signal_commitment, Some([0xcc; 32]));
     }
 
     #[test]
