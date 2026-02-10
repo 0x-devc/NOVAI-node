@@ -724,7 +724,11 @@ impl ConsensusNode {
         drop(state);
         drop(db);
 
-        tracing::debug!(height = block.height, round = block.round, "Proposing block");
+        tracing::debug!(
+            height = block.height,
+            round = block.round,
+            "Proposing block"
+        );
 
         self.broadcast(NetworkMessage::SignedProposal(signed_proposal))
     }
@@ -807,7 +811,11 @@ impl ConsensusNode {
         *self.round_start_time.lock().unwrap() = Instant::now();
         *self.last_timeout_time.lock().unwrap() = None;
 
-        tracing::debug!(height = block.height, round = block.round, "Proposing block");
+        tracing::debug!(
+            height = block.height,
+            round = block.round,
+            "Proposing block"
+        );
 
         self.broadcast(NetworkMessage::SignedProposal(signed_proposal))?;
         Ok(true)
@@ -891,12 +899,40 @@ impl ConsensusNode {
                     quorum
                 ));
             }
+
+            // Verify each vote signature in justify_qc (prevents malicious leader
+            // from fabricating a QC with fake votes that passes the count check).
+            for vote in &justify_qc.votes {
+                let pubkey = self.validator_pubkeys.get(&vote.voter).ok_or_else(|| {
+                    format!(
+                        "justify_qc vote from unknown validator {:?}",
+                        &vote.voter[..4]
+                    )
+                })?;
+                let unsigned_vote = Vote {
+                    signature: [0u8; 64],
+                    ai_signal_commitment: vote.ai_signal_commitment,
+                    ..*vote
+                };
+                let unsigned_bytes =
+                    novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
+                let domain_tag = b"NOVAI_VOTE_V1";
+                let mut to_verify = Vec::new();
+                to_verify.extend_from_slice(domain_tag);
+                to_verify.extend_from_slice(&unsigned_bytes);
+                if !novai_crypto::verify_bytes(pubkey, &to_verify, &vote.signature) {
+                    return Err(format!(
+                        "justify_qc contains invalid vote signature from {:?}",
+                        &vote.voter[..4]
+                    ));
+                }
+            }
         }
 
         // 4. Apply justify_qc if it advances our state (QC catch-up).
         //    This fixes the race where proposal for N+1 arrives before the
-        //    standalone QC(N) broadcast. The justify_qc was already validated
-        //    above (correct height, quorum votes, proposer signature covers it).
+        //    standalone QC(N) broadcast. The justify_qc was fully validated
+        //    above (correct height, quorum votes, and all vote signatures verified).
         //    Idempotent: cache_qc_and_check_commit is a no-op when the QC
         //    does not dominate the current highest_qc.
         // 5. Verify block validity, create vote, and cache block in single lock acquisition
@@ -1064,7 +1100,10 @@ impl ConsensusNode {
                     state
                         .persist_highest_qc(&mut *db)
                         .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
-                    tracing::debug!(qc_height = qc.height, "Persisted highest_qc (formed locally)");
+                    tracing::debug!(
+                        qc_height = qc.height,
+                        "Persisted highest_qc (formed locally)"
+                    );
                 }
                 Err(e) => {
                     // Commit chain incomplete — blocks missing from cache.
