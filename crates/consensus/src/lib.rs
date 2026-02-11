@@ -792,7 +792,15 @@ impl ConsensusState {
     /// - Certified block missing from cache
     /// - Parent chain has gaps or height mismatches
     /// - Required blocks for commit are missing
-    pub fn cache_qc_and_check_commit(&mut self, qc: QC) -> Result<Vec<Block>, ConsensusError> {
+    pub fn cache_qc_and_check_commit<K>(
+        &mut self,
+        qc: QC,
+        db: &K,
+    ) -> Result<Vec<Block>, ConsensusError>
+    where
+        K: Kv,
+        K::Error: std::fmt::Debug,
+    {
         let qc_height = qc.height;
 
         // Update highest QC if this one dominates
@@ -842,13 +850,35 @@ impl ConsensusState {
 
         // === VERIFY CHAIN LINKAGE ===
 
-        // 1. Find B_H (certified block) by QC's block_hash
-        let block_h = self.block_by_hash.get(&qc.block_hash).ok_or_else(|| {
-            ConsensusError::StateError(format!(
-                "Missing certified block for QC at height {}",
-                qc_height
-            ))
-        })?;
+        // 1. Find B_H (certified block) by QC's block_hash (with DB fallback)
+        let block_h = if let Some(b) = self.block_by_hash.get(&qc.block_hash) {
+            b.clone()
+        } else {
+            // DB fallback: load by expected height, verify hash matches
+            let loaded = Self::load_block(db, qc_height)
+                .map_err(|e| {
+                    ConsensusError::StateError(format!(
+                        "DB fallback failed for certified block at height {}: {:?}",
+                        qc_height, e
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ConsensusError::StateError(format!(
+                        "Missing certified block for QC at height {}",
+                        qc_height,
+                    ))
+                })?;
+            let loaded_hash = novai_consensus_types::codec::hash_block_v1(&loaded)
+                .map_err(|e| ConsensusError::CodecError(format!("hash failed: {:?}", e)))?;
+            if loaded_hash != qc.block_hash {
+                return Err(ConsensusError::StateError(format!(
+                    "DB block at height {} has wrong hash for QC",
+                    qc_height
+                )));
+            }
+            self.cache_block(loaded.clone());
+            loaded
+        };
 
         if block_h.height != qc_height {
             return Err(ConsensusError::InvalidBlock(format!(
@@ -862,12 +892,34 @@ impl ConsensusState {
         let mut current_hash = qc.block_hash;
 
         for expected_height in (self.committed_height + 1..=qc_height).rev() {
-            let block = self.block_by_hash.get(&current_hash).ok_or_else(|| {
-                ConsensusError::StateError(format!(
-                    "Missing block at height {} (chain broken)",
-                    expected_height
-                ))
-            })?;
+            let block = if let Some(b) = self.block_by_hash.get(&current_hash) {
+                b.clone()
+            } else {
+                // DB fallback: load by expected height, verify hash matches
+                let loaded = Self::load_block(db, expected_height)
+                    .map_err(|e| {
+                        ConsensusError::StateError(format!(
+                            "DB fallback at height {}: {:?}",
+                            expected_height, e
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        ConsensusError::StateError(format!(
+                            "Missing block at height {} (chain broken)",
+                            expected_height
+                        ))
+                    })?;
+                let loaded_hash = novai_consensus_types::codec::hash_block_v1(&loaded)
+                    .map_err(|e| ConsensusError::CodecError(format!("hash failed: {:?}", e)))?;
+                if loaded_hash != current_hash {
+                    return Err(ConsensusError::StateError(format!(
+                        "DB block at height {} has wrong hash",
+                        expected_height
+                    )));
+                }
+                self.cache_block(loaded.clone());
+                loaded
+            };
 
             if block.height != expected_height {
                 return Err(ConsensusError::InvalidBlock(format!(
@@ -876,12 +928,13 @@ impl ConsensusState {
                 )));
             }
 
+            // Extract parent_hash before potential move
+            current_hash = block.parent_hash;
+
             // Only include blocks up to commit_target (not the 2 confirmation blocks)
             if expected_height <= commit_target {
-                chain.push(block.clone());
+                chain.push(block);
             }
-
-            current_hash = block.parent_hash;
         }
 
         // Reverse to get oldest first

@@ -534,23 +534,25 @@ impl ConsensusNode {
             "Received blocks"
         );
 
-        // Clear pending request if we have one (accept from any peer)
+        // Bug 4 fix: Only clear pending_sync_request for non-empty responses.
+        // Empty responses leave the request pending so another peer can respond.
+        // The 5-second timeout in main.rs handles the all-peers-empty case.
         {
             let mut pending = self.pending_sync_request.lock().unwrap();
             if pending.is_some() {
+                if response.blocks.is_empty() {
+                    // Don't clear pending — wait for non-empty response from another peer.
+                    tracing::warn!(
+                        responder = ?&response.responder[..4],
+                        "Peer sent empty block response (keeping request pending)"
+                    );
+                    return Ok(());
+                }
                 *pending = None;
             } else {
                 // No pending request — unsolicited response, ignore
                 return Ok(());
             }
-        }
-
-        if response.blocks.is_empty() {
-            tracing::warn!(
-                responder = ?&response.responder[..4],
-                "Peer sent empty block response"
-            );
-            return Ok(());
         }
 
         // Lock order: state → db
@@ -605,7 +607,7 @@ impl ConsensusNode {
         // Try commit rule with current highest_qc (may succeed if we now
         // have enough blocks for the 3-chain rule).
         if let Some(hqc) = state.highest_qc.clone() {
-            match state.cache_qc_and_check_commit(hqc.clone()) {
+            match state.cache_qc_and_check_commit(hqc.clone(), &*db) {
                 Ok(to_commit) if !to_commit.is_empty() => {
                     let new_committed_height = to_commit.last().unwrap().height;
                     state
@@ -961,7 +963,7 @@ impl ConsensusNode {
                     "QC catch-up from proposal"
                 );
 
-                match state.cache_qc_and_check_commit(justify_qc.clone()) {
+                match state.cache_qc_and_check_commit(justify_qc.clone(), &*db) {
                     Ok(to_commit) if !to_commit.is_empty() => {
                         let new_committed_height = to_commit.last().unwrap().height;
                         state
@@ -998,6 +1000,37 @@ impl ConsensusNode {
                 }
             }
 
+            // Bug 1 fix: Detect late-arriving blocks BEFORE verify_block rejects
+            // them. If block.height is behind our expected height but ahead of
+            // committed_height, cache + persist and return without voting. This
+            // prevents the in-memory cache gap that breaks the commit chain walk.
+            let expected_height = match &state.highest_qc {
+                Some(hqc) => std::cmp::max(state.height, hqc.height) + 1,
+                None => state.height + 1,
+            };
+
+            if block.height < expected_height && block.height > state.committed_height {
+                tracing::warn!(
+                    block_height = block.height,
+                    expected_height,
+                    committed_height = state.committed_height,
+                    "Late-arriving block — caching without voting"
+                );
+                state.cache_block(block.clone());
+
+                // Bug 2 fix (late path): persist to DB so chain walk DB fallback
+                // can find this block after an in-memory cache eviction.
+                let key = novai_state::block_key(block.height);
+                let value = novai_consensus_types::codec::encode_block_v1(block)
+                    .map_err(|e| format!("Failed to encode block: {:?}", e))?;
+                db.put(&key, &value)
+                    .map_err(|e| format!("Failed to store block: {:?}", e))?;
+
+                drop(db);
+                drop(state);
+                return Ok(());
+            }
+
             state
                 .verify_block(block, &*db)
                 .map_err(|e| format!("Block verification failed: {:?}", e))?;
@@ -1010,6 +1043,15 @@ impl ConsensusNode {
             // 6. Cache block for commit rule (combined to avoid re-acquiring lock)
             state.check_no_fork(block);
             state.cache_block(block.clone());
+
+            // Bug 2 fix (normal path): persist block to DB on receipt so the
+            // commit chain walk DB fallback can recover it after cache eviction.
+            // Idempotent — persist_commit_atomic may later re-write the same key.
+            let key = novai_state::block_key(block.height);
+            let value = novai_consensus_types::codec::encode_block_v1(block)
+                .map_err(|e| format!("Failed to encode block: {:?}", e))?;
+            db.put(&key, &value)
+                .map_err(|e| format!("Failed to store block: {:?}", e))?;
 
             vote
         };
@@ -1076,9 +1118,10 @@ impl ConsensusNode {
             // Commit chain errors are non-fatal — highest_qc is updated
             // regardless, and the QC MUST always be broadcast so other
             // nodes can advance.
-            match state.cache_qc_and_check_commit(qc.clone()) {
+            // Lock order: state (already held) → db
+            let mut db = self.db.lock().unwrap();
+            match state.cache_qc_and_check_commit(qc.clone(), &*db) {
                 Ok(to_commit) if !to_commit.is_empty() => {
-                    let mut db = self.db.lock().unwrap();
                     let new_committed_height = to_commit.last().unwrap().height;
                     state
                         .persist_commit_atomic(
@@ -1096,7 +1139,6 @@ impl ConsensusNode {
                     );
                 }
                 Ok(_) => {
-                    let mut db = self.db.lock().unwrap();
                     state
                         .persist_highest_qc(&mut *db)
                         .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
@@ -1110,7 +1152,6 @@ impl ConsensusNode {
                     // highest_qc was already updated. Persist it and ALWAYS
                     // broadcast the QC so other nodes can advance.
                     tracing::warn!(?e, "Commit chain incomplete (will sync)");
-                    let mut db = self.db.lock().unwrap();
                     state
                         .persist_highest_qc(&mut *db)
                         .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
@@ -1150,10 +1191,11 @@ impl ConsensusNode {
         // Check commit rule and get blocks to commit.
         // Commit chain errors are non-fatal — highest_qc is updated regardless,
         // and commits will happen when missing blocks arrive via sync.
+        // Lock order: state (already held) → db
+        let mut db = self.db.lock().unwrap();
         let mut committed = false;
-        match state.cache_qc_and_check_commit(qc.clone()) {
+        match state.cache_qc_and_check_commit(qc.clone(), &*db) {
             Ok(to_commit) if !to_commit.is_empty() => {
-                let mut db = self.db.lock().unwrap();
                 let new_committed_height = to_commit.last().unwrap().height;
                 state
                     .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
@@ -1168,7 +1210,6 @@ impl ConsensusNode {
             }
             Ok(_) => {
                 if state.highest_qc.as_ref().map(|q| q.height) == Some(qc.height) {
-                    let mut db = self.db.lock().unwrap();
                     state
                         .persist_highest_qc(&mut *db)
                         .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
@@ -1182,7 +1223,6 @@ impl ConsensusNode {
                 // Commit chain incomplete — blocks missing from cache.
                 // highest_qc was already updated. Persist it and continue.
                 tracing::warn!(?e, "Commit chain incomplete (will sync)");
-                let mut db = self.db.lock().unwrap();
                 state
                     .persist_highest_qc(&mut *db)
                     .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;

@@ -244,6 +244,7 @@ fn commit_rule_3_chain() {
     let addr = address_from_pubkey(&pk);
 
     let mut state = ConsensusState::new(addr);
+    let db = MemKv::new();
 
     // Create properly linked chain: genesis -> block1 -> block2 -> block3
     let genesis_hash = [0u8; 32]; // Genesis parent
@@ -269,7 +270,7 @@ fn commit_rule_3_chain() {
         block_hash: hash1,
         votes: vec![],
     };
-    let to_commit = state.cache_qc_and_check_commit(qc1).unwrap();
+    let to_commit = state.cache_qc_and_check_commit(qc1, &db).unwrap();
     assert!(
         to_commit.is_empty(),
         "QC at height 1 should not trigger commit"
@@ -282,7 +283,7 @@ fn commit_rule_3_chain() {
         block_hash: hash2,
         votes: vec![],
     };
-    let to_commit = state.cache_qc_and_check_commit(qc2).unwrap();
+    let to_commit = state.cache_qc_and_check_commit(qc2, &db).unwrap();
     assert!(
         to_commit.is_empty(),
         "QC at height 2 should not trigger commit (commit_target=0, nothing to commit)"
@@ -295,7 +296,7 @@ fn commit_rule_3_chain() {
         block_hash: hash3,
         votes: vec![],
     };
-    let to_commit = state.cache_qc_and_check_commit(qc3).unwrap();
+    let to_commit = state.cache_qc_and_check_commit(qc3, &db).unwrap();
     assert_eq!(to_commit.len(), 1, "QC at height 3 should commit block 1");
     assert_eq!(to_commit[0].height, 1);
 
@@ -315,7 +316,7 @@ fn commit_rule_3_chain() {
         block_hash: hash4,
         votes: vec![],
     };
-    let to_commit = state.cache_qc_and_check_commit(qc4).unwrap();
+    let to_commit = state.cache_qc_and_check_commit(qc4, &db).unwrap();
     assert_eq!(to_commit.len(), 1, "QC at height 4 should commit block 2");
     assert_eq!(to_commit[0].height, 2);
 
@@ -332,6 +333,7 @@ fn commit_rule_batch_commits() {
     let addr = address_from_pubkey(&pk);
 
     let mut state = ConsensusState::new(addr);
+    let db = MemKv::new();
 
     // Create properly linked chain: genesis -> 1 -> 2 -> 3 -> 4 -> 5
     let genesis_hash = [0u8; 32];
@@ -365,7 +367,7 @@ fn commit_rule_batch_commits() {
         block_hash: hash5,
         votes: vec![],
     };
-    let to_commit = state.cache_qc_and_check_commit(qc5).unwrap();
+    let to_commit = state.cache_qc_and_check_commit(qc5, &db).unwrap();
 
     assert_eq!(to_commit.len(), 3, "Should commit 3 blocks");
     assert_eq!(to_commit[0].height, 1);
@@ -383,6 +385,7 @@ fn highest_qc_updated() {
     let addr = address_from_pubkey(&pk);
 
     let mut state = ConsensusState::new(addr);
+    let db = MemKv::new();
 
     // Create blocks for QC references
     let block1 = make_block(1, [0u8; 32]);
@@ -407,7 +410,7 @@ fn highest_qc_updated() {
         block_hash: hash2,
         votes: vec![],
     };
-    let _ = state.cache_qc_and_check_commit(qc2.clone());
+    let _ = state.cache_qc_and_check_commit(qc2.clone(), &db);
     assert_eq!(state.highest_qc.as_ref().unwrap().height, 2);
 
     // Add QC at height 1 (lower) - should NOT update
@@ -417,7 +420,7 @@ fn highest_qc_updated() {
         block_hash: hash1,
         votes: vec![],
     };
-    let _ = state.cache_qc_and_check_commit(qc1);
+    let _ = state.cache_qc_and_check_commit(qc1, &db);
     assert_eq!(
         state.highest_qc.as_ref().unwrap().height,
         2,
@@ -431,7 +434,7 @@ fn highest_qc_updated() {
         block_hash: hash3,
         votes: vec![],
     };
-    let _ = state.cache_qc_and_check_commit(qc3);
+    let _ = state.cache_qc_and_check_commit(qc3, &db);
     assert_eq!(state.highest_qc.as_ref().unwrap().height, 3);
 }
 
@@ -443,6 +446,7 @@ fn commit_fails_on_missing_block() {
     let addr = address_from_pubkey(&pk);
 
     let mut state = ConsensusState::new(addr);
+    let db = MemKv::new();
 
     // Create chain but DON'T cache block 2 (creating a gap)
     let block1 = make_block(1, [0u8; 32]);
@@ -466,7 +470,7 @@ fn commit_fails_on_missing_block() {
         votes: vec![],
     };
 
-    let result = state.cache_qc_and_check_commit(qc3);
+    let result = state.cache_qc_and_check_commit(qc3, &db);
     assert!(result.is_err(), "Should fail when chain has missing blocks");
 }
 
@@ -478,6 +482,7 @@ fn commit_fails_on_wrong_block_hash_in_qc() {
     let addr = address_from_pubkey(&pk);
 
     let mut state = ConsensusState::new(addr);
+    let db = MemKv::new();
 
     let block1 = make_block(1, [0u8; 32]);
     let hash1 = hash_block_v1(&block1).unwrap();
@@ -500,7 +505,7 @@ fn commit_fails_on_wrong_block_hash_in_qc() {
         votes: vec![],
     };
 
-    let result = state.cache_qc_and_check_commit(qc3);
+    let result = state.cache_qc_and_check_commit(qc3, &db);
     assert!(
         result.is_err(),
         "Should fail when QC references unknown block"
