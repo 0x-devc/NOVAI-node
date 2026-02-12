@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use novai_consensus_types::{BlockRequest, BlockResponse, SignedProposal, Timeout, Vote, QC};
 
@@ -248,6 +249,8 @@ impl PeerManager {
     /// Broadcast a message to all connected peers.
     ///
     /// Pre-encodes the message once to avoid repeated serialization per peer.
+    /// Takes peers out of the mutex during writes so a blocked TCP write
+    /// cannot prevent `add_peer()` or other threads from making progress.
     ///
     /// # Errors
     /// Returns error if encoding fails (individual peer write failures are handled internally).
@@ -257,7 +260,12 @@ impl PeerManager {
     pub fn broadcast(&self, msg: &NetworkMessage) -> Result<(), P2PError> {
         let wire_bytes = encode_wire_message(msg)?;
 
-        self.peers.lock().unwrap().retain_mut(|writer| {
+        // Take peers out so TCP writes don't hold the mutex.
+        // Write timeouts on each stream (set at connection time) bound
+        // how long any single write can block.
+        let mut writers = std::mem::take(&mut *self.peers.lock().unwrap());
+
+        writers.retain_mut(|writer| {
             if writer.write_all(&wire_bytes).is_ok() && writer.flush().is_ok() {
                 true
             } else {
@@ -265,6 +273,12 @@ impl PeerManager {
                 false
             }
         });
+
+        // Put surviving writers back, appending any peers added concurrently.
+        let mut guard = self.peers.lock().unwrap();
+        writers.append(&mut *guard);
+        *guard = writers;
+        drop(guard);
 
         Ok(())
     }
@@ -318,6 +332,10 @@ where
 /// Returns error if connection fails.
 pub fn connect_to_peer(addr: SocketAddr) -> Result<TcpStream, P2PError> {
     let stream = TcpStream::connect(addr)?;
+    // Bound how long broadcast() can block on a single peer write.
+    // The Noise handshake saves/restores this value, so it persists
+    // through to the NoiseWriter wrapping the cloned stream.
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     tracing::info!("Connected to peer at {addr}");
     Ok(stream)
 }

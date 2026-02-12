@@ -223,6 +223,10 @@ impl ConsensusNode {
         start_listener(bind_addr, move |mut stream| {
             let node_clone = Arc::clone(&node);
             thread::spawn(move || {
+                // Bound how long broadcast() can block writing to this peer.
+                // Shared with the Noise handshake's save/restore_timeout.
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+
                 if let Some(key) = node_clone.encryption_key {
                     // Encrypted mode: Noise XX responder handshake
                     match handshake_responder(&mut stream, &key) {
