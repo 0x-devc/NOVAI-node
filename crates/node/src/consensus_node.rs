@@ -1159,8 +1159,9 @@ impl ConsensusNode {
             }
 
             drop(state);
+            drop(db);
 
-            // Trigger block sync for missing blocks (locks are now dropped)
+            // Trigger block sync for missing blocks (locks now dropped)
             self.try_request_missing_blocks();
 
             // Reset timeout timer — view height just advanced via our own QC.
@@ -1234,8 +1235,9 @@ impl ConsensusNode {
         let qc_advanced = new_highest > old_highest;
         let round_was_reset = state.round == 0 && old_round != 0;
 
-        // Release state lock before updating node-level flags
+        // Release locks before updating node-level flags and triggering sync
         drop(state);
+        drop(db);
 
         // When progress is made (round reset, commit, or QC advanced), reset the
         // timeout timer so the new round gets a fresh timeout window.
