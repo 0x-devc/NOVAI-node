@@ -114,6 +114,8 @@ pub struct ConsensusNode {
     encryption_key: Option<[u8; 32]>,
     /// Known validators' X25519 static keys for peer authentication.
     known_noise_keys: Vec<[u8; 32]>,
+    /// Noise static keys of currently-connected peers (prevents duplicate connections).
+    connected_noise_keys: Arc<Mutex<HashSet<[u8; 32]>>>,
 }
 
 impl ConsensusNode {
@@ -203,6 +205,7 @@ impl ConsensusNode {
             base_timeout_ms,
             encryption_key,
             known_noise_keys,
+            connected_noise_keys: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -234,8 +237,18 @@ impl ConsensusNode {
                             if !node_clone.verify_peer_identity(&result.remote_static_key) {
                                 return;
                             }
+                            // Reject duplicate connections from the same peer
+                            {
+                                let mut connected = node_clone.connected_noise_keys.lock().unwrap();
+                                if !connected.insert(result.remote_static_key) {
+                                    tracing::info!("Duplicate connection rejected (already connected to this peer)");
+                                    return;
+                                }
+                            }
                             if !node_clone.peer_manager.add_peer(Box::new(result.writer)) {
                                 tracing::warn!("Peer rejected: connection limit reached");
+                                // Roll back the connected_noise_keys entry
+                                node_clone.connected_noise_keys.lock().unwrap().remove(&result.remote_static_key);
                                 return;
                             }
                             node_clone.handle_peer_connection(result.reader);
@@ -281,7 +294,23 @@ impl ConsensusNode {
                 return Err("Rejected: remote peer not in validator set".into());
             }
 
+            // Reject duplicate connections to the same peer
+            {
+                let mut connected = self.connected_noise_keys.lock().unwrap();
+                if !connected.insert(result.remote_static_key) {
+                    tracing::info!(
+                        "Duplicate connection rejected (already connected to this peer)"
+                    );
+                    return Ok(());
+                }
+            }
+
             if !self.peer_manager.add_peer(Box::new(result.writer)) {
+                // Roll back the connected_noise_keys entry
+                self.connected_noise_keys
+                    .lock()
+                    .unwrap()
+                    .remove(&result.remote_static_key);
                 return Err("Peer rejected: connection limit reached".into());
             }
 
@@ -1039,11 +1068,6 @@ impl ConsensusNode {
                 .verify_block(block, &*db)
                 .map_err(|e| format!("Block verification failed: {:?}", e))?;
 
-            // 5. Create vote
-            let vote = state
-                .create_vote(block, &self.signing_key)
-                .map_err(|e| format!("Vote creation failed: {:?}", e))?;
-
             // 6. Cache block for commit rule (combined to avoid re-acquiring lock)
             state.check_no_fork(block);
             state.cache_block(block.clone());
@@ -1056,6 +1080,25 @@ impl ConsensusNode {
                 .map_err(|e| format!("Failed to encode block: {:?}", e))?;
             db.put(&key, &value)
                 .map_err(|e| format!("Failed to store block: {:?}", e))?;
+
+            // 5. Create vote (skip if we already voted in this round — dedup
+            // against duplicate proposals arriving via redundant connections)
+            if state.voted_in_round.contains(&self.our_address) {
+                tracing::debug!(
+                    height = block.height,
+                    "Already voted in this round, skipping duplicate proposal"
+                );
+                drop(db);
+                drop(state);
+                return Ok(());
+            }
+
+            let vote = state
+                .create_vote(block, &self.signing_key)
+                .map_err(|e| format!("Vote creation failed: {:?}", e))?;
+
+            // Mark ourselves as voted so duplicate proposals are rejected
+            state.voted_in_round.insert(self.our_address);
 
             vote
         };
@@ -1078,10 +1121,18 @@ impl ConsensusNode {
     pub fn handle_vote(&self, vote: Vote) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
 
-        // Use cached pubkeys_vec to avoid allocation on every vote
-        state
-            .add_vote(vote.clone(), &self.validator_pubkeys_vec)
-            .map_err(|e| format!("Add vote failed: {:?}", e))?;
+        // Use cached pubkeys_vec to avoid allocation on every vote.
+        // Duplicate/equivocation votes are expected during normal operation
+        // (e.g., redundant network paths) — treat them as no-ops, not errors.
+        match state.add_vote(vote.clone(), &self.validator_pubkeys_vec) {
+            Ok(()) => {}
+            Err(novai_consensus::ConsensusError::InvalidVote(ref msg))
+                if msg.contains("Duplicate vote") || msg.contains("height mismatch") =>
+            {
+                return Ok(());
+            }
+            Err(e) => return Err(format!("Add vote failed: {:?}", e)),
+        }
 
         // Log AI signal if present (advisory only)
         if let Some(commitment) = vote.ai_signal_commitment {
