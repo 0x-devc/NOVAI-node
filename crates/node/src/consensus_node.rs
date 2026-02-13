@@ -114,8 +114,6 @@ pub struct ConsensusNode {
     encryption_key: Option<[u8; 32]>,
     /// Known validators' X25519 static keys for peer authentication.
     known_noise_keys: Vec<[u8; 32]>,
-    /// Noise static keys of currently-connected peers (prevents duplicate connections).
-    connected_noise_keys: Arc<Mutex<HashSet<[u8; 32]>>>,
 }
 
 impl ConsensusNode {
@@ -205,7 +203,6 @@ impl ConsensusNode {
             base_timeout_ms,
             encryption_key,
             known_noise_keys,
-            connected_noise_keys: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -237,18 +234,8 @@ impl ConsensusNode {
                             if !node_clone.verify_peer_identity(&result.remote_static_key) {
                                 return;
                             }
-                            // Reject duplicate connections from the same peer
-                            {
-                                let mut connected = node_clone.connected_noise_keys.lock().unwrap();
-                                if !connected.insert(result.remote_static_key) {
-                                    tracing::info!("Duplicate connection rejected (already connected to this peer)");
-                                    return;
-                                }
-                            }
                             if !node_clone.peer_manager.add_peer(Box::new(result.writer)) {
                                 tracing::warn!("Peer rejected: connection limit reached");
-                                // Roll back the connected_noise_keys entry
-                                node_clone.connected_noise_keys.lock().unwrap().remove(&result.remote_static_key);
                                 return;
                             }
                             node_clone.handle_peer_connection(result.reader);
@@ -294,23 +281,7 @@ impl ConsensusNode {
                 return Err("Rejected: remote peer not in validator set".into());
             }
 
-            // Reject duplicate connections to the same peer
-            {
-                let mut connected = self.connected_noise_keys.lock().unwrap();
-                if !connected.insert(result.remote_static_key) {
-                    tracing::info!(
-                        "Duplicate connection rejected (already connected to this peer)"
-                    );
-                    return Ok(());
-                }
-            }
-
             if !self.peer_manager.add_peer(Box::new(result.writer)) {
-                // Roll back the connected_noise_keys entry
-                self.connected_noise_keys
-                    .lock()
-                    .unwrap()
-                    .remove(&result.remote_static_key);
                 return Err("Peer rejected: connection limit reached".into());
             }
 
