@@ -213,6 +213,10 @@ pub const MAX_PEERS: usize = 128;
 /// Stores write halves of peer connections (plain `TcpStream` or `NoiseWriter`).
 pub struct PeerManager {
     peers: Arc<Mutex<Vec<Box<dyn Write + Send>>>>,
+    /// Serializes broadcasts so concurrent callers cannot race on `mem::take`.
+    /// Without this, Thread B calling `broadcast()` while Thread A is mid-write
+    /// sees an empty peer list and silently drops its message.
+    broadcast_lock: Mutex<()>,
 }
 
 impl Default for PeerManager {
@@ -226,6 +230,7 @@ impl PeerManager {
     pub fn new() -> Self {
         Self {
             peers: Arc::new(Mutex::new(Vec::new())),
+            broadcast_lock: Mutex::new(()),
         }
     }
 
@@ -260,7 +265,12 @@ impl PeerManager {
     pub fn broadcast(&self, msg: &NetworkMessage) -> Result<(), P2PError> {
         let wire_bytes = encode_wire_message(msg)?;
 
-        // Take peers out so TCP writes don't hold the mutex.
+        // Serialize broadcasts: without this lock, concurrent callers race on
+        // `mem::take` — Thread B sees an empty peer list while Thread A is
+        // mid-write, silently dropping the message.
+        let _bcast = self.broadcast_lock.lock().unwrap();
+
+        // Take peers out so TCP writes don't hold the peers mutex.
         // Write timeouts on each stream (set at connection time) bound
         // how long any single write can block.
         let mut writers = std::mem::take(&mut *self.peers.lock().unwrap());
