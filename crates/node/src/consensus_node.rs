@@ -564,11 +564,33 @@ impl ConsensusNode {
         let mut db = self.db.lock().unwrap();
         let committed_height = state.committed_height;
 
-        // Check that first block connects to our committed chain
-        if response.blocks[0].height != committed_height + 1 {
+        // Filter out blocks we've already committed (stale sync response).
+        // This happens when committed_height advances between request and response.
+        let blocks: Vec<_> = response
+            .blocks
+            .iter()
+            .filter(|b| b.height > committed_height)
+            .cloned()
+            .collect();
+
+        if blocks.is_empty() {
+            tracing::debug!(
+                committed_height,
+                response_start = response.blocks[0].height,
+                response_end = response.blocks.last().unwrap().height,
+                "Stale sync response — all blocks already committed"
+            );
+            drop(state);
+            drop(db);
+            self.try_request_missing_blocks();
+            return Ok(());
+        }
+
+        // First fresh block must connect to committed chain
+        if blocks[0].height != committed_height + 1 {
             return Err(format!(
                 "Block chain gap: committed_height={}, first block height={}",
-                committed_height, response.blocks[0].height
+                committed_height, blocks[0].height
             ));
         }
 
@@ -583,12 +605,12 @@ impl ConsensusNode {
         };
 
         // Verify the blocks form a valid chain
-        if let Err(e) = ConsensusState::verify_block_chain(&response.blocks, expected_parent_hash) {
+        if let Err(e) = ConsensusState::verify_block_chain(&blocks, expected_parent_hash) {
             return Err(format!("Block chain verification failed: {:?}", e));
         }
 
         // Store blocks to DB AND cache in memory for commit rule
-        for block in &response.blocks {
+        for block in &blocks {
             let key = novai_state::block_key(block.height);
             let value = novai_consensus_types::codec::encode_block_v1(block)
                 .map_err(|e| format!("Failed to encode block: {:?}", e))?;
@@ -600,13 +622,13 @@ impl ConsensusNode {
         }
 
         tracing::info!(
-            count = response.blocks.len(),
-            start = response.blocks.first().unwrap().height,
-            end = response.blocks.last().unwrap().height,
+            count = blocks.len(),
+            start = blocks.first().unwrap().height,
+            end = blocks.last().unwrap().height,
             "Cached synced blocks"
         );
 
-        let last_received_height = response.blocks.last().unwrap().height;
+        let last_received_height = blocks.last().unwrap().height;
 
         // Try commit rule with current highest_qc (may succeed if we now
         // have enough blocks for the 3-chain rule).
@@ -1012,6 +1034,20 @@ impl ConsensusNode {
                 Some(hqc) => std::cmp::max(state.height, hqc.height) + 1,
                 None => state.height + 1,
             };
+
+            // Skip proposals for already-committed heights. This happens when
+            // committed_height advances via QC catch-up or sync before a delayed
+            // proposal arrives on a duplicate peer connection.
+            if block.height <= state.committed_height {
+                tracing::debug!(
+                    block_height = block.height,
+                    committed_height = state.committed_height,
+                    "Proposal for already-committed height — skipping"
+                );
+                drop(db);
+                drop(state);
+                return Ok(());
+            }
 
             if block.height < expected_height && block.height > state.committed_height {
                 tracing::warn!(
