@@ -10,9 +10,10 @@ pub mod transport;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use novai_consensus_types::{BlockRequest, BlockResponse, SignedProposal, Timeout, Vote, QC};
 
@@ -254,8 +255,10 @@ impl PeerManager {
     /// Broadcast a message to all connected peers.
     ///
     /// Pre-encodes the message once to avoid repeated serialization per peer.
-    /// Takes peers out of the mutex during writes so a blocked TCP write
-    /// cannot prevent `add_peer()` or other threads from making progress.
+    /// Spawns a thread per peer so a blocked TCP write (especially through
+    /// `NoiseWriter` + `BufWriter` layers where socket-level write timeouts don't
+    /// apply) cannot stall the entire broadcast. An absolute 2-second deadline
+    /// bounds total broadcast time regardless of peer count.
     ///
     /// # Errors
     /// Returns error if encoding fails (individual peer write failures are handled internally).
@@ -271,23 +274,46 @@ impl PeerManager {
         let _bcast = self.broadcast_lock.lock().unwrap();
 
         // Take peers out so TCP writes don't hold the peers mutex.
-        // Write timeouts on each stream (set at connection time) bound
-        // how long any single write can block.
-        let mut writers = std::mem::take(&mut *self.peers.lock().unwrap());
+        let writers = std::mem::take(&mut *self.peers.lock().unwrap());
 
-        writers.retain_mut(|writer| {
-            if writer.write_all(&wire_bytes).is_ok() && writer.flush().is_ok() {
-                true
-            } else {
-                tracing::debug!("Peer disconnected, removing");
-                false
+        // Spawn a write thread per peer with a channel to send the writer back.
+        let mut receivers = Vec::with_capacity(writers.len());
+        for writer in writers {
+            let bytes = wire_bytes.clone();
+            let (tx, rx) = mpsc::sync_channel::<(Box<dyn Write + Send>, bool)>(1);
+            thread::spawn(move || {
+                let mut w = writer;
+                let ok = w.write_all(&bytes).is_ok() && w.flush().is_ok();
+                let _ = tx.send((w, ok));
+            });
+            receivers.push(rx);
+        }
+
+        // Collect results against an absolute deadline so total broadcast
+        // time is bounded at 2 seconds even if every peer is stuck.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut surviving: Vec<Box<dyn Write + Send>> = Vec::new();
+        for rx in receivers {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                tracing::warn!("Broadcast deadline exceeded, dropping remaining peers");
+                break;
             }
-        });
+            match rx.recv_timeout(remaining) {
+                Ok((writer, true)) => surviving.push(writer),
+                Ok((_writer, false)) => {
+                    tracing::debug!("Peer write failed, removing");
+                }
+                Err(_) => {
+                    tracing::warn!("Peer write timed out (2s deadline), removing stuck peer");
+                }
+            }
+        }
 
         // Put surviving writers back, appending any peers added concurrently.
         let mut guard = self.peers.lock().unwrap();
-        writers.append(&mut *guard);
-        *guard = writers;
+        surviving.append(&mut *guard);
+        *guard = surviving;
         drop(guard);
 
         Ok(())
