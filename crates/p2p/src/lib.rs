@@ -13,7 +13,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use novai_consensus_types::{BlockRequest, BlockResponse, SignedProposal, Timeout, Vote, QC};
 
@@ -211,13 +211,12 @@ pub const MAX_PEERS: usize = 128;
 
 /// Minimal peer connection manager.
 ///
-/// Stores write halves of peer connections (plain `TcpStream` or `NoiseWriter`).
+/// Each peer gets a dedicated writer thread that owns the TCP stream and loops
+/// on a bounded channel. `broadcast()` just sends pre-encoded bytes into the
+/// channels — no thread spawning, no blocking on network I/O.
 pub struct PeerManager {
-    peers: Arc<Mutex<Vec<Box<dyn Write + Send>>>>,
-    /// Serializes broadcasts so concurrent callers cannot race on `mem::take`.
-    /// Without this, Thread B calling `broadcast()` while Thread A is mid-write
-    /// sees an empty peer list and silently drops its message.
-    broadcast_lock: Mutex<()>,
+    /// Channel senders to dedicated per-peer writer threads.
+    peer_senders: Arc<Mutex<Vec<mpsc::SyncSender<Vec<u8>>>>>,
 }
 
 impl Default for PeerManager {
@@ -226,96 +225,84 @@ impl Default for PeerManager {
     }
 }
 
+/// Per-peer writer channel capacity. If a peer falls this many messages behind
+/// (writer thread stuck on a blocked socket), the peer is dropped on the next
+/// broadcast. At ~60 messages/second this is ~1 second of backlog.
+const PEER_CHANNEL_CAPACITY: usize = 64;
+
 impl PeerManager {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            peers: Arc::new(Mutex::new(Vec::new())),
-            broadcast_lock: Mutex::new(()),
+            peer_senders: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Add a connected peer's write half.
     ///
+    /// Spawns a dedicated writer thread that owns `writer` and loops on a
+    /// bounded channel. The thread exits on write error or channel disconnect
+    /// (when the corresponding `SyncSender` is dropped).
+    ///
     /// Returns `false` if the peer was rejected because the connection
     /// limit ([`MAX_PEERS`]) has been reached.
     ///
     /// # Panics
-    /// Panics if the mutex is poisoned.
+    /// Panics if the mutex is poisoned or thread spawn fails.
     pub fn add_peer(&self, writer: Box<dyn Write + Send>) -> bool {
-        let mut peers = self.peers.lock().unwrap();
-        if peers.len() >= MAX_PEERS {
+        let mut senders = self.peer_senders.lock().unwrap();
+        if senders.len() >= MAX_PEERS {
             tracing::warn!(max = MAX_PEERS, "Peer connection rejected: at capacity");
             return false;
         }
-        peers.push(writer);
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PEER_CHANNEL_CAPACITY);
+        thread::Builder::new()
+            .name("peer-writer".into())
+            .spawn(move || {
+                let mut w = writer;
+                for bytes in rx {
+                    if w.write_all(&bytes).is_err() || w.flush().is_err() {
+                        tracing::debug!("Peer writer failed, exiting");
+                        return;
+                    }
+                }
+            })
+            .expect("failed to spawn peer writer thread");
+        senders.push(tx);
         true
     }
 
     /// Broadcast a message to all connected peers.
     ///
-    /// Pre-encodes the message once to avoid repeated serialization per peer.
-    /// Spawns a thread per peer so a blocked TCP write (especially through
-    /// `NoiseWriter` + `BufWriter` layers where socket-level write timeouts don't
-    /// apply) cannot stall the entire broadcast. An absolute 2-second deadline
-    /// bounds total broadcast time regardless of peer count.
+    /// Pre-encodes the message once, then `try_send`s the bytes into each
+    /// peer's channel. Peers whose channels are full (stuck writer) or
+    /// disconnected (writer thread exited) are removed.
+    ///
+    /// This method never blocks on network I/O — the only work is encoding
+    /// plus a lock + iterate + `try_send` per peer.
     ///
     /// # Errors
-    /// Returns error if encoding fails (individual peer write failures are handled internally).
+    /// Returns error if encoding fails (individual peer failures are handled internally).
     ///
     /// # Panics
     /// Panics if the mutex is poisoned.
     pub fn broadcast(&self, msg: &NetworkMessage) -> Result<(), P2PError> {
         let wire_bytes = encode_wire_message(msg)?;
-
-        // Serialize broadcasts: without this lock, concurrent callers race on
-        // `mem::take` — Thread B sees an empty peer list while Thread A is
-        // mid-write, silently dropping the message.
-        let _bcast = self.broadcast_lock.lock().unwrap();
-
-        // Take peers out so TCP writes don't hold the peers mutex.
-        let writers = std::mem::take(&mut *self.peers.lock().unwrap());
-
-        // Spawn a write thread per peer with a channel to send the writer back.
-        let mut receivers = Vec::with_capacity(writers.len());
-        for writer in writers {
-            let bytes = wire_bytes.clone();
-            let (tx, rx) = mpsc::sync_channel::<(Box<dyn Write + Send>, bool)>(1);
-            thread::spawn(move || {
-                let mut w = writer;
-                let ok = w.write_all(&bytes).is_ok() && w.flush().is_ok();
-                let _ = tx.send((w, ok));
-            });
-            receivers.push(rx);
-        }
-
-        // Collect results against an absolute deadline so total broadcast
-        // time is bounded at 2 seconds even if every peer is stuck.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut surviving: Vec<Box<dyn Write + Send>> = Vec::new();
-        for rx in receivers {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                tracing::warn!("Broadcast deadline exceeded, dropping remaining peers");
-                break;
+        let mut senders = self.peer_senders.lock().unwrap();
+        senders.retain(|tx| match tx.try_send(wire_bytes.clone()) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    "Peer channel full ({PEER_CHANNEL_CAPACITY} msgs behind), dropping slow peer"
+                );
+                false
             }
-            match rx.recv_timeout(remaining) {
-                Ok((writer, true)) => surviving.push(writer),
-                Ok((_writer, false)) => {
-                    tracing::debug!("Peer write failed, removing");
-                }
-                Err(_) => {
-                    tracing::warn!("Peer write timed out (2s deadline), removing stuck peer");
-                }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                tracing::debug!("Peer writer exited, removing");
+                false
             }
-        }
-
-        // Put surviving writers back, appending any peers added concurrently.
-        let mut guard = self.peers.lock().unwrap();
-        surviving.append(&mut *guard);
-        *guard = surviving;
-        drop(guard);
-
+        });
+        drop(senders);
         Ok(())
     }
 
@@ -325,7 +312,7 @@ impl PeerManager {
     /// Panics if the mutex is poisoned.
     #[must_use]
     pub fn peer_count(&self) -> usize {
-        self.peers.lock().unwrap().len()
+        self.peer_senders.lock().unwrap().len()
     }
 }
 
