@@ -48,6 +48,9 @@ impl RocksKv {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+        // Cap open files to prevent FD exhaustion when multiple instances
+        // share a single machine (e.g., 4-node testnet on one server).
+        opts.set_max_open_files(256);
 
         // Try to list existing column families
         let existing_cfs = match DB::list_cf(&opts, path) {

@@ -9,7 +9,7 @@ use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
 use std::env;
 use std::io::Write;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -226,6 +226,16 @@ fn parse_genesis_validator_set(
 }
 
 fn main() {
+    // Install panic hook BEFORE tracing so panics are always visible.
+    // Tracing may not work if the panic happened while holding a tracing lock.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("<unnamed>");
+        eprintln!("NOVAI PANIC in thread '{name}': {info}");
+        default_hook(info);
+    }));
+
     // Initialize structured logging (controlled via RUST_LOG env var)
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -610,13 +620,52 @@ fn main() {
                 tracing::error!(%e, "Failed to start metrics server");
             }
 
+            // Graceful shutdown on SIGTERM/SIGHUP/SIGINT
+            let shutdown = Arc::new(AtomicBool::new(false));
+            {
+                let shutdown_flag = shutdown.clone();
+                std::thread::Builder::new()
+                    .name("signal-handler".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("signal handler runtime");
+                        rt.block_on(async {
+                            #[cfg(unix)]
+                            {
+                                use tokio::signal::unix::{signal, SignalKind};
+                                let mut sigterm = signal(SignalKind::terminate()).unwrap();
+                                let mut sighup = signal(SignalKind::hangup()).unwrap();
+                                tokio::select! {
+                                    _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
+                                    _ = sighup.recv() => tracing::info!("Received SIGHUP"),
+                                    _ = tokio::signal::ctrl_c() => tracing::info!("Received SIGINT"),
+                                }
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                let _ = tokio::signal::ctrl_c().await;
+                                tracing::info!("Received SIGINT");
+                            }
+                            shutdown_flag.store(true, Ordering::Relaxed);
+                        });
+                    })
+                    .expect("spawn signal handler");
+            }
+
             // Simple consensus loop with timeout checking
             // NOTE: 5ms sleep allows 200 iterations/sec for responsive consensus
             let mut last_proposal_attempt = std::time::Instant::now();
             let mut last_status_log = std::time::Instant::now();
             let mut last_sync_check = std::time::Instant::now();
             let mut last_sync_trigger = std::time::Instant::now();
+            let mut last_resource_log = std::time::Instant::now();
             loop {
+                if shutdown.load(Ordering::Relaxed) {
+                    tracing::info!("Shutting down gracefully...");
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(5));
 
                 // Check for timeout
@@ -657,6 +706,21 @@ fn main() {
                     node.try_request_missing_blocks();
                 }
 
+                // Periodic resource monitoring (every 60 seconds)
+                if last_resource_log.elapsed() >= Duration::from_secs(60) {
+                    last_resource_log = std::time::Instant::now();
+                    let state = node.state.lock().unwrap();
+                    let qc_broadcast_cache = node.qc_broadcasted.lock().unwrap().len();
+                    tracing::info!(
+                        committed_height = state.committed_height,
+                        round = state.round,
+                        block_cache = state.block_cache.len(),
+                        qc_broadcast_cache,
+                        peers = node.peer_manager.peer_count(),
+                        "RESOURCE_MONITOR"
+                    );
+                }
+
                 // Propose every 100ms (must be less than BASE_TIMEOUT_MS for consensus to work)
                 // This allows up to 10 proposals/sec - balanced for stability
                 if last_proposal_attempt.elapsed() >= Duration::from_millis(100) {
@@ -683,6 +747,7 @@ fn main() {
                     }
                 }
             }
+            tracing::info!("Node stopped");
         }
 
         "submit-tx" => {

@@ -334,6 +334,24 @@ impl ConsensusNode {
             .map_err(|e| format!("Broadcast failed: {:?}", e))
     }
 
+    /// Prune the QC broadcast dedup cache, removing entries below the retention window.
+    ///
+    /// Without pruning, this `HashSet` grows by ~100 bytes per block forever,
+    /// causing unbounded memory growth (~50MB per 500k blocks per node).
+    fn prune_qc_broadcast_cache(&self, committed_height: u64) {
+        if committed_height <= novai_consensus::CACHE_RETAIN_DEPTH {
+            return;
+        }
+        let prune_below = committed_height - novai_consensus::CACHE_RETAIN_DEPTH;
+        let mut cache = self.qc_broadcasted.lock().unwrap();
+        let before = cache.len();
+        cache.retain(|&(height, _, _)| height >= prune_below);
+        let pruned = before - cache.len();
+        if pruned > 0 {
+            tracing::debug!(pruned, remaining = cache.len(), "Pruned QC broadcast cache");
+        }
+    }
+
     /// Check if timeout should be triggered and create it.
     ///
     /// Returns Some(Timeout) if timeout duration elapsed and not already timed out.
@@ -676,9 +694,14 @@ impl ConsensusNode {
             );
         }
 
+        let final_committed = state.committed_height;
+
         // Drop locks before requesting next chunk
         drop(state);
         drop(db);
+
+        // Prune QC broadcast cache to bound memory growth
+        self.prune_qc_broadcast_cache(final_committed);
 
         // If still behind, request next chunk (chunked sync)
         self.try_request_missing_blocks();
@@ -965,6 +988,7 @@ impl ConsensusNode {
         //    does not dominate the current highest_qc.
         // 5. Verify block validity, create vote, and cache block in single lock acquisition
         let mut needs_sync = false;
+        let mut committed_height_for_prune: Option<u64> = None;
         let vote = {
             // Lock order: state → db (must match try_propose_block, handle_vote,
             // handle_qc to prevent deadlock between main loop and receive threads).
@@ -1002,6 +1026,7 @@ impl ConsensusNode {
                             )
                             .map_err(|e| format!("QC catch-up atomic persist failed: {:?}", e))?;
                         state.apply_commits(&to_commit);
+                        committed_height_for_prune = Some(new_committed_height);
                         tracing::info!(
                             committed_height = new_committed_height,
                             "QC catch-up committed blocks"
@@ -1115,6 +1140,11 @@ impl ConsensusNode {
             self.try_request_missing_blocks();
         }
 
+        // Prune QC broadcast cache after commit (locks already dropped)
+        if let Some(ch) = committed_height_for_prune {
+            self.prune_qc_broadcast_cache(ch);
+        }
+
         // Reset round timer - we received a valid proposal
         *self.round_start_time.lock().unwrap() = Instant::now();
         *self.last_timeout_time.lock().unwrap() = None;
@@ -1181,6 +1211,7 @@ impl ConsensusNode {
             // regardless, and the QC MUST always be broadcast so other
             // nodes can advance.
             // Lock order: state (already held) → db
+            let mut vote_committed_height: Option<u64> = None;
             let mut db = self.db.lock().unwrap();
             match state.cache_qc_and_check_commit(qc.clone(), &*db) {
                 Ok(to_commit) if !to_commit.is_empty() => {
@@ -1195,6 +1226,7 @@ impl ConsensusNode {
                         )
                         .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
                     state.apply_commits(&to_commit);
+                    vote_committed_height = Some(new_committed_height);
                     tracing::info!(
                         committed_height = new_committed_height,
                         "Committed blocks (formed QC locally)"
@@ -1225,6 +1257,11 @@ impl ConsensusNode {
 
             // Trigger block sync for missing blocks (locks now dropped)
             self.try_request_missing_blocks();
+
+            // Prune QC broadcast cache after commit
+            if let Some(ch) = vote_committed_height {
+                self.prune_qc_broadcast_cache(ch);
+            }
 
             // Reset timeout timer — view height just advanced via our own QC.
             // Without this, the stale round_start_time from the previous round
@@ -1257,6 +1294,7 @@ impl ConsensusNode {
         // Lock order: state (already held) → db
         let mut db = self.db.lock().unwrap();
         let mut committed = false;
+        let mut qc_committed_height: Option<u64> = None;
         match state.cache_qc_and_check_commit(qc.clone(), &*db) {
             Ok(to_commit) if !to_commit.is_empty() => {
                 let new_committed_height = to_commit.last().unwrap().height;
@@ -1265,6 +1303,7 @@ impl ConsensusNode {
                     .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
                 state.apply_commits(&to_commit);
                 committed = true;
+                qc_committed_height = Some(new_committed_height);
                 tracing::debug!(
                     committed_height = state.committed_height(),
                     highest_qc = state.highest_qc.as_ref().map(|q| q.height).unwrap_or(0),
@@ -1308,6 +1347,11 @@ impl ConsensusNode {
             *self.last_timeout_time.lock().unwrap() = None;
         }
 
+        // Prune QC broadcast cache after commit
+        if let Some(ch) = qc_committed_height {
+            self.prune_qc_broadcast_cache(ch);
+        }
+
         // Trigger block sync if commit chain was incomplete
         if !committed {
             self.try_request_missing_blocks();
@@ -1317,14 +1361,37 @@ impl ConsensusNode {
     }
 
     /// Handle a peer connection (blocking, spawned per peer).
+    ///
+    /// Uses `catch_unwind` around message handling to prevent a panic from
+    /// poisoning shared mutexes and cascading to all other threads.
     pub fn handle_peer_connection(self: Arc<Self>, mut reader: impl std::io::Read) {
         tracing::debug!("Starting receive loop for peer");
 
         loop {
             match read_wire_message(&mut reader) {
                 Ok(msg) => {
-                    if let Err(e) = self.handle_network_message(msg) {
-                        tracing::error!(%e, "Message handling failed");
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.handle_network_message(msg)
+                    }));
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::error!(%e, "Message handling failed");
+                        }
+                        Err(panic_payload) => {
+                            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                (*s).to_string()
+                            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                s.clone()
+                            } else {
+                                "unknown panic".to_string()
+                            };
+                            tracing::error!(
+                                %panic_msg,
+                                "PANIC in message handler — disconnecting peer"
+                            );
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
