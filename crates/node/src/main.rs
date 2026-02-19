@@ -620,7 +620,7 @@ fn main() {
                 tracing::error!(%e, "Failed to start metrics server");
             }
 
-            // Graceful shutdown on SIGTERM/SIGHUP/SIGINT
+            // Graceful shutdown on SIGTERM/SIGINT (SIGHUP ignored for daemon)
             let shutdown = Arc::new(AtomicBool::new(false));
             {
                 let shutdown_flag = shutdown.clone();
@@ -637,10 +637,21 @@ fn main() {
                                 use tokio::signal::unix::{signal, SignalKind};
                                 let mut sigterm = signal(SignalKind::terminate()).unwrap();
                                 let mut sighup = signal(SignalKind::hangup()).unwrap();
-                                tokio::select! {
-                                    _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
-                                    _ = sighup.recv() => tracing::info!("Received SIGHUP"),
-                                    _ = tokio::signal::ctrl_c() => tracing::info!("Received SIGINT"),
+                                loop {
+                                    tokio::select! {
+                                        _ = sigterm.recv() => {
+                                            tracing::info!("Received SIGTERM");
+                                            break;
+                                        }
+                                        _ = sighup.recv() => {
+                                            tracing::info!("Received SIGHUP (ignored)");
+                                            // Daemon ignores SIGHUP — continue waiting
+                                        }
+                                        _ = tokio::signal::ctrl_c() => {
+                                            tracing::info!("Received SIGINT");
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                             #[cfg(not(unix))]
