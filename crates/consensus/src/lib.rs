@@ -692,6 +692,25 @@ impl ConsensusState {
             }
         }
 
+        // Round sync: if this valid timeout is for a higher round than ours,
+        // fast-forward to match. This allows restarted nodes (round 0) to
+        // adopt the higher round from surviving nodes after quorum loss,
+        // enabling all nodes to converge on the same round and form a TC.
+        // Safe because: advancing to a higher round cannot violate safety
+        // (safety depends on QC chain, not round number).
+        if timeout.round > self.round {
+            tracing::info!(
+                old_round = self.round,
+                new_round = timeout.round,
+                peer = ?&timeout.voter[..4],
+                "Round sync: fast-forwarding to peer's round"
+            );
+            self.round = timeout.round;
+            self.voted_in_round.clear();
+            self.timed_out_in_round.clear();
+            self.last_proposed = None;
+        }
+
         // Add timeout to pending timeouts (dedup already checked above)
         self.pending_timeouts.entry(key).or_default().push(timeout);
 

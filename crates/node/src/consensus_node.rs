@@ -158,13 +158,21 @@ impl ConsensusNode {
             .map(|(addr, pk)| (*addr, *pk))
             .collect();
 
-        // Attempt recovery from persistent state
-        let state = match ConsensusState::recover(our_address, &storage) {
+        // Attempt recovery from persistent state, pre-populating the block
+        // cache so the commit chain walk works immediately after restart.
+        // Without this, the cache is empty and the first QCs trigger
+        // "Missing block at height X (chain broken)" until sync fills the gap.
+        let state = match ConsensusState::recover_with_cache(
+            our_address,
+            &storage,
+            novai_consensus::CACHE_RETAIN_DEPTH,
+        ) {
             Ok(recovered) => {
                 tracing::info!(
                     committed_height = recovered.committed_height,
                     highest_qc = recovered.highest_qc.as_ref().map(|q| q.height).unwrap_or(0),
-                    "Recovered state"
+                    block_cache = recovered.block_cache.len(),
+                    "Recovered state with cache"
                 );
                 recovered
             }
@@ -403,10 +411,29 @@ impl ConsensusNode {
 
         let mut state = self.state.lock().unwrap();
 
-        // Add timeout to state (use cached pubkeys_vec to avoid allocation)
-        state
-            .add_timeout(timeout, &self.validator_pubkeys_vec)
-            .map_err(|e| format!("Add timeout failed: {:?}", e))?;
+        // Record round before add_timeout to detect round sync fast-forward
+        let round_before = state.round;
+
+        // Add timeout to state (use cached pubkeys_vec to avoid allocation).
+        // Duplicate timeouts (same voter, same round) are expected during
+        // re-broadcast and treated as no-ops, not errors — same pattern as
+        // handle_vote's duplicate handling.
+        match state.add_timeout(timeout, &self.validator_pubkeys_vec) {
+            Ok(()) => {}
+            Err(novai_consensus::ConsensusError::InvalidVote(ref msg))
+                if msg.contains("Duplicate timeout") || msg.contains("height mismatch") =>
+            {
+                return Ok(false);
+            }
+            Err(e) => return Err(format!("Add timeout failed: {:?}", e)),
+        }
+
+        // If add_timeout performed round sync (fast-forwarded our round),
+        // reset timeout timers so we get a fresh timeout window at the new round
+        if state.round > round_before {
+            *self.round_start_time.lock().unwrap() = Instant::now();
+            *self.last_timeout_time.lock().unwrap() = None;
+        }
 
         // Try to advance round
         let advanced = state.try_advance_round(&self.validator_set);
@@ -556,25 +583,23 @@ impl ConsensusNode {
             "Received blocks"
         );
 
-        // Bug 4 fix: Only clear pending_sync_request for non-empty responses.
-        // Empty responses leave the request pending so another peer can respond.
-        // The 5-second timeout in main.rs handles the all-peers-empty case.
+        // Accept block responses regardless of pending_sync_request state.
+        // Previously, responses arriving after the 5-second pending timeout
+        // were silently discarded, causing rejoining validators to never sync.
+        // Now we always process non-empty responses (idempotent: already-committed
+        // blocks are filtered out below).
+        if response.blocks.is_empty() {
+            tracing::debug!(
+                responder = ?&response.responder[..4],
+                "Peer sent empty block response"
+            );
+            return Ok(());
+        }
+
+        // Clear pending request if set, so new requests can be made
         {
             let mut pending = self.pending_sync_request.lock().unwrap();
-            if pending.is_some() {
-                if response.blocks.is_empty() {
-                    // Don't clear pending — wait for non-empty response from another peer.
-                    tracing::warn!(
-                        responder = ?&response.responder[..4],
-                        "Peer sent empty block response (keeping request pending)"
-                    );
-                    return Ok(());
-                }
-                *pending = None;
-            } else {
-                // No pending request — unsolicited response, ignore
-                return Ok(());
-            }
+            *pending = None;
         }
 
         // Lock order: state → db
