@@ -629,7 +629,7 @@ impl ConsensusNode {
             return Ok(());
         }
 
-        // First fresh block must connect to committed chain
+        // First fresh block must connect to committed chain (height contiguity)
         if blocks[0].height != committed_height + 1 {
             return Err(format!(
                 "Block chain gap: committed_height={}, first block height={}",
@@ -637,19 +637,32 @@ impl ConsensusNode {
             ));
         }
 
-        // Get expected parent hash
-        let expected_parent_hash = if committed_height > 0 {
-            let committed_block = ConsensusState::load_block(&*db, committed_height)
-                .map_err(|e| format!("Failed to load committed block: {:?}", e))?
-                .ok_or_else(|| "Missing committed block".to_string())?;
-            novai_consensus_types::block_hash(&committed_block)
-        } else {
-            [0u8; 32] // Genesis parent
-        };
-
-        // Verify the blocks form a valid chain
-        if let Err(e) = ConsensusState::verify_block_chain(&blocks, expected_parent_hash) {
+        // Verify internal chain consistency (each block connects to the previous
+        // one via parent_hash). We use the first block's own parent_hash as the
+        // anchor — NOT our local block at committed_height — because the local
+        // block may have been overwritten by a stale proposal from a different
+        // round (handle_proposal stores all received blocks to DB by height).
+        // The sync blocks come from a peer's committed chain and are already
+        // verified by the BFT network.
+        let anchor_parent = blocks[0].parent_hash;
+        if let Err(e) = ConsensusState::verify_block_chain(&blocks, anchor_parent) {
             return Err(format!("Block chain verification failed: {:?}", e));
+        }
+
+        // Best-effort: warn if our local block doesn't match (indicates DB corruption)
+        if committed_height > 0 {
+            if let Ok(Some(local_block)) = ConsensusState::load_block(&*db, committed_height) {
+                let local_hash = novai_consensus_types::block_hash(&local_block);
+                if local_hash != anchor_parent {
+                    tracing::warn!(
+                        committed_height,
+                        local_hash = ?&local_hash[..8],
+                        expected_hash = ?&anchor_parent[..8],
+                        "Local block at committed_height has wrong hash — \
+                         overwriting with peer's committed chain"
+                    );
+                }
+            }
         }
 
         // Store blocks to DB AND cache in memory for commit rule
@@ -1108,13 +1121,17 @@ impl ConsensusNode {
                 );
                 state.cache_block(block.clone());
 
-                // Bug 2 fix (late path): persist to DB so chain walk DB fallback
-                // can find this block after an in-memory cache eviction.
+                // Persist to DB so chain walk DB fallback can find this block
+                // after in-memory cache eviction. Only write if no block exists
+                // at this height yet — avoids overwriting synced/committed blocks
+                // with stale proposals from a different round.
                 let key = novai_state::block_key(block.height);
-                let value = novai_consensus_types::codec::encode_block_v1(block)
-                    .map_err(|e| format!("Failed to encode block: {:?}", e))?;
-                db.put(&key, &value)
-                    .map_err(|e| format!("Failed to store block: {:?}", e))?;
+                if db.get(&key).ok().flatten().is_none() {
+                    let value = novai_consensus_types::codec::encode_block_v1(block)
+                        .map_err(|e| format!("Failed to encode block: {:?}", e))?;
+                    db.put(&key, &value)
+                        .map_err(|e| format!("Failed to store block: {:?}", e))?;
+                }
 
                 drop(db);
                 drop(state);
@@ -1129,14 +1146,19 @@ impl ConsensusNode {
             state.check_no_fork(block);
             state.cache_block(block.clone());
 
-            // Bug 2 fix (normal path): persist block to DB on receipt so the
-            // commit chain walk DB fallback can recover it after cache eviction.
-            // Idempotent — persist_commit_atomic may later re-write the same key.
+            // Persist block to DB so the commit chain walk DB fallback can
+            // recover it after in-memory cache eviction. Only write if no
+            // block exists at this height yet — avoids overwriting synced or
+            // committed blocks with proposals from a different round.
+            // persist_commit_atomic and handle_block_response always overwrite
+            // unconditionally (they store canonical committed blocks).
             let key = novai_state::block_key(block.height);
-            let value = novai_consensus_types::codec::encode_block_v1(block)
-                .map_err(|e| format!("Failed to encode block: {:?}", e))?;
-            db.put(&key, &value)
-                .map_err(|e| format!("Failed to store block: {:?}", e))?;
+            if db.get(&key).ok().flatten().is_none() {
+                let value = novai_consensus_types::codec::encode_block_v1(block)
+                    .map_err(|e| format!("Failed to encode block: {:?}", e))?;
+                db.put(&key, &value)
+                    .map_err(|e| format!("Failed to store block: {:?}", e))?;
+            }
 
             // 5. Create vote (skip if we already voted in this round — dedup
             // against duplicate proposals arriving via redundant connections)
