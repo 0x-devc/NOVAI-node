@@ -7,7 +7,10 @@ use novai_crypto::{address_from_pubkey, sign_bytes};
 use novai_p2p::noise::{
     handshake_initiator, handshake_responder, is_known_validator, noise_keypair_from_seed,
 };
-use novai_p2p::{connect_to_peer, read_wire_message, start_listener, NetworkMessage, PeerManager};
+use novai_p2p::{
+    connect_to_peer, read_wire_message, start_listener, ConnectionLimiter, NetworkMessage,
+    PeerManager,
+};
 use novai_state::{Kv, KvBatch, MemKv, RocksKv, WriteOp};
 use novai_types::Address;
 use std::collections::{HashMap, HashSet};
@@ -114,6 +117,8 @@ pub struct ConsensusNode {
     encryption_key: Option<[u8; 32]>,
     /// Known validators' X25519 static keys for peer authentication.
     known_noise_keys: Vec<[u8; 32]>,
+    /// Connection limiter for incoming TCP connections (C-03, C-04).
+    pub connection_limiter: Arc<ConnectionLimiter>,
 }
 
 impl ConsensusNode {
@@ -211,6 +216,10 @@ impl ConsensusNode {
             base_timeout_ms,
             encryption_key,
             known_noise_keys,
+            connection_limiter: Arc::new(ConnectionLimiter::new(
+                novai_p2p::MAX_PEERS,
+                novai_p2p::MAX_CONNECTIONS_PER_IP,
+            )),
         }
     }
 
@@ -230,7 +239,25 @@ impl ConsensusNode {
         let node = Arc::clone(self);
         start_listener(bind_addr, move |mut stream| {
             let node_clone = Arc::clone(&node);
+
+            // C-03/C-04: Check connection limits BEFORE spawning thread.
+            // This prevents thread exhaustion from SYN floods and eclipse attacks.
+            let ip = match stream.peer_addr() {
+                Ok(addr) => addr.ip(),
+                Err(_) => return,
+            };
+            let guard = match ConnectionLimiter::try_acquire(&node_clone.connection_limiter, ip) {
+                Some(g) => g,
+                None => {
+                    tracing::warn!(%ip, "Connection rejected: limit exceeded");
+                    return;
+                }
+            };
+
             thread::spawn(move || {
+                // Guard released when thread exits, freeing the connection slot.
+                let _conn_guard = guard;
+
                 // Bound how long broadcast() can block writing to this peer.
                 // Shared with the Noise handshake's save/restore_timeout.
                 let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
@@ -421,7 +448,9 @@ impl ConsensusNode {
         match state.add_timeout(timeout, &self.validator_pubkeys_vec) {
             Ok(()) => {}
             Err(novai_consensus::ConsensusError::InvalidVote(ref msg))
-                if msg.contains("Duplicate timeout") || msg.contains("height mismatch") =>
+                if msg.contains("Duplicate timeout")
+                    || msg.contains("height mismatch")
+                    || msg.contains("at capacity") =>
             {
                 return Ok(false);
             }
@@ -649,21 +678,35 @@ impl ConsensusNode {
             return Err(format!("Block chain verification failed: {:?}", e));
         }
 
-        // Best-effort: warn if our local block doesn't match (indicates DB corruption)
+        // C-01: Reject sync response if peer's chain doesn't connect to our
+        // committed block. NEVER overwrite committed blocks from peer responses.
         if committed_height > 0 {
             if let Ok(Some(local_block)) = ConsensusState::load_block(&*db, committed_height) {
                 let local_hash = novai_consensus_types::block_hash(&local_block);
                 if local_hash != anchor_parent {
-                    tracing::warn!(
+                    return Err(format!(
+                        "Sync rejected: peer's chain doesn't connect to our committed \
+                         block at height {} (local={:?}, peer_parent={:?})",
                         committed_height,
-                        local_hash = ?&local_hash[..8],
-                        expected_hash = ?&anchor_parent[..8],
-                        "Local block at committed_height has wrong hash — \
-                         overwriting with peer's committed chain"
-                    );
+                        &local_hash[..8],
+                        &anchor_parent[..8],
+                    ));
                 }
             }
         }
+
+        // TODO(C-01): Synced blocks are stored without re-executing transactions
+        // against local state. State roots are NOT verified. A malicious peer
+        // could inject blocks with valid parent hashes but fabricated state roots.
+        // Full fix: re-execute block.txs against local state and verify
+        // state_root matches before accepting. Requires wiring up the execution
+        // engine to the sync path.
+        tracing::warn!(
+            count = blocks.len(),
+            start = blocks.first().unwrap().height,
+            end = blocks.last().unwrap().height,
+            "Accepting synced blocks WITHOUT state root verification"
+        );
 
         // Store blocks to DB AND cache in memory for commit rule
         for block in &blocks {
@@ -1414,9 +1457,31 @@ impl ConsensusNode {
     pub fn handle_peer_connection(self: Arc<Self>, mut reader: impl std::io::Read) {
         tracing::debug!("Starting receive loop for peer");
 
+        // C-03: Per-peer message rate limiting.
+        // Simple sliding window: count messages per second, disconnect if exceeded.
+        let mut msg_count: u64 = 0;
+        let mut window_start = Instant::now();
+
         loop {
             match read_wire_message(&mut reader) {
                 Ok(msg) => {
+                    // Rate limit: reset window every second, disconnect if exceeded.
+                    let elapsed = window_start.elapsed();
+                    if elapsed >= std::time::Duration::from_secs(1) {
+                        msg_count = 1;
+                        window_start = Instant::now();
+                    } else {
+                        msg_count += 1;
+                        if msg_count > novai_p2p::MAX_MESSAGES_PER_SECOND {
+                            tracing::warn!(
+                                msg_count,
+                                limit = novai_p2p::MAX_MESSAGES_PER_SECOND,
+                                "Peer exceeded message rate limit, disconnecting"
+                            );
+                            break;
+                        }
+                    }
+
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         self.handle_network_message(msg)
                     }));

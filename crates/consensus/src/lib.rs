@@ -711,6 +711,15 @@ impl ConsensusState {
             self.last_proposed = None;
         }
 
+        // H-01: Hard cap on pending_timeouts to prevent memory exhaustion.
+        // 10,000 entries is ~2MB and far beyond normal operation.
+        let total_entries: usize = self.pending_timeouts.values().map(|v| v.len()).sum();
+        if total_entries >= 10_000 {
+            return Err(ConsensusError::InvalidVote(
+                "pending_timeouts at capacity".to_string(),
+            ));
+        }
+
         // Add timeout to pending timeouts (dedup already checked above)
         self.pending_timeouts.entry(key).or_default().push(timeout);
 
@@ -765,6 +774,21 @@ impl ConsensusState {
         self.voted_in_round.clear();
         self.timed_out_in_round.clear();
         self.last_proposed = None;
+
+        // H-01: Prune old pending_timeouts to prevent unbounded memory growth.
+        // Keep timeouts for recent rounds only (current_round - 10 as margin).
+        let prune_below_round = self.round.saturating_sub(10);
+        let before = self.pending_timeouts.len();
+        self.pending_timeouts
+            .retain(|&(_, r), _| r >= prune_below_round);
+        let pruned = before - self.pending_timeouts.len();
+        if pruned > 0 {
+            tracing::debug!(
+                pruned,
+                remaining = self.pending_timeouts.len(),
+                "Pruned old pending_timeouts"
+            );
+        }
 
         tracing::info!(
             round = self.round,

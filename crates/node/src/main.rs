@@ -17,7 +17,7 @@ fn usage() {
     eprintln!(
         "usage:
   novai-node run --port <port> --genesis <path> [--peer <addr>]... [--key-file <path>] [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
-  novai-node run --port <port> --dev-keys --validator <index> [--peer <addr>]... [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
+  novai-node run --port <port> --dev-keys --allow-insecure-dev-keys --validator <index> [--peer <addr>]... [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
   novai-node generate-key [--output <path>]
   novai-node submit-tx <payload> [--nonce <u64>] [--fee <u64>] [--min-fee <u64>] [--cap <u64>]
   novai-node drain-mempool <payload> [<payload> ...] [--max <u64>] [--min-fee <u64>] [--cap <u64>]
@@ -302,6 +302,7 @@ fn main() {
             let mut genesis_path: Option<String> = None;
             let mut dev_keys = false;
             let mut no_encryption = false;
+            let mut allow_insecure_dev_keys = false;
 
             let rest: Vec<String> = args.collect();
             let mut i = 0;
@@ -357,6 +358,10 @@ fn main() {
                         no_encryption = true;
                         i += 1;
                     }
+                    "--allow-insecure-dev-keys" => {
+                        allow_insecure_dev_keys = true;
+                        i += 1;
+                    }
                     other => {
                         panic!("unknown flag: {other}");
                     }
@@ -365,6 +370,20 @@ fn main() {
 
             let port = port.expect("--port required");
             let metrics_port = metrics_port.unwrap_or(8080);
+
+            // C-05: Block dev-keys without explicit acknowledgment.
+            if dev_keys && !allow_insecure_dev_keys {
+                eprintln!(
+                    "SECURITY ERROR: --dev-keys generates DETERMINISTIC keys known to EVERYONE."
+                );
+                eprintln!("Seeds: [0;32], [1;32], [2;32], [3;32] — any attacker can derive them.");
+                eprintln!();
+                eprintln!("To proceed, add: --allow-insecure-dev-keys");
+                panic!("Refusing to start with --dev-keys without explicit acknowledgment");
+            }
+            if dev_keys && allow_insecure_dev_keys {
+                eprintln!("WARNING: Running with DETERMINISTIC dev keys — NOT SAFE FOR PRODUCTION");
+            }
 
             // Resolve key + validator set based on mode
             // Returns: (signing_key, validator_set, pubkeys, ed25519_seed, known_noise_keys)
@@ -525,8 +544,27 @@ fn main() {
             );
 
             // Set known noise keys for peer identity verification
-            if encryption_enabled && !known_noise_keys.is_empty() {
+            let has_noise_keys = !known_noise_keys.is_empty();
+            if encryption_enabled && has_noise_keys {
                 node.set_known_noise_keys(known_noise_keys);
+            }
+
+            // C-02: Refuse to start without peer authentication when encryption
+            // is enabled and we're not the only validator. Dev-keys mode always
+            // populates known_noise_keys, so this only fires in production.
+            if encryption_enabled && !has_noise_keys && validator_set.len() > 1 {
+                eprintln!("SECURITY ERROR: Noise encryption enabled but no known validator keys configured.");
+                eprintln!(
+                    "Without peer authentication, any attacker can connect and eclipse this node."
+                );
+                eprintln!();
+                eprintln!("Options:");
+                eprintln!("  1. Use --dev-keys for testing (NOT for production)");
+                eprintln!("  2. Use --no-encryption to disable Noise (reduced security)");
+                eprintln!("  3. Configure validator noise pubkeys via genesis (future feature)");
+                panic!(
+                    "Refusing to start: peer authentication required for multi-validator network"
+                );
             }
 
             let node = Arc::new(node);

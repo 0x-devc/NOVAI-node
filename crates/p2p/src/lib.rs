@@ -8,8 +8,10 @@
 pub mod noise;
 pub mod transport;
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -316,6 +318,103 @@ impl PeerManager {
     }
 }
 
+/// Maximum connections allowed from a single IP address.
+pub const MAX_CONNECTIONS_PER_IP: usize = 3;
+
+/// TCP socket read/write timeout for peer connections (seconds).
+pub const PEER_SOCKET_TIMEOUT_SECS: u64 = 30;
+
+/// Per-peer message rate limit (messages per second).
+/// Peers exceeding this are disconnected.
+pub const MAX_MESSAGES_PER_SECOND: u64 = 100;
+
+/// Tracks active connections to prevent resource exhaustion (C-03, C-04).
+///
+/// Enforces:
+/// - Total connection limit (prevents thread exhaustion from SYN floods)
+/// - Per-IP connection limit (prevents eclipse from single source)
+///
+/// INVARIANTS:
+/// - `active` count is always consistent with live [`ConnectionGuard`]s
+/// - Per-IP counts are always >= 0 and consistent
+pub struct ConnectionLimiter {
+    active: AtomicUsize,
+    max_total: usize,
+    per_ip: Mutex<HashMap<IpAddr, usize>>,
+    max_per_ip: usize,
+}
+
+impl ConnectionLimiter {
+    /// Create a new connection limiter.
+    #[must_use]
+    pub fn new(max_total: usize, max_per_ip: usize) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            max_total,
+            per_ip: Mutex::new(HashMap::new()),
+            max_per_ip,
+        }
+    }
+
+    /// Try to acquire a connection slot for the given IP.
+    ///
+    /// Returns a [`ConnectionGuard`] that automatically releases the slot on drop,
+    /// or `None` if the connection would exceed total or per-IP limits.
+    ///
+    /// # Panics
+    /// Panics if the per-IP mutex is poisoned.
+    pub fn try_acquire(limiter: &Arc<Self>, ip: IpAddr) -> Option<ConnectionGuard> {
+        let current = limiter.active.fetch_add(1, Ordering::SeqCst);
+        if current >= limiter.max_total {
+            limiter.active.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+
+        let mut per_ip = limiter.per_ip.lock().unwrap();
+        let count = per_ip.entry(ip).or_insert(0);
+        if *count >= limiter.max_per_ip {
+            drop(per_ip);
+            limiter.active.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        *count += 1;
+        drop(per_ip);
+
+        Some(ConnectionGuard {
+            limiter: Arc::clone(limiter),
+            ip,
+        })
+    }
+
+    /// Get the current number of active connections.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+}
+
+/// RAII guard that releases a connection slot when dropped.
+///
+/// Created by [`ConnectionLimiter::try_acquire`]. Move into the
+/// per-connection thread so the slot is freed when the thread exits.
+pub struct ConnectionGuard {
+    limiter: Arc<ConnectionLimiter>,
+    ip: IpAddr,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.limiter.active.fetch_sub(1, Ordering::SeqCst);
+        let mut per_ip = self.limiter.per_ip.lock().unwrap();
+        if let Some(count) = per_ip.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                per_ip.remove(&self.ip);
+            }
+        }
+    }
+}
+
 /// Start a TCP listener for incoming peer connections.
 ///
 /// Callback is invoked for each accepted TCP connection. The caller is
@@ -336,6 +435,11 @@ where
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    // Set TCP read timeout on accepted socket to prevent idle
+                    // connections from holding resources indefinitely (C-04).
+                    let _ = stream
+                        .set_read_timeout(Some(Duration::from_secs(PEER_SOCKET_TIMEOUT_SECS)));
+                    let _ = stream.set_nodelay(true);
                     tracing::info!("New peer connected from {:?}", stream.peer_addr());
                     on_peer_connected(stream);
                 }
