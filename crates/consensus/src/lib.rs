@@ -1000,17 +1000,24 @@ impl ConsensusState {
 
     /// Mark blocks as committed and advance state.
     ///
-    /// # Panics
-    /// Panics if conflicting commit detected (consensus safety violation).
-    pub fn apply_commits(&mut self, blocks: &[Block]) {
+    /// # Errors
+    /// Returns error if a commit gap is detected (consensus safety violation).
+    /// The caller should log evidence and halt the node gracefully.
+    pub fn apply_commits(&mut self, blocks: &[Block]) -> Result<(), ConsensusError> {
         for block in blocks {
             // Safety check: no gaps in commit sequence
             let expected_height = self.committed_height + 1;
             if block.height != expected_height {
-                panic!(
+                tracing::error!(
+                    expected_height,
+                    actual_height = block.height,
+                    committed_height = self.committed_height,
+                    "CONSENSUS SAFETY VIOLATION: commit gap detected"
+                );
+                return Err(ConsensusError::StateError(format!(
                     "CONSENSUS SAFETY VIOLATION: commit gap! expected height {}, got {}",
                     expected_height, block.height
-                );
+                )));
             }
 
             // Advance committed height
@@ -1046,6 +1053,8 @@ impl ConsensusState {
             // Evict old blocks from in-memory caches to bound memory usage.
             self.prune_old_blocks();
         }
+
+        Ok(())
     }
 
     /// Prune in-memory block and QC caches below the retention window.
@@ -1084,19 +1093,22 @@ impl ConsensusState {
     ///
     /// # Returns
     /// Returns the AI operations that should be passed to `persist_commit_atomic`.
+    ///
+    /// # Errors
+    /// Returns error if `apply_commits` detects a consensus safety violation.
     pub fn apply_commits_with_ai_hook(
         &mut self,
         blocks: &[Block],
         ai_hook: &dyn AiCommitHook,
-    ) -> Vec<novai_state::WriteOp> {
+    ) -> Result<Vec<novai_state::WriteOp>, ConsensusError> {
         // First apply commits normally (updates in-memory state)
-        self.apply_commits(blocks);
+        self.apply_commits(blocks)?;
 
         // Then generate AI operations if blocks were committed
         if !blocks.is_empty() {
-            ai_hook.on_commit(blocks)
+            Ok(ai_hook.on_commit(blocks))
         } else {
-            Vec::new()
+            Ok(Vec::new())
         }
     }
 
@@ -1106,32 +1118,39 @@ impl ConsensusState {
     /// proposes a different block for the same height. This is normal behavior.
     /// A real fork would be COMMITTING two different blocks at the same height.
     ///
-    /// # Panics
-    /// Panics if two different blocks conflict at or below committed_height.
-    pub fn check_no_fork(&self, block: &Block) {
+    /// # Errors
+    /// Returns error if two different blocks conflict at or below committed_height.
+    /// The caller should log the fork evidence and halt the node gracefully.
+    pub fn check_no_fork(&self, block: &Block) -> Result<(), ConsensusError> {
         // Only check for forks at or below committed_height.
         // Heights above committed_height can have different proposals in different rounds.
         if block.height > self.committed_height {
-            return;
+            return Ok(());
         }
 
         if let Some(cached) = self.block_cache.get(&block.height) {
             let cached_hash = novai_consensus_types::codec::hash_block_v1(cached)
-                .expect("cached block must encode");
-            let new_hash =
-                novai_consensus_types::codec::hash_block_v1(block).expect("new block must encode");
+                .map_err(|e| ConsensusError::CodecError(format!("{e:?}")))?;
+            let new_hash = novai_consensus_types::codec::hash_block_v1(block)
+                .map_err(|e| ConsensusError::CodecError(format!("{e:?}")))?;
 
             if cached_hash != new_hash {
-                panic!(
-                    "CONSENSUS SAFETY VIOLATION: FORK DETECTED at height {}!\n\
-                     Cached block hash: {:?}\n\
-                     New block hash: {:?}",
+                tracing::error!(
+                    height = block.height,
+                    cached_hash = ?&cached_hash[..8],
+                    new_hash = ?&new_hash[..8],
+                    "CONSENSUS SAFETY VIOLATION: FORK DETECTED"
+                );
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "FORK DETECTED at height {}! cached={:?} new={:?}",
                     block.height,
                     &cached_hash[..8],
                     &new_hash[..8]
-                );
+                )));
             }
         }
+
+        Ok(())
     }
 
     /// Get committed height.

@@ -267,7 +267,7 @@ fn partition_and_rejoin_syncs_correctly() {
 
     // Update committed height
     set_committed_height(&mut shared_db, 5);
-    active_state.apply_commits(&blocks);
+    active_state.apply_commits(&blocks).unwrap();
 
     // Partitioned node (node 3) was at height 0
     let mut partitioned_state = ConsensusState::new(validator_set[3]);

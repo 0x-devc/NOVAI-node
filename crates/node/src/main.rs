@@ -4,6 +4,7 @@ use novai_copilot::observer::{AnomalyCallback, ChainObserver, ObservableState, O
 use novai_crypto::{address_from_pubkey, generate_keypair, sign_tx_v1};
 use novai_node::consensus_node::{ConsensusNode, Storage};
 use novai_node::metrics;
+use novai_node::MutexExt;
 use novai_state::{MemKv, RocksKv};
 use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
@@ -67,11 +68,11 @@ struct NodeObservableState {
 
 impl ObservableState for NodeObservableState {
     fn committed_height(&self) -> u64 {
-        self.node.state.lock().unwrap().committed_height
+        self.node.state.lock_or_recover().committed_height
     }
 
     fn current_round(&self) -> u64 {
-        self.node.state.lock().unwrap().round
+        self.node.state.lock_or_recover().round
     }
 
     fn peer_count(&self) -> u64 {
@@ -79,11 +80,11 @@ impl ObservableState for NodeObservableState {
     }
 
     fn mempool_size(&self) -> u64 {
-        self.mempool.lock().unwrap().len() as u64
+        self.mempool.lock_or_recover().len() as u64
     }
 
     fn view_changes_total(&self) -> u64 {
-        self.node.state.lock().unwrap().view_changes_total
+        self.node.state.lock_or_recover().view_changes_total
     }
 
     fn validator_set(&self) -> Vec<Address> {
@@ -611,7 +612,7 @@ fn main() {
                     tracing::info!("Copilot observer started");
                     loop {
                         std::thread::sleep(Duration::from_millis(500));
-                        let mut obs = observer.lock().unwrap();
+                        let mut obs = observer.lock_or_recover();
                         let anomalies = obs.observe(&observable_state, &callback);
                         if !anomalies.is_empty() {
                             tracing::info!(
@@ -630,11 +631,11 @@ fn main() {
                 let mempool = Arc::clone(&mempool);
                 let observer_metrics = Arc::clone(&observer_metrics);
                 move || metrics::MetricsSnapshot {
-                    committed_height: state.lock().unwrap().committed_height,
-                    current_round: state.lock().unwrap().round,
+                    committed_height: state.lock_or_recover().committed_height,
+                    current_round: state.lock_or_recover().round,
                     peer_count: peer_manager.peer_count() as u64,
-                    mempool_size: mempool.lock().unwrap().len() as u64,
-                    view_changes_total: state.lock().unwrap().view_changes_total,
+                    mempool_size: mempool.lock_or_recover().len() as u64,
+                    view_changes_total: state.lock_or_recover().view_changes_total,
                     block_tx_count: 0, // TODO: Wire to actual block commit events
                     total_txs_committed: 0, // TODO: Accumulate from block commits
                     // Copilot metrics from observer
@@ -734,7 +735,7 @@ fn main() {
                 // Check for sync timeout every 500ms (not every loop iteration)
                 if last_sync_check.elapsed() >= Duration::from_millis(500) {
                     last_sync_check = std::time::Instant::now();
-                    let mut pending = node.pending_sync_request.lock().unwrap();
+                    let mut pending = node.pending_sync_request.lock_or_recover();
                     if let Some(ref request) = *pending {
                         if request.request_time.elapsed() >= Duration::from_secs(5) {
                             tracing::warn!(
@@ -758,8 +759,8 @@ fn main() {
                 // Periodic resource monitoring (every 60 seconds)
                 if last_resource_log.elapsed() >= Duration::from_secs(60) {
                     last_resource_log = std::time::Instant::now();
-                    let state = node.state.lock().unwrap();
-                    let qc_broadcast_cache = node.qc_broadcasted.lock().unwrap().len();
+                    let state = node.state.lock_or_recover();
+                    let qc_broadcast_cache = node.qc_broadcasted.lock_or_recover().len();
                     tracing::info!(
                         committed_height = state.committed_height,
                         round = state.round,
@@ -775,7 +776,7 @@ fn main() {
                 if last_proposal_attempt.elapsed() >= Duration::from_millis(100) {
                     last_proposal_attempt = std::time::Instant::now();
 
-                    let mut mempool_guard = mempool.lock().unwrap();
+                    let mut mempool_guard = mempool.lock_or_recover();
                     match node.try_propose_block(&mut mempool_guard, &nonce_provider) {
                         Ok(true) => tracing::info!("Proposed block successfully"),
                         Ok(false) => {
@@ -783,7 +784,7 @@ fn main() {
                             if last_status_log.elapsed() >= Duration::from_secs(5) {
                                 last_status_log = std::time::Instant::now();
                                 let peer_count = node.peer_manager.peer_count();
-                                let state = node.state.lock().unwrap();
+                                let state = node.state.lock_or_recover();
                                 tracing::debug!(
                                     height = state.committed_height,
                                     round = state.round,

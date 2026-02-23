@@ -1,5 +1,6 @@
 //! Networked consensus node implementation.
 
+use crate::MutexExt;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use novai_consensus::{ConsensusError, ConsensusState};
 use novai_consensus_types::{SignedProposal, Timeout, Vote, QC};
@@ -378,7 +379,7 @@ impl ConsensusNode {
             return;
         }
         let prune_below = committed_height - novai_consensus::CACHE_RETAIN_DEPTH;
-        let mut cache = self.qc_broadcasted.lock().unwrap();
+        let mut cache = self.qc_broadcasted.lock_or_recover();
         let before = cache.len();
         cache.retain(|&(height, _, _)| height >= prune_below);
         let pruned = before - cache.len();
@@ -391,8 +392,8 @@ impl ConsensusNode {
     ///
     /// Returns Some(Timeout) if timeout duration elapsed and not already timed out.
     pub fn check_timeout(&self) -> Option<Timeout> {
-        let start_time = *self.round_start_time.lock().unwrap();
-        let state = self.state.lock().unwrap();
+        let start_time = *self.round_start_time.lock_or_recover();
+        let state = self.state.lock_or_recover();
 
         let timeout_ms =
             novai_consensus::timeout_for_round_with_base(state.round, self.base_timeout_ms);
@@ -404,7 +405,7 @@ impl ConsensusNode {
 
         // Allow re-broadcast after the full timeout duration to handle lost messages.
         // This replaces the old boolean flag that permanently blocked re-timeout.
-        let last_timeout = *self.last_timeout_time.lock().unwrap();
+        let last_timeout = *self.last_timeout_time.lock_or_recover();
         if let Some(last) = last_timeout {
             let rebroadcast_interval = std::time::Duration::from_millis(timeout_ms);
             if last.elapsed() < rebroadcast_interval {
@@ -415,7 +416,7 @@ impl ConsensusNode {
         // Create timeout
         match state.create_timeout(&self.signing_key) {
             Ok(timeout) => {
-                *self.last_timeout_time.lock().unwrap() = Some(Instant::now());
+                *self.last_timeout_time.lock_or_recover() = Some(Instant::now());
                 tracing::info!(
                     round = state.round,
                     elapsed = ?start_time.elapsed(),
@@ -436,7 +437,7 @@ impl ConsensusNode {
     pub fn handle_timeout(&self, timeout: Timeout) -> Result<bool, String> {
         tracing::debug!(voter = ?&timeout.voter[..4], "Received timeout");
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
 
         // Record round before add_timeout to detect round sync fast-forward
         let round_before = state.round;
@@ -460,8 +461,8 @@ impl ConsensusNode {
         // If add_timeout performed round sync (fast-forwarded our round),
         // reset timeout timers so we get a fresh timeout window at the new round
         if state.round > round_before {
-            *self.round_start_time.lock().unwrap() = Instant::now();
-            *self.last_timeout_time.lock().unwrap() = None;
+            *self.round_start_time.lock_or_recover() = Instant::now();
+            *self.last_timeout_time.lock_or_recover() = None;
         }
 
         // Try to advance round
@@ -469,8 +470,8 @@ impl ConsensusNode {
 
         if advanced {
             // Reset round timer
-            *self.round_start_time.lock().unwrap() = Instant::now();
-            *self.last_timeout_time.lock().unwrap() = None;
+            *self.round_start_time.lock_or_recover() = Instant::now();
+            *self.last_timeout_time.lock_or_recover() = None;
 
             tracing::info!(
                 round = state.round,
@@ -491,7 +492,7 @@ impl ConsensusNode {
         end_height: u64,
     ) -> Result<(), String> {
         // Check if there's already a pending request
-        let mut pending = self.pending_sync_request.lock().unwrap();
+        let mut pending = self.pending_sync_request.lock_or_recover();
         if pending.is_some() {
             return Err("Sync request already pending".to_string());
         }
@@ -554,8 +555,8 @@ impl ConsensusNode {
             .end_height
             .min(request.start_height.saturating_add(SYNC_CHUNK_SIZE - 1));
 
-        let state = self.state.lock().unwrap();
-        let db = self.db.lock().unwrap();
+        let state = self.state.lock_or_recover();
+        let db = self.db.lock_or_recover();
 
         // Load individual blocks from DB, falling back to in-memory cache
         let mut blocks = Vec::new();
@@ -627,13 +628,13 @@ impl ConsensusNode {
 
         // Clear pending request if set, so new requests can be made
         {
-            let mut pending = self.pending_sync_request.lock().unwrap();
+            let mut pending = self.pending_sync_request.lock_or_recover();
             *pending = None;
         }
 
         // Lock order: state → db
-        let mut state = self.state.lock().unwrap();
-        let mut db = self.db.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
+        let mut db = self.db.lock_or_recover();
         let committed_height = state.committed_height;
 
         // Filter out blocks we've already committed (stale sync response).
@@ -744,7 +745,9 @@ impl ConsensusNode {
                             None,
                         )
                         .map_err(|e| format!("Sync commit persist failed: {:?}", e))?;
-                    state.apply_commits(&to_commit);
+                    state
+                        .apply_commits(&to_commit)
+                        .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during sync: {:?}", e))?;
                     tracing::info!(
                         committed_height = new_committed_height,
                         count = to_commit.len(),
@@ -793,7 +796,7 @@ impl ConsensusNode {
     /// Check if we're the leader for current view.
     /// Uses view_height = max(committed_height, highest_qc.height) for consistency with propose_block.
     pub fn are_we_leader(&self) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock_or_recover();
         let view_height = match &state.highest_qc {
             Some(qc) => std::cmp::max(state.height, qc.height),
             None => state.height,
@@ -811,8 +814,8 @@ impl ConsensusNode {
         mempool: &mut mempool::TxMempool,
         nonce_provider: &impl mempool::NonceProvider,
     ) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap();
-        let db = self.db.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
+        let db = self.db.lock_or_recover();
 
         let block = state
             .propose_block(mempool, nonce_provider, &*db, &self.validator_set)
@@ -879,8 +882,8 @@ impl ConsensusNode {
         mempool: &mut mempool::TxMempool,
         nonce_provider: &impl mempool::NonceProvider,
     ) -> Result<bool, String> {
-        let mut state = self.state.lock().unwrap();
-        let db = self.db.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
+        let db = self.db.lock_or_recover();
 
         // Try to propose - NotLeader and AlreadyProposed are expected outcomes, not errors
         let block = match state.propose_block(mempool, nonce_provider, &*db, &self.validator_set) {
@@ -940,8 +943,8 @@ impl ConsensusNode {
         // timeout window to collect votes. Without this, the stale round_start_time
         // from the last received proposal can cause an immediate spurious timeout
         // that clears pending_votes (including our self-vote) before QC forms.
-        *self.round_start_time.lock().unwrap() = Instant::now();
-        *self.last_timeout_time.lock().unwrap() = None;
+        *self.round_start_time.lock_or_recover() = Instant::now();
+        *self.last_timeout_time.lock_or_recover() = None;
 
         tracing::debug!(
             height = block.height,
@@ -1073,8 +1076,8 @@ impl ConsensusNode {
         let vote = {
             // Lock order: state → db (must match try_propose_block, handle_vote,
             // handle_qc to prevent deadlock between main loop and receive threads).
-            let mut state = self.state.lock().unwrap();
-            let mut db = self.db.lock().unwrap();
+            let mut state = self.state.lock_or_recover();
+            let mut db = self.db.lock_or_recover();
 
             // Check if justify_qc would advance our view
             let dominated = match &state.highest_qc {
@@ -1106,7 +1109,9 @@ impl ConsensusNode {
                                 None,
                             )
                             .map_err(|e| format!("QC catch-up atomic persist failed: {:?}", e))?;
-                        state.apply_commits(&to_commit);
+                        state.apply_commits(&to_commit).map_err(|e| {
+                            format!("CONSENSUS SAFETY VIOLATION during QC catch-up: {:?}", e)
+                        })?;
                         committed_height_for_prune = Some(new_committed_height);
                         tracing::info!(
                             committed_height = new_committed_height,
@@ -1186,7 +1191,9 @@ impl ConsensusNode {
                 .map_err(|e| format!("Block verification failed: {:?}", e))?;
 
             // 6. Cache block for commit rule (combined to avoid re-acquiring lock)
-            state.check_no_fork(block);
+            state
+                .check_no_fork(block)
+                .map_err(|e| format!("Fork detection failed: {:?}", e))?;
             state.cache_block(block.clone());
 
             // Persist block to DB so the commit chain walk DB fallback can
@@ -1236,8 +1243,8 @@ impl ConsensusNode {
         }
 
         // Reset round timer - we received a valid proposal
-        *self.round_start_time.lock().unwrap() = Instant::now();
-        *self.last_timeout_time.lock().unwrap() = None;
+        *self.round_start_time.lock_or_recover() = Instant::now();
+        *self.last_timeout_time.lock_or_recover() = None;
 
         tracing::info!(height = block.height, "Voting for block");
 
@@ -1246,7 +1253,7 @@ impl ConsensusNode {
 
     /// Handle incoming vote.
     pub fn handle_vote(&self, vote: Vote) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
 
         // Use cached pubkeys_vec to avoid allocation on every vote.
         // Duplicate/equivocation votes are expected during normal operation
@@ -1287,7 +1294,7 @@ impl ConsensusNode {
             let key = (qc.height, qc.round, qc.block_hash);
 
             {
-                let mut sent = self.qc_broadcasted.lock().unwrap();
+                let mut sent = self.qc_broadcasted.lock_or_recover();
                 if sent.contains(&key) {
                     return Ok(());
                 }
@@ -1302,7 +1309,7 @@ impl ConsensusNode {
             // nodes can advance.
             // Lock order: state (already held) → db
             let mut vote_committed_height: Option<u64> = None;
-            let mut db = self.db.lock().unwrap();
+            let mut db = self.db.lock_or_recover();
             match state.cache_qc_and_check_commit(qc.clone(), &*db) {
                 Ok(to_commit) if !to_commit.is_empty() => {
                     let new_committed_height = to_commit.last().unwrap().height;
@@ -1315,7 +1322,9 @@ impl ConsensusNode {
                             None,
                         )
                         .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
-                    state.apply_commits(&to_commit);
+                    state.apply_commits(&to_commit).map_err(|e| {
+                        format!("CONSENSUS SAFETY VIOLATION during vote commit: {:?}", e)
+                    })?;
                     vote_committed_height = Some(new_committed_height);
                     tracing::info!(
                         committed_height = new_committed_height,
@@ -1356,8 +1365,8 @@ impl ConsensusNode {
             // Reset timeout timer — view height just advanced via our own QC.
             // Without this, the stale round_start_time from the previous round
             // causes immediate spurious timeouts that clear pending_votes.
-            *self.round_start_time.lock().unwrap() = Instant::now();
-            *self.last_timeout_time.lock().unwrap() = None;
+            *self.round_start_time.lock_or_recover() = Instant::now();
+            *self.last_timeout_time.lock_or_recover() = None;
 
             self.broadcast(NetworkMessage::Qc(qc))?;
         }
@@ -1372,7 +1381,7 @@ impl ConsensusNode {
         // CRITICAL FIX: Hold state lock across cache_qc_and_check_commit AND apply_commits
         // to prevent race condition where timeouts arriving between the two operations
         // get wiped out by apply_commits clearing pending_timeouts.
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_or_recover();
 
         // Record current round and highest_qc height before processing QC
         let old_round = state.round;
@@ -1382,7 +1391,7 @@ impl ConsensusNode {
         // Commit chain errors are non-fatal — highest_qc is updated regardless,
         // and commits will happen when missing blocks arrive via sync.
         // Lock order: state (already held) → db
-        let mut db = self.db.lock().unwrap();
+        let mut db = self.db.lock_or_recover();
         let mut committed = false;
         let mut qc_committed_height: Option<u64> = None;
         match state.cache_qc_and_check_commit(qc.clone(), &*db) {
@@ -1391,7 +1400,9 @@ impl ConsensusNode {
                 state
                     .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
                     .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
-                state.apply_commits(&to_commit);
+                state
+                    .apply_commits(&to_commit)
+                    .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during QC commit: {:?}", e))?;
                 committed = true;
                 qc_committed_height = Some(new_committed_height);
                 tracing::debug!(
@@ -1433,8 +1444,8 @@ impl ConsensusNode {
         // When progress is made (round reset, commit, or QC advanced), reset the
         // timeout timer so the new round gets a fresh timeout window.
         if round_was_reset || committed || qc_advanced {
-            *self.round_start_time.lock().unwrap() = Instant::now();
-            *self.last_timeout_time.lock().unwrap() = None;
+            *self.round_start_time.lock_or_recover() = Instant::now();
+            *self.last_timeout_time.lock_or_recover() = None;
         }
 
         // Prune QC broadcast cache after commit
@@ -1521,7 +1532,7 @@ impl ConsensusNode {
     /// MUST be called without holding the state lock.
     pub fn try_request_missing_blocks(&self) {
         let (committed, hqc_height) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock_or_recover();
             let committed = state.committed_height;
             let hqc_height = state.highest_qc.as_ref().map(|q| q.height).unwrap_or(0);
             (committed, hqc_height)

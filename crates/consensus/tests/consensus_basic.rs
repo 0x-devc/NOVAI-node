@@ -301,7 +301,7 @@ fn commit_rule_3_chain() {
     assert_eq!(to_commit[0].height, 1);
 
     // Apply commits
-    state.apply_commits(&to_commit);
+    state.apply_commits(&to_commit).unwrap();
     assert_eq!(state.committed_height(), 1);
 
     // Create block 4 linked to block 3
@@ -320,7 +320,7 @@ fn commit_rule_3_chain() {
     assert_eq!(to_commit.len(), 1, "QC at height 4 should commit block 2");
     assert_eq!(to_commit[0].height, 2);
 
-    state.apply_commits(&to_commit);
+    state.apply_commits(&to_commit).unwrap();
     assert_eq!(state.committed_height(), 2);
 }
 
@@ -374,7 +374,7 @@ fn commit_rule_batch_commits() {
     assert_eq!(to_commit[1].height, 2);
     assert_eq!(to_commit[2].height, 3);
 
-    state.apply_commits(&to_commit);
+    state.apply_commits(&to_commit).unwrap();
     assert_eq!(state.committed_height(), 3);
 }
 
