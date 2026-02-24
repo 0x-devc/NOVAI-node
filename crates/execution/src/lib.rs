@@ -134,6 +134,14 @@ pub enum ExecError<E> {
     // Week 25 - Adversarial hardening (A25.4)
     /// Proposal contains a Tier 0 action which is NEVER allowed.
     Tier0ActionForbidden,
+    /// Attempted to register an AI entity that already exists.
+    EntityAlreadyExists,
+    /// Attempted to register with Autonomous mode (reserved, not yet supported).
+    AutonomousModeReserved,
+    /// Payload version byte not recognized by the dispatcher.
+    UnknownPayloadVersion {
+        version: u8,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -277,6 +285,144 @@ pub const SUBMIT_PROPOSAL_PAYLOAD_V1: u8 = 6;
 
 /// Execute governance proposal payload version.
 pub const EXECUTE_PROPOSAL_PAYLOAD_V1: u8 = 7;
+
+// ============================================================================
+// REGISTER / CREDIT AI ENTITY PAYLOADS
+// ============================================================================
+
+/// Register AI entity payload version.
+pub const REGISTER_AI_ENTITY_PAYLOAD_V1: u8 = 8;
+
+/// Credit AI entity payload version.
+pub const CREDIT_AI_ENTITY_PAYLOAD_V1: u8 = 9;
+
+/// Register AI Entity payload:
+/// `[version:1][code_hash:32][autonomy_mode:1][capabilities:1][initial_balance_be:16]`
+///
+/// Total size: 51 bytes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterAiEntityPayloadV1 {
+    /// Hash of the AI module code/weights.
+    pub code_hash: [u8; 32],
+    /// Autonomy mode for the entity.
+    pub autonomy_mode: novai_ai_entities::AutonomyMode,
+    /// Capability flags for the entity.
+    pub capabilities: novai_ai_entities::Capabilities,
+    /// Initial balance to fund the entity with (transferred from creator).
+    pub initial_balance: u128,
+}
+
+/// Deterministically encode a register AI entity payload.
+#[must_use]
+pub fn encode_register_ai_entity_payload_v1(p: &RegisterAiEntityPayloadV1) -> [u8; 51] {
+    let mut out = [0u8; 51];
+    out[0] = REGISTER_AI_ENTITY_PAYLOAD_V1;
+    out[1..33].copy_from_slice(&p.code_hash);
+    out[33] = p.autonomy_mode.to_byte();
+    out[34] = p.capabilities.to_byte();
+    out[35..51].copy_from_slice(&p.initial_balance.to_be_bytes());
+    out
+}
+
+/// Deterministically decode a register AI entity payload.
+///
+/// # Errors
+/// Returns error if payload length or version is invalid.
+pub fn decode_register_ai_entity_payload_v1(
+    payload: &[u8],
+) -> Result<RegisterAiEntityPayloadV1, ExecError<()>> {
+    const LEN: usize = 51;
+    if payload.len() != LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: LEN,
+            got: payload.len(),
+        });
+    }
+    let ver = payload[0];
+    if ver != REGISTER_AI_ENTITY_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: REGISTER_AI_ENTITY_PAYLOAD_V1,
+            got: ver,
+        });
+    }
+
+    let mut code_hash = [0u8; 32];
+    code_hash.copy_from_slice(&payload[1..33]);
+
+    let autonomy_mode = novai_ai_entities::AutonomyMode::from_byte(payload[33]).ok_or(
+        ExecError::BadPayloadVersion {
+            expected: 2, // max valid autonomy mode
+            got: payload[33],
+        },
+    )?;
+
+    let capabilities = novai_ai_entities::Capabilities::from_byte(payload[34]);
+
+    let mut balance_bytes = [0u8; 16];
+    balance_bytes.copy_from_slice(&payload[35..51]);
+    let initial_balance = u128::from_be_bytes(balance_bytes);
+
+    Ok(RegisterAiEntityPayloadV1 {
+        code_hash,
+        autonomy_mode,
+        capabilities,
+        initial_balance,
+    })
+}
+
+/// Credit AI Entity payload:
+/// `[version:1][entity_id:32][amount_be:16]`
+///
+/// Total size: 49 bytes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreditAiEntityPayloadV1 {
+    /// ID of the AI entity to credit.
+    pub entity_id: [u8; 32],
+    /// Amount to credit to the entity's balance.
+    pub amount: u128,
+}
+
+/// Deterministically encode a credit AI entity payload.
+#[must_use]
+pub fn encode_credit_ai_entity_payload_v1(p: &CreditAiEntityPayloadV1) -> [u8; 49] {
+    let mut out = [0u8; 49];
+    out[0] = CREDIT_AI_ENTITY_PAYLOAD_V1;
+    out[1..33].copy_from_slice(&p.entity_id);
+    out[33..49].copy_from_slice(&p.amount.to_be_bytes());
+    out
+}
+
+/// Deterministically decode a credit AI entity payload.
+///
+/// # Errors
+/// Returns error if payload length or version is invalid.
+pub fn decode_credit_ai_entity_payload_v1(
+    payload: &[u8],
+) -> Result<CreditAiEntityPayloadV1, ExecError<()>> {
+    const LEN: usize = 49;
+    if payload.len() != LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: LEN,
+            got: payload.len(),
+        });
+    }
+    let ver = payload[0];
+    if ver != CREDIT_AI_ENTITY_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: CREDIT_AI_ENTITY_PAYLOAD_V1,
+            got: ver,
+        });
+    }
+
+    let mut entity_id = [0u8; 32];
+    entity_id.copy_from_slice(&payload[1..33]);
+
+    let mut amount_bytes = [0u8; 16];
+    amount_bytes.copy_from_slice(&payload[33..49]);
+    let amount = u128::from_be_bytes(amount_bytes);
+
+    Ok(CreditAiEntityPayloadV1 { entity_id, amount })
+}
 
 /// Submit Proposal payload (D24.3):
 /// `[version:1][proposal_type:1][gate_id:32][data_len_be:4][proposal_data:var]`
@@ -1356,6 +1502,245 @@ pub fn apply_signal_commitment_tx<K: KvBatch>(
 }
 
 // ============================================================================
+// REGISTER AI ENTITY EXECUTION (Audit Gap Fix)
+// ============================================================================
+
+/// Apply a `RegisterAiEntity` transaction.
+///
+/// Creates a new AI entity on-chain, funded by a normal account (the creator).
+///
+/// # Validation
+/// 1. Payload must decode correctly
+/// 2. Autonomous mode is rejected (reserved for future ZK proof support)
+/// 3. Creator nonce must match `tx.nonce`
+/// 4. Creator balance must cover `initial_balance + fee`
+/// 5. Entity must not already exist (duplicate rejection)
+///
+/// # State Changes
+/// - Debit creator by `initial_balance + fee`
+/// - Increment creator nonce
+/// - Credit fee pool by `fee`
+/// - Create new AI entity with `initial_balance`
+///
+/// # Returns
+/// The 32-byte entity ID on success.
+///
+/// # Errors
+/// Returns error if validation fails or DB error occurs.
+pub fn apply_register_ai_entity_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<[u8; 32], ExecError<K::Error>> {
+    // Decode payload
+    let payload = decode_register_ai_entity_payload_v1(&tx.payload).map_err(|e| match e {
+        ExecError::BadPayloadLength { expected, got } => {
+            ExecError::BadPayloadLength { expected, got }
+        }
+        ExecError::BadPayloadVersion { expected, got } => {
+            ExecError::BadPayloadVersion { expected, got }
+        }
+        _ => ExecError::Overflow,
+    })?;
+
+    // Reject Autonomous mode (reserved, requires ZK proofs)
+    if payload.autonomy_mode == novai_ai_entities::AutonomyMode::Autonomous {
+        return Err(ExecError::AutonomousModeReserved);
+    }
+
+    // Read creator account (sender is a normal account)
+    let mut creator_acct = read_account_or_default(db, &tx.from)?;
+
+    // Validate nonce
+    if tx.nonce != creator_acct.nonce {
+        return Err(ExecError::NonceMismatch {
+            expected: creator_acct.nonce,
+            got: tx.nonce,
+        });
+    }
+
+    // Compute total cost: initial_balance + fee
+    let fee_u128 = u128::from(tx.fee);
+    let total_cost = payload
+        .initial_balance
+        .checked_add(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+
+    if creator_acct.balance < total_cost {
+        return Err(ExecError::InsufficientFunds {
+            balance: creator_acct.balance,
+            needed: total_cost,
+        });
+    }
+
+    // Compute entity ID
+    let entity_id = AiEntity::compute_id(&payload.code_hash, &tx.from);
+
+    // Check no duplicate
+    if read_ai_entity(db, &entity_id)?.is_some() {
+        return Err(ExecError::EntityAlreadyExists);
+    }
+
+    // Create entity
+    let mut entity = AiEntity::new(
+        payload.code_hash,
+        tx.from,
+        payload.autonomy_mode,
+        payload.capabilities,
+        current_height,
+    );
+    entity.economic_balance = payload.initial_balance;
+
+    // Debit creator
+    creator_acct.balance = creator_acct
+        .balance
+        .checked_sub(total_cost)
+        .ok_or(ExecError::Overflow)?;
+    creator_acct.nonce = creator_acct
+        .nonce
+        .checked_add(1)
+        .ok_or(ExecError::NonceOverflow)?;
+
+    // Credit fee pool
+    let mut fee_pool = read_fee_pool_or_default(db)?;
+    fee_pool.balance = fee_pool
+        .balance
+        .checked_add(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+
+    // Build atomic batch
+    let ops = vec![
+        WriteOp::Put(
+            account_key(&tx.from),
+            encode_account_v1(&creator_acct).to_vec(),
+        ),
+        WriteOp::Put(
+            KEY_FEE_POOL.to_vec(),
+            encode_fee_pool_v1(&fee_pool).to_vec(),
+        ),
+        write_ai_entity_op(&entity),
+    ];
+
+    db.apply_batch(&ops).map_err(ExecError::Db)?;
+
+    Ok(entity_id)
+}
+
+// ============================================================================
+// CREDIT AI ENTITY EXECUTION (Audit Gap Fix)
+// ============================================================================
+
+/// Apply a `CreditAiEntity` transaction.
+///
+/// Transfers funds from a normal account to an AI entity's balance.
+///
+/// # Validation
+/// 1. Payload must decode correctly
+/// 2. Sender nonce must match `tx.nonce`
+/// 3. Sender balance must cover `amount + fee`
+/// 4. Target entity must exist
+/// 5. Target entity must be active
+/// 6. Credit must not overflow entity balance
+///
+/// # State Changes
+/// - Debit sender by `amount + fee`
+/// - Increment sender nonce
+/// - Credit entity by `amount`
+/// - Credit fee pool by `fee`
+///
+/// # Errors
+/// Returns error if validation fails or DB error occurs.
+pub fn apply_credit_ai_entity_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    _current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
+    // Decode payload
+    let payload = decode_credit_ai_entity_payload_v1(&tx.payload).map_err(|e| match e {
+        ExecError::BadPayloadLength { expected, got } => {
+            ExecError::BadPayloadLength { expected, got }
+        }
+        ExecError::BadPayloadVersion { expected, got } => {
+            ExecError::BadPayloadVersion { expected, got }
+        }
+        _ => ExecError::Overflow,
+    })?;
+
+    // Read sender account (normal account)
+    let mut sender_acct = read_account_or_default(db, &tx.from)?;
+
+    // Validate nonce
+    if tx.nonce != sender_acct.nonce {
+        return Err(ExecError::NonceMismatch {
+            expected: sender_acct.nonce,
+            got: tx.nonce,
+        });
+    }
+
+    // Compute total cost: amount + fee
+    let fee_u128 = u128::from(tx.fee);
+    let total_cost = payload
+        .amount
+        .checked_add(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+
+    if sender_acct.balance < total_cost {
+        return Err(ExecError::InsufficientFunds {
+            balance: sender_acct.balance,
+            needed: total_cost,
+        });
+    }
+
+    // Load entity — must exist
+    let mut entity = read_ai_entity(db, &payload.entity_id)?.ok_or(ExecError::EntityNotFound)?;
+
+    // Entity must be active
+    if !entity.is_active {
+        return Err(ExecError::EntityNotActive);
+    }
+
+    // Debit sender
+    sender_acct.balance = sender_acct
+        .balance
+        .checked_sub(total_cost)
+        .ok_or(ExecError::Overflow)?;
+    sender_acct.nonce = sender_acct
+        .nonce
+        .checked_add(1)
+        .ok_or(ExecError::NonceOverflow)?;
+
+    // Credit entity
+    entity.economic_balance = entity
+        .economic_balance
+        .checked_add(payload.amount)
+        .ok_or(ExecError::Overflow)?;
+
+    // Credit fee pool
+    let mut fee_pool = read_fee_pool_or_default(db)?;
+    fee_pool.balance = fee_pool
+        .balance
+        .checked_add(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+
+    // Build atomic batch
+    let ops = vec![
+        WriteOp::Put(
+            account_key(&tx.from),
+            encode_account_v1(&sender_acct).to_vec(),
+        ),
+        WriteOp::Put(
+            KEY_FEE_POOL.to_vec(),
+            encode_fee_pool_v1(&fee_pool).to_vec(),
+        ),
+        write_ai_entity_op(&entity),
+    ];
+
+    db.apply_batch(&ops).map_err(ExecError::Db)?;
+
+    Ok(())
+}
+
+// ============================================================================
 // MEMORY OBJECT EXECUTION (Week 21 - D21.4)
 // ============================================================================
 
@@ -2212,6 +2597,62 @@ pub fn get_derived_views_by_creator<K: Kv>(
 #[must_use]
 pub fn is_derived_view(key: &[u8]) -> bool {
     is_derived_view_key(key)
+}
+
+// ============================================================================
+// TRANSACTION DISPATCH (routes TxV1 by payload version byte)
+// ============================================================================
+
+/// Dispatch a `TxV1` to the correct apply function based on its payload version byte.
+///
+/// The first byte of `tx.payload` identifies the transaction type:
+///
+/// | Byte | Type                     | Apply function                        |
+/// |------|--------------------------|---------------------------------------|
+/// |  1   | Transfer                 | `apply_tx_v1_transfer`                |
+/// |  2   | Signal Commitment        | `apply_signal_commitment_tx`          |
+/// |  3   | Create Memory Object     | `apply_create_memory_object_tx`       |
+/// |  4   | Update Memory Object     | `apply_update_memory_object_tx`       |
+/// |  5   | Delete Memory Object     | `apply_delete_memory_object_tx`       |
+/// |  6   | Submit Governance Proposal| `apply_governance_submit_tx`          |
+/// |  7   | Execute Governance Proposal| `apply_governance_execute_tx`        |
+/// |  8   | Register AI Entity       | `apply_register_ai_entity_tx`         |
+/// |  9   | Credit AI Entity         | `apply_credit_ai_entity_tx`           |
+///
+/// # Errors
+///
+/// Returns `UnknownPayloadVersion` if the payload is empty or the version byte
+/// does not match any known transaction type. All other errors are forwarded
+/// from the underlying apply function.
+pub fn dispatch_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
+    let version = tx
+        .payload
+        .first()
+        .copied()
+        .ok_or(ExecError::UnknownPayloadVersion { version: 0 })?;
+
+    match version {
+        TRANSFER_PAYLOAD_V1 => apply_tx_v1_transfer(db, tx),
+        SIGNAL_COMMITMENT_PAYLOAD_V1 => apply_signal_commitment_tx(db, tx, current_height),
+        CREATE_MEMORY_OBJECT_PAYLOAD_V1 => {
+            apply_create_memory_object_tx(db, tx, current_height).map(|_| ())
+        }
+        UPDATE_MEMORY_OBJECT_PAYLOAD_V1 => apply_update_memory_object_tx(db, tx, current_height),
+        DELETE_MEMORY_OBJECT_PAYLOAD_V1 => apply_delete_memory_object_tx(db, tx, current_height),
+        SUBMIT_PROPOSAL_PAYLOAD_V1 => {
+            apply_governance_submit_tx(db, tx, current_height).map(|_| ())
+        }
+        EXECUTE_PROPOSAL_PAYLOAD_V1 => apply_governance_execute_tx(db, tx, current_height),
+        REGISTER_AI_ENTITY_PAYLOAD_V1 => {
+            apply_register_ai_entity_tx(db, tx, current_height).map(|_| ())
+        }
+        CREDIT_AI_ENTITY_PAYLOAD_V1 => apply_credit_ai_entity_tx(db, tx, current_height),
+        other => Err(ExecError::UnknownPayloadVersion { version: other }),
+    }
 }
 
 #[cfg(test)]
