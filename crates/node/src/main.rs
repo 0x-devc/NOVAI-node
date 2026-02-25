@@ -20,8 +20,8 @@ use std::time::Duration;
 fn usage() {
     eprintln!(
         "usage:
-  novai-node run --port <port> --genesis <path> [--peer <addr>]... [--key-file <path>] [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
-  novai-node run --port <port> --dev-keys --allow-insecure-dev-keys --validator <index> [--peer <addr>]... [--metrics-port <port>] [--base-timeout <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
+  novai-node run --port <port> --genesis <path> [--peer <addr>]... [--key-file <path>] [--metrics-port <port>] [--base-timeout <ms>] [--proposal-interval <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
+  novai-node run --port <port> --dev-keys --allow-insecure-dev-keys --validator <index> [--peer <addr>]... [--metrics-port <port>] [--base-timeout <ms>] [--proposal-interval <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
   novai-node generate-key [--output <path>]
   novai-node submit-tx <payload> [--nonce <u64>] [--fee <u64>] [--min-fee <u64>] [--cap <u64>]
   novai-node drain-mempool <payload> [<payload> ...] [--max <u64>] [--min-fee <u64>] [--cap <u64>]
@@ -326,6 +326,7 @@ fn main() {
             let mut dev_keys = false;
             let mut no_encryption = false;
             let mut allow_insecure_dev_keys = false;
+            let mut proposal_interval_ms: u64 = 100; // Default: 100ms
 
             let rest: Vec<String> = args.collect();
             let mut i = 0;
@@ -351,6 +352,15 @@ fn main() {
                     }
                     "--base-timeout" => {
                         base_timeout_ms = parse_u64(rest.get(i + 1).cloned(), "--base-timeout");
+                        i += 2;
+                    }
+                    "--proposal-interval" => {
+                        proposal_interval_ms =
+                            parse_u64(rest.get(i + 1).cloned(), "--proposal-interval");
+                        if proposal_interval_ms < 20 {
+                            eprintln!("--proposal-interval must be >= 20ms");
+                            std::process::exit(1);
+                        }
                         i += 2;
                     }
                     "--storage" => {
@@ -547,6 +557,7 @@ fn main() {
                 address = %&hex::encode(our_addr)[..16],
                 peers = ?peers,
                 base_timeout_ms,
+                proposal_interval_ms,
                 "Starting consensus node"
             );
 
@@ -847,9 +858,8 @@ fn main() {
                     );
                 }
 
-                // Propose every 100ms (must be less than BASE_TIMEOUT_MS for consensus to work)
-                // This allows up to 10 proposals/sec - balanced for stability
-                if last_proposal_attempt.elapsed() >= Duration::from_millis(100) {
+                // Propose every proposal_interval_ms (must be less than BASE_TIMEOUT_MS for consensus to work)
+                if last_proposal_attempt.elapsed() >= Duration::from_millis(proposal_interval_ms) {
                     last_proposal_attempt = std::time::Instant::now();
 
                     let mut mempool_guard = mempool.lock_or_recover();
