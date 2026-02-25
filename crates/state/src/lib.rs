@@ -146,6 +146,10 @@ pub const KEY_PREFIX_GOVERNANCE_PROPOSALS_BY_STATE: &[u8] = b"governance/proposa
 /// Key: `ai/gates/{gate_id32}` → ApprovalGate (encoded via gate codec)
 pub const KEY_PREFIX_APPROVAL_GATES: &[u8] = b"ai/gates/";
 
+/// AI emergency kill switch key.
+/// Value: `0u8` = normal operation, `1u8` = all AI entity operations blocked.
+pub const KEY_AI_KILL_SWITCH: &[u8] = b"ai/kill_switch";
+
 /// Build the canonical key for an account record: `b"accounts/" ++ addr32`.
 ///
 /// `addr` must be exactly 32 bytes.

@@ -62,8 +62,8 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
     let mut module = AiEntity::new(
         module_code_hash,
         module_creator,
-        AutonomyMode::Advisory,
-        Capabilities::advisory(),
+        AutonomyMode::Gated,
+        Capabilities::gated(),
         0, // registered at genesis
     );
     module.economic_balance = 10_000_000_000; // 10B units for fees

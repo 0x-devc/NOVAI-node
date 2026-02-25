@@ -72,8 +72,8 @@ fn create_test_entity(name: &[u8], balance: u128, is_active: bool) -> AiEntity {
     let mut entity = AiEntity::new(
         code_hash,
         creator,
-        AutonomyMode::Advisory,
-        Capabilities::advisory(),
+        AutonomyMode::Gated,
+        Capabilities::gated(),
         0,
     );
     entity.economic_balance = balance;
@@ -150,14 +150,13 @@ fn conflicting_activate_then_rollback() {
     let activate_id = apply_governance_submit_tx(&mut db, &activate_tx, 100).unwrap();
     println!("Submitted activation proposal: {:02x?}", &activate_id[..8]);
 
-    // Submit ROLLBACK proposal (different data to get different ID)
-    // Use a different proposer to get a different proposal ID
+    // Submit ROLLBACK proposal (different proposal type gives different ID)
     let rollback_payload = create_submit_payload(
         ProposalType::ModuleRollback,
         reentrancy_gate_id(),
         target_id.to_vec(),
     );
-    let rollback_tx = create_tx(target_id, 0, 100, rollback_payload);
+    let rollback_tx = create_tx(executor_id, 1, 100, rollback_payload);
     let rollback_id = apply_governance_submit_tx(&mut db, &rollback_tx, 100).unwrap();
     println!("Submitted rollback proposal: {:02x?}", &rollback_id[..8]);
 

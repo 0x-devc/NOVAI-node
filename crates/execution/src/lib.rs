@@ -18,7 +18,7 @@ use novai_state::{
     account_key, approval_gate_key, decode_account_v1, decode_fee_pool_v1, decode_smt_root_v1,
     encode_account_v1, encode_fee_pool_v1, encode_smt_root_v1, governance_proposal_key,
     smt_key_for_state_key, smt_node_key, AccountStateV1, FeePoolV1, Kv, KvBatch, StateDecodeError,
-    WriteOp, KEY_FEE_POOL, KEY_SMT_ROOT,
+    WriteOp, KEY_AI_KILL_SWITCH, KEY_FEE_POOL, KEY_SMT_ROOT,
 };
 
 use novai_ai_entities::tiers::ActionType;
@@ -138,6 +138,8 @@ pub enum ExecError<E> {
     EntityAlreadyExists,
     /// Attempted to register with Autonomous mode (reserved, not yet supported).
     AutonomousModeReserved,
+    /// AI emergency kill switch is active — all AI entity operations blocked.
+    AiKillSwitchActive,
     /// Payload version byte not recognized by the dispatcher.
     UnknownPayloadVersion {
         version: u8,
@@ -771,6 +773,30 @@ fn read_smt_root_or_default<K: Kv>(db: &K) -> Result<Hash32, ExecError<K::Error>
     }
 }
 
+// ============================================================================
+// AI KILL SWITCH HELPERS
+// ============================================================================
+
+/// Read the AI emergency kill switch state.
+///
+/// Returns `true` if the kill switch is active (all AI operations blocked).
+/// Key absent = normal operation (false).
+///
+/// # Errors
+///
+/// Returns `ExecError::Db` on storage read failure.
+pub fn read_ai_kill_switch<K: Kv>(db: &K) -> Result<bool, ExecError<K::Error>> {
+    db.get(KEY_AI_KILL_SWITCH)
+        .map_err(ExecError::Db)
+        .map(|opt| opt.is_some_and(|bytes| bytes.first().copied().unwrap_or(0) == 1))
+}
+
+/// Create a `WriteOp` to set the AI emergency kill switch.
+#[must_use]
+pub fn write_ai_kill_switch_op(active: bool) -> WriteOp {
+    WriteOp::Put(KEY_AI_KILL_SWITCH.to_vec(), vec![u8::from(active)])
+}
+
 /// Store adapter: reads existing nodes from Kv, buffers writes as `WriteOp::Put`.
 /// Deterministic: uses Vec + linear search (no `HashMap`).
 struct SmtOverlayStore<'a, K: Kv> {
@@ -1226,6 +1252,35 @@ pub fn apply_governance_submit_tx<K: KvBatch>(
         }
     }
 
+    // If proposer is an AI entity, enforce capability and kill switch checks.
+    // Normal human accounts (entity not found) are always allowed to submit proposals.
+    if let Some(entity) = read_ai_entity(db, &tx.from)? {
+        // Kill switch blocks governance proposals from AI entities
+        if read_ai_kill_switch(db)? {
+            return Err(ExecError::AiKillSwitchActive);
+        }
+        // AI entity must be active
+        if !entity.is_active {
+            return Err(ExecError::EntityNotActive);
+        }
+        // All governance proposals from AI entities require emit_proposals
+        if !entity.capabilities.emit_proposals {
+            return Err(ExecError::IssuerMissingCapability);
+        }
+        // Execution-requesting proposal types require request_execution
+        if matches!(
+            payload.proposal_type,
+            ProposalType::ParamChange
+                | ProposalType::PolicyChange
+                | ProposalType::ModuleActivation
+                | ProposalType::ModuleRollback
+                | ProposalType::EmergencyFreeze
+        ) && !entity.capabilities.request_execution
+        {
+            return Err(ExecError::IssuerMissingCapability);
+        }
+    }
+
     // Create proposal (computes ID from content)
     let mut proposal = Proposal::new(
         payload.proposal_type,
@@ -1341,15 +1396,21 @@ pub fn apply_governance_execute_tx<K: KvBatch>(
             apply_module_rollback(db, &entity_id)?;
         }
         ProposalType::EmergencyFreeze => {
-            // proposal_data contains entity_id for emergency freeze
-            if proposal.proposal_data.len() != 32 {
+            if proposal.proposal_data.len() == 1 {
+                // Global AI kill switch: 1-byte payload toggles the kill switch
+                // 0x01 = activate (block all AI operations)
+                // 0x00 = deactivate (restore normal operation)
+                let active = proposal.proposal_data[0] == 1;
+                let op = write_ai_kill_switch_op(active);
+                db.apply_batch(&[op]).map_err(ExecError::Db)?;
+            } else if proposal.proposal_data.len() == 32 {
+                // Per-entity emergency freeze
+                let mut entity_id = [0u8; 32];
+                entity_id.copy_from_slice(&proposal.proposal_data);
+                apply_module_rollback(db, &entity_id)?;
+            } else {
                 return Err(ExecError::InvalidProposalType);
             }
-            let mut entity_id = [0u8; 32];
-            entity_id.copy_from_slice(&proposal.proposal_data);
-
-            // Emergency freeze = immediate deactivation
-            apply_module_rollback(db, &entity_id)?;
         }
         ProposalType::ParamChange | ProposalType::PolicyChange => {
             // Week 25 Hardening (A25.4): Defense-in-depth check for Tier 0 actions
@@ -1407,6 +1468,11 @@ pub fn apply_signal_commitment_tx<K: KvBatch>(
     tx: &TxV1,
     current_height: u64,
 ) -> Result<(), ExecError<K::Error>> {
+    // Kill switch: block all AI entity operations when active
+    if read_ai_kill_switch(db)? {
+        return Err(ExecError::AiKillSwitchActive);
+    }
+
     // Decode payload (validates signal_type is 0-6)
     let payload = decode_signal_commitment_payload_v1(&tx.payload).map_err(|e| match e {
         ExecError::BadPayloadLength { expected, got } => {
@@ -1811,6 +1877,11 @@ pub fn apply_create_memory_object_tx<K: KvBatch>(
     tx: &TxV1,
     current_height: u64,
 ) -> Result<[u8; 32], ExecError<K::Error>> {
+    // Kill switch: block all AI entity operations when active
+    if read_ai_kill_switch(db)? {
+        return Err(ExecError::AiKillSwitchActive);
+    }
+
     // Decode payload
     let payload = decode_create_memory_object_payload_v1(&tx.payload).map_err(|e| match e {
         ExecError::BadPayloadLength { expected, got } => {
@@ -1934,6 +2005,11 @@ pub fn apply_update_memory_object_tx<K: KvBatch>(
     tx: &TxV1,
     current_height: u64,
 ) -> Result<(), ExecError<K::Error>> {
+    // Kill switch: block all AI entity operations when active
+    if read_ai_kill_switch(db)? {
+        return Err(ExecError::AiKillSwitchActive);
+    }
+
     // Decode payload
     let payload = decode_update_memory_object_payload_v1(&tx.payload).map_err(|e| match e {
         ExecError::BadPayloadLength { expected, got } => {
@@ -1959,6 +2035,11 @@ pub fn apply_update_memory_object_tx<K: KvBatch>(
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
         return Err(ExecError::EntityNotActive);
+    }
+
+    // Validate read_memory_objects capability
+    if !entity.capabilities.read_memory_objects {
+        return Err(ExecError::IssuerMissingCapability);
     }
 
     // Validate nonce
@@ -2040,6 +2121,11 @@ pub fn apply_delete_memory_object_tx<K: KvBatch>(
     tx: &TxV1,
     current_height: u64,
 ) -> Result<(), ExecError<K::Error>> {
+    // Kill switch: block all AI entity operations when active
+    if read_ai_kill_switch(db)? {
+        return Err(ExecError::AiKillSwitchActive);
+    }
+
     // Decode payload
     let payload = decode_delete_memory_object_payload_v1(&tx.payload).map_err(|e| match e {
         ExecError::BadPayloadLength { expected, got } => {
@@ -2057,6 +2143,11 @@ pub fn apply_delete_memory_object_tx<K: KvBatch>(
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
         return Err(ExecError::EntityNotActive);
+    }
+
+    // Validate read_memory_objects capability
+    if !entity.capabilities.read_memory_objects {
+        return Err(ExecError::IssuerMissingCapability);
     }
 
     // Validate nonce

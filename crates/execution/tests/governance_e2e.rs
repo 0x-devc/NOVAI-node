@@ -65,8 +65,8 @@ fn create_core_observer(balance: u128, nonce: u64) -> AiEntity {
     let mut entity = AiEntity::new(
         CORE_OBSERVER_CODE_HASH,
         PROTOCOL_CREATOR,
-        AutonomyMode::Advisory,
-        Capabilities::advisory(),
+        AutonomyMode::Gated,
+        Capabilities::gated(),
         0,
     );
     entity.economic_balance = balance;
@@ -82,8 +82,8 @@ fn create_third_party_module(balance: u128, nonce: u64) -> AiEntity {
     let mut entity = AiEntity::new(
         code_hash,
         creator,
-        AutonomyMode::Advisory,
-        Capabilities::advisory(),
+        AutonomyMode::Gated,
+        Capabilities::gated(),
         0,
     );
     entity.economic_balance = balance;
@@ -359,6 +359,17 @@ fn module_activation_via_proposal() {
     let entity_id = entity.id;
     db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
 
+    // Create a separate active governance account to submit the proposal
+    let gov_account = *blake3::hash(b"GOVERNANCE_ACTIVATION").as_bytes();
+    let gov_entity = AiEntity::new(
+        *blake3::hash(b"GOVERNANCE_ACTIVATION_MODULE").as_bytes(),
+        gov_account,
+        AutonomyMode::Gated,
+        Capabilities::gated(),
+        0,
+    );
+    db.apply_batch(&[write_ai_entity_op(&gov_entity)]).unwrap();
+
     let gate = create_timelock_gate(5, 500);
     store_gate(&mut db, &gate);
 
@@ -366,17 +377,17 @@ fn module_activation_via_proposal() {
     let loaded = read_ai_entity(&db, &entity_id).unwrap().unwrap();
     assert!(!loaded.is_active);
 
-    // Submit and execute ModuleActivation
+    // Submit and execute ModuleActivation (from active governance account)
     let activate_payload = create_submit_proposal_payload(
         ProposalType::ModuleActivation,
         testnet_gate_id(),
         entity_id,
     );
-    let submit_tx = create_tx(entity_id, 0, 100, activate_payload);
+    let submit_tx = create_tx(gov_account, 0, 100, activate_payload);
     let proposal_id = apply_governance_submit_tx(&mut db, &submit_tx, 100).unwrap();
 
     let execute_payload = create_execute_proposal_payload(proposal_id);
-    let execute_tx = create_tx(entity_id, 1, 100, execute_payload.to_vec());
+    let execute_tx = create_tx(gov_account, 1, 100, execute_payload.to_vec());
     apply_governance_execute_tx(&mut db, &execute_tx, 106).unwrap();
 
     // Verify now active

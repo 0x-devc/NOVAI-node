@@ -64,8 +64,8 @@ fn create_test_entity(name: &[u8], balance: u128, is_active: bool) -> AiEntity {
     let mut entity = AiEntity::new(
         code_hash,
         creator,
-        AutonomyMode::Advisory,
-        Capabilities::advisory(),
+        AutonomyMode::Gated,
+        Capabilities::gated(),
         0,
     );
     entity.economic_balance = balance;
