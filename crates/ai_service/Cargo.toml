@@ -9,6 +9,7 @@ description = "AI Service: Anthropic Claude API integration for NOVAI validator 
 # Internal crates
 novai-types = { path = "../types", version = "0.1.0" }
 novai-ai-entities = { path = "../ai_entities", version = "0.1.0" }
+novai-copilot = { path = "../copilot", version = "0.1.0" }
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

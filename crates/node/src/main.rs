@@ -1,4 +1,7 @@
 use mempool::{NonceProvider, TxMempool};
+use novai_ai_service::{
+    AiServiceConfig, AiServiceRunner, AiTriggerCallback, AnthropicClient, FeatureFlags,
+};
 use novai_codec::txid_v1;
 use novai_copilot::observer::{AnomalyCallback, ChainObserver, ObservableState, ObserverConfig};
 use novai_crypto::{address_from_pubkey, generate_keypair, sign_tx_v1};
@@ -116,6 +119,25 @@ impl AnomalyCallback for LoggingAnomalyCallback {
             signal_type = ?signal.signal_type,
             "ANOMALY"
         );
+    }
+}
+
+/// Dispatches anomalies to either the logging callback or the AI service.
+enum AnomalyHandler {
+    Logging(LoggingAnomalyCallback),
+    AiService(AiTriggerCallback),
+}
+
+impl AnomalyCallback for AnomalyHandler {
+    fn on_anomaly(
+        &self,
+        payload: novai_ai_entities::SignalPayload,
+        signal: novai_ai_entities::AiSignalV1,
+    ) {
+        match self {
+            Self::Logging(cb) => cb.on_anomaly(payload, signal),
+            Self::AiService(cb) => cb.on_anomaly(payload, signal),
+        }
     }
 }
 
@@ -593,11 +615,67 @@ fn main() {
             let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
             let nonce_provider = InMemoryNonceProvider::default();
 
+            // Graceful shutdown flag — created early so AI service can share it
+            let shutdown = Arc::new(AtomicBool::new(false));
+
             // Create copilot observer
             let observer_config = ObserverConfig::default();
             let observer = ChainObserver::new(observer_key, observer_config);
             let observer_metrics = observer.metrics();
             let observer = Arc::new(Mutex::new(observer));
+
+            // AI service: conditionally start if NOVAI_AI_API_KEY is set
+            let ai_api_key = env::var("NOVAI_AI_API_KEY").ok().filter(|k| !k.is_empty());
+
+            let callback: AnomalyHandler = if let Some(ref api_key) = ai_api_key {
+                let config = AiServiceConfig {
+                    enabled: true,
+                    api_key: Some(api_key.clone()),
+                    ..AiServiceConfig::default()
+                };
+
+                match AnthropicClient::new(config) {
+                    Ok(client) => {
+                        let client = Arc::new(client);
+                        let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(32);
+                        let ai_shutdown = Arc::clone(&shutdown);
+                        let features = FeatureFlags::default();
+                        let mut runner =
+                            AiServiceRunner::new(client, trigger_rx, ai_shutdown, features);
+
+                        // Allow the consensus loop to update height for the runner
+                        let _ai_height_handle = runner.height_handle();
+
+                        // Spawn AI service thread (Thread 3) with its own tokio runtime
+                        std::thread::Builder::new()
+                            .name("ai-service".into())
+                            .spawn(move || {
+                                let rt = tokio::runtime::Builder::new_current_thread()
+                                    .enable_all()
+                                    .build()
+                                    .expect("AI service tokio runtime");
+                                rt.block_on(runner.run());
+                                tracing::info!("AI service thread exited");
+                            })
+                            .expect("spawn AI service thread");
+
+                        tracing::info!("AI service enabled — wired to copilot anomaly triggers");
+                        AnomalyHandler::AiService(AiTriggerCallback::new(trigger_tx))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            %e,
+                            "AI service client creation failed — falling back to logging"
+                        );
+                        AnomalyHandler::Logging(LoggingAnomalyCallback)
+                    }
+                }
+            } else {
+                tracing::info!(
+                    "NOVAI_AI_API_KEY not set — AI service disabled, using log-only callback"
+                );
+                AnomalyHandler::Logging(LoggingAnomalyCallback)
+            };
 
             // Start copilot observer background thread
             {
@@ -606,7 +684,6 @@ fn main() {
                     node: Arc::clone(&node),
                     mempool: Arc::clone(&mempool),
                 };
-                let callback = LoggingAnomalyCallback;
 
                 std::thread::spawn(move || {
                     tracing::info!("Copilot observer started");
@@ -659,8 +736,7 @@ fn main() {
                 tracing::error!(%e, "Failed to start metrics server");
             }
 
-            // Graceful shutdown on SIGTERM/SIGINT (SIGHUP ignored for daemon)
-            let shutdown = Arc::new(AtomicBool::new(false));
+            // Signal handler — reuses the shutdown flag created earlier
             {
                 let shutdown_flag = shutdown.clone();
                 std::thread::Builder::new()

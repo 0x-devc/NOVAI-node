@@ -15,15 +15,19 @@
 //! - Rate limited → error propagated with retry-after hint
 //! - Response unparseable → falls back to raw text finding
 
+pub mod bridge;
 pub mod client;
 pub mod error;
 pub mod prompt;
+pub mod runner;
 pub mod scheduler;
 pub mod types;
 
+pub use bridge::{AiTriggerCallback, AnomalyTrigger};
 pub use client::AnthropicClient;
 pub use error::AiServiceError;
 pub use prompt::PromptBuilder;
+pub use runner::{AiServiceRunner, FeatureFlags};
 pub use scheduler::{
     InferenceCallback, InferenceScheduler, InferenceTask, LoggingInferenceCallback,
 };
