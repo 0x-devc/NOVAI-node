@@ -9,6 +9,8 @@ allow = [
   "ISC",
   "Zlib",
   "Unicode-3.0",
+  # webpki-roots (Mozilla CA cert data) uses this permissive data license via reqwest/rustls
+  "CDLA-Permissive-2.0",
 ]
 
 unused-allowed-license = "allow"
