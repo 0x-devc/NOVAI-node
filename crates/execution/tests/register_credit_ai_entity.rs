@@ -565,7 +565,7 @@ fn dispatch_register_entity() {
 
     let creator = [0x01u8; 32];
     let code_hash = [0x55u8; 32];
-    seed_account(&mut db, &creator, 5000, 0);
+    seed_account(&mut db, &creator, 100_000, 0);
 
     let payload = encode_register_ai_entity_payload_v1(&RegisterAiEntityPayloadV1 {
         code_hash,
@@ -578,7 +578,8 @@ fn dispatch_register_entity() {
     // Verify payload version byte is 8
     assert_eq!(payload[0], 8, "Register payload must start with version 8");
 
-    let tx = create_test_tx(creator, 0, 10, payload);
+    let fee = 5000u64; // MIN_FEE_REGISTER_AI_ENTITY
+    let tx = create_test_tx(creator, 0, fee, payload);
     dispatch_tx(&mut db, &tx, 100).unwrap();
 
     // Verify entity was created via dispatch
@@ -591,7 +592,7 @@ fn dispatch_register_entity() {
 
     // Verify creator was debited
     let creator_acct = read_account(&db, &creator);
-    assert_eq!(creator_acct.balance, 5000 - 200 - 10);
+    assert_eq!(creator_acct.balance, 100_000 - 200 - fee as u128);
     assert_eq!(creator_acct.nonce, 1);
 }
 
@@ -618,7 +619,7 @@ fn dispatch_credit_entity() {
 
     // Fund sender
     let sender = [0x02u8; 32];
-    seed_account(&mut db, &sender, 2000, 0);
+    seed_account(&mut db, &sender, 100_000, 0);
 
     let payload = encode_credit_ai_entity_payload_v1(&CreditAiEntityPayloadV1 {
         entity_id,
@@ -629,7 +630,8 @@ fn dispatch_credit_entity() {
     // Verify payload version byte is 9
     assert_eq!(payload[0], 9, "Credit payload must start with version 9");
 
-    let tx = create_test_tx(sender, 0, 15, payload);
+    let fee = 100u64; // MIN_FEE_CREDIT_AI_ENTITY
+    let tx = create_test_tx(sender, 0, fee, payload);
     dispatch_tx(&mut db, &tx, 200).unwrap();
 
     // Verify entity balance increased via dispatch
@@ -638,9 +640,9 @@ fn dispatch_credit_entity() {
 
     // Verify sender was debited
     let sender_acct = read_account(&db, &sender);
-    assert_eq!(sender_acct.balance, 2000 - 500 - 15);
+    assert_eq!(sender_acct.balance, 100_000 - 500 - fee as u128);
     assert_eq!(sender_acct.nonce, 1);
 
     // Verify fee pool
-    assert_eq!(read_fee_pool(&db), 15);
+    assert_eq!(read_fee_pool(&db), fee as u128);
 }

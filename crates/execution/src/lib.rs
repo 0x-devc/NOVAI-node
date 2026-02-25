@@ -142,6 +142,11 @@ pub enum ExecError<E> {
     UnknownPayloadVersion {
         version: u8,
     },
+    /// Transaction fee is below the minimum required for this payload type.
+    FeeBelowMinimum {
+        minimum: u64,
+        provided: u64,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -2600,6 +2605,199 @@ pub fn is_derived_view(key: &[u8]) -> bool {
 }
 
 // ============================================================================
+// FEE SCHEDULE (Tiered Minimum Fee Enforcement)
+// ============================================================================
+
+/// Minimum fee for a base transfer transaction.
+pub const MIN_FEE_TRANSFER: u64 = 100;
+
+/// Minimum fee for a signal commitment transaction (10x base).
+pub const MIN_FEE_SIGNAL_COMMITMENT: u64 = 1_000;
+
+/// Minimum fee for memory object operations (5x base).
+pub const MIN_FEE_MEMORY_OBJECT: u64 = 500;
+
+/// Minimum fee for submitting a governance proposal (20x base).
+pub const MIN_FEE_GOVERNANCE_SUBMIT: u64 = 2_000;
+
+/// Minimum fee for executing a governance proposal (5x base).
+pub const MIN_FEE_GOVERNANCE_EXECUTE: u64 = 500;
+
+/// Minimum fee for registering an AI entity (50x base).
+pub const MIN_FEE_REGISTER_AI_ENTITY: u64 = 5_000;
+
+/// Minimum fee for crediting an AI entity balance (same as base).
+pub const MIN_FEE_CREDIT_AI_ENTITY: u64 = 100;
+
+/// Tiered fee schedule with minimum fees per transaction type.
+///
+/// All values are floor minimums — senders can pay MORE but never less.
+/// The fee hierarchy reflects operational cost and spam resistance needs:
+/// - Base transfers are cheapest
+/// - AI operations cost more (signals, memory, registration)
+/// - Governance proposals are expensive to deter spam
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeSchedule {
+    pub transfer: u64,
+    pub signal_commitment: u64,
+    pub memory_object: u64,
+    pub governance_submit: u64,
+    pub governance_execute: u64,
+    pub register_ai_entity: u64,
+    pub credit_ai_entity: u64,
+}
+
+impl FeeSchedule {
+    /// Returns the default fee schedule with production values.
+    #[must_use]
+    pub const fn default() -> Self {
+        Self {
+            transfer: MIN_FEE_TRANSFER,
+            signal_commitment: MIN_FEE_SIGNAL_COMMITMENT,
+            memory_object: MIN_FEE_MEMORY_OBJECT,
+            governance_submit: MIN_FEE_GOVERNANCE_SUBMIT,
+            governance_execute: MIN_FEE_GOVERNANCE_EXECUTE,
+            register_ai_entity: MIN_FEE_REGISTER_AI_ENTITY,
+            credit_ai_entity: MIN_FEE_CREDIT_AI_ENTITY,
+        }
+    }
+}
+
+/// Returns the minimum fee required for a transaction based on its payload version byte.
+///
+/// # Errors
+///
+/// Returns `UnknownPayloadVersion` if the payload is empty or unrecognized.
+pub fn minimum_fee_for_tx(tx: &TxV1) -> Result<u64, ExecError<()>> {
+    let version = tx
+        .payload
+        .first()
+        .copied()
+        .ok_or(ExecError::UnknownPayloadVersion { version: 0 })?;
+
+    match version {
+        TRANSFER_PAYLOAD_V1 => Ok(MIN_FEE_TRANSFER),
+        SIGNAL_COMMITMENT_PAYLOAD_V1 => Ok(MIN_FEE_SIGNAL_COMMITMENT),
+        CREATE_MEMORY_OBJECT_PAYLOAD_V1
+        | UPDATE_MEMORY_OBJECT_PAYLOAD_V1
+        | DELETE_MEMORY_OBJECT_PAYLOAD_V1 => Ok(MIN_FEE_MEMORY_OBJECT),
+        SUBMIT_PROPOSAL_PAYLOAD_V1 => Ok(MIN_FEE_GOVERNANCE_SUBMIT),
+        EXECUTE_PROPOSAL_PAYLOAD_V1 => Ok(MIN_FEE_GOVERNANCE_EXECUTE),
+        REGISTER_AI_ENTITY_PAYLOAD_V1 => Ok(MIN_FEE_REGISTER_AI_ENTITY),
+        CREDIT_AI_ENTITY_PAYLOAD_V1 => Ok(MIN_FEE_CREDIT_AI_ENTITY),
+        other => Err(ExecError::UnknownPayloadVersion { version: other }),
+    }
+}
+
+// ============================================================================
+// TREASURY STATE KEYS (Fee Distribution)
+// ============================================================================
+
+/// Canonical key for the AI treasury balance record.
+///
+/// Receives the non-base portion of fees from AI-related transactions
+/// (signal commitments, memory objects, entity registration).
+pub const KEY_AI_TREASURY: &[u8] = b"treasury/ai";
+
+/// Canonical key for the NNPX privacy treasury balance record.
+///
+/// Reserved for future use — will receive fees from NNPX privacy transactions.
+pub const KEY_PRIVACY_TREASURY: &[u8] = b"treasury/privacy";
+
+/// Distribute a fee between the validator fee pool and the AI treasury.
+///
+/// For AI-related transactions (signal commitment, memory objects, entity registration):
+/// - The base portion (`MIN_FEE_TRANSFER`) goes to the validator fee pool
+/// - The remainder goes to the AI treasury
+///
+/// For base transfers and governance: all goes to the fee pool.
+///
+/// # Arguments
+///
+/// - `db`: Database handle
+/// - `tx`: Transaction (payload[0] determines fee category)
+/// - `fee`: Total fee amount (as u128)
+///
+/// # Returns
+///
+/// `WriteOp`s for the fee pool and (optionally) AI treasury updates.
+///
+/// # Errors
+///
+/// Returns error if DB read fails or arithmetic overflows.
+pub fn distribute_fee<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    fee: u128,
+) -> Result<Vec<WriteOp>, ExecError<K::Error>> {
+    let version = tx.payload.first().copied().unwrap_or(0);
+
+    let is_ai_tx = matches!(
+        version,
+        SIGNAL_COMMITMENT_PAYLOAD_V1
+            | CREATE_MEMORY_OBJECT_PAYLOAD_V1
+            | UPDATE_MEMORY_OBJECT_PAYLOAD_V1
+            | DELETE_MEMORY_OBJECT_PAYLOAD_V1
+            | REGISTER_AI_ENTITY_PAYLOAD_V1
+    );
+
+    let mut ops = Vec::with_capacity(2);
+
+    if is_ai_tx && fee > u128::from(MIN_FEE_TRANSFER) {
+        // Split: base portion to fee pool, remainder to AI treasury
+        let base_portion = u128::from(MIN_FEE_TRANSFER);
+        let ai_portion = fee.checked_sub(base_portion).ok_or(ExecError::Overflow)?;
+
+        // Fee pool gets base portion
+        let mut fee_pool = read_fee_pool_or_default(db)?;
+        fee_pool.balance = fee_pool
+            .balance
+            .checked_add(base_portion)
+            .ok_or(ExecError::Overflow)?;
+        ops.push(WriteOp::Put(
+            KEY_FEE_POOL.to_vec(),
+            encode_fee_pool_v1(&fee_pool).to_vec(),
+        ));
+
+        // AI treasury gets remainder
+        let mut ai_treasury_balance = read_treasury_balance(db, KEY_AI_TREASURY)?;
+        ai_treasury_balance = ai_treasury_balance
+            .checked_add(ai_portion)
+            .ok_or(ExecError::Overflow)?;
+        ops.push(WriteOp::Put(
+            KEY_AI_TREASURY.to_vec(),
+            encode_fee_pool_v1(&FeePoolV1 {
+                balance: ai_treasury_balance,
+            })
+            .to_vec(),
+        ));
+    } else {
+        // All to fee pool
+        let mut fee_pool = read_fee_pool_or_default(db)?;
+        fee_pool.balance = fee_pool
+            .balance
+            .checked_add(fee)
+            .ok_or(ExecError::Overflow)?;
+        ops.push(WriteOp::Put(
+            KEY_FEE_POOL.to_vec(),
+            encode_fee_pool_v1(&fee_pool).to_vec(),
+        ));
+    }
+
+    Ok(ops)
+}
+
+/// Read treasury balance from a given key.
+///
+/// Treasury records reuse the `FeePoolV1` encoding (version byte + u128 big-endian).
+fn read_treasury_balance<K: Kv>(db: &K, key: &[u8]) -> Result<u128, ExecError<K::Error>> {
+    match db.get(key).map_err(ExecError::Db)? {
+        None => Ok(0),
+        Some(bytes) => Ok(decode_fee_pool_v1(&bytes)?.balance),
+    }
+}
+
+// ============================================================================
 // TRANSACTION DISPATCH (routes TxV1 by payload version byte)
 // ============================================================================
 
@@ -2629,6 +2827,20 @@ pub fn dispatch_tx<K: KvBatch>(
     tx: &TxV1,
     current_height: u64,
 ) -> Result<(), ExecError<K::Error>> {
+    // Enforce minimum fee before routing to any apply function.
+    let min_fee = minimum_fee_for_tx(tx).map_err(|e| match e {
+        ExecError::UnknownPayloadVersion { version } => {
+            ExecError::UnknownPayloadVersion { version }
+        }
+        _ => ExecError::Overflow,
+    })?;
+    if tx.fee < min_fee {
+        return Err(ExecError::FeeBelowMinimum {
+            minimum: min_fee,
+            provided: tx.fee,
+        });
+    }
+
     let version = tx
         .payload
         .first()
