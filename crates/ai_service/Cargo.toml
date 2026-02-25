@@ -1,0 +1,28 @@
+[package]
+name = "novai-ai-service"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "AI Service: Anthropic Claude API integration for NOVAI validator intelligence"
+
+[dependencies]
+# Internal crates
+novai-types = { path = "../types", version = "0.1.0" }
+novai-ai-entities = { path = "../ai_entities", version = "0.1.0" }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1.40", features = ["time", "sync"] }
+
+# Logging
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["rt", "macros", "time", "sync"] }
+tempfile = "3.10"

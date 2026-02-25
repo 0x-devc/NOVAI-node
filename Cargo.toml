@@ -17,6 +17,7 @@ members = [
     "crates/genesis",
     "tools/tx-generator",
     "tools/genesis-generator",
+    "crates/ai_service",
 ]
 
 resolver = "2"
