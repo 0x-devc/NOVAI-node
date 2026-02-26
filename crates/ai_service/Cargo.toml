@@ -7,7 +7,6 @@ description = "AI Service: Anthropic Claude API integration for NOVAI validator 
 
 [dependencies]
 # Internal crates
-novai-types = { path = "../types", version = "0.1.0" }
 novai-ai-entities = { path = "../ai_entities", version = "0.1.0" }
 novai-copilot = { path = "../copilot", version = "0.1.0" }
 

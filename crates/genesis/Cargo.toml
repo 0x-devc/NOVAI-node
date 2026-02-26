@@ -15,7 +15,6 @@ novai-types = { path = "../types" }
 novai-crypto = { path = "../crypto" }
 novai-state = { path = "../state" }
 novai-smt = { path = "../smt" }
-novai-execution = { path = "../execution" }
 novai-consensus-types = { path = "../consensus_types" }
 novai-ai-entities = { path = "../ai_entities" }
 novai-codec = { path = "../codec" }

@@ -459,6 +459,9 @@ where
 /// Returns error if connection fails.
 pub fn connect_to_peer(addr: SocketAddr) -> Result<TcpStream, P2PError> {
     let stream = TcpStream::connect(addr)?;
+    // Disable Nagle's algorithm for low-latency consensus messaging,
+    // matching the set_nodelay(true) on accepted (incoming) connections.
+    let _ = stream.set_nodelay(true);
     // Bound how long broadcast() can block on a single peer write.
     // The Noise handshake saves/restores this value, so it persists
     // through to the NoiseWriter wrapping the cloned stream.
