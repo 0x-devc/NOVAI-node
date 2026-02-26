@@ -831,7 +831,7 @@ novai_current_round > 5
 
 1. Open Grafana: `http://localhost:3000`
 2. Navigate to: **Dashboards → Import**
-3. Upload file: `dashboards/novai-grafana.json`
+3. Upload file: `dashboards/novai-grafana.json` *(not yet included in repo — create from Prometheus metrics below)*
 4. Select Prometheus datasource
 5. Click **Import**
 

@@ -232,18 +232,6 @@ Timeout {
 }
 ```
 
-## Signature Domain Separation
-
-All signatures use domain separation tags to prevent cross-context attacks:
-
-| Message Type | Domain Tag | Signed Bytes Format |
-|--------------|------------|---------------------|
-| Vote | `b"NOVAI_VOTE_V1"` | `tag || encode_vote_v1_unsigned(vote)` |
-| Timeout | `b"NOVAI_TIMEOUT_V1"` | `tag || encode_timeout_v1_unsigned(timeout)` |
-| Proposal | `b"NOVAI_PROPOSAL_V1"` | `tag || encode_proposal_v1_unsigned(proposal)` |
-
-**Verification Rule:** For all message types, `verify(pubkey, tag || unsigned_bytes, signature)` MUST succeed.
-
 ## Canonical Encoding Rules
 
 ### Vector Encoding
@@ -264,28 +252,6 @@ Before encoding a QC:
 This ensures: **same logical QC → same encoded bytes → same hash**
 
 **Policy:** Implementations normalize (auto-sort + dedup-check) during encoding. Unsorted input is acceptable—encoder canonicalizes automatically.
-## Wire Format & Network Rules
-
-### Byte-Level Constraints
-To prevent DoS attacks, implementations MUST enforce:
-- Block encoding: <= 1 MB (10,000 txs × ~100 bytes/tx)
-- QC encoding: <= 2 MB (11,000 votes × ~145 bytes/vote)
-- Proposal encoding: <= 3 MB (block + QC)
-- Individual message: <= 10 MB total
-
-### Network Acceptance Policy
-**QC Vote Ordering:**
-- Peers MAY send QC votes in any order over the wire
-- Receivers MUST normalize (auto-sort + dedup-check) before using
-- Both sorted and unsorted QCs are valid network messages
-- After normalization, duplicate voters cause rejection
-
-**Rationale:** Allows flexible QC construction while ensuring deterministic hashing.
-
-### Forward Compatibility
-- Unknown version bytes MUST be rejected with clear error
-- Receivers MUST NOT attempt to parse unknown versions
-- Version negotiation is out of scope for V1
 
 ## Message Validity Rules
 
@@ -414,8 +380,8 @@ quorum = 2f + 1 = 2 * ((n - 1) / 3) + 1
 ## Liveness Dependencies (Informative)
 
 ### Timeouts
-- Initial timeout: 2 seconds
-- Exponential backoff: `timeout(r) = min(2^r seconds, 60s)`
+- Initial timeout: 1 second
+- Exponential backoff: `timeout(r) = min(BASE_TIMEOUT_MS * 2^r, 60s)`
 - Reset on progress (new QC formed)
 
 ### Synchrony Requirement

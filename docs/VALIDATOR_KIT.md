@@ -370,12 +370,15 @@ ExecStart=/usr/bin/docker run \
     --network host \
     -v /var/lib/novai:/data \
     -v /etc/novai/keys:/keys:ro \
-    -v /etc/novai/config:/config:ro \
-    novai/novai-node:mainnet-v1.0.0 \
+    -v /etc/novai/genesis:/genesis:ro \
+    novai/novai-node:latest \
     run \
+    --port 9090 \
     --data-dir /data \
-    --config /config/node.toml \
-    --validator-key /keys/validator_key.pem
+    --genesis /genesis/genesis.json \
+    --key-file /keys/validator_key.pem \
+    --metrics-port 8080 \
+    --storage rocksdb
 
 ExecStop=/usr/bin/docker stop novai-validator
 
@@ -426,9 +429,12 @@ RestartSec=10
 LimitNOFILE=65536
 
 ExecStart=/usr/local/bin/novai-node run \
+    --port 9090 \
     --data-dir /var/lib/novai \
-    --config /etc/novai/config/node.toml \
-    --validator-key /etc/novai/keys/validator_key.pem
+    --genesis /etc/novai/genesis/genesis.json \
+    --key-file /etc/novai/keys/validator_key.pem \
+    --metrics-port 8080 \
+    --storage rocksdb
 
 [Install]
 WantedBy=multi-user.target
@@ -460,60 +466,42 @@ sudo chown -R novai:novai /etc/novai
 
 ## 6. Configuration
 
-### 6.1 Node Configuration File
+### 6.1 CLI Flags Reference
 
-Create `/etc/novai/config/node.toml`:
+NOVAI node is configured entirely via CLI flags (no TOML config file):
 
-```toml
-# NOVAI Validator Node Configuration
+```
+novai-node run \
+    --port <port>                    # P2P listen port (required)
+    --genesis <path>                 # Path to genesis JSON (required unless --dev-keys)
+    --key-file <path>                # Path to validator Ed25519 key file
+    --peer <addr>                    # Peer address (repeatable: --peer a --peer b)
+    --metrics-port <port>            # Prometheus metrics port (default: none)
+    --base-timeout <ms>              # Consensus timeout in ms (default: 1000)
+    --proposal-interval <ms>         # Min ms between proposals (default: 100, min: 20)
+    --storage <rocksdb|memory>       # Storage backend (default: rocksdb)
+    --data-dir <path>                # Data directory for RocksDB
+    --no-encryption                  # Disable Noise XX transport (testing only)
+```
 
-[node]
-# Chain ID (must match genesis)
-chain_id = "novai-mainnet-1"
+**Dev mode** (deterministic keys for local testing):
+```
+novai-node run \
+    --port 9000 \
+    --dev-keys --allow-insecure-dev-keys \
+    --validator <index>              # Validator index (0-based)
+```
 
-# Data directory
-data_dir = "/var/lib/novai"
+**Other commands**:
+```
+novai-node generate-key --output <path>    # Generate Ed25519 validator key
+novai-node submit-tx <payload>             # Submit a transaction
+novai-node drain-mempool <payload>...      # Batch submit transactions
+```
 
-# Genesis files
-genesis_config = "/etc/novai/genesis/genesis_config.json"
-genesis_block = "/etc/novai/genesis/genesis_block.bin"
-
-[network]
-# P2P listen address
-listen_addr = "0.0.0.0:9090"
-
-# Public address (for peer discovery)
-# Replace with your public IP
-public_addr = "YOUR_PUBLIC_IP:9090"
-
-# Seed nodes (official mainnet seeds)
-seed_nodes = [
-    "seed-1.mainnet.novai.io:9090",
-    "seed-2.mainnet.novai.io:9090",
-    "seed-3.mainnet.novai.io:9090",
-]
-
-# Maximum peer connections
-max_peers = 50
-
-[consensus]
-# Validator index (assigned during genesis ceremony)
-validator_index = YOUR_VALIDATOR_INDEX
-
-[metrics]
-# Metrics endpoint (bind to localhost for security)
-listen_addr = "127.0.0.1:8080"
-enabled = true
-
-[logging]
-# Log level: error, warn, info, debug, trace
-level = "info"
-
-# Log format: json or text
-format = "json"
-
-# Log file (optional, uses stdout if not set)
-# file = "/var/log/novai/node.log"
+**Environment variables** for logging:
+```bash
+export RUST_LOG=info                # Log level: error, warn, info, debug, trace
 ```
 
 ### 6.2 Start the Node

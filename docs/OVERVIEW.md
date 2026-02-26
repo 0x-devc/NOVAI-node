@@ -238,7 +238,7 @@ docker build -t novai-node:latest .
 - NNPX privacy foundation with RocksDB column family isolation
 - Chaos testing framework (105+ tests: partitions, crashes, Byzantine faults)
 - Performance testing infrastructure with tx-generator tool
-- 330+ tests passing across the workspace
+- 1000+ tests passing across the workspace
 
 **In Progress:**
 - Testnet stabilization and operator tooling

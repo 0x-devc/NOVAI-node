@@ -25,7 +25,7 @@ This document describes configurable parameters for NOVAI blockchain nodes and p
 **Location**: `crates/consensus/src/lib.rs`
 
 ```rust
-pub const BASE_TIMEOUT_MS: u64 = 2000;        // 2 seconds
+pub const BASE_TIMEOUT_MS: u64 = 1000;        // 1 second
 pub const TIMEOUT_MULTIPLIER: u64 = 2;        // Exponential backoff multiplier
 pub const MAX_TIMEOUT_MS: u64 = 60_000;       // 60 seconds
 ```
@@ -34,15 +34,15 @@ pub const MAX_TIMEOUT_MS: u64 = 60_000;       // 60 seconds
 
 **Purpose**: Initial timeout for consensus round progression. If no proposal or quorum is reached within this time, the round advances (view change).
 
-**Current Value**: `2000` ms (2 seconds)
+**Current Value**: `1000` ms (1 second)
 
 **Tuning Guidelines**:
-- **Lower values (1000-1500 ms)**: Faster recovery from failures, but may cause unnecessary view changes under normal network latency
-- **Higher values (3000-5000 ms)**: More tolerance for network delays, but slower failure recovery
+- **Lower values (500-1000 ms)**: Faster recovery from failures, but may cause unnecessary view changes under normal network latency
+- **Higher values (2000-5000 ms)**: More tolerance for network delays, but slower failure recovery
 - **Recommended**:
-  - LAN environments: 1000-2000 ms
-  - WAN with <100ms latency: 2000-3000 ms
-  - High-latency networks: 3000-5000 ms
+  - LAN environments: 500-1000 ms
+  - WAN with <100ms latency: 1000-2000 ms
+  - High-latency networks: 2000-5000 ms
 
 **Impact**:
 - Lower → More view changes, potentially lower throughput
@@ -57,9 +57,9 @@ pub const MAX_TIMEOUT_MS: u64 = 60_000;       // 60 seconds
 **Calculation**: `timeout_ms = BASE_TIMEOUT_MS * (TIMEOUT_MULTIPLIER ^ consecutive_view_changes)`
 
 **Tuning Guidelines**:
-- **Value of 2**: Standard exponential backoff (2s → 4s → 8s → 16s → 32s → 60s cap)
+- **Value of 2**: Standard exponential backoff (1s → 2s → 4s → 8s → 16s → 32s → 60s cap)
 - **Value of 1**: No backoff (constant timeout)
-- **Value of 3**: Aggressive backoff (2s → 6s → 18s → 54s → 60s cap)
+- **Value of 3**: Aggressive backoff (1s → 3s → 9s → 27s → 60s cap)
 
 **Recommended**: Keep at `2` for balanced behavior. Only adjust for extreme network conditions.
 
@@ -247,7 +247,7 @@ MAX_TXS_PER_BLOCK = 1_000
 
 ```rust
 // Consensus
-BASE_TIMEOUT_MS = 2000
+BASE_TIMEOUT_MS = 1000
 TIMEOUT_MULTIPLIER = 2
 MAX_TIMEOUT_MS = 60_000
 
@@ -278,7 +278,7 @@ MAX_TXS_PER_BLOCK = 5_000
 
 ```rust
 // Consensus
-BASE_TIMEOUT_MS = 2000
+BASE_TIMEOUT_MS = 1000
 TIMEOUT_MULTIPLIER = 2
 MAX_TIMEOUT_MS = 60_000
 
@@ -444,8 +444,8 @@ novai_total_txs_committed       # Cumulative throughput
 **A**: Theoretical maximum is constrained by:
 ```
 Max TPS = MAX_TXS_PER_BLOCK / (BASE_TIMEOUT_MS / 1000)
-         = 10,000 / 2
-         = 5,000 TPS
+         = 10,000 / 1
+         = 10,000 TPS
 ```
 
 However, realistic sustainable TPS is 20-50% of theoretical maximum due to:
