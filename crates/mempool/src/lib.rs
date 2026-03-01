@@ -1,6 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Errors returned by [`Mempool`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +142,12 @@ pub struct TxMempool {
     by_id: HashMap<TxId, TxV1>,
     /// Total encoded bytes of all transactions currently in the mempool.
     total_bytes: usize,
+    /// Dynamic fee floor set by the congestion responder.
+    /// `effective_min_fee = max(min_fee, dynamic_fee_floor)`.
+    dynamic_fee_floor: Arc<AtomicU64>,
+    /// Per-address threat scores (0-100) set by the spam detector.
+    /// Used in `drain_ready()` to deprioritize (never reject) suspicious senders.
+    threat_scores: Arc<Mutex<BTreeMap<Address, u8>>>,
 }
 
 impl TxMempool {
@@ -150,7 +157,29 @@ impl TxMempool {
             fairness_cap_per_sender: fairness_cap_per_sender.max(1),
             by_id: HashMap::new(),
             total_bytes: 0,
+            dynamic_fee_floor: Arc::new(AtomicU64::new(0)),
+            threat_scores: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    /// Returns the shared dynamic fee floor atomic.
+    ///
+    /// The congestion responder writes to this; the mempool reads it during `insert()`.
+    pub fn dynamic_fee_floor(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.dynamic_fee_floor)
+    }
+
+    /// Effective minimum fee: `max(base_min_fee, dynamic_fee_floor)`.
+    pub fn effective_min_fee(&self) -> u64 {
+        let dynamic = self.dynamic_fee_floor.load(Ordering::Relaxed);
+        self.min_fee.max(dynamic)
+    }
+
+    /// Returns the shared threat scores map.
+    ///
+    /// The copilot thread writes updated scores; the mempool reads them during `drain_ready()`.
+    pub fn threat_scores(&self) -> Arc<Mutex<BTreeMap<Address, u8>>> {
+        Arc::clone(&self.threat_scores)
     }
 
     /// Total encoded bytes of all transactions currently in the mempool.
@@ -188,10 +217,11 @@ impl TxMempool {
         tx: TxV1,
         nonce_provider: &impl NonceProvider,
     ) -> Result<TxId, TxMempoolError> {
-        // min fee
-        if tx.fee < self.min_fee {
+        // min fee (uses effective = max(base, dynamic_floor))
+        let effective = self.effective_min_fee();
+        if tx.fee < effective {
             return Err(TxMempoolError::FeeTooLow {
-                min_fee: self.min_fee,
+                min_fee: effective,
                 got: tx.fee,
             });
         }
@@ -249,24 +279,41 @@ impl TxMempool {
     }
 
     /// Drain up to `max` ready transactions under fee-priority + fairness.
+    ///
+    /// Sort uses `effective_fee = fee * (100 - threat_score) / 100` so that
+    /// high-threat senders are deprioritized but NEVER dropped.
     pub fn drain_ready(&mut self, max: usize, nonce_provider: &impl NonceProvider) -> Vec<TxV1> {
         if max == 0 || self.by_id.is_empty() {
             return Vec::new();
         }
 
-        // Gather ready candidates.
-        let mut candidates: Vec<(u64, TxId, Address)> = Vec::with_capacity(self.by_id.len());
+        // Snapshot threat scores under lock (brief hold).
+        let scores = self
+            .threat_scores
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+
+        // Gather ready candidates with effective fee.
+        // Tuple: (effective_fee, raw_fee, txid, sender)
+        let mut candidates: Vec<(u64, u64, TxId, Address)> = Vec::with_capacity(self.by_id.len());
 
         for (id, tx) in &self.by_id {
             let expected = nonce_provider.expected_nonce(&tx.from);
             if tx.nonce == expected {
-                candidates.push((tx.fee, *id, tx.from));
+                let score = scores.get(&tx.from).copied().unwrap_or(0);
+                let s = (score.min(100)) as u64;
+                let eff = tx.fee * (100 - s) / 100;
+                candidates.push((eff, tx.fee, *id, tx.from));
             }
         }
 
-        // Sort: fee DESC, txid ASC.
-        candidates.sort_by(|(fee_a, id_a, _), (fee_b, id_b, _)| {
-            fee_b.cmp(fee_a).then_with(|| id_a.cmp(id_b))
+        // Sort: effective_fee DESC, then raw_fee DESC, then txid ASC (deterministic).
+        candidates.sort_by(|(eff_a, fee_a, id_a, _), (eff_b, fee_b, id_b, _)| {
+            eff_b
+                .cmp(eff_a)
+                .then_with(|| fee_b.cmp(fee_a))
+                .then_with(|| id_a.cmp(id_b))
         });
 
         let cap = max.min(candidates.len());
@@ -274,7 +321,7 @@ impl TxMempool {
         let mut per_sender: HashMap<Address, usize> = HashMap::new();
         let mut selected_ids: Vec<TxId> = Vec::with_capacity(cap);
 
-        for (_fee, id, from) in candidates {
+        for (_eff, _fee, id, from) in candidates {
             if selected_ids.len() >= max {
                 break;
             }
@@ -714,5 +761,184 @@ mod tests {
         let id_b = novai_codec::txid_v1(&make_signed_tx(&sk, &vk, 1, 5, b"bbb")).unwrap();
         mp.remove(&id_b);
         assert_eq!(mp.total_bytes(), 0);
+    }
+
+    // -----------------------------------------
+    // Dynamic fee floor tests
+    // -----------------------------------------
+
+    #[test]
+    fn dynamic_fee_floor_overrides_base_when_higher() {
+        let (sk, vk) = test_keypair(20);
+        let from: Address = address_from_pubkey(&vk);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from, 0);
+
+        let mut mp = TxMempool::new(5, 10); // base min_fee = 5
+        assert_eq!(mp.effective_min_fee(), 5);
+
+        // Set dynamic floor higher than base
+        mp.dynamic_fee_floor().store(50, Ordering::Relaxed);
+        assert_eq!(mp.effective_min_fee(), 50);
+
+        // Tx with fee=10 should be rejected (below dynamic floor of 50)
+        let tx = make_signed_tx(&sk, &vk, 0, 10, b"low");
+        let err = mp.insert(tx, &np).unwrap_err();
+        assert!(matches!(err, TxMempoolError::FeeTooLow { min_fee: 50, .. }));
+
+        // Tx with fee=50 should be accepted
+        let tx = make_signed_tx(&sk, &vk, 0, 50, b"ok");
+        mp.insert(tx, &np).unwrap();
+    }
+
+    #[test]
+    fn base_min_fee_used_when_dynamic_is_lower() {
+        let (sk, vk) = test_keypair(21);
+        let from: Address = address_from_pubkey(&vk);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from, 0);
+
+        let mut mp = TxMempool::new(100, 10); // base min_fee = 100
+        mp.dynamic_fee_floor().store(10, Ordering::Relaxed); // dynamic = 10 (lower)
+        assert_eq!(mp.effective_min_fee(), 100); // base wins
+
+        // Tx with fee=50 rejected (below base of 100)
+        let tx = make_signed_tx(&sk, &vk, 0, 50, b"low");
+        let err = mp.insert(tx, &np).unwrap_err();
+        assert!(matches!(
+            err,
+            TxMempoolError::FeeTooLow { min_fee: 100, .. }
+        ));
+    }
+
+    #[test]
+    fn dynamic_fee_floor_zero_is_effectively_disabled() {
+        let (sk, vk) = test_keypair(22);
+        let from: Address = address_from_pubkey(&vk);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from, 0);
+
+        let mut mp = TxMempool::new(1, 10);
+        // Default dynamic floor is 0 — base min_fee of 1 wins
+        assert_eq!(mp.effective_min_fee(), 1);
+
+        let tx = make_signed_tx(&sk, &vk, 0, 1, b"min");
+        mp.insert(tx, &np).unwrap();
+    }
+
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn dynamic_fee_floor_arc_is_shared() {
+        let mp = TxMempool::new(1, 10);
+        let floor = mp.dynamic_fee_floor();
+        floor.store(42, Ordering::Relaxed);
+        assert_eq!(mp.effective_min_fee(), 42);
+    }
+
+    // -----------------------------------------
+    // Threat score deprioritization tests
+    // -----------------------------------------
+
+    #[test]
+    fn high_threat_tx_sorted_behind_unthreatened() {
+        // Two senders: sender1 has high fee but high threat score,
+        // sender2 has lower fee but no threat.
+        let (sk1, vk1) = test_keypair(30);
+        let (sk2, vk2) = test_keypair(31);
+        let from1: Address = address_from_pubkey(&vk1);
+        let from2: Address = address_from_pubkey(&vk2);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from1, 0);
+        np.set(from2, 0);
+
+        let mut mp = TxMempool::new(1, 10);
+
+        // sender1: fee=100, threat_score=80 → effective=100*(100-80)/100 = 20
+        // sender2: fee=50,  threat_score=0  → effective=50
+        let tx1 = make_signed_tx(&sk1, &vk1, 0, 100, b"threat");
+        let tx2 = make_signed_tx(&sk2, &vk2, 0, 50, b"clean");
+
+        mp.insert(tx1, &np).unwrap();
+        mp.insert(tx2, &np).unwrap();
+
+        // Set threat score for sender1
+        {
+            let scores = mp.threat_scores();
+            let mut map = scores.lock().unwrap();
+            map.insert(from1, 80);
+        }
+
+        let drained = mp.drain_ready(10, &np);
+        assert_eq!(drained.len(), 2);
+        // sender2 (effective=50) should come before sender1 (effective=20)
+        assert_eq!(drained[0].payload, b"clean");
+        assert_eq!(drained[1].payload, b"threat");
+    }
+
+    #[test]
+    fn zero_threat_score_unaffected() {
+        let (sk1, vk1) = test_keypair(32);
+        let (sk2, vk2) = test_keypair(33);
+        let from1: Address = address_from_pubkey(&vk1);
+        let from2: Address = address_from_pubkey(&vk2);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from1, 0);
+        np.set(from2, 0);
+
+        let mut mp = TxMempool::new(1, 10);
+
+        // Both have zero threat → normal fee priority
+        let tx_hi = make_signed_tx(&sk1, &vk1, 0, 100, b"hi");
+        let tx_lo = make_signed_tx(&sk2, &vk2, 0, 10, b"lo");
+
+        mp.insert(tx_hi, &np).unwrap();
+        mp.insert(tx_lo, &np).unwrap();
+
+        let drained = mp.drain_ready(10, &np);
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].payload, b"hi");
+        assert_eq!(drained[1].payload, b"lo");
+    }
+
+    #[test]
+    fn max_threat_still_drainable() {
+        // Score=100 → effective_fee=0, but transaction MUST still be returned
+        let (sk, vk) = test_keypair(34);
+        let from: Address = address_from_pubkey(&vk);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from, 0);
+
+        let mut mp = TxMempool::new(1, 10);
+        let tx = make_signed_tx(&sk, &vk, 0, 1000, b"maxed");
+        mp.insert(tx, &np).unwrap();
+
+        {
+            let scores = mp.threat_scores();
+            let mut map = scores.lock().unwrap();
+            map.insert(from, 100);
+        }
+
+        let drained = mp.drain_ready(10, &np);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].payload, b"maxed");
+    }
+
+    #[test]
+    fn threat_scores_arc_is_shared() {
+        let mp = TxMempool::new(1, 10);
+        let scores = mp.threat_scores();
+        let addr = [0x42u8; 32];
+        scores.lock().unwrap().insert(addr, 75);
+
+        // Mempool reads the same map
+        let mp_scores = mp.threat_scores();
+        assert_eq!(*mp_scores.lock().unwrap().get(&addr).unwrap(), 75);
     }
 }

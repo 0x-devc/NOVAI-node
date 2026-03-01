@@ -3,7 +3,12 @@ use novai_ai_service::{
     AiServiceConfig, AiServiceRunner, AiTriggerCallback, AnthropicClient, FeatureFlags,
 };
 use novai_codec::txid_v1;
+use novai_copilot::congestion_forecaster::CongestionForecaster;
+use novai_copilot::congestion_responder::CongestionResponder;
+use novai_copilot::congestion_stats::CongestionStats;
 use novai_copilot::observer::{AnomalyCallback, ChainObserver, ObservableState, ObserverConfig};
+use novai_copilot::spam_detector::SpamDetector;
+use novai_copilot::spam_stats::SpamStats;
 use novai_crypto::{address_from_pubkey, generate_keypair, sign_tx_v1};
 use novai_node::consensus_node::{ConsensusNode, Storage};
 use novai_node::metrics;
@@ -688,7 +693,7 @@ fn main() {
                 AnomalyHandler::Logging(LoggingAnomalyCallback)
             };
 
-            // Start copilot observer background thread
+            // Start copilot observer background thread (with congestion response)
             {
                 let observer = Arc::clone(&observer);
                 let observable_state = NodeObservableState {
@@ -696,8 +701,20 @@ fn main() {
                     mempool: Arc::clone(&mempool),
                 };
 
+                // Wire dynamic fee floor from mempool to congestion responder
+                let dynamic_fee_floor = mempool.lock_or_recover().dynamic_fee_floor();
+                let mut congestion_responder = CongestionResponder::new(dynamic_fee_floor);
+                let mut congestion_stats = CongestionStats::new(100);
+                let congestion_forecaster = CongestionForecaster::new();
+
+                // Wire threat scores from spam detector to mempool
+                let threat_scores_shared = mempool.lock_or_recover().threat_scores();
+                let spam_detector = SpamDetector::new();
+                let mut spam_stats = SpamStats::new(100);
+                let mut decay_counter: u64 = 0;
+
                 std::thread::spawn(move || {
-                    tracing::info!("Copilot observer started");
+                    tracing::info!("Copilot observer started (with congestion + threat response)");
                     loop {
                         std::thread::sleep(Duration::from_millis(500));
                         let mut obs = observer.lock_or_recover();
@@ -707,6 +724,54 @@ fn main() {
                                 count = anomalies.len(),
                                 "Detected anomalies this cycle"
                             );
+                        }
+
+                        // Congestion response: record stats, forecast, and adjust fee floor
+                        let mempool_size = observable_state.mempool_size();
+                        let height = observable_state.committed_height();
+                        congestion_stats.record_block(
+                            height,
+                            mempool_size,
+                            0,   // block_tx_count: TODO wire to actual block commit events
+                            100, // max_block_txs
+                            0,   // pending_total_value
+                            0,   // avg_fee
+                        );
+                        if congestion_stats.has_sufficient_data() {
+                            if let Some(forecast) =
+                                congestion_forecaster.forecast(&congestion_stats)
+                            {
+                                congestion_responder.respond(&forecast);
+                            }
+                        }
+
+                        // Threat deprioritization: detect spam, compute scores, update mempool
+                        spam_stats.record_mempool_size(mempool_size);
+                        let patterns = spam_detector.detect(&spam_stats, height);
+                        if !patterns.is_empty() {
+                            let scores = spam_detector.compute_threat_scores(&patterns);
+                            if let Ok(mut map) = threat_scores_shared.lock() {
+                                for (addr, score) in scores {
+                                    let entry = map.entry(addr).or_insert(0);
+                                    *entry = (*entry).max(score);
+                                }
+                            }
+                            tracing::info!(
+                                patterns = patterns.len(),
+                                "Spam patterns detected, threat scores updated"
+                            );
+                        }
+
+                        // Decay threat scores every 10 cycles (~5s)
+                        decay_counter += 1;
+                        if decay_counter >= 10 {
+                            decay_counter = 0;
+                            if let Ok(mut map) = threat_scores_shared.lock() {
+                                map.retain(|_, score| {
+                                    *score = score.saturating_sub(5);
+                                    *score > 0
+                                });
+                            }
                         }
                     }
                 });

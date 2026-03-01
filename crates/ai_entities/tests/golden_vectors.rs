@@ -7,7 +7,7 @@
 
 use novai_ai_entities::{AiEntity, AutonomyMode, Capabilities};
 // Golden vector tests intentionally use v1 codec to verify backward compatibility
-use novai_codec::ai_entity_codec::{decode_ai_entity, encode_ai_entity_v2};
+use novai_codec::ai_entity_codec::{decode_ai_entity, encode_ai_entity_v2, encode_ai_entity_v3};
 #[allow(deprecated)]
 use novai_codec::ai_entity_codec::{decode_ai_entity_v1, encode_ai_entity_v1};
 use std::fs;
@@ -155,5 +155,108 @@ fn golden_ai_entity_v2_is_stable_across_runs() {
     assert_eq!(
         bytes1, bytes2,
         "V2 encoding must be deterministic across calls"
+    );
+}
+
+// ============================================================================
+// V3 Golden Vector Tests (includes pubkey)
+// ============================================================================
+
+#[test]
+fn golden_ai_entity_v3_zero_pubkey() {
+    let entity = golden_test_entity(); // pubkey = [0u8; 32]
+    let bytes = encode_ai_entity_v3(&entity);
+
+    let path = vectors_dir().join("ai_entity_v3_zero_pubkey.bin");
+
+    if should_update_vectors() {
+        fs::create_dir_all(vectors_dir()).expect("failed to create vectors dir");
+        fs::write(&path, &bytes).expect("failed to write golden vector");
+        println!("Updated golden vector: {:?}", path);
+        println!("Vector length: {} bytes", bytes.len());
+    } else {
+        let expected = fs::read(&path)
+            .expect("Golden vector file missing. Run with UPDATE_VECTORS=1 to generate.");
+        assert_eq!(
+            bytes, expected,
+            "AI entity v3 (zero pubkey) encoding drifted from golden vector!"
+        );
+    }
+
+    assert_eq!(bytes.len(), 236, "AiEntity v3 must be exactly 236 bytes");
+    assert_eq!(bytes[0], 0x03, "V3 must start with version byte 0x03");
+
+    // Verify pubkey is at offset 123 and is all zeros
+    assert_eq!(
+        &bytes[123..155],
+        &[0u8; 32],
+        "pubkey at offset 123 must be zero"
+    );
+
+    let decoded = decode_ai_entity(&bytes).expect("v3 decode failed");
+    assert_eq!(entity.id, decoded.id);
+    assert_eq!(entity.code_hash, decoded.code_hash);
+    assert_eq!(entity.creator, decoded.creator);
+    assert_eq!(entity.autonomy_mode, decoded.autonomy_mode);
+    assert_eq!(entity.pubkey, decoded.pubkey);
+    assert_eq!(entity.pubkey, [0u8; 32]);
+    assert_eq!(entity.is_active, decoded.is_active);
+}
+
+#[test]
+fn golden_ai_entity_v3_with_pubkey() {
+    let mut entity = golden_test_entity();
+    entity.pubkey = [0xAB; 32]; // Non-zero pubkey
+
+    let bytes = encode_ai_entity_v3(&entity);
+
+    let path = vectors_dir().join("ai_entity_v3_with_pubkey.bin");
+
+    if should_update_vectors() {
+        fs::create_dir_all(vectors_dir()).expect("failed to create vectors dir");
+        fs::write(&path, &bytes).expect("failed to write golden vector");
+        println!("Updated golden vector: {:?}", path);
+    } else {
+        let expected = fs::read(&path)
+            .expect("Golden vector file missing. Run with UPDATE_VECTORS=1 to generate.");
+        assert_eq!(
+            bytes, expected,
+            "AI entity v3 (with pubkey) encoding drifted from golden vector!"
+        );
+    }
+
+    assert_eq!(bytes.len(), 236);
+    assert_eq!(bytes[0], 0x03);
+    assert_eq!(
+        &bytes[123..155],
+        &[0xAB; 32],
+        "pubkey must be at offset 123"
+    );
+
+    let decoded = decode_ai_entity(&bytes).expect("v3 decode failed");
+    assert_eq!(decoded.pubkey, [0xAB; 32]);
+}
+
+#[test]
+fn golden_ai_entity_v3_is_stable_across_runs() {
+    let mut entity = golden_test_entity();
+    entity.pubkey = [0xCD; 32];
+
+    let bytes1 = encode_ai_entity_v3(&entity);
+    let bytes2 = encode_ai_entity_v3(&entity);
+    assert_eq!(
+        bytes1, bytes2,
+        "V3 encoding must be deterministic across calls"
+    );
+}
+
+#[test]
+fn v2_backward_compat_decodes_with_zero_pubkey() {
+    let entity = golden_test_entity();
+    let v2_bytes = encode_ai_entity_v2(&entity);
+    let decoded = decode_ai_entity(&v2_bytes).expect("v2 decode failed");
+    assert_eq!(
+        decoded.pubkey, [0u8; 32],
+        "V2 entities must decode with pubkey = [0u8; 32]"
     );
 }

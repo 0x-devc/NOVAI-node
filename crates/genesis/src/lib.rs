@@ -7,7 +7,7 @@ use chrono::DateTime;
 use ed25519_dalek::VerifyingKey;
 use novai_ai_entities::gates::{ApprovalGate, GateType};
 use novai_ai_entities::{AiEntity, AutonomyMode, Capabilities};
-use novai_codec::{encode_ai_entity_v2, encode_approval_gate_v1};
+use novai_codec::{encode_ai_entity_v3, encode_approval_gate_v1};
 use novai_consensus_types::Block;
 use novai_smt::hash::{empty_hash_at_height, Hash32};
 use novai_smt::node::Node;
@@ -423,7 +423,7 @@ impl GenesisGenerator {
                 entity.economic_balance = u128::from(balance);
             }
 
-            let encoded = encode_ai_entity_v2(&entity);
+            let encoded = encode_ai_entity_v3(&entity);
             state_ops.push(WriteOp::Put(ai_entity_key(&entity.id), encoded));
         }
 

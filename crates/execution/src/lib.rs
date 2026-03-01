@@ -33,6 +33,20 @@ use novai_types::{Address, Nonce, TxV1};
 
 pub const EXECUTION_VERSION: u8 = 1;
 
+/// Derive the canonical 32-byte address from raw public key bytes.
+///
+/// `address = blake3("NOVAI_ADDRESS_V1" || pubkey_bytes)`
+///
+/// This matches the derivation in `novai-crypto::address_from_pubkey` but operates
+/// on raw bytes, avoiding the need for ed25519 `VerifyingKey` validation at registration
+/// time. Actual key validity is verified when the entity signs a transaction.
+fn derive_address_from_pubkey_bytes(pubkey: &[u8; 32]) -> Address {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"NOVAI_ADDRESS_V1");
+    hasher.update(pubkey);
+    *hasher.finalize().as_bytes()
+}
+
 /// Transfer payload version.
 pub const TRANSFER_PAYLOAD_V1: u8 = 1;
 
@@ -429,6 +443,97 @@ pub fn decode_credit_ai_entity_payload_v1(
     let amount = u128::from_be_bytes(amount_bytes);
 
     Ok(CreditAiEntityPayloadV1 { entity_id, amount })
+}
+
+// ============================================================================
+// REGISTER AI ENTITY WITH KEY PAYLOAD (Type 10)
+// ============================================================================
+
+/// Register AI entity with ed25519 pubkey payload version.
+pub const REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1: u8 = 10;
+
+/// Register AI Entity with Key payload:
+/// `[version:1][code_hash:32][pubkey:32][autonomy_mode:1][capabilities:1][initial_balance_be:16]`
+///
+/// Total size: 83 bytes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterAiEntityWithKeyPayloadV1 {
+    /// Hash of the AI module code/weights.
+    pub code_hash: [u8; 32],
+    /// Ed25519 public key for the entity.
+    pub pubkey: [u8; 32],
+    /// Autonomy mode for the entity.
+    pub autonomy_mode: novai_ai_entities::AutonomyMode,
+    /// Capability flags for the entity.
+    pub capabilities: novai_ai_entities::Capabilities,
+    /// Initial balance to fund the entity with (transferred from creator).
+    pub initial_balance: u128,
+}
+
+/// Deterministically encode a register AI entity with key payload.
+#[must_use]
+pub fn encode_register_ai_entity_with_key_payload_v1(
+    p: &RegisterAiEntityWithKeyPayloadV1,
+) -> [u8; 83] {
+    let mut out = [0u8; 83];
+    out[0] = REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1;
+    out[1..33].copy_from_slice(&p.code_hash);
+    out[33..65].copy_from_slice(&p.pubkey);
+    out[65] = p.autonomy_mode.to_byte();
+    out[66] = p.capabilities.to_byte();
+    out[67..83].copy_from_slice(&p.initial_balance.to_be_bytes());
+    out
+}
+
+/// Deterministically decode a register AI entity with key payload.
+///
+/// # Errors
+/// Returns error if payload length is not 83 bytes, version byte is wrong,
+/// or autonomy mode byte is invalid.
+pub fn decode_register_ai_entity_with_key_payload_v1(
+    payload: &[u8],
+) -> Result<RegisterAiEntityWithKeyPayloadV1, ExecError<()>> {
+    const LEN: usize = 83;
+    if payload.len() != LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: LEN,
+            got: payload.len(),
+        });
+    }
+    let ver = payload[0];
+    if ver != REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1,
+            got: ver,
+        });
+    }
+
+    let mut code_hash = [0u8; 32];
+    code_hash.copy_from_slice(&payload[1..33]);
+
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&payload[33..65]);
+
+    let autonomy_mode = novai_ai_entities::AutonomyMode::from_byte(payload[65]).ok_or(
+        ExecError::BadPayloadVersion {
+            expected: 2,
+            got: payload[65],
+        },
+    )?;
+
+    let capabilities = novai_ai_entities::Capabilities::from_byte(payload[66]);
+
+    let mut balance_bytes = [0u8; 16];
+    balance_bytes.copy_from_slice(&payload[67..83]);
+    let initial_balance = u128::from_be_bytes(balance_bytes);
+
+    Ok(RegisterAiEntityWithKeyPayloadV1 {
+        code_hash,
+        pubkey,
+        autonomy_mode,
+        capabilities,
+        initial_balance,
+    })
 }
 
 /// Submit Proposal payload (D24.3):
@@ -932,6 +1037,7 @@ fn append_smt_ops_for_state_ops<K: Kv>(
 ///
 /// # Errors
 /// Returns error if nonce mismatch, insufficient funds, payload decode fails, or DB error.
+#[allow(clippy::too_many_lines)]
 pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), ExecError<K::Error>> {
     // Decode payload (deterministic).
     let payload = decode_transfer_payload_v1(&tx.payload).map_err(|e| match e {
@@ -944,36 +1050,18 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
         _ => ExecError::Overflow,
     })?;
 
-    // Read current state (no mutations yet)
-    let mut from_acct = read_account_or_default(db, &tx.from)?;
-    if tx.nonce != from_acct.nonce {
-        return Err(ExecError::NonceMismatch {
-            expected: from_acct.nonce,
-            got: tx.nonce,
-        });
-    }
+    // Check if sender is an AI entity (via reverse index)
+    let ai_sender = lookup_ai_entity_by_address(db, &tx.from)?;
+
+    let amount_u128 = u64_to_u128_checked(payload.amount);
+    let fee_u128 = u64_to_u128_checked(tx.fee);
+    let needed = amount_u128
+        .checked_add(fee_u128)
+        .ok_or(ExecError::Overflow)?;
 
     let mut to_acct = read_account_or_default(db, &payload.to)?;
     let mut fee_pool = read_fee_pool_or_default(db)?;
 
-    // Validate and compute new state (all in memory, no writes yet)
-    let amount_u128 = u64_to_u128_checked(payload.amount);
-    let fee_u128 = u64_to_u128_checked(tx.fee);
-
-    let needed = amount_u128
-        .checked_add(fee_u128)
-        .ok_or(ExecError::Overflow)?;
-    if from_acct.balance < needed {
-        return Err(ExecError::InsufficientFunds {
-            balance: from_acct.balance,
-            needed,
-        });
-    }
-
-    from_acct.balance = from_acct
-        .balance
-        .checked_sub(needed)
-        .ok_or(ExecError::Overflow)?;
     to_acct.balance = to_acct
         .balance
         .checked_add(amount_u128)
@@ -983,34 +1071,94 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
         .checked_add(fee_u128)
         .ok_or(ExecError::Overflow)?;
 
-    from_acct.nonce = from_acct
-        .nonce
-        .checked_add(1)
-        .ok_or(ExecError::NonceOverflow)?;
+    if let Some(mut entity) = ai_sender {
+        // AI entity sender path: use entity balance/nonce
+        if !entity.is_active {
+            return Err(ExecError::EntityNotActive);
+        }
+        if tx.nonce != entity.nonce {
+            return Err(ExecError::NonceMismatch {
+                expected: entity.nonce,
+                got: tx.nonce,
+            });
+        }
+        if entity.economic_balance < needed {
+            return Err(ExecError::InsufficientFunds {
+                balance: entity.economic_balance,
+                needed,
+            });
+        }
 
-    // Build atomic batch of all state changes.
-    let ops = vec![
-        WriteOp::Put(
-            account_key(&tx.from),
-            encode_account_v1(&from_acct).to_vec(),
-        ),
-        WriteOp::Put(
-            account_key(&payload.to),
-            encode_account_v1(&to_acct).to_vec(),
-        ),
-        WriteOp::Put(
-            KEY_FEE_POOL.to_vec(),
-            encode_fee_pool_v1(&fee_pool).to_vec(),
-        ),
-    ];
+        entity.economic_balance = entity
+            .economic_balance
+            .checked_sub(needed)
+            .ok_or(ExecError::Overflow)?;
+        entity.nonce = entity
+            .nonce
+            .checked_add(1)
+            .ok_or(ExecError::NonceOverflow)?;
 
-    // Append SMT node writes + smt root write, derived deterministically from the state ops.
-    let mut all_ops = ops;
-    let state_ops_snapshot = all_ops.clone();
-    let _new_root = append_smt_ops_for_state_ops(db, &state_ops_snapshot, &mut all_ops)?;
+        let ops = vec![
+            write_ai_entity_op(&entity),
+            WriteOp::Put(
+                account_key(&payload.to),
+                encode_account_v1(&to_acct).to_vec(),
+            ),
+            WriteOp::Put(
+                KEY_FEE_POOL.to_vec(),
+                encode_fee_pool_v1(&fee_pool).to_vec(),
+            ),
+        ];
 
-    // Apply ALL changes atomically (state + SMT nodes + root).
-    db.apply_batch(&all_ops).map_err(ExecError::Db)?;
+        let mut all_ops = ops;
+        let state_ops_snapshot = all_ops.clone();
+        let _new_root = append_smt_ops_for_state_ops(db, &state_ops_snapshot, &mut all_ops)?;
+        db.apply_batch(&all_ops).map_err(ExecError::Db)?;
+    } else {
+        // Normal account sender path (original logic)
+        let mut from_acct = read_account_or_default(db, &tx.from)?;
+        if tx.nonce != from_acct.nonce {
+            return Err(ExecError::NonceMismatch {
+                expected: from_acct.nonce,
+                got: tx.nonce,
+            });
+        }
+        if from_acct.balance < needed {
+            return Err(ExecError::InsufficientFunds {
+                balance: from_acct.balance,
+                needed,
+            });
+        }
+
+        from_acct.balance = from_acct
+            .balance
+            .checked_sub(needed)
+            .ok_or(ExecError::Overflow)?;
+        from_acct.nonce = from_acct
+            .nonce
+            .checked_add(1)
+            .ok_or(ExecError::NonceOverflow)?;
+
+        let ops = vec![
+            WriteOp::Put(
+                account_key(&tx.from),
+                encode_account_v1(&from_acct).to_vec(),
+            ),
+            WriteOp::Put(
+                account_key(&payload.to),
+                encode_account_v1(&to_acct).to_vec(),
+            ),
+            WriteOp::Put(
+                KEY_FEE_POOL.to_vec(),
+                encode_fee_pool_v1(&fee_pool).to_vec(),
+            ),
+        ];
+
+        let mut all_ops = ops;
+        let state_ops_snapshot = all_ops.clone();
+        let _new_root = append_smt_ops_for_state_ops(db, &state_ops_snapshot, &mut all_ops)?;
+        db.apply_batch(&all_ops).map_err(ExecError::Db)?;
+    }
 
     Ok(())
 }
@@ -1020,7 +1168,7 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
 // ============================================================================
 
 use novai_ai_entities::{AiEntity, SignalCommitment};
-use novai_codec::{decode_ai_entity, encode_ai_entity_v2, encode_signal_commitment_v1};
+use novai_codec::{decode_ai_entity, encode_ai_entity_v3, encode_signal_commitment_v1};
 use novai_state::{
     ai_entity_key, ai_memory_key, ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
 };
@@ -1038,7 +1186,7 @@ pub fn read_ai_entity<K: Kv>(
     match db.get(&key).map_err(ExecError::Db)? {
         None => Ok(None),
         Some(bytes) => {
-            // decode_ai_entity handles both V1 and V2 formats
+            // decode_ai_entity handles V1, V2, and V3 formats
             let entity =
                 decode_ai_entity(&bytes).map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
             Ok(Some(entity))
@@ -1050,7 +1198,7 @@ pub fn read_ai_entity<K: Kv>(
 #[must_use]
 pub fn write_ai_entity_op(entity: &AiEntity) -> WriteOp {
     let key = ai_entity_key(&entity.id);
-    let value = encode_ai_entity_v2(entity);
+    let value = encode_ai_entity_v3(entity);
     WriteOp::Put(key, value)
 }
 
@@ -1809,6 +1957,236 @@ pub fn apply_credit_ai_entity_tx<K: KvBatch>(
     db.apply_batch(&ops).map_err(ExecError::Db)?;
 
     Ok(())
+}
+
+// ============================================================================
+// REGISTER AI ENTITY WITH KEY EXECUTION (Type 10)
+// ============================================================================
+
+use novai_state::ai_entity_by_address_key;
+
+/// Apply a `RegisterAiEntityWithKey` transaction (type 10).
+///
+/// Like type 8 but includes an ed25519 public key that enables the entity
+/// to sign transactions. Also writes a reverse index from entity address to `entity_id`.
+///
+/// # Validation
+/// 1. Payload must decode correctly (83 bytes)
+/// 2. Autonomous mode rejected (reserved)
+/// 3. AI kill switch must not be active
+/// 4. Sender nonce must match `tx.nonce`
+/// 5. Sender balance must cover `initial_balance + fee`
+/// 6. Entity must not already exist
+/// 7. No other entity may already be registered at the derived address
+///
+/// # State Changes
+/// - Debit creator by `initial_balance + fee`
+/// - Increment creator nonce
+/// - Write entity (V3 with pubkey)
+/// - Write reverse index `ai/entities_by_addr/{address} → entity_id`
+/// - Credit fee pool by `fee`
+///
+/// # Errors
+/// Returns error on decode failure, autonomous mode, kill switch active, nonce mismatch,
+/// insufficient funds, duplicate entity, or duplicate address.
+pub fn apply_register_ai_entity_with_key_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<[u8; 32], ExecError<K::Error>> {
+    // Decode payload
+    let payload =
+        decode_register_ai_entity_with_key_payload_v1(&tx.payload).map_err(|e| match e {
+            ExecError::BadPayloadLength { expected, got } => {
+                ExecError::BadPayloadLength { expected, got }
+            }
+            ExecError::BadPayloadVersion { expected, got } => {
+                ExecError::BadPayloadVersion { expected, got }
+            }
+            _ => ExecError::Overflow,
+        })?;
+
+    // Reject Autonomous mode (reserved, requires ZK proofs)
+    if payload.autonomy_mode == novai_ai_entities::AutonomyMode::Autonomous {
+        return Err(ExecError::AutonomousModeReserved);
+    }
+
+    // Check kill switch
+    if read_ai_kill_switch(db)? {
+        return Err(ExecError::AiKillSwitchActive);
+    }
+
+    // Read creator account (sender is a normal account)
+    let mut creator_acct = read_account_or_default(db, &tx.from)?;
+
+    // Validate nonce
+    if tx.nonce != creator_acct.nonce {
+        return Err(ExecError::NonceMismatch {
+            expected: creator_acct.nonce,
+            got: tx.nonce,
+        });
+    }
+
+    // Compute total cost: initial_balance + fee
+    let fee_u128 = u128::from(tx.fee);
+    let total_cost = payload
+        .initial_balance
+        .checked_add(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+
+    if creator_acct.balance < total_cost {
+        return Err(ExecError::InsufficientFunds {
+            balance: creator_acct.balance,
+            needed: total_cost,
+        });
+    }
+
+    // Compute entity ID
+    let entity_id = AiEntity::compute_id(&payload.code_hash, &tx.from);
+
+    // Check no duplicate entity
+    if read_ai_entity(db, &entity_id)?.is_some() {
+        return Err(ExecError::EntityAlreadyExists);
+    }
+
+    // Derive address from pubkey: address = blake3("NOVAI_ADDRESS_V1" || pubkey)
+    let entity_addr = derive_address_from_pubkey_bytes(&payload.pubkey);
+
+    // Check no existing entity registered at this address
+    let addr_key = ai_entity_by_address_key(&entity_addr);
+    if db.get(&addr_key).map_err(ExecError::Db)?.is_some() {
+        return Err(ExecError::EntityAlreadyExists);
+    }
+
+    // Create entity with pubkey
+    let mut entity = AiEntity::new_with_pubkey(
+        payload.code_hash,
+        tx.from,
+        payload.autonomy_mode,
+        payload.capabilities,
+        payload.pubkey,
+        current_height,
+    );
+    entity.economic_balance = payload.initial_balance;
+
+    // Debit creator
+    creator_acct.balance = creator_acct
+        .balance
+        .checked_sub(total_cost)
+        .ok_or(ExecError::Overflow)?;
+    creator_acct.nonce = creator_acct
+        .nonce
+        .checked_add(1)
+        .ok_or(ExecError::NonceOverflow)?;
+
+    // Credit fee pool
+    let mut fee_pool = read_fee_pool_or_default(db)?;
+    fee_pool.balance = fee_pool
+        .balance
+        .checked_add(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+
+    // Build atomic batch (entity + reverse index + account + fee pool)
+    let ops = vec![
+        WriteOp::Put(
+            account_key(&tx.from),
+            encode_account_v1(&creator_acct).to_vec(),
+        ),
+        WriteOp::Put(
+            KEY_FEE_POOL.to_vec(),
+            encode_fee_pool_v1(&fee_pool).to_vec(),
+        ),
+        write_ai_entity_op(&entity),
+        // Reverse index: address → entity_id
+        WriteOp::Put(addr_key, entity_id.to_vec()),
+    ];
+
+    db.apply_batch(&ops).map_err(ExecError::Db)?;
+
+    Ok(entity_id)
+}
+
+/// Look up an AI entity by sender address via reverse index.
+///
+/// Returns `Some(entity)` if the address maps to a registered AI entity, `None` otherwise.
+///
+/// # Errors
+/// Returns error on DB failure or corrupt reverse index data.
+pub fn lookup_ai_entity_by_address<K: Kv>(
+    db: &K,
+    addr: &Address,
+) -> Result<Option<AiEntity>, ExecError<K::Error>> {
+    let addr_key = ai_entity_by_address_key(addr);
+    match db.get(&addr_key).map_err(ExecError::Db)? {
+        None => Ok(None),
+        Some(entity_id_bytes) => {
+            if entity_id_bytes.len() != 32 {
+                return Err(ExecError::CodecDecode(
+                    "invalid entity_id in reverse index".into(),
+                ));
+            }
+            let mut entity_id = [0u8; 32];
+            entity_id.copy_from_slice(&entity_id_bytes);
+            read_ai_entity(db, &entity_id)
+        }
+    }
+}
+
+/// Check if a transaction sender is an AI entity and enforce restrictions.
+///
+/// Returns `Err` if the sender is an AI entity that is not allowed to submit this tx type.
+/// Returns `Ok(Some(entity))` if the sender is a valid AI entity allowed to submit this type.
+/// Returns `Ok(None)` if the sender is not an AI entity (normal account).
+///
+/// # Errors
+/// Returns error if entity is inactive or tx type is restricted for AI entities.
+pub fn check_ai_entity_sender<K: Kv>(
+    db: &K,
+    tx: &TxV1,
+) -> Result<Option<AiEntity>, ExecError<K::Error>> {
+    let Some(entity) = lookup_ai_entity_by_address(db, &tx.from)? else {
+        return Ok(None);
+    };
+
+    // Entity must be active
+    if !entity.is_active {
+        return Err(ExecError::EntityNotActive);
+    }
+
+    let tx_type = tx
+        .payload
+        .first()
+        .copied()
+        .ok_or(ExecError::UnknownPayloadVersion { version: 0 })?;
+
+    match tx_type {
+        // ALLOW: Transfer (type 1)
+        TRANSFER_PAYLOAD_V1 => Ok(Some(entity)),
+
+        // ALLOW: Signal Commitment (type 2) — if emit_proposals capability
+        SIGNAL_COMMITMENT_PAYLOAD_V1 => {
+            if entity.has_capability("emit_proposals") {
+                Ok(Some(entity))
+            } else {
+                Err(ExecError::IssuerMissingCapability)
+            }
+        }
+
+        // ALLOW: Memory CRUD (types 3, 4, 5) — if read_memory_objects capability
+        CREATE_MEMORY_OBJECT_PAYLOAD_V1
+        | UPDATE_MEMORY_OBJECT_PAYLOAD_V1
+        | DELETE_MEMORY_OBJECT_PAYLOAD_V1 => {
+            if entity.has_capability("read_memory_objects") {
+                Ok(Some(entity))
+            } else {
+                Err(ExecError::IssuerMissingCapability)
+            }
+        }
+
+        // DENY: Governance (6,7), entity registration (8,10), credit entity (9),
+        // and all unknown types — AI entities cannot perform these operations.
+        _ => Err(ExecError::IssuerMissingCapability),
+    }
 }
 
 // ============================================================================
@@ -2720,6 +3098,9 @@ pub const MIN_FEE_REGISTER_AI_ENTITY: u64 = 5_000;
 /// Minimum fee for crediting an AI entity balance (same as base).
 pub const MIN_FEE_CREDIT_AI_ENTITY: u64 = 100;
 
+/// Minimum fee for registering an AI entity with key (same as register, 50x base).
+pub const MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY: u64 = 5_000;
+
 /// Tiered fee schedule with minimum fees per transaction type.
 ///
 /// All values are floor minimums — senders can pay MORE but never less.
@@ -2776,6 +3157,7 @@ pub fn minimum_fee_for_tx(tx: &TxV1) -> Result<u64, ExecError<()>> {
         EXECUTE_PROPOSAL_PAYLOAD_V1 => Ok(MIN_FEE_GOVERNANCE_EXECUTE),
         REGISTER_AI_ENTITY_PAYLOAD_V1 => Ok(MIN_FEE_REGISTER_AI_ENTITY),
         CREDIT_AI_ENTITY_PAYLOAD_V1 => Ok(MIN_FEE_CREDIT_AI_ENTITY),
+        REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1 => Ok(MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY),
         other => Err(ExecError::UnknownPayloadVersion { version: other }),
     }
 }
@@ -2830,6 +3212,7 @@ pub fn distribute_fee<K: KvBatch>(
             | UPDATE_MEMORY_OBJECT_PAYLOAD_V1
             | DELETE_MEMORY_OBJECT_PAYLOAD_V1
             | REGISTER_AI_ENTITY_PAYLOAD_V1
+            | REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1
     );
 
     let mut ops = Vec::with_capacity(2);
@@ -2932,6 +3315,10 @@ pub fn dispatch_tx<K: KvBatch>(
         });
     }
 
+    // Check AI entity sender restrictions before routing.
+    // If sender is an AI entity, verify it is allowed to submit this tx type.
+    check_ai_entity_sender(db, tx)?;
+
     let version = tx
         .payload
         .first()
@@ -2954,6 +3341,9 @@ pub fn dispatch_tx<K: KvBatch>(
             apply_register_ai_entity_tx(db, tx, current_height).map(|_| ())
         }
         CREDIT_AI_ENTITY_PAYLOAD_V1 => apply_credit_ai_entity_tx(db, tx, current_height),
+        REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1 => {
+            apply_register_ai_entity_with_key_tx(db, tx, current_height).map(|_| ())
+        }
         other => Err(ExecError::UnknownPayloadVersion { version: other }),
     }
 }
@@ -4095,5 +4485,645 @@ mod tests {
         assert!(
             DerivedView::new(DerivedSourceType::ChainAggregate, 3, 0, creator, data3).is_some()
         );
+    }
+
+    // ========================================================================
+    // PHASE 3: AI ENTITY ORIGINATE TRANSACTIONS — Type 10 Registration Tests
+    // ========================================================================
+
+    /// Helper: build a type 10 register-entity-with-key tx.
+    #[allow(clippy::too_many_arguments)]
+    fn mk_register_with_key_tx(
+        from: Address,
+        nonce: u64,
+        fee: u64,
+        code_hash: [u8; 32],
+        pubkey: [u8; 32],
+        autonomy_mode: AutonomyMode,
+        capabilities: Capabilities,
+        initial_balance: u128,
+    ) -> TxV1 {
+        use novai_types::TxVersion;
+        let payload =
+            encode_register_ai_entity_with_key_payload_v1(&RegisterAiEntityWithKeyPayloadV1 {
+                code_hash,
+                pubkey,
+                autonomy_mode,
+                capabilities,
+                initial_balance,
+            });
+        TxV1 {
+            version: TxVersion::V1,
+            from,
+            pubkey: from,
+            nonce,
+            fee,
+            payload: payload.to_vec(),
+            sig: [0u8; 64],
+        }
+    }
+
+    /// Helper: fund an account in `MemKv`.
+    fn fund_account(db: &mut MemKv, addr: &Address, balance: u128) {
+        let acct = AccountStateV1 { balance, nonce: 0 };
+        db.apply_batch(&[WriteOp::Put(
+            account_key(addr),
+            encode_account_v1(&acct).to_vec(),
+        )])
+        .unwrap();
+    }
+
+    #[test]
+    fn type10_encode_decode_roundtrip() {
+        let p = RegisterAiEntityWithKeyPayloadV1 {
+            code_hash: [0x42; 32],
+            pubkey: [0xAB; 32],
+            autonomy_mode: AutonomyMode::Gated,
+            capabilities: Capabilities::gated(),
+            initial_balance: 500_000,
+        };
+        let encoded = encode_register_ai_entity_with_key_payload_v1(&p);
+        assert_eq!(encoded.len(), 83);
+        assert_eq!(encoded[0], REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1);
+
+        let decoded = decode_register_ai_entity_with_key_payload_v1(&encoded).unwrap();
+        assert_eq!(decoded.code_hash, p.code_hash);
+        assert_eq!(decoded.pubkey, p.pubkey);
+        assert_eq!(decoded.autonomy_mode, p.autonomy_mode);
+        assert_eq!(decoded.capabilities.to_byte(), p.capabilities.to_byte());
+        assert_eq!(decoded.initial_balance, p.initial_balance);
+    }
+
+    #[test]
+    fn type10_payload_bad_length_rejected() {
+        let result = decode_register_ai_entity_with_key_payload_v1(&[10u8; 50]);
+        assert!(matches!(
+            result,
+            Err(ExecError::BadPayloadLength {
+                expected: 83,
+                got: 50
+            })
+        ));
+    }
+
+    #[test]
+    fn type10_register_stores_pubkey_and_reverse_index() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 1_000_000);
+
+        let entity_pubkey = [0xABu8; 32];
+        let tx = mk_register_with_key_tx(
+            creator,
+            0,
+            5_000,
+            [0x42; 32],
+            entity_pubkey,
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            100_000,
+        );
+
+        let entity_id = apply_register_ai_entity_with_key_tx(&mut db, &tx, 42).unwrap();
+
+        // Verify entity stored with pubkey
+        let entity = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+        assert_eq!(entity.pubkey, entity_pubkey);
+        assert_eq!(entity.economic_balance, 100_000);
+        assert_eq!(entity.registered_at, 42);
+        assert!(entity.is_active);
+
+        // Verify reverse index exists
+        let entity_addr = derive_address_from_pubkey_bytes(&entity_pubkey);
+        let addr_key = novai_state::ai_entity_by_address_key(&entity_addr);
+        let stored_id = db.get(&addr_key).unwrap().unwrap();
+        assert_eq!(stored_id, entity_id.to_vec());
+
+        // Verify lookup by address works
+        let looked_up = lookup_ai_entity_by_address(&db, &entity_addr)
+            .unwrap()
+            .unwrap();
+        assert_eq!(looked_up.id, entity_id);
+        assert_eq!(looked_up.pubkey, entity_pubkey);
+    }
+
+    #[test]
+    fn type10_register_debits_creator() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 1_000_000);
+
+        let tx = mk_register_with_key_tx(
+            creator,
+            0,
+            5_000,
+            [0x42; 32],
+            [0xAB; 32],
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            100_000,
+        );
+
+        apply_register_ai_entity_with_key_tx(&mut db, &tx, 1).unwrap();
+
+        // Creator debited: initial_balance(100_000) + fee(5_000) = 105_000
+        let acct = read_account_or_default::<MemKv>(&db, &creator).unwrap();
+        assert_eq!(acct.balance, 1_000_000 - 105_000);
+        assert_eq!(acct.nonce, 1);
+    }
+
+    #[test]
+    fn type10_register_rejects_autonomous_mode() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 1_000_000);
+
+        let tx = mk_register_with_key_tx(
+            creator,
+            0,
+            5_000,
+            [0x42; 32],
+            [0xAB; 32],
+            AutonomyMode::Autonomous,
+            Capabilities::gated(),
+            100_000,
+        );
+
+        let result = apply_register_ai_entity_with_key_tx(&mut db, &tx, 1);
+        assert!(matches!(result, Err(ExecError::AutonomousModeReserved)));
+    }
+
+    #[test]
+    fn type10_register_rejects_duplicate_entity() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 2_000_000);
+
+        let tx1 = mk_register_with_key_tx(
+            creator,
+            0,
+            5_000,
+            [0x42; 32],
+            [0xAB; 32],
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            100_000,
+        );
+        apply_register_ai_entity_with_key_tx(&mut db, &tx1, 1).unwrap();
+
+        // Same code_hash + creator → same entity_id → duplicate
+        let tx2 = mk_register_with_key_tx(
+            creator,
+            1,
+            5_000,
+            [0x42; 32],
+            [0xCC; 32], // different pubkey but same entity_id
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            100_000,
+        );
+        let result = apply_register_ai_entity_with_key_tx(&mut db, &tx2, 2);
+        assert!(matches!(result, Err(ExecError::EntityAlreadyExists)));
+    }
+
+    #[test]
+    fn type10_register_rejects_duplicate_address() {
+        let mut db = MemKv::new();
+        let creator1 = [0x01u8; 32];
+        let creator2 = [0x02u8; 32];
+        fund_account(&mut db, &creator1, 2_000_000);
+        fund_account(&mut db, &creator2, 2_000_000);
+
+        let same_pubkey = [0xAB; 32];
+
+        // First registration succeeds
+        let tx1 = mk_register_with_key_tx(
+            creator1,
+            0,
+            5_000,
+            [0x42; 32],
+            same_pubkey,
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            100_000,
+        );
+        apply_register_ai_entity_with_key_tx(&mut db, &tx1, 1).unwrap();
+
+        // Second with same pubkey (same address) from different creator → rejected
+        let tx2 = mk_register_with_key_tx(
+            creator2,
+            0,
+            5_000,
+            [0x99; 32],  // different code_hash → different entity_id
+            same_pubkey, // same pubkey → same address
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            100_000,
+        );
+        let result = apply_register_ai_entity_with_key_tx(&mut db, &tx2, 2);
+        assert!(matches!(result, Err(ExecError::EntityAlreadyExists)));
+    }
+
+    #[test]
+    fn type10_register_rejects_insufficient_funds() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 50_000); // not enough for 100_000 + 5_000
+
+        let tx = mk_register_with_key_tx(
+            creator,
+            0,
+            5_000,
+            [0x42; 32],
+            [0xAB; 32],
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            100_000,
+        );
+        let result = apply_register_ai_entity_with_key_tx(&mut db, &tx, 1);
+        assert!(matches!(result, Err(ExecError::InsufficientFunds { .. })));
+    }
+
+    // ========================================================================
+    // PHASE 3: AI ENTITY TRANSFER — Entity as Sender
+    // ========================================================================
+
+    /// Helper: register an entity with key and return (`entity_id`, `entity_addr`).
+    fn register_entity_with_key(
+        db: &mut MemKv,
+        creator: &Address,
+        nonce: u64,
+        pubkey: [u8; 32],
+        initial_balance: u128,
+    ) -> ([u8; 32], Address) {
+        let tx = mk_register_with_key_tx(
+            *creator,
+            nonce,
+            5_000,
+            [0x42; 32],
+            pubkey,
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            initial_balance,
+        );
+        let entity_id = apply_register_ai_entity_with_key_tx(db, &tx, 1).unwrap();
+        let entity_addr = derive_address_from_pubkey_bytes(&pubkey);
+        (entity_id, entity_addr)
+    }
+
+    /// Helper: build a transfer tx from an AI entity address.
+    fn mk_entity_transfer_tx(
+        entity_addr: Address,
+        nonce: u64,
+        fee: u64,
+        to: Address,
+        amount: u64,
+    ) -> TxV1 {
+        use novai_types::TxVersion;
+        let payload = encode_transfer_payload_v1(&TransferPayloadV1 { to, amount });
+        TxV1 {
+            version: TxVersion::V1,
+            from: entity_addr,
+            pubkey: entity_addr, // in reality this is the entity pubkey; simplified for tests
+            nonce,
+            fee,
+            payload: payload.to_vec(),
+            sig: [0u8; 64],
+        }
+    }
+
+    #[test]
+    fn ai_entity_transfer_debits_entity_balance() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let entity_pubkey = [0xAB; 32];
+        let (entity_id, entity_addr) =
+            register_entity_with_key(&mut db, &creator, 0, entity_pubkey, 500_000);
+
+        let recipient = [0xFFu8; 32];
+        let tx = mk_entity_transfer_tx(entity_addr, 0, 1_000, recipient, 50_000);
+        apply_tx_v1_transfer(&mut db, &tx).unwrap();
+
+        // Entity balance: 500_000 - 50_000 - 1_000 = 449_000
+        let entity = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+        assert_eq!(entity.economic_balance, 449_000);
+        assert_eq!(entity.nonce, 1);
+
+        // Recipient credited
+        let recip_acct = read_account_or_default::<MemKv>(&db, &recipient).unwrap();
+        assert_eq!(recip_acct.balance, 50_000u128);
+    }
+
+    #[test]
+    fn ai_entity_transfer_nonce_mismatch_rejected() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let (_, entity_addr) = register_entity_with_key(&mut db, &creator, 0, [0xAB; 32], 500_000);
+
+        // Entity nonce is 0, but we send nonce 5
+        let tx = mk_entity_transfer_tx(entity_addr, 5, 1_000, [0xFF; 32], 10_000);
+        let result = apply_tx_v1_transfer(&mut db, &tx);
+        assert!(matches!(
+            result,
+            Err(ExecError::NonceMismatch {
+                expected: 0,
+                got: 5
+            })
+        ));
+    }
+
+    #[test]
+    fn ai_entity_transfer_insufficient_funds_rejected() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let (_, entity_addr) = register_entity_with_key(&mut db, &creator, 0, [0xAB; 32], 10_000);
+
+        // Try to transfer more than entity balance
+        let tx = mk_entity_transfer_tx(entity_addr, 0, 1_000, [0xFF; 32], 100_000);
+        let result = apply_tx_v1_transfer(&mut db, &tx);
+        assert!(matches!(result, Err(ExecError::InsufficientFunds { .. })));
+    }
+
+    #[test]
+    fn ai_entity_transfer_inactive_entity_rejected() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let entity_pubkey = [0xAB; 32];
+        let (entity_id, entity_addr) =
+            register_entity_with_key(&mut db, &creator, 0, entity_pubkey, 500_000);
+
+        // Deactivate entity
+        let mut entity = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+        entity.is_active = false;
+        let op = write_ai_entity_op(&entity);
+        db.apply_batch(&[op]).unwrap();
+
+        let tx = mk_entity_transfer_tx(entity_addr, 0, 1_000, [0xFF; 32], 10_000);
+        let result = apply_tx_v1_transfer(&mut db, &tx);
+        assert!(matches!(result, Err(ExecError::EntityNotActive)));
+    }
+
+    #[test]
+    fn ai_entity_sequential_transfers() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let (entity_id, entity_addr) =
+            register_entity_with_key(&mut db, &creator, 0, [0xAB; 32], 1_000_000);
+
+        // Transfer 1
+        let tx1 = mk_entity_transfer_tx(entity_addr, 0, 100, [0xFF; 32], 10_000);
+        apply_tx_v1_transfer(&mut db, &tx1).unwrap();
+
+        // Transfer 2 (nonce must be 1)
+        let tx2 = mk_entity_transfer_tx(entity_addr, 1, 100, [0xEE; 32], 20_000);
+        apply_tx_v1_transfer(&mut db, &tx2).unwrap();
+
+        let entity = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+        // 1_000_000 - 10_000 - 100 - 20_000 - 100 = 969_800
+        assert_eq!(entity.economic_balance, 969_800);
+        assert_eq!(entity.nonce, 2);
+    }
+
+    // ========================================================================
+    // PHASE 3: AI ENTITY RESTRICTION ENFORCEMENT
+    // ========================================================================
+
+    #[test]
+    fn ai_entity_cannot_submit_governance() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let (_, entity_addr) = register_entity_with_key(&mut db, &creator, 0, [0xAB; 32], 500_000);
+
+        // Build a fake governance payload (type 6)
+        let mut payload = vec![SUBMIT_PROPOSAL_PAYLOAD_V1];
+        payload.extend_from_slice(&[0u8; 200]); // dummy data
+
+        let tx = TxV1 {
+            version: novai_types::TxVersion::V1,
+            from: entity_addr,
+            pubkey: entity_addr,
+            nonce: 0,
+            fee: 10_000,
+            payload,
+            sig: [0u8; 64],
+        };
+
+        let result = check_ai_entity_sender(&db, &tx);
+        assert!(matches!(result, Err(ExecError::IssuerMissingCapability)));
+    }
+
+    #[test]
+    fn ai_entity_cannot_register_entities() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let (_, entity_addr) = register_entity_with_key(&mut db, &creator, 0, [0xAB; 32], 500_000);
+
+        // Type 8: register AI entity
+        let mut payload = vec![REGISTER_AI_ENTITY_PAYLOAD_V1];
+        payload.extend_from_slice(&[0u8; 100]);
+
+        let tx = TxV1 {
+            version: novai_types::TxVersion::V1,
+            from: entity_addr,
+            pubkey: entity_addr,
+            nonce: 0,
+            fee: 10_000,
+            payload,
+            sig: [0u8; 64],
+        };
+
+        let result = check_ai_entity_sender(&db, &tx);
+        assert!(matches!(result, Err(ExecError::IssuerMissingCapability)));
+    }
+
+    #[test]
+    fn ai_entity_cannot_register_entities_with_key() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let (_, entity_addr) = register_entity_with_key(&mut db, &creator, 0, [0xAB; 32], 500_000);
+
+        // Type 10: register AI entity with key
+        let mut payload = vec![REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1];
+        payload.extend_from_slice(&[0u8; 100]);
+
+        let tx = TxV1 {
+            version: novai_types::TxVersion::V1,
+            from: entity_addr,
+            pubkey: entity_addr,
+            nonce: 0,
+            fee: 10_000,
+            payload,
+            sig: [0u8; 64],
+        };
+
+        let result = check_ai_entity_sender(&db, &tx);
+        assert!(matches!(result, Err(ExecError::IssuerMissingCapability)));
+    }
+
+    #[test]
+    fn ai_entity_transfer_allowed_by_restrictions() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let (_, entity_addr) = register_entity_with_key(&mut db, &creator, 0, [0xAB; 32], 500_000);
+
+        // Type 1: transfer
+        let payload = encode_transfer_payload_v1(&TransferPayloadV1 {
+            to: [0xFF; 32],
+            amount: 1_000,
+        });
+
+        let tx = TxV1 {
+            version: novai_types::TxVersion::V1,
+            from: entity_addr,
+            pubkey: entity_addr,
+            nonce: 0,
+            fee: 1_000,
+            payload: payload.to_vec(),
+            sig: [0u8; 64],
+        };
+
+        let result = check_ai_entity_sender(&db, &tx);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some()); // returns Some(entity)
+    }
+
+    #[test]
+    fn normal_account_passes_restrictions_as_none() {
+        let db = MemKv::new();
+        let normal_addr = [0xDD; 32]; // not registered as entity
+
+        let payload = encode_transfer_payload_v1(&TransferPayloadV1 {
+            to: [0xFF; 32],
+            amount: 1_000,
+        });
+
+        let tx = TxV1 {
+            version: novai_types::TxVersion::V1,
+            from: normal_addr,
+            pubkey: normal_addr,
+            nonce: 0,
+            fee: 1_000,
+            payload: payload.to_vec(),
+            sig: [0u8; 64],
+        };
+
+        let result = check_ai_entity_sender(&db, &tx);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // not an entity
+    }
+
+    // ========================================================================
+    // PHASE 3: DISPATCH INTEGRATION — Type 10 via dispatch_tx
+    // ========================================================================
+
+    #[test]
+    fn dispatch_type10_via_dispatch_tx() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let tx = mk_register_with_key_tx(
+            creator,
+            0,
+            5_000,
+            [0x42; 32],
+            [0xAB; 32],
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            100_000,
+        );
+
+        let result = dispatch_tx(&mut db, &tx, 1);
+        assert!(result.is_ok());
+
+        // Verify entity was created
+        let entity_id = AiEntity::compute_id(&[0x42; 32], &creator);
+        let entity = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+        assert_eq!(entity.pubkey, [0xAB; 32]);
+    }
+
+    #[test]
+    fn dispatch_type10_below_min_fee_rejected() {
+        let mut db = MemKv::new();
+        let creator = [0x01u8; 32];
+        fund_account(&mut db, &creator, 10_000_000);
+
+        let tx = mk_register_with_key_tx(
+            creator,
+            0,
+            100, // below MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY (5_000)
+            [0x42; 32],
+            [0xAB; 32],
+            AutonomyMode::Gated,
+            Capabilities::gated(),
+            100_000,
+        );
+
+        let result = dispatch_tx(&mut db, &tx, 1);
+        assert!(matches!(result, Err(ExecError::FeeBelowMinimum { .. })));
+    }
+
+    // ========================================================================
+    // PHASE 3: ADDRESS DERIVATION CONSISTENCY
+    // ========================================================================
+
+    #[test]
+    fn derive_address_is_deterministic() {
+        let pubkey = [0xAB; 32];
+        let addr1 = derive_address_from_pubkey_bytes(&pubkey);
+        let addr2 = derive_address_from_pubkey_bytes(&pubkey);
+        assert_eq!(addr1, addr2);
+    }
+
+    #[test]
+    fn derive_address_matches_crypto_module() {
+        // Verify our inline derivation matches novai_crypto::address_from_pubkey
+        // Generate a real ed25519 keypair to get a valid public key
+        let (_sk, vk) = novai_crypto::generate_keypair();
+        let pubkey_bytes: [u8; 32] = *vk.as_bytes();
+
+        // Inline derivation
+        let inline_addr = derive_address_from_pubkey_bytes(&pubkey_bytes);
+
+        // Verify via novai_crypto (available as dev-dependency)
+        let crypto_addr = novai_crypto::address_from_pubkey(&vk);
+
+        assert_eq!(
+            inline_addr, crypto_addr,
+            "Inline address derivation must match novai_crypto"
+        );
+    }
+
+    #[test]
+    fn different_pubkeys_produce_different_addresses() {
+        let addr1 = derive_address_from_pubkey_bytes(&[0xAB; 32]);
+        let addr2 = derive_address_from_pubkey_bytes(&[0xCD; 32]);
+        assert_ne!(addr1, addr2);
+    }
+
+    #[test]
+    fn lookup_nonexistent_address_returns_none() {
+        let db = MemKv::new();
+        let addr = [0xFF; 32];
+        let result = lookup_ai_entity_by_address(&db, &addr).unwrap();
+        assert!(result.is_none());
     }
 }

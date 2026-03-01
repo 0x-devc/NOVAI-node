@@ -12,10 +12,10 @@ novai-smt = { path = "../smt", version = "0.1.0" }
 novai-ai-entities = { path = "../ai_entities", version = "0.1.0" }
 novai-codec = { path = "../codec", version = "0.1.0" }
 novai-governance = { path = "../governance", version = "0.1.0" }
+blake3 = "=1.8.2"
 
 [dev-dependencies]
 novai-crypto = { path = "../crypto", version = "0.1.0" }
-blake3 = "=1.8.2"
 
 [lints]
 workspace = true

@@ -220,6 +220,9 @@ pub struct AiEntity {
     pub economic_balance: u128,
     /// Nonce for AI-initiated transactions (prevents replay).
     pub nonce: u64,
+    /// Ed25519 public key for signing transactions.
+    /// `[0u8; 32]` means no key assigned (legacy/V1/V2 entities).
+    pub pubkey: [u8; 32],
     /// Root hash of persistent memory tree.
     pub memory_root: [u8; 32],
     /// Root hash of learned parameters tree.
@@ -260,12 +263,45 @@ impl AiEntity {
             capabilities,
             economic_balance: 0,
             nonce: 0,
+            pubkey: [0u8; 32],
             memory_root: [0u8; 32],
             params_root: [0u8; 32],
             registered_at,
             last_active_at: registered_at,
             is_active: true,
         }
+    }
+
+    /// Create a new AI entity with an ed25519 public key.
+    pub fn new_with_pubkey(
+        code_hash: CodeHash,
+        creator: Address,
+        autonomy_mode: AutonomyMode,
+        capabilities: Capabilities,
+        pubkey: [u8; 32],
+        registered_at: u64,
+    ) -> Self {
+        let id = Self::compute_id(&code_hash, &creator);
+        Self {
+            id,
+            code_hash,
+            creator,
+            autonomy_mode,
+            capabilities,
+            economic_balance: 0,
+            nonce: 0,
+            pubkey,
+            memory_root: [0u8; 32],
+            params_root: [0u8; 32],
+            registered_at,
+            last_active_at: registered_at,
+            is_active: true,
+        }
+    }
+
+    /// Returns true if this entity has an assigned public key (non-zero).
+    pub fn has_pubkey(&self) -> bool {
+        self.pubkey != [0u8; 32]
     }
 
     /// Check if entity has a specific capability.

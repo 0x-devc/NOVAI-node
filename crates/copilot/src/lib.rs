@@ -26,8 +26,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bounded_param;
 pub mod congestion_forecaster;
 pub mod congestion_reporter;
+pub mod congestion_responder;
 pub mod congestion_stats;
 pub mod detector;
 pub mod observer;
@@ -38,12 +40,14 @@ pub mod spam_observer;
 pub mod spam_reporter;
 pub mod spam_stats;
 pub mod stats;
+pub mod threat_score;
 
 pub use congestion_forecaster::{
     BlockSizeRecommendation, CongestionForecast, CongestionForecaster, CongestionLevel,
     CongestionThresholds, FeeRecommendation, ForecastEvidence,
 };
 pub use congestion_reporter::CongestionReporter;
+pub use congestion_responder::CongestionResponder;
 pub use congestion_stats::CongestionStats;
 pub use detector::{AnomalyDetector, AnomalyKind, DetectedAnomaly};
 pub use observer::{
@@ -56,6 +60,7 @@ pub use spam_observer::{SpamCallback, SpamObserver, SpamObserverConfig, SpamObse
 pub use spam_reporter::SpamReporter;
 pub use spam_stats::{SenderStats, SpamStats, TxRejectionReason};
 pub use stats::{ChainStats, RingBuffer};
+pub use threat_score::{effective_fee, ThreatScoreMap};
 
 #[cfg(test)]
 mod non_censorship_tests;

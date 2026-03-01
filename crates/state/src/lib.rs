@@ -60,6 +60,22 @@ pub const KEY_PREFIX_AI_SIGNALS_BY_TYPE: &[u8] = b"ai/signals/by_type/";
 pub const KEY_PREFIX_AI_SIGNALS_BY_ISSUER: &[u8] = b"ai/signals/by_issuer/";
 
 // ============================================================================
+// AI ENTITY REVERSE INDEX (by address → entity_id)
+// ============================================================================
+
+/// Canonical prefix for reverse index: AI entity address → entity_id.
+/// Key: `ai/entities_by_addr/{address32}` → entity_id (32 bytes)
+pub const KEY_PREFIX_AI_ENTITY_BY_ADDR: &[u8] = b"ai/entities_by_addr/";
+
+/// Build the key for reverse-indexing an AI entity by its derived address.
+pub fn ai_entity_by_address_key(addr: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_ENTITY_BY_ADDR.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_ENTITY_BY_ADDR);
+    k.extend_from_slice(addr);
+    k
+}
+
+// ============================================================================
 // AI MEMORY OBJECT KEY PREFIXES (Week 21)
 // ============================================================================
 

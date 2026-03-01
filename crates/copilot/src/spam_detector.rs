@@ -448,6 +448,68 @@ impl SpamDetector {
     }
 }
 
+impl SpamDetector {
+    /// Convert detected spam patterns into per-address threat scores (0-100).
+    ///
+    /// Score rubric:
+    /// - `HighInvalidRate` → `min(100, rejection_pct)`
+    /// - `HighTxRate` → `min(100, tx_count * 100 / (threshold * 2))`
+    /// - `LowFeeFlood` → `min(100, low_fee_count * 100 / (threshold_fee * 3))`
+    /// - `MempoolSpike` → no per-address score (global pattern)
+    ///
+    /// Multiple patterns for the same address: take the maximum score.
+    ///
+    /// This method is purely computational with no side effects.
+    #[must_use]
+    pub fn compute_threat_scores(
+        &self,
+        patterns: &[DetectedSpamPattern],
+    ) -> std::collections::BTreeMap<Address, u8> {
+        use std::collections::BTreeMap;
+        let mut scores: BTreeMap<Address, u8> = BTreeMap::new();
+
+        for pattern in patterns {
+            let (addr, score) = match &pattern.kind {
+                SpamPatternKind::HighInvalidRate {
+                    sender,
+                    rejection_pct,
+                    ..
+                } => (*sender, (*rejection_pct).min(100) as u8),
+
+                SpamPatternKind::HighTxRate {
+                    sender,
+                    tx_count,
+                    threshold,
+                } => {
+                    let denom = threshold.saturating_mul(2).max(1);
+                    let raw = tx_count.saturating_mul(100) / denom;
+                    (*sender, raw.min(100) as u8)
+                }
+
+                SpamPatternKind::LowFeeFlood {
+                    sender,
+                    low_fee_count,
+                    threshold_fee,
+                } => {
+                    let denom = threshold_fee.saturating_mul(3).max(1);
+                    let raw = low_fee_count.saturating_mul(100) / denom;
+                    (*sender, raw.min(100) as u8)
+                }
+
+                SpamPatternKind::MempoolSpike { .. } => {
+                    // Global pattern — no per-address score
+                    continue;
+                }
+            };
+
+            let entry = scores.entry(addr).or_insert(0);
+            *entry = (*entry).max(score);
+        }
+
+        scores
+    }
+}
+
 impl Default for SpamDetector {
     fn default() -> Self {
         Self::new()
@@ -646,5 +708,120 @@ mod tests {
         // Stats should be unchanged
         assert_eq!(stats.observation_count, observation_count_before);
         assert_eq!(stats.sender_count(), sender_count_before);
+    }
+
+    // -----------------------------------------
+    // compute_threat_scores tests
+    // -----------------------------------------
+
+    #[test]
+    fn threat_score_high_invalid_rate() {
+        let detector = SpamDetector::new();
+        let sender = [0x01u8; 32];
+        let patterns = vec![DetectedSpamPattern {
+            kind: SpamPatternKind::HighInvalidRate {
+                sender,
+                invalid_count: 80,
+                total_count: 100,
+                rejection_pct: 80,
+            },
+            confidence: 200,
+            height: 1,
+        }];
+
+        let scores = detector.compute_threat_scores(&patterns);
+        assert_eq!(*scores.get(&sender).unwrap(), 80);
+    }
+
+    #[test]
+    fn threat_score_high_tx_rate() {
+        let detector = SpamDetector::new();
+        let sender = [0x02u8; 32];
+        let patterns = vec![DetectedSpamPattern {
+            kind: SpamPatternKind::HighTxRate {
+                sender,
+                tx_count: 150,
+                threshold: 50,
+            },
+            confidence: 200,
+            height: 1,
+        }];
+
+        let scores = detector.compute_threat_scores(&patterns);
+        // 150 * 100 / (50 * 2) = 150, clamped to 100
+        assert_eq!(*scores.get(&sender).unwrap(), 100);
+    }
+
+    #[test]
+    fn threat_score_low_fee_flood() {
+        let detector = SpamDetector::new();
+        let sender = [0x03u8; 32];
+        let patterns = vec![DetectedSpamPattern {
+            kind: SpamPatternKind::LowFeeFlood {
+                sender,
+                low_fee_count: 30,
+                threshold_fee: 20,
+            },
+            confidence: 200,
+            height: 1,
+        }];
+
+        let scores = detector.compute_threat_scores(&patterns);
+        // 30 * 100 / (20 * 3) = 50
+        assert_eq!(*scores.get(&sender).unwrap(), 50);
+    }
+
+    #[test]
+    fn threat_score_mempool_spike_ignored() {
+        let detector = SpamDetector::new();
+        let patterns = vec![DetectedSpamPattern {
+            kind: SpamPatternKind::MempoolSpike {
+                current_size: 1000,
+                baseline_size: 100,
+            },
+            confidence: 200,
+            height: 1,
+        }];
+
+        let scores = detector.compute_threat_scores(&patterns);
+        assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn threat_score_multiple_patterns_takes_max() {
+        let detector = SpamDetector::new();
+        let sender = [0x04u8; 32];
+        let patterns = vec![
+            DetectedSpamPattern {
+                kind: SpamPatternKind::HighInvalidRate {
+                    sender,
+                    invalid_count: 30,
+                    total_count: 100,
+                    rejection_pct: 30,
+                },
+                confidence: 150,
+                height: 1,
+            },
+            DetectedSpamPattern {
+                kind: SpamPatternKind::HighTxRate {
+                    sender,
+                    tx_count: 80,
+                    threshold: 50,
+                },
+                confidence: 200,
+                height: 1,
+            },
+        ];
+
+        let scores = detector.compute_threat_scores(&patterns);
+        // HighInvalidRate → 30, HighTxRate → 80*100/(50*2) = 80 → max = 80
+        assert_eq!(*scores.get(&sender).unwrap(), 80);
+    }
+
+    #[test]
+    fn threat_score_empty_input() {
+        let detector = SpamDetector::new();
+        let scores = detector.compute_threat_scores(&[]);
+        assert!(scores.is_empty());
     }
 }
