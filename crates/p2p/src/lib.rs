@@ -319,7 +319,8 @@ impl PeerManager {
 }
 
 /// Maximum connections allowed from a single IP address.
-pub const MAX_CONNECTIONS_PER_IP: usize = 3;
+/// Set to 10 to support localhost testnets where all validators share 127.0.0.1.
+pub const MAX_CONNECTIONS_PER_IP: usize = 10;
 
 /// TCP socket read/write timeout for peer connections (seconds).
 pub const PEER_SOCKET_TIMEOUT_SECS: u64 = 30;
