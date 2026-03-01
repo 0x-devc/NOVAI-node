@@ -13,7 +13,7 @@
 #
 # ENVIRONMENT VARIABLES (tune without editing script):
 #   BASE_TIMEOUT         Consensus timeout in ms (default: 1000)
-#   PROPOSAL_INTERVAL    Proposal interval in ms (default: 100, min 20)
+#   PROPOSAL_INTERVAL    Proposal interval in ms (default: 5, min 5)
 #   BIN                  Path to novai-node binary
 #   LOG_DIR              Path to log directory
 #   DATA_DIR             Path to data directory
@@ -38,7 +38,7 @@ BIN="${BIN:-${PROJECT_ROOT}/target/release/novai-node}"
 LOG_DIR="${LOG_DIR:-/var/log/novai}"
 DATA_DIR="${DATA_DIR:-[redacted-server]/.novai/data}"
 BASE_TIMEOUT="${BASE_TIMEOUT:-1000}"
-PROPOSAL_INTERVAL="${PROPOSAL_INTERVAL:-100}"
+PROPOSAL_INTERVAL="${PROPOSAL_INTERVAL:-5}"
 PID_DIR="${LOG_DIR}/pids"
 
 declare -a PORTS=(9000 9001 9002 9003)
@@ -367,7 +367,7 @@ case "${1:-}" in
         echo ""
         echo "Environment variables:"
         echo "  BASE_TIMEOUT=1000       Consensus timeout (ms)"
-        echo "  PROPOSAL_INTERVAL=100   Proposal interval (ms, min 20)"
+        echo "  PROPOSAL_INTERVAL=5     Proposal interval (ms, min 5)"
         echo "  BIN=./target/release/novai-node"
         echo "  LOG_DIR=/var/log/novai"
         echo "  DATA_DIR=[redacted-server]/.novai/data"

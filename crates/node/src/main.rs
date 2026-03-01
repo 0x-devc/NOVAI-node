@@ -362,8 +362,8 @@ fn main() {
                     "--proposal-interval" => {
                         proposal_interval_ms =
                             parse_u64(rest.get(i + 1).cloned(), "--proposal-interval");
-                        if proposal_interval_ms < 20 {
-                            eprintln!("--proposal-interval must be >= 20ms");
+                        if proposal_interval_ms < 5 {
+                            eprintln!("--proposal-interval must be >= 5ms");
                             std::process::exit(1);
                         }
                         i += 2;
