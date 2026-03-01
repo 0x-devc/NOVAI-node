@@ -716,19 +716,27 @@ fn main() {
                 std::thread::spawn(move || {
                     tracing::info!("Copilot observer started (with congestion + threat response)");
                     loop {
-                        std::thread::sleep(Duration::from_millis(500));
-                        let mut obs = observer.lock_or_recover();
-                        let anomalies = obs.observe(&observable_state, &callback);
-                        if !anomalies.is_empty() {
-                            tracing::info!(
-                                count = anomalies.len(),
-                                "Detected anomalies this cycle"
-                            );
-                        }
+                        // 5s interval — observer is advisory, doesn't need high frequency
+                        std::thread::sleep(Duration::from_millis(5000));
 
-                        // Congestion response: record stats, forecast, and adjust fee floor
+                        // Snapshot state with minimal lock hold time — grab values and drop locks
                         let mempool_size = observable_state.mempool_size();
                         let height = observable_state.committed_height();
+
+                        // Run observer (acquires its own lock briefly)
+                        {
+                            let mut obs = observer.lock_or_recover();
+                            let anomalies = obs.observe(&observable_state, &callback);
+                            // obs lock dropped here
+                            if !anomalies.is_empty() {
+                                tracing::debug!(
+                                    count = anomalies.len(),
+                                    "Detected anomalies this cycle"
+                                );
+                            }
+                        }
+
+                        // Congestion response (no shared locks needed — uses atomic store)
                         congestion_stats.record_block(
                             height,
                             mempool_size,
@@ -745,7 +753,7 @@ fn main() {
                             }
                         }
 
-                        // Threat deprioritization: detect spam, compute scores, update mempool
+                        // Threat deprioritization (brief lock on threat_scores only)
                         spam_stats.record_mempool_size(mempool_size);
                         let patterns = spam_detector.detect(&spam_stats, height);
                         if !patterns.is_empty() {
@@ -756,13 +764,13 @@ fn main() {
                                     *entry = (*entry).max(score);
                                 }
                             }
-                            tracing::info!(
+                            tracing::debug!(
                                 patterns = patterns.len(),
                                 "Spam patterns detected, threat scores updated"
                             );
                         }
 
-                        // Decay threat scores every 10 cycles (~5s)
+                        // Decay threat scores every 10 cycles (~50s at 5s interval)
                         decay_counter += 1;
                         if decay_counter >= 10 {
                             decay_counter = 0;

@@ -84,7 +84,7 @@ impl CongestionResponder {
 
         self.shared_floor.store(new, Ordering::Relaxed);
 
-        tracing::info!(
+        tracing::debug!(
             level = ?forecast.level,
             old_fee_floor = old,
             new_fee_floor = new,
@@ -105,7 +105,7 @@ impl CongestionResponder {
         self.fee_floor.reset();
         self.shared_floor
             .store(self.fee_floor.current(), Ordering::Relaxed);
-        tracing::info!(
+        tracing::debug!(
             fee_floor = self.fee_floor.current(),
             "Congestion response: fee floor reset to default"
         );
