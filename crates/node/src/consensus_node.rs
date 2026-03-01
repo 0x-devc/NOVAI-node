@@ -882,29 +882,6 @@ impl ConsensusNode {
         mempool: &mut mempool::TxMempool,
         nonce_provider: &impl mempool::NonceProvider,
     ) -> Result<bool, String> {
-        // Pre-check: are we likely the leader? Avoids acquiring the db lock
-        // on every iteration for the ~75% of validators that are non-leaders.
-        {
-            let state = self.state.lock_or_recover();
-            let next_height = match &state.highest_qc {
-                Some(qc) => std::cmp::max(state.height, qc.height) + 1,
-                None => state.height + 1,
-            };
-            let proposed_key = (next_height, state.round);
-            if state.last_proposed == Some(proposed_key) {
-                return Ok(false); // AlreadyProposed — skip without db lock
-            }
-            let view_height = next_height.saturating_sub(1);
-            if let Ok(leader) =
-                ConsensusState::compute_leader_for_view(view_height, state.round, &self.validator_set)
-            {
-                if leader != self.our_address {
-                    return Ok(false); // NotLeader — skip without db lock
-                }
-            }
-            // Drop state lock before re-acquiring with db
-        }
-
         let mut state = self.state.lock_or_recover();
         let db = self.db.lock_or_recover();
 
