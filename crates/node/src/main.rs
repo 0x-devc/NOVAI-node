@@ -125,7 +125,11 @@ fn snapshot_observable_state(
 ) -> ObservableStateSnapshot {
     let (committed_height, current_round, view_changes_total) = {
         let state = node.state.lock_or_recover();
-        (state.committed_height, state.round, state.view_changes_total)
+        (
+            state.committed_height,
+            state.round,
+            state.view_changes_total,
+        )
     };
     let peer_count = node.peer_manager.peer_count() as u64;
     let mempool_size = mempool.lock_or_recover().len() as u64;
@@ -750,10 +754,7 @@ fn main() {
 
                         // Snapshot all state with 2 lock acquisitions (state + mempool),
                         // then use the lock-free snapshot for the entire cycle.
-                        let snapshot = snapshot_observable_state(
-                            &observer_node,
-                            &observer_mempool,
-                        );
+                        let snapshot = snapshot_observable_state(&observer_node, &observer_mempool);
                         let height = snapshot.committed_height;
                         let mempool_size = snapshot.mempool_size;
 
@@ -796,8 +797,7 @@ fn main() {
                                     let entry = map.entry(addr).or_insert(0);
                                     *entry = (*entry).max(score);
                                 }
-                                threat_scores_empty
-                                    .store(map.is_empty(), Ordering::Relaxed);
+                                threat_scores_empty.store(map.is_empty(), Ordering::Relaxed);
                             }
                             tracing::debug!(
                                 patterns = patterns.len(),
@@ -814,8 +814,7 @@ fn main() {
                                     *score = score.saturating_sub(5);
                                     *score > 0
                                 });
-                                threat_scores_empty
-                                    .store(map.is_empty(), Ordering::Relaxed);
+                                threat_scores_empty.store(map.is_empty(), Ordering::Relaxed);
                             }
                         }
                     }
@@ -835,27 +834,27 @@ fn main() {
                         (s.committed_height, s.round, s.view_changes_total)
                     };
                     metrics::MetricsSnapshot {
-                    committed_height,
-                    current_round,
-                    peer_count: peer_manager.peer_count() as u64,
-                    mempool_size: mempool.lock_or_recover().len() as u64,
-                    view_changes_total,
-                    block_tx_count: 0, // TODO: Wire to actual block commit events
-                    total_txs_committed: 0, // TODO: Accumulate from block commits
-                    // Copilot metrics from observer
-                    copilot_observations_total: observer_metrics
-                        .observations
-                        .load(Ordering::Relaxed),
-                    anomaly_signals_total: observer_metrics
-                        .anomalies_detected
-                        .load(Ordering::Relaxed),
-                    anomaly_signals_published: observer_metrics
-                        .signals_published
-                        .load(Ordering::Relaxed),
-                    anomaly_last_confidence: observer_metrics
-                        .last_confidence
-                        .load(Ordering::Relaxed),
-                }
+                        committed_height,
+                        current_round,
+                        peer_count: peer_manager.peer_count() as u64,
+                        mempool_size: mempool.lock_or_recover().len() as u64,
+                        view_changes_total,
+                        block_tx_count: 0, // TODO: Wire to actual block commit events
+                        total_txs_committed: 0, // TODO: Accumulate from block commits
+                        // Copilot metrics from observer
+                        copilot_observations_total: observer_metrics
+                            .observations
+                            .load(Ordering::Relaxed),
+                        anomaly_signals_total: observer_metrics
+                            .anomalies_detected
+                            .load(Ordering::Relaxed),
+                        anomaly_signals_published: observer_metrics
+                            .signals_published
+                            .load(Ordering::Relaxed),
+                        anomaly_last_confidence: observer_metrics
+                            .last_confidence
+                            .load(Ordering::Relaxed),
+                    }
                 }
             };
 
