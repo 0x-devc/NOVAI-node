@@ -14,7 +14,10 @@ use novai_node::consensus_node::{ConsensusNode, Storage};
 use novai_node::metrics;
 use novai_node::rpc;
 use novai_node::MutexExt;
-use novai_state::{MemKv, RocksKv};
+use novai_state::{
+    account_key, encode_account_v1, AccountStateV1, Kv, KvBatch, MemKv, RocksKv, WriteOp,
+    KEY_COMMITTED_HEIGHT,
+};
 use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
 use std::env;
@@ -286,6 +289,51 @@ fn parse_genesis_validator_set(
     }
 
     (validator_set, validator_pubkeys)
+}
+
+/// Apply dev-mode genesis: fund the first 100 tx-generator sender addresses.
+///
+/// Uses the same deterministic key derivation as `tools/tx-generator/src/sender.rs`
+/// (`SenderAccount::from_index`). Only runs on fresh storage (no committed height).
+fn apply_dev_genesis(storage: &mut Storage) {
+    // Skip if DB already has state (restart)
+    if storage.get(KEY_COMMITTED_HEIGHT).ok().flatten().is_some() {
+        return;
+    }
+
+    const FUNDED_ACCOUNTS: usize = 100;
+    const INITIAL_BALANCE: u128 = 1_000_000_000;
+
+    let mut ops = Vec::with_capacity(FUNDED_ACCOUNTS);
+
+    for index in 0..FUNDED_ACCOUNTS {
+        // Replicate sender.rs SenderAccount::from_index key derivation
+        let seed_byte = (index % 256) as u8;
+        let mut seed = [seed_byte; 32];
+        let index_bytes = index.to_le_bytes();
+        for (j, &b) in index_bytes.iter().enumerate() {
+            seed[j] ^= b;
+        }
+
+        let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let addr = address_from_pubkey(&sk.verifying_key());
+
+        let account = AccountStateV1 {
+            balance: INITIAL_BALANCE,
+            nonce: 0,
+        };
+        ops.push(WriteOp::Put(
+            account_key(&addr),
+            encode_account_v1(&account).to_vec(),
+        ));
+    }
+
+    storage.apply_batch(&ops).expect("dev genesis write failed");
+    tracing::info!(
+        accounts = FUNDED_ACCOUNTS,
+        balance = INITIAL_BALANCE,
+        "Dev genesis: funded tx-generator sender accounts"
+    );
 }
 
 fn main() {
@@ -589,6 +637,12 @@ fn main() {
                     );
                 }
             };
+
+            // Fund tx-generator sender accounts on first start (dev-keys only)
+            let mut storage = storage;
+            if dev_keys {
+                apply_dev_genesis(&mut storage);
+            }
 
             let encryption_enabled = !no_encryption;
             if encryption_enabled {
