@@ -485,18 +485,20 @@ impl ChainObserver {
     }
 
     /// Check for missed blocks in a height range.
+    ///
+    /// Capped at 100 heights per call to avoid unbounded lock churn on the
+    /// state Mutex (each `expected_leader` call acquires the lock).
     fn check_missed_blocks<S: ObservableState>(
         &mut self,
         state: &S,
         start_height: u64,
         end_height: u64,
     ) {
-        // For each height in range, record the proposer
-        // In a real implementation, we'd get the actual proposer from blocks
-        // For now, we record expected leaders as successful proposers
-        // (since if height advanced, someone must have proposed)
+        // Cap iteration to avoid excessive lock acquisitions when the observer
+        // wakes up after a long sleep and many blocks have been committed.
+        let capped_end = end_height.min(start_height.saturating_add(100));
 
-        for h in start_height..=end_height {
+        for h in start_height..=capped_end {
             // Height h was committed, so round 0 leader successfully proposed
             // (simplification - in reality we'd check the actual block)
             if let Some(proposer) = state.expected_leader(h.saturating_sub(1), 0) {

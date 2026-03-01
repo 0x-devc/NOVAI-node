@@ -1039,6 +1039,21 @@ fn append_smt_ops_for_state_ops<K: Kv>(
 /// Returns error if nonce mismatch, insufficient funds, payload decode fails, or DB error.
 #[allow(clippy::too_many_lines)]
 pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), ExecError<K::Error>> {
+    let ai_sender = lookup_ai_entity_by_address(db, &tx.from)?;
+    apply_tx_v1_transfer_inner(db, tx, ai_sender)
+}
+
+/// Inner transfer implementation that accepts a pre-resolved AI entity.
+///
+/// Called by `dispatch_tx` (which already looked up the entity via
+/// `check_ai_entity_sender`) and by the public `apply_tx_v1_transfer`
+/// wrapper (which does its own lookup for standalone callers).
+#[allow(clippy::too_many_lines)]
+fn apply_tx_v1_transfer_inner<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    ai_sender: Option<AiEntity>,
+) -> Result<(), ExecError<K::Error>> {
     // Decode payload (deterministic).
     let payload = decode_transfer_payload_v1(&tx.payload).map_err(|e| match e {
         ExecError::BadPayloadLength { expected, got } => {
@@ -1049,9 +1064,6 @@ pub fn apply_tx_v1_transfer<K: KvBatch>(db: &mut K, tx: &TxV1) -> Result<(), Exe
         }
         _ => ExecError::Overflow,
     })?;
-
-    // Check if sender is an AI entity (via reverse index)
-    let ai_sender = lookup_ai_entity_by_address(db, &tx.from)?;
 
     let amount_u128 = u64_to_u128_checked(payload.amount);
     let fee_u128 = u64_to_u128_checked(tx.fee);
@@ -3317,7 +3329,9 @@ pub fn dispatch_tx<K: KvBatch>(
 
     // Check AI entity sender restrictions before routing.
     // If sender is an AI entity, verify it is allowed to submit this tx type.
-    check_ai_entity_sender(db, tx)?;
+    // The returned entity is passed to apply functions that need it, avoiding
+    // a redundant lookup_ai_entity_by_address call.
+    let ai_entity = check_ai_entity_sender(db, tx)?;
 
     let version = tx
         .payload
@@ -3326,7 +3340,7 @@ pub fn dispatch_tx<K: KvBatch>(
         .ok_or(ExecError::UnknownPayloadVersion { version: 0 })?;
 
     match version {
-        TRANSFER_PAYLOAD_V1 => apply_tx_v1_transfer(db, tx),
+        TRANSFER_PAYLOAD_V1 => apply_tx_v1_transfer_inner(db, tx, ai_entity),
         SIGNAL_COMMITMENT_PAYLOAD_V1 => apply_signal_commitment_tx(db, tx, current_height),
         CREATE_MEMORY_OBJECT_PAYLOAD_V1 => {
             apply_create_memory_object_tx(db, tx, current_height).map(|_| ())

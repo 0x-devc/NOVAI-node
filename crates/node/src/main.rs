@@ -68,44 +68,74 @@ impl NonceProvider for InMemoryNonceProvider {
     }
 }
 
-/// Wrapper for node state that implements ObservableState.
-struct NodeObservableState {
-    node: Arc<ConsensusNode>,
-    mempool: Arc<Mutex<TxMempool>>,
+/// Snapshot of node state that implements ObservableState without holding locks.
+///
+/// Created by `NodeObservableState::snapshot()` which acquires each lock once,
+/// reads all values, and releases immediately. The observer then uses this
+/// snapshot for the entire observation cycle — zero lock contention.
+struct ObservableStateSnapshot {
+    committed_height: u64,
+    current_round: u64,
+    peer_count: u64,
+    mempool_size: u64,
+    view_changes_total: u64,
+    validator_set: Vec<Address>,
 }
 
-impl ObservableState for NodeObservableState {
+impl ObservableState for ObservableStateSnapshot {
     fn committed_height(&self) -> u64 {
-        self.node.state.lock_or_recover().committed_height
+        self.committed_height
     }
 
     fn current_round(&self) -> u64 {
-        self.node.state.lock_or_recover().round
+        self.current_round
     }
 
     fn peer_count(&self) -> u64 {
-        self.node.peer_manager.peer_count() as u64
+        self.peer_count
     }
 
     fn mempool_size(&self) -> u64 {
-        self.mempool.lock_or_recover().len() as u64
+        self.mempool_size
     }
 
     fn view_changes_total(&self) -> u64 {
-        self.node.state.lock_or_recover().view_changes_total
+        self.view_changes_total
     }
 
     fn validator_set(&self) -> Vec<Address> {
-        self.node.validator_set.clone()
+        self.validator_set.clone()
     }
 
     fn expected_leader(&self, height: u64, round: u64) -> Option<Address> {
-        let validators = &self.node.validator_set;
-        if validators.is_empty() {
+        if self.validator_set.is_empty() {
             return None;
         }
-        let idx = ((height + round) as usize) % validators.len();
-        Some(validators[idx])
+        let idx = ((height + round) as usize) % self.validator_set.len();
+        Some(self.validator_set[idx])
+    }
+}
+
+/// Creates a snapshot of node state with minimal lock holding.
+///
+/// Acquires each lock once, reads all values, and returns a lock-free snapshot.
+fn snapshot_observable_state(
+    node: &ConsensusNode,
+    mempool: &Mutex<TxMempool>,
+) -> ObservableStateSnapshot {
+    let (committed_height, current_round, view_changes_total) = {
+        let state = node.state.lock_or_recover();
+        (state.committed_height, state.round, state.view_changes_total)
+    };
+    let peer_count = node.peer_manager.peer_count() as u64;
+    let mempool_size = mempool.lock_or_recover().len() as u64;
+    ObservableStateSnapshot {
+        committed_height,
+        current_round,
+        peer_count,
+        mempool_size,
+        view_changes_total,
+        validator_set: node.validator_set.clone(),
     }
 }
 
@@ -696,10 +726,8 @@ fn main() {
             // Start copilot observer background thread (with congestion response)
             {
                 let observer = Arc::clone(&observer);
-                let observable_state = NodeObservableState {
-                    node: Arc::clone(&node),
-                    mempool: Arc::clone(&mempool),
-                };
+                let observer_node = Arc::clone(&node);
+                let observer_mempool = Arc::clone(&mempool);
 
                 // Wire dynamic fee floor from mempool to congestion responder
                 let dynamic_fee_floor = mempool.lock_or_recover().dynamic_fee_floor();
@@ -708,7 +736,8 @@ fn main() {
                 let congestion_forecaster = CongestionForecaster::new();
 
                 // Wire threat scores from spam detector to mempool
-                let threat_scores_shared = mempool.lock_or_recover().threat_scores();
+                let (threat_scores_shared, threat_scores_empty) =
+                    mempool.lock_or_recover().threat_scores();
                 let spam_detector = SpamDetector::new();
                 let mut spam_stats = SpamStats::new(100);
                 let mut decay_counter: u64 = 0;
@@ -719,15 +748,19 @@ fn main() {
                         // 5s interval — observer is advisory, doesn't need high frequency
                         std::thread::sleep(Duration::from_millis(5000));
 
-                        // Snapshot state with minimal lock hold time — grab values and drop locks
-                        let mempool_size = observable_state.mempool_size();
-                        let height = observable_state.committed_height();
+                        // Snapshot all state with 2 lock acquisitions (state + mempool),
+                        // then use the lock-free snapshot for the entire cycle.
+                        let snapshot = snapshot_observable_state(
+                            &observer_node,
+                            &observer_mempool,
+                        );
+                        let height = snapshot.committed_height;
+                        let mempool_size = snapshot.mempool_size;
 
-                        // Run observer (acquires its own lock briefly)
+                        // Run observer using snapshot (zero additional lock acquisitions)
                         {
                             let mut obs = observer.lock_or_recover();
-                            let anomalies = obs.observe(&observable_state, &callback);
-                            // obs lock dropped here
+                            let anomalies = obs.observe(&snapshot, &callback);
                             if !anomalies.is_empty() {
                                 tracing::debug!(
                                     count = anomalies.len(),
@@ -763,6 +796,8 @@ fn main() {
                                     let entry = map.entry(addr).or_insert(0);
                                     *entry = (*entry).max(score);
                                 }
+                                threat_scores_empty
+                                    .store(map.is_empty(), Ordering::Relaxed);
                             }
                             tracing::debug!(
                                 patterns = patterns.len(),
@@ -779,6 +814,8 @@ fn main() {
                                     *score = score.saturating_sub(5);
                                     *score > 0
                                 });
+                                threat_scores_empty
+                                    .store(map.is_empty(), Ordering::Relaxed);
                             }
                         }
                     }
@@ -791,12 +828,18 @@ fn main() {
                 let peer_manager = Arc::clone(&node.peer_manager);
                 let mempool = Arc::clone(&mempool);
                 let observer_metrics = Arc::clone(&observer_metrics);
-                move || metrics::MetricsSnapshot {
-                    committed_height: state.lock_or_recover().committed_height,
-                    current_round: state.lock_or_recover().round,
+                move || {
+                    // Acquire state lock once for all state fields
+                    let (committed_height, current_round, view_changes_total) = {
+                        let s = state.lock_or_recover();
+                        (s.committed_height, s.round, s.view_changes_total)
+                    };
+                    metrics::MetricsSnapshot {
+                    committed_height,
+                    current_round,
                     peer_count: peer_manager.peer_count() as u64,
                     mempool_size: mempool.lock_or_recover().len() as u64,
-                    view_changes_total: state.lock_or_recover().view_changes_total,
+                    view_changes_total,
                     block_tx_count: 0, // TODO: Wire to actual block commit events
                     total_txs_committed: 0, // TODO: Accumulate from block commits
                     // Copilot metrics from observer
@@ -812,6 +855,7 @@ fn main() {
                     anomaly_last_confidence: observer_metrics
                         .last_confidence
                         .load(Ordering::Relaxed),
+                }
                 }
             };
 

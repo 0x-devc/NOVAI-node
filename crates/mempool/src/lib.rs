@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Errors returned by [`Mempool`].
@@ -148,6 +148,9 @@ pub struct TxMempool {
     /// Per-address threat scores (0-100) set by the spam detector.
     /// Used in `drain_ready()` to deprioritize (never reject) suspicious senders.
     threat_scores: Arc<Mutex<BTreeMap<Address, u8>>>,
+    /// Fast-path flag: true when threat_scores map is known to be empty.
+    /// Avoids Mutex lock in `drain_ready()` when no spam has been detected.
+    threat_scores_empty: Arc<AtomicBool>,
 }
 
 impl TxMempool {
@@ -159,6 +162,7 @@ impl TxMempool {
             total_bytes: 0,
             dynamic_fee_floor: Arc::new(AtomicU64::new(0)),
             threat_scores: Arc::new(Mutex::new(BTreeMap::new())),
+            threat_scores_empty: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -175,11 +179,15 @@ impl TxMempool {
         self.min_fee.max(dynamic)
     }
 
-    /// Returns the shared threat scores map.
+    /// Returns the shared threat scores map and empty flag.
     ///
     /// The copilot thread writes updated scores; the mempool reads them during `drain_ready()`.
-    pub fn threat_scores(&self) -> Arc<Mutex<BTreeMap<Address, u8>>> {
-        Arc::clone(&self.threat_scores)
+    /// Callers MUST set the empty flag to `false` when adding scores and `true` when clearing.
+    pub fn threat_scores(&self) -> (Arc<Mutex<BTreeMap<Address, u8>>>, Arc<AtomicBool>) {
+        (
+            Arc::clone(&self.threat_scores),
+            Arc::clone(&self.threat_scores_empty),
+        )
     }
 
     /// Total encoded bytes of all transactions currently in the mempool.
@@ -287,12 +295,15 @@ impl TxMempool {
             return Vec::new();
         }
 
-        // Snapshot threat scores under lock (brief hold).
-        let scores = self
-            .threat_scores
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        // Fast-path: skip Mutex lock when no threat scores exist.
+        let scores = if self.threat_scores_empty.load(Ordering::Relaxed) {
+            BTreeMap::new()
+        } else {
+            self.threat_scores
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default()
+        };
 
         // Gather ready candidates with effective fee.
         // Tuple: (effective_fee, raw_fee, txid, sender)
@@ -868,9 +879,10 @@ mod tests {
 
         // Set threat score for sender1
         {
-            let scores = mp.threat_scores();
+            let (scores, empty_flag) = mp.threat_scores();
             let mut map = scores.lock().unwrap();
             map.insert(from1, 80);
+            empty_flag.store(false, Ordering::Relaxed);
         }
 
         let drained = mp.drain_ready(10, &np);
@@ -920,9 +932,10 @@ mod tests {
         mp.insert(tx, &np).unwrap();
 
         {
-            let scores = mp.threat_scores();
+            let (scores, empty_flag) = mp.threat_scores();
             let mut map = scores.lock().unwrap();
             map.insert(from, 100);
+            empty_flag.store(false, Ordering::Relaxed);
         }
 
         let drained = mp.drain_ready(10, &np);
@@ -933,12 +946,13 @@ mod tests {
     #[test]
     fn threat_scores_arc_is_shared() {
         let mp = TxMempool::new(1, 10);
-        let scores = mp.threat_scores();
+        let (scores, empty_flag) = mp.threat_scores();
         let addr = [0x42u8; 32];
         scores.lock().unwrap().insert(addr, 75);
+        empty_flag.store(false, Ordering::Relaxed);
 
         // Mempool reads the same map
-        let mp_scores = mp.threat_scores();
+        let (mp_scores, _) = mp.threat_scores();
         assert_eq!(*mp_scores.lock().unwrap().get(&addr).unwrap(), 75);
     }
 }
