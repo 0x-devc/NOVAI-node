@@ -327,7 +327,7 @@ pub const PEER_SOCKET_TIMEOUT_SECS: u64 = 30;
 
 /// Per-peer message rate limit (messages per second).
 /// Peers exceeding this are disconnected.
-pub const MAX_MESSAGES_PER_SECOND: u64 = 100;
+pub const MAX_MESSAGES_PER_SECOND: u64 = 1000;
 
 /// Tracks active connections to prevent resource exhaustion (C-03, C-04).
 ///
