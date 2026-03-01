@@ -4,7 +4,7 @@
 //! to a NOVAI node for mempool ingestion and block inclusion.
 //!
 //! USAGE:
-//!   tx-generator --tps 100 --senders 10 --duration 60 --endpoint http://localhost:8080
+//!   tx-generator --tps 100 --senders 10 --duration 60 --endpoint http://localhost:3030
 
 mod generator;
 mod metrics;
@@ -36,7 +36,7 @@ struct Args {
     duration: u64,
 
     /// RPC endpoint URL
-    #[arg(short, long, default_value = "http://localhost:8080")]
+    #[arg(short, long, default_value = "http://localhost:3030")]
     endpoint: String,
 
     /// Transaction type: transfer, ai_register, ai_signal
@@ -223,7 +223,7 @@ mod tests {
             tps: 100,
             senders: 10,
             duration: 60,
-            endpoint: "http://localhost:8080".to_string(),
+            endpoint: "http://localhost:3030".to_string(),
             tx_type: "transfer".to_string(),
             output: "text".to_string(),
             verbose: false,
@@ -239,7 +239,7 @@ mod tests {
             tps: 0,
             senders: 10,
             duration: 60,
-            endpoint: "http://localhost:8080".to_string(),
+            endpoint: "http://localhost:3030".to_string(),
             tx_type: "transfer".to_string(),
             output: "text".to_string(),
             verbose: false,
@@ -255,7 +255,7 @@ mod tests {
             tps: 100,
             senders: 10,
             duration: 60,
-            endpoint: "http://localhost:8080".to_string(),
+            endpoint: "http://localhost:3030".to_string(),
             tx_type: "invalid".to_string(),
             output: "text".to_string(),
             verbose: false,

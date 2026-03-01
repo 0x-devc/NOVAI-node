@@ -12,6 +12,7 @@ use novai_copilot::spam_stats::SpamStats;
 use novai_crypto::{address_from_pubkey, generate_keypair, sign_tx_v1};
 use novai_node::consensus_node::{ConsensusNode, Storage};
 use novai_node::metrics;
+use novai_node::rpc;
 use novai_node::MutexExt;
 use novai_state::{MemKv, RocksKv};
 use novai_types::{Address, TxId, TxV1, TxVersion};
@@ -357,6 +358,7 @@ fn main() {
             let mut peers: Vec<String> = Vec::new();
             let mut validator_idx: Option<usize> = None;
             let mut metrics_port: Option<u16> = None;
+            let mut rpc_port: Option<u16> = None;
             let mut base_timeout_ms: u64 = novai_consensus::BASE_TIMEOUT_MS;
             let mut storage_backend: String = "rocksdb".to_string();
             let mut data_dir: Option<String> = None;
@@ -387,6 +389,10 @@ fn main() {
                     "--metrics-port" => {
                         metrics_port =
                             Some(parse_u64(rest.get(i + 1).cloned(), "--metrics-port") as u16);
+                        i += 2;
+                    }
+                    "--rpc-port" => {
+                        rpc_port = Some(parse_u64(rest.get(i + 1).cloned(), "--rpc-port") as u16);
                         i += 2;
                     }
                     "--base-timeout" => {
@@ -442,6 +448,7 @@ fn main() {
 
             let port = port.expect("--port required");
             let metrics_port = metrics_port.unwrap_or(8080);
+            let rpc_port = rpc_port.unwrap_or(3030);
 
             // C-05: Block dev-keys without explicit acknowledgment.
             if dev_keys && !allow_insecure_dev_keys {
@@ -663,7 +670,7 @@ fn main() {
 
             // Create dummy mempool and nonce provider for Week 6
             let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
-            let nonce_provider = InMemoryNonceProvider::default();
+            let nonce_provider = Arc::new(InMemoryNonceProvider::default());
 
             // Graceful shutdown flag — created early so AI service can share it
             let shutdown = Arc::new(AtomicBool::new(false));
@@ -863,6 +870,16 @@ fn main() {
                 tracing::error!(%e, "Failed to start metrics server");
             }
 
+            // Start RPC server for transaction submission
+            let rpc_addr = format!("0.0.0.0:{}", rpc_port);
+            if let Err(e) = rpc::start_rpc_server(
+                &rpc_addr,
+                Arc::clone(&mempool),
+                Arc::clone(&nonce_provider) as Arc<dyn NonceProvider + Send + Sync>,
+            ) {
+                tracing::error!(%e, "Failed to start RPC server");
+            }
+
             // Signal handler — reuses the shutdown flag created earlier
             {
                 let shutdown_flag = shutdown.clone();
@@ -979,7 +996,7 @@ fn main() {
                     last_proposal_attempt = std::time::Instant::now();
 
                     let mut mempool_guard = mempool.lock_or_recover();
-                    match node.try_propose_block(&mut mempool_guard, &nonce_provider) {
+                    match node.try_propose_block(&mut mempool_guard, &*nonce_provider) {
                         Ok(true) => tracing::info!("Proposed block successfully"),
                         Ok(false) => {
                             // Only log status every 5 seconds to reduce noise

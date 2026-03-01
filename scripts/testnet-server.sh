@@ -19,10 +19,10 @@
 #   DATA_DIR             Path to data directory
 #
 # NETWORK TOPOLOGY:
-#   Validator 0 (seed):  Port 9000, Metrics 8080
-#   Validator 1:         Port 9001, Metrics 8081 (peers to 0)
-#   Validator 2:         Port 9002, Metrics 8082 (peers to 0)
-#   Validator 3:         Port 9003, Metrics 8083 (peers to 0)
+#   Validator 0 (seed):  Port 9000, Metrics 8080, RPC 3030
+#   Validator 1:         Port 9001, Metrics 8081, RPC 3031 (peers to 0)
+#   Validator 2:         Port 9002, Metrics 8082, RPC 3032 (peers to 0)
+#   Validator 3:         Port 9003, Metrics 8083, RPC 3033 (peers to 0)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -43,6 +43,7 @@ PID_DIR="${LOG_DIR}/pids"
 
 declare -a PORTS=(9000 9001 9002 9003)
 declare -a METRICS_PORTS=(8080 8081 8082 8083)
+declare -a RPC_PORTS=(3030 3031 3032 3033)
 NODE_COUNT=4
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,7 +140,7 @@ cmd_start() {
     fi
 
     # Check ports
-    for port in "${PORTS[@]}" "${METRICS_PORTS[@]}"; do
+    for port in "${PORTS[@]}" "${METRICS_PORTS[@]}" "${RPC_PORTS[@]}"; do
         if ss -tlnp 2>/dev/null | grep -q ":${port} " || \
            lsof -i ":${port}" 2>/dev/null | grep -q LISTEN; then
             log_error "Port ${port} is already in use"
@@ -163,6 +164,7 @@ cmd_start() {
     for i in $(seq 0 $((NODE_COUNT - 1))); do
         local port=${PORTS[$i]}
         local metrics_port=${METRICS_PORTS[$i]}
+        local rpc_port=${RPC_PORTS[$i]}
         local logfile="${LOG_DIR}/node-${i}.log"
 
         # Build peer args: all nodes peer to validator 0
@@ -171,13 +173,14 @@ cmd_start() {
             peer_args="--peer 127.0.0.1:${PORTS[0]}"
         fi
 
-        log_info "Starting validator ${i} (port=${port}, metrics=${metrics_port})..."
+        log_info "Starting validator ${i} (port=${port}, metrics=${metrics_port}, rpc=${rpc_port})..."
 
         nohup "${BIN}" run \
             --port "${port}" \
             --dev-keys --allow-insecure-dev-keys \
             --validator "${i}" \
             --metrics-port "${metrics_port}" \
+            --rpc-port "${rpc_port}" \
             --base-timeout "${BASE_TIMEOUT}" \
             --proposal-interval "${PROPOSAL_INTERVAL}" \
             --storage rocksdb \
