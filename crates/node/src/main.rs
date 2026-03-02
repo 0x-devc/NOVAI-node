@@ -101,6 +101,11 @@ impl InMemoryNonceProvider {
             };
             map.insert(addr, nonce);
         }
+        tracing::info!(
+            accounts = FUNDED_ACCOUNTS,
+            sample_nonce = map.values().next().copied().unwrap_or(0),
+            "Nonce provider seeded"
+        );
     }
 
     /// Set a specific expected nonce (used by CLI commands).

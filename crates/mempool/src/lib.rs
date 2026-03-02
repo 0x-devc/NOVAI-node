@@ -307,6 +307,7 @@ impl TxMempool {
         // Tuple: (effective_fee, raw_fee, txid, sender)
         let mut candidates: Vec<(u64, u64, TxId, Address)> = Vec::with_capacity(self.by_id.len());
 
+        let mut mismatch_sample = 0u32;
         for (id, tx) in &self.by_id {
             let expected = nonce_provider.expected_nonce(&tx.from);
             if tx.nonce == expected {
@@ -314,6 +315,14 @@ impl TxMempool {
                 let s = (score.min(100)) as u64;
                 let eff = tx.fee * (100 - s) / 100;
                 candidates.push((eff, tx.fee, *id, tx.from));
+            } else if mismatch_sample < 3 {
+                mismatch_sample += 1;
+                tracing::warn!(
+                    from = ?&tx.from[..4],
+                    tx_nonce = tx.nonce,
+                    expected_nonce = expected,
+                    "nonce mismatch (tx skipped)"
+                );
             }
         }
 

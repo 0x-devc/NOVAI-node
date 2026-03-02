@@ -1289,6 +1289,7 @@ dependencies = [
  "novai-codec",
  "novai-crypto",
  "novai-types",
+ "tracing",
 ]
 
 [[package]]

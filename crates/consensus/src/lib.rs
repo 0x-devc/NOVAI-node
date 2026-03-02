@@ -190,6 +190,11 @@ impl ConsensusState {
         // Drain up to MAX_TXS_PER_BLOCK candidates, then filter by cumulative
         // block size. Txs that don't fit are returned to the mempool.
         let mut candidates = mempool.drain_ready(novai_types::MAX_TXS_PER_BLOCK, nonce_provider);
+        tracing::info!(
+            tx_count = candidates.len(),
+            mempool_remaining = mempool.len(),
+            "drain_ready returned"
+        );
         let mut txs = Vec::new();
         let mut block_bytes = 0usize;
         let mut overflow = Vec::new();
