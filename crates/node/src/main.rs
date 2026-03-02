@@ -56,25 +56,50 @@ fn parse_u64(opt: Option<String>, what: &str) -> u64 {
 }
 
 struct InMemoryNonceProvider {
-    /// In-memory nonce overrides (populated during this session's commits).
+    /// In-memory nonce cache. Seeded from DB at startup, then advanced by
+    /// committed blocks. Never acquires the DB Mutex — eliminates deadlock
+    /// when called from `drain_ready` (which runs under the DB lock).
     expected: Mutex<HashMap<Address, u64>>,
-    /// Fallback: read committed nonce from DB for addresses not yet seen.
-    db: Arc<Mutex<Storage>>,
 }
 
 impl InMemoryNonceProvider {
-    fn new(db: Arc<Mutex<Storage>>) -> Self {
+    fn new() -> Self {
         Self {
             expected: Mutex::new(HashMap::new()),
-            db,
         }
     }
 
-    /// Create a standalone provider for CLI commands (no DB fallback).
+    /// Create a standalone provider for CLI commands.
     fn standalone() -> Self {
-        Self {
-            expected: Mutex::new(HashMap::new()),
-            db: Arc::new(Mutex::new(Storage::Memory(MemKv::new()))),
+        Self::new()
+    }
+
+    /// Seed nonce cache from the 100 dev-genesis accounts.
+    ///
+    /// Reads current nonces directly from storage (caller holds no Mutex).
+    /// Handles both fresh start (nonce=0) and restart (nonce=N from prior
+    /// commits).
+    fn seed_dev_accounts(&self, storage: &Storage) {
+        const FUNDED_ACCOUNTS: usize = 100;
+        let mut map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
+        for index in 0..FUNDED_ACCOUNTS {
+            // Same key derivation as apply_dev_genesis / SenderAccount::from_index
+            let seed_byte = (index % 256) as u8;
+            let mut seed = [seed_byte; 32];
+            let index_bytes = index.to_le_bytes();
+            for (j, &b) in index_bytes.iter().enumerate() {
+                seed[j] ^= b;
+            }
+            let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+            let addr = address_from_pubkey(&sk.verifying_key());
+
+            let nonce = match storage.get(&account_key(&addr)) {
+                Ok(Some(bytes)) => novai_state::decode_account_v1(&bytes)
+                    .map(|a| a.nonce)
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            map.insert(addr, nonce);
         }
     }
 
@@ -104,19 +129,7 @@ impl InMemoryNonceProvider {
 impl NonceProvider for InMemoryNonceProvider {
     fn expected_nonce(&self, from: &Address) -> u64 {
         let map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(&nonce) = map.get(from) {
-            return nonce;
-        }
-        drop(map); // Release before acquiring DB lock (prevents deadlock)
-
-        // Fallback: read committed nonce from DB state
-        let db = self.db.lock().unwrap_or_else(|p| p.into_inner());
-        match db.get(&account_key(from)) {
-            Ok(Some(bytes)) => novai_state::decode_account_v1(&bytes)
-                .map(|a| a.nonce)
-                .unwrap_or(0),
-            _ => 0,
-        }
+        map.get(from).copied().unwrap_or(0)
     }
 }
 
@@ -126,11 +139,7 @@ struct ExecutionCommitCallback {
 }
 
 impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
-    fn on_commit(
-        &self,
-        db: &mut Storage,
-        blocks: &[novai_consensus_types::Block],
-    ) {
+    fn on_commit(&self, db: &mut Storage, blocks: &[novai_consensus_types::Block]) {
         for block in blocks {
             for tx in &block.txs {
                 match novai_execution::dispatch_tx(db, tx, block.height) {
@@ -787,8 +796,12 @@ fn main() {
                 );
             }
 
-            // Create nonce provider with DB fallback (must precede Arc::new(node))
-            let nonce_provider = Arc::new(InMemoryNonceProvider::new(Arc::clone(&node.db)));
+            // Create nonce provider and seed from DB (lock held briefly, single-threaded)
+            let nonce_provider = Arc::new(InMemoryNonceProvider::new());
+            {
+                let db_guard = node.db.lock().unwrap_or_else(|p| p.into_inner());
+                nonce_provider.seed_dev_accounts(&db_guard);
+            }
 
             // Wire execution commit callback
             let commit_callback = Arc::new(ExecutionCommitCallback {
