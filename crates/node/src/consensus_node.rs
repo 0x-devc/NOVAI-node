@@ -248,6 +248,12 @@ impl ConsensusNode {
     /// lock still held. Execution writes to different key namespaces than
     /// consensus persistence (no overlap), so this is safe.
     fn execute_committed_blocks(&self, db: &mut Storage, blocks: &[Block]) {
+        let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
+        tracing::info!(
+            block_count = blocks.len(),
+            total_txs,
+            "execute_committed_blocks called"
+        );
         if let Some(ref cb) = self.commit_callback {
             cb.on_commit(db, blocks);
         }
