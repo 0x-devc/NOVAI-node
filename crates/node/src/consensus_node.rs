@@ -3,7 +3,7 @@
 use crate::MutexExt;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use novai_consensus::{ConsensusError, ConsensusState};
-use novai_consensus_types::{SignedProposal, Timeout, Vote, QC};
+use novai_consensus_types::{Block, SignedProposal, Timeout, Vote, QC};
 use novai_crypto::{address_from_pubkey, sign_bytes};
 use novai_p2p::noise::{
     handshake_initiator, handshake_responder, is_known_validator, noise_keypair_from_seed,
@@ -82,6 +82,14 @@ impl KvBatch for Storage {
     }
 }
 
+/// Callback invoked after blocks are committed and consensus state is updated.
+///
+/// Implementations execute transactions against the state DB and update the
+/// nonce provider. The DB lock is already held by the caller.
+pub trait CommitCallback: Send + Sync {
+    fn on_commit(&self, db: &mut Storage, blocks: &[Block]);
+}
+
 /// Cache for tracking which QCs have been broadcasted (to avoid duplicates).
 type QcBroadcastCache = Arc<Mutex<HashSet<(u64, u64, [u8; 32])>>>;
 
@@ -120,6 +128,8 @@ pub struct ConsensusNode {
     known_noise_keys: Vec<[u8; 32]>,
     /// Connection limiter for incoming TCP connections (C-03, C-04).
     pub connection_limiter: Arc<ConnectionLimiter>,
+    /// Callback for post-commit execution (dispatch_tx + nonce updates).
+    pub commit_callback: Option<Arc<dyn CommitCallback>>,
 }
 
 impl ConsensusNode {
@@ -221,6 +231,25 @@ impl ConsensusNode {
                 novai_p2p::MAX_PEERS,
                 novai_p2p::MAX_CONNECTIONS_PER_IP,
             )),
+            commit_callback: None,
+        }
+    }
+
+    /// Set the commit callback for post-persist transaction execution.
+    ///
+    /// Must be called before the node starts handling peer connections.
+    pub fn set_commit_callback(&mut self, cb: Arc<dyn CommitCallback>) {
+        self.commit_callback = Some(cb);
+    }
+
+    /// Execute committed blocks via the commit callback.
+    ///
+    /// Called after `persist_commit_atomic` + `apply_commits` with the DB
+    /// lock still held. Execution writes to different key namespaces than
+    /// consensus persistence (no overlap), so this is safe.
+    fn execute_committed_blocks(&self, db: &mut Storage, blocks: &[Block]) {
+        if let Some(ref cb) = self.commit_callback {
+            cb.on_commit(db, blocks);
         }
     }
 
@@ -748,6 +777,7 @@ impl ConsensusNode {
                     state
                         .apply_commits(&to_commit)
                         .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during sync: {:?}", e))?;
+                    self.execute_committed_blocks(&mut db, &to_commit);
                     tracing::info!(
                         committed_height = new_committed_height,
                         count = to_commit.len(),
@@ -766,6 +796,16 @@ impl ConsensusNode {
         // These blocks are chain-verified and stored to DB — they were
         // already committed by network consensus.
         if state.committed_height < last_received_height {
+            // Execute synced blocks not already committed via the QC path above
+            let already = state.committed_height;
+            let remaining: Vec<_> = blocks
+                .iter()
+                .filter(|b| b.height > already)
+                .cloned()
+                .collect();
+            if !remaining.is_empty() {
+                self.execute_committed_blocks(&mut db, &remaining);
+            }
             state.committed_height = last_received_height;
             db.put(
                 novai_state::KEY_COMMITTED_HEIGHT,
@@ -1112,6 +1152,7 @@ impl ConsensusNode {
                         state.apply_commits(&to_commit).map_err(|e| {
                             format!("CONSENSUS SAFETY VIOLATION during QC catch-up: {:?}", e)
                         })?;
+                        self.execute_committed_blocks(&mut db, &to_commit);
                         committed_height_for_prune = Some(new_committed_height);
                         tracing::info!(
                             committed_height = new_committed_height,
@@ -1325,6 +1366,7 @@ impl ConsensusNode {
                     state.apply_commits(&to_commit).map_err(|e| {
                         format!("CONSENSUS SAFETY VIOLATION during vote commit: {:?}", e)
                     })?;
+                    self.execute_committed_blocks(&mut db, &to_commit);
                     vote_committed_height = Some(new_committed_height);
                     tracing::info!(
                         committed_height = new_committed_height,
@@ -1403,6 +1445,7 @@ impl ConsensusNode {
                 state
                     .apply_commits(&to_commit)
                     .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during QC commit: {:?}", e))?;
+                self.execute_committed_blocks(&mut db, &to_commit);
                 committed = true;
                 qc_committed_height = Some(new_committed_height);
                 tracing::debug!(

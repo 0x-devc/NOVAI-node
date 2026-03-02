@@ -55,20 +55,106 @@ fn parse_u64(opt: Option<String>, what: &str) -> u64 {
         .unwrap_or_else(|_| panic!("invalid {what}: {s}"))
 }
 
-#[derive(Default)]
 struct InMemoryNonceProvider {
-    expected: HashMap<Address, u64>,
+    /// In-memory nonce overrides (populated during this session's commits).
+    expected: Mutex<HashMap<Address, u64>>,
+    /// Fallback: read committed nonce from DB for addresses not yet seen.
+    db: Arc<Mutex<Storage>>,
 }
 
 impl InMemoryNonceProvider {
-    fn set(&mut self, from: Address, nonce: u64) {
-        self.expected.insert(from, nonce);
+    fn new(db: Arc<Mutex<Storage>>) -> Self {
+        Self {
+            expected: Mutex::new(HashMap::new()),
+            db,
+        }
+    }
+
+    /// Create a standalone provider for CLI commands (no DB fallback).
+    fn standalone() -> Self {
+        Self {
+            expected: Mutex::new(HashMap::new()),
+            db: Arc::new(Mutex::new(Storage::Memory(MemKv::new()))),
+        }
+    }
+
+    /// Set a specific expected nonce (used by CLI commands).
+    fn set(&self, from: Address, nonce: u64) {
+        let mut map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
+        map.insert(from, nonce);
+    }
+
+    /// Advance nonces for all senders in committed blocks.
+    ///
+    /// Called after execution, regardless of individual tx success — a
+    /// consensus-committed tx occupies its nonce slot forever.
+    fn advance_nonces_for_blocks(&self, blocks: &[novai_consensus_types::Block]) {
+        let mut map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
+        for block in blocks {
+            for tx in &block.txs {
+                let entry = map.entry(tx.from).or_insert(tx.nonce);
+                if tx.nonce >= *entry {
+                    *entry = tx.nonce + 1;
+                }
+            }
+        }
     }
 }
 
 impl NonceProvider for InMemoryNonceProvider {
     fn expected_nonce(&self, from: &Address) -> u64 {
-        *self.expected.get(from).unwrap_or(&0)
+        let map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(&nonce) = map.get(from) {
+            return nonce;
+        }
+        drop(map); // Release before acquiring DB lock (prevents deadlock)
+
+        // Fallback: read committed nonce from DB state
+        let db = self.db.lock().unwrap_or_else(|p| p.into_inner());
+        match db.get(&account_key(from)) {
+            Ok(Some(bytes)) => novai_state::decode_account_v1(&bytes)
+                .map(|a| a.nonce)
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+}
+
+/// Post-commit callback: executes transactions and advances the nonce provider.
+struct ExecutionCommitCallback {
+    nonce_provider: Arc<InMemoryNonceProvider>,
+}
+
+impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
+    fn on_commit(
+        &self,
+        db: &mut Storage,
+        blocks: &[novai_consensus_types::Block],
+    ) {
+        for block in blocks {
+            for tx in &block.txs {
+                match novai_execution::dispatch_tx(db, tx, block.height) {
+                    Ok(()) => {
+                        tracing::debug!(
+                            height = block.height,
+                            from = ?&tx.from[..4],
+                            nonce = tx.nonce,
+                            "Executed tx"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            height = block.height,
+                            from = ?&tx.from[..4],
+                            nonce = tx.nonce,
+                            ?e,
+                            "Tx execution failed (committed, skipping)"
+                        );
+                    }
+                }
+            }
+        }
+        self.nonce_provider.advance_nonces_for_blocks(blocks);
     }
 }
 
@@ -701,6 +787,15 @@ fn main() {
                 );
             }
 
+            // Create nonce provider with DB fallback (must precede Arc::new(node))
+            let nonce_provider = Arc::new(InMemoryNonceProvider::new(Arc::clone(&node.db)));
+
+            // Wire execution commit callback
+            let commit_callback = Arc::new(ExecutionCommitCallback {
+                nonce_provider: Arc::clone(&nonce_provider),
+            });
+            node.set_commit_callback(commit_callback);
+
             let node = Arc::new(node);
 
             // Start listener
@@ -722,9 +817,8 @@ fn main() {
             tracing::info!("Node started, waiting for peers...");
             std::thread::sleep(Duration::from_millis(500));
 
-            // Create dummy mempool and nonce provider for Week 6
+            // Create mempool
             let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
-            let nonce_provider = Arc::new(InMemoryNonceProvider::default());
 
             // Graceful shutdown flag — created early so AI service can share it
             let shutdown = Arc::new(AtomicBool::new(false));
@@ -1119,7 +1213,7 @@ fn main() {
             let (sk, pk) = generate_keypair();
             let from = address_from_pubkey(&pk);
 
-            let mut nonce_provider = InMemoryNonceProvider::default();
+            let nonce_provider = InMemoryNonceProvider::standalone();
             nonce_provider.set(from, nonce);
 
             let mut tx = build_tx(from, pk.to_bytes(), nonce, fee, payload);
@@ -1184,7 +1278,7 @@ fn main() {
             }
 
             let mut mp = TxMempool::new(min_fee, cap);
-            let mut nonce_provider = InMemoryNonceProvider::default();
+            let nonce_provider = InMemoryNonceProvider::standalone();
 
             // Insert txs with increasing fees so drain shows fee-priority deterministically.
             let (sk, pk) = generate_keypair();
