@@ -146,7 +146,11 @@ struct ExecutionCommitCallback {
 impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
     fn on_commit(&self, db: &mut Storage, blocks: &[novai_consensus_types::Block]) {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
-        tracing::info!(block_count = blocks.len(), total_txs, "on_commit executing");
+        tracing::info!(
+            block_count = blocks.len(),
+            total_txs,
+            "on_commit executing"
+        );
         for block in blocks {
             for tx in &block.txs {
                 match novai_execution::dispatch_tx(db, tx, block.height) {
@@ -1092,12 +1096,6 @@ fn main() {
                     .expect("spawn signal handler");
             }
 
-            // Reset round_start_time to NOW — node creation was 700ms+ ago
-            // (200ms + 500ms sleeps plus peer connections), so the timeout
-            // budget is nearly exhausted before consensus even starts.
-            *node.round_start_time.lock_or_recover() = std::time::Instant::now();
-            *node.last_timeout_time.lock_or_recover() = None;
-
             // Simple consensus loop with timeout checking
             // NOTE: 5ms sleep allows 200 iterations/sec for responsive consensus
             let mut last_proposal_attempt = std::time::Instant::now();
@@ -1114,20 +1112,6 @@ fn main() {
 
                 // Check for timeout
                 if let Some(timeout) = node.check_timeout() {
-                    // Save proposed block txs BEFORE round might advance.
-                    // If round changes, the proposal is superseded and drain_ready
-                    // already removed these txs — they'd be lost forever.
-                    let saved_txs: Option<Vec<novai_types::TxV1>> = {
-                        let state = node.state.lock_or_recover();
-                        state.last_proposed.and_then(|(h, _)| {
-                            state
-                                .block_cache
-                                .get(&h)
-                                .filter(|b| !b.txs.is_empty())
-                                .map(|b| b.txs.clone())
-                        })
-                    };
-
                     tracing::debug!("Broadcasting timeout...");
                     if let Err(e) =
                         node.broadcast(novai_p2p::NetworkMessage::Timeout(timeout.clone()))
@@ -1135,22 +1119,8 @@ fn main() {
                         tracing::error!(%e, "Timeout broadcast failed");
                     }
                     // Handle our own timeout
-                    match node.handle_timeout(timeout) {
-                        Ok(true) => {
-                            // Round advanced — return proposed txs to mempool
-                            if let Some(txs) = saved_txs {
-                                let mut mp = mempool.lock_or_recover();
-                                for tx in &txs {
-                                    let _ = mp.reinsert_unchecked(tx.clone());
-                                }
-                                tracing::info!(
-                                    returned = txs.len(),
-                                    "Returned proposed txs to mempool after round change"
-                                );
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(e) => tracing::error!(%e, "Handle timeout failed"),
+                    if let Err(e) = node.handle_timeout(timeout) {
+                        tracing::error!(%e, "Handle timeout failed");
                     }
                 }
 
