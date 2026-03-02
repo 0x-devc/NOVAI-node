@@ -100,8 +100,8 @@ where
 // Week 2 "real" mempool: TxV1 policy enforcement + deterministic fee-priority.
 // -----------------------------------------------------------------------------
 
-use novai_codec::{encode_tx_v1_unsigned, txid_v1};
-use novai_crypto::{address_from_pubkey, pubkey_from_bytes, verify_bytes};
+use novai_codec::txid_v1;
+use novai_crypto::{address_from_pubkey, pubkey_from_bytes, verify_tx_v1};
 use novai_types::{Address, TxId, TxV1};
 
 /// Provides the current expected nonce for a sender address (state snapshot).
@@ -250,11 +250,9 @@ impl TxMempool {
             return Err(TxMempoolError::AddressMismatch);
         }
 
-        // canonical unsigned bytes
-        let unsigned = encode_tx_v1_unsigned(&tx).map_err(|_| TxMempoolError::CodecError)?;
-
-        // verify signature
-        if !verify_bytes(&vk, &unsigned, &tx.sig) {
+        // verify domain-tagged signature (NOVAI_TX_V1 || unsigned_bytes)
+        let sig_ok = verify_tx_v1(&vk, &tx).map_err(|_| TxMempoolError::CodecError)?;
+        if !sig_ok {
             return Err(TxMempoolError::InvalidSignature);
         }
 
@@ -503,9 +501,8 @@ mod tests {
     // -----------------------------
 
     use ed25519_dalek::{SigningKey, VerifyingKey};
-    use novai_codec::encode_tx_v1_unsigned;
-    use novai_crypto::{address_from_pubkey, sign_bytes};
-    use novai_types::{SignatureBytes, TxVersion};
+    use novai_crypto::{address_from_pubkey, sign_tx_v1};
+    use novai_types::TxVersion;
 
     fn test_keypair(seed: u8) -> (SigningKey, VerifyingKey) {
         let sk = SigningKey::from_bytes(&[seed; 32]);
@@ -549,9 +546,7 @@ mod tests {
             sig: [0u8; 64],
         };
 
-        let unsigned = encode_tx_v1_unsigned(&tx).expect("unsigned encode");
-        let sig: SignatureBytes = sign_bytes(from_sk, &unsigned);
-        tx.sig = sig;
+        sign_tx_v1(from_sk, &mut tx).expect("sign_tx_v1");
         tx
     }
 
@@ -606,8 +601,7 @@ mod tests {
             sig: [0u8; 64],
         };
 
-        let unsigned = encode_tx_v1_unsigned(&tx).expect("unsigned encode");
-        tx.sig = sign_bytes(&sk2, &unsigned);
+        sign_tx_v1(&sk2, &mut tx).expect("sign_tx_v1");
 
         let err = mp.insert(tx, &np).unwrap_err();
         assert_eq!(err, TxMempoolError::InvalidSignature);

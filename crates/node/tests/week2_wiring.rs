@@ -1,7 +1,7 @@
 use mempool::{NonceProvider, TxMempool};
 use novai_codec::txid_v1;
-use novai_crypto::{address_from_pubkey, sign_bytes};
-use novai_types::{Address, SignatureBytes, TxV1, TxVersion};
+use novai_crypto::{address_from_pubkey, sign_tx_v1};
+use novai_types::{Address, TxV1, TxVersion};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
@@ -47,9 +47,7 @@ fn make_signed_tx(
         sig: [0u8; 64],
     };
 
-    let unsigned = novai_codec::encode_tx_v1_unsigned(&tx).expect("unsigned encode");
-    let sig: SignatureBytes = sign_bytes(from_sk, &unsigned);
-    tx.sig = sig;
+    sign_tx_v1(from_sk, &mut tx).expect("sign_tx_v1");
     tx
 }
 

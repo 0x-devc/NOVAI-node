@@ -19,8 +19,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mempool::{NonceProvider, TxMempool};
     use novai_ai_entities::{AiSignalType, AiSignalV1, SignalPayload};
-    use novai_codec::encode_tx_v1_unsigned;
-    use novai_crypto::{address_from_pubkey, sign_bytes};
+    use novai_crypto::{address_from_pubkey, sign_tx_v1};
     use novai_types::{Address, TxV1, TxVersion};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,8 +54,7 @@ mod tests {
             sig: [0u8; 64],
         };
 
-        let unsigned = encode_tx_v1_unsigned(&tx).expect("encode");
-        tx.sig = sign_bytes(&sk, &unsigned);
+        sign_tx_v1(&sk, &mut tx).expect("sign_tx_v1");
         tx
     }
 
