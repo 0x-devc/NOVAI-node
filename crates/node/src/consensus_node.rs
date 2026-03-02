@@ -254,6 +254,23 @@ impl ConsensusNode {
             total_txs,
             "execute_committed_blocks called"
         );
+        for block in blocks {
+            if block.txs.is_empty() {
+                tracing::warn!(
+                    height = block.height,
+                    round = block.round,
+                    parent = ?&block.parent_hash[..4],
+                    "committed block has 0 txs"
+                );
+            } else {
+                tracing::info!(
+                    height = block.height,
+                    round = block.round,
+                    tx_count = block.txs.len(),
+                    "committed block with txs"
+                );
+            }
+        }
         if let Some(ref cb) = self.commit_callback {
             cb.on_commit(db, blocks);
         }
