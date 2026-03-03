@@ -813,6 +813,13 @@ impl ConsensusState {
     pub fn cache_block(&mut self, block: Block) {
         let hash = novai_consensus_types::codec::hash_block_v1(&block)
             .expect("block must encode for hashing");
+        tracing::debug!(
+            height = block.height,
+            round = block.round,
+            tx_count = block.txs.len(),
+            hash = ?&hash[..4],
+            "cache_block"
+        );
         self.block_cache.insert(block.height, block.clone());
         self.block_by_hash.insert(hash, block);
     }
@@ -897,9 +904,23 @@ impl ConsensusState {
         }
 
         // === VERIFY CHAIN LINKAGE ===
+        tracing::info!(
+            qc_height,
+            commit_target,
+            committed_height = self.committed_height,
+            qc_hash = ?&qc.block_hash[..4],
+            cache_size = self.block_by_hash.len(),
+            "commit chain walk starting"
+        );
 
         // 1. Find B_H (certified block) by QC's block_hash (with DB fallback)
         let block_h = if let Some(b) = self.block_by_hash.get(&qc.block_hash) {
+            tracing::info!(
+                height = b.height,
+                round = b.round,
+                tx_count = b.txs.len(),
+                "certified block from CACHE"
+            );
             b.clone()
         } else {
             // DB fallback: load by expected height, verify hash matches
@@ -940,8 +961,8 @@ impl ConsensusState {
         let mut current_hash = qc.block_hash;
 
         for expected_height in (self.committed_height + 1..=qc_height).rev() {
-            let block = if let Some(b) = self.block_by_hash.get(&current_hash) {
-                b.clone()
+            let (block, source) = if let Some(b) = self.block_by_hash.get(&current_hash) {
+                (b.clone(), "cache")
             } else {
                 // DB fallback: load by expected height, verify hash matches
                 let loaded = Self::load_block(db, expected_height)
@@ -966,8 +987,19 @@ impl ConsensusState {
                     )));
                 }
                 self.cache_block(loaded.clone());
-                loaded
+                (loaded, "db")
             };
+
+            tracing::info!(
+                expected_height,
+                actual_height = block.height,
+                round = block.round,
+                tx_count = block.txs.len(),
+                source,
+                hash = ?&current_hash[..4],
+                will_commit = expected_height <= commit_target,
+                "chain walk block"
+            );
 
             if block.height != expected_height {
                 return Err(ConsensusError::InvalidBlock(format!(
@@ -987,6 +1019,13 @@ impl ConsensusState {
 
         // Reverse to get oldest first
         chain.reverse();
+
+        let total_commit_txs: usize = chain.iter().map(|b| b.txs.len()).sum();
+        tracing::info!(
+            commit_blocks = chain.len(),
+            total_commit_txs,
+            "commit chain built"
+        );
 
         // Verify contiguous commit (no gaps) - Fix D
         let expected_count = (commit_target - self.committed_height) as usize;
