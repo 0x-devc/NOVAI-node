@@ -489,16 +489,40 @@ fn handle_submit_tx(
     })?;
 
     // Submit to mempool
-    let mut mempool = mempool.lock().unwrap();
-    mempool.insert(tx, nonce_provider).map_err(|e| RpcError {
-        code: -32001,
-        message: format!("Mempool rejected transaction: {:?}", e),
-    })?;
-
-    // Return success response
-    Ok(SubmitTxResult {
-        txid: hex::encode(txid),
-    })
+    let mut mempool_guard = mempool.lock().unwrap();
+    let inner_ptr = &*mempool_guard as *const TxMempool as usize;
+    let size_before = mempool_guard.len();
+    match mempool_guard.insert(tx, nonce_provider) {
+        Ok(id) => {
+            let size_after = mempool_guard.len();
+            tracing::warn!(
+                txid = %hex::encode(id),
+                size_before,
+                size_after,
+                mempool_ptr = format!("{:#x}", inner_ptr),
+                "RPC_DIAG: insert SUCCESS"
+            );
+            drop(mempool_guard);
+            // Return success response
+            Ok(SubmitTxResult {
+                txid: hex::encode(txid),
+            })
+        }
+        Err(e) => {
+            tracing::warn!(
+                txid = %hex::encode(txid),
+                size_before,
+                error = %format!("{:?}", e),
+                mempool_ptr = format!("{:#x}", inner_ptr),
+                "RPC_DIAG: insert FAILED"
+            );
+            drop(mempool_guard);
+            Err(RpcError {
+                code: -32001,
+                message: format!("Mempool rejected transaction: {:?}", e),
+            })
+        }
+    }
 }
 
 // ============================================================================
