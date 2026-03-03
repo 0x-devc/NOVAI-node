@@ -8,7 +8,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use novai_consensus_types::codec::{decode_block_v1, decode_qc_v1, encode_block_v1, encode_qc_v1};
 use novai_consensus_types::{Block, Timeout, Vote, QC};
 use novai_state::{block_key, qc_key, Kv, KvBatch, KEY_COMMITTED_HEIGHT, KEY_HIGHEST_QC};
-use novai_types::Address;
+use novai_types::{Address, TxV1};
 use std::collections::{HashMap, HashSet};
 
 // ========== WEEK 8: TIMEOUT CONFIGURATION ==========
@@ -129,6 +129,9 @@ pub struct ConsensusState {
     pub timed_out_in_round: HashSet<Address>,
     /// Total view changes (round advances due to timeouts) since node start.
     pub view_changes_total: u64,
+    /// Txs from the last block we proposed. Recovered to mempool if the
+    /// block is abandoned (round change / view change before commit).
+    pub last_proposed_txs: Vec<TxV1>,
 }
 
 impl ConsensusState {
@@ -149,6 +152,7 @@ impl ConsensusState {
             pending_timeouts: HashMap::new(),
             timed_out_in_round: HashSet::new(),
             view_changes_total: 0,
+            last_proposed_txs: Vec::new(),
         }
     }
 
@@ -245,10 +249,19 @@ impl ConsensusState {
             txs,
         };
 
-        // Mark as proposed
+        // Mark as proposed and save txs for recovery if block is abandoned
         self.last_proposed = Some((block.height, block.round));
+        self.last_proposed_txs = block.txs.clone();
 
         Ok(block)
+    }
+
+    /// Take txs from the last abandoned proposal for mempool recovery.
+    ///
+    /// Returns the txs and clears the buffer. The caller should reinsert
+    /// recoverable txs (nonce >= expected) back into the mempool.
+    pub fn take_abandoned_txs(&mut self) -> Vec<TxV1> {
+        std::mem::take(&mut self.last_proposed_txs)
     }
 
     /// Verify a proposed block.
@@ -1647,6 +1660,7 @@ impl ConsensusState {
             pending_timeouts: HashMap::new(),
             timed_out_in_round: HashSet::new(),
             view_changes_total: 0,
+            last_proposed_txs: Vec::new(),
         })
     }
 }

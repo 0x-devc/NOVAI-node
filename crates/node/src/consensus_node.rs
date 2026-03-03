@@ -854,6 +854,16 @@ impl ConsensusNode {
         }
     }
 
+    /// Recover txs from the last abandoned proposal.
+    ///
+    /// When a round changes (timeout or QC catch-up) before our proposed block
+    /// is committed, the drained txs are lost. This method returns them so the
+    /// caller can reinsert valid ones into the mempool.
+    pub fn recover_abandoned_txs(&self) -> Vec<novai_types::TxV1> {
+        let mut state = self.state.lock_or_recover();
+        state.take_abandoned_txs()
+    }
+
     /// Propose a block (leader only).
     pub fn propose_block(
         &self,

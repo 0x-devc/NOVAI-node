@@ -1163,6 +1163,28 @@ fn main() {
                 if last_proposal_attempt.elapsed() >= Duration::from_millis(proposal_interval_ms) {
                     last_proposal_attempt = std::time::Instant::now();
 
+                    // Recover txs from abandoned proposals (round changed before
+                    // our block was committed). Nonce check filters out txs that
+                    // were already committed via a different block.
+                    let recovered = node.recover_abandoned_txs();
+                    if !recovered.is_empty() {
+                        let mut mp = mempool.lock_or_recover();
+                        let mut reinserted = 0usize;
+                        for tx in recovered {
+                            if tx.nonce >= nonce_provider.expected_nonce(&tx.from) {
+                                if mp.reinsert_unchecked(tx).is_ok() {
+                                    reinserted += 1;
+                                }
+                            }
+                        }
+                        if reinserted > 0 {
+                            tracing::warn!(
+                                reinserted,
+                                "Recovered abandoned txs to mempool"
+                            );
+                        }
+                    }
+
                     let mut mempool_guard = mempool.lock_or_recover();
                     match node.try_propose_block(&mut mempool_guard, &*nonce_provider) {
                         Ok(true) => tracing::info!("Proposed block successfully"),
