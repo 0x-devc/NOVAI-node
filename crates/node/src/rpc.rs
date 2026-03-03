@@ -20,6 +20,7 @@ use mempool::{NonceProvider, TxMempool};
 use novai_ai_entities::{AiSignalType, SignalCommitment};
 use novai_codec::{decode_tx_v1_signed, txid_v1};
 use novai_execution::{get_signals_by_height, get_signals_by_issuer, get_signals_by_type};
+use novai_p2p::{NetworkMessage, PeerManager};
 use novai_state::MemKv;
 use novai_types::{Address, TxV1};
 use serde::{Deserialize, Serialize};
@@ -160,6 +161,7 @@ pub fn start_rpc_server(
     bind_addr: &str,
     mempool: Arc<Mutex<TxMempool>>,
     nonce_provider: Arc<dyn NonceProvider + Send + Sync>,
+    peer_manager: Option<Arc<PeerManager>>,
 ) -> Result<(), String> {
     let addr: SocketAddr = bind_addr
         .parse()
@@ -225,7 +227,7 @@ pub fn start_rpc_server(
             // Route to method handler
             let http_response = match rpc_request.method.as_str() {
                 "novai_submitTransaction" => {
-                    match handle_submit_tx(&rpc_request, &mempool, &nonce) {
+                    match handle_submit_tx(&rpc_request, &mempool, &nonce, &peer_manager) {
                         Ok(result) => {
                             let response = RpcResponse {
                                 jsonrpc: "2.0",
@@ -346,7 +348,7 @@ pub fn start_rpc_server_with_state(
             // Route to method handler
             let http_response = match rpc_request.method.as_str() {
                 "novai_submitTransaction" => {
-                    match handle_submit_tx(&rpc_request, &mempool, &nonce) {
+                    match handle_submit_tx(&rpc_request, &mempool, &nonce, &None) {
                         Ok(result) => {
                             let response = RpcResponse {
                                 jsonrpc: "2.0",
@@ -449,6 +451,7 @@ fn handle_submit_tx(
     request: &RpcRequest,
     mempool: &Arc<Mutex<TxMempool>>,
     nonce_provider: &SharedNonceProvider,
+    peer_manager: &Option<Arc<PeerManager>>,
 ) -> Result<SubmitTxResult, RpcError> {
     // Parse parameters
     let params: SubmitTxParams =
@@ -490,31 +493,35 @@ fn handle_submit_tx(
 
     // Submit to mempool
     let mut mempool_guard = mempool.lock().unwrap();
-    let inner_ptr = &*mempool_guard as *const TxMempool as usize;
     let size_before = mempool_guard.len();
     match mempool_guard.insert(tx, nonce_provider) {
         Ok(id) => {
             let size_after = mempool_guard.len();
-            tracing::warn!(
+            tracing::debug!(
                 txid = %hex::encode(id),
                 size_before,
                 size_after,
-                mempool_ptr = format!("{:#x}", inner_ptr),
-                "RPC_DIAG: insert SUCCESS"
+                "RPC tx accepted"
             );
             drop(mempool_guard);
-            // Return success response
+
+            // Gossip to peers so all validators have txs for proposal
+            if let Some(pm) = peer_manager {
+                if let Err(e) = pm.broadcast(&NetworkMessage::Transaction(tx_bytes)) {
+                    tracing::warn!(?e, "Failed to gossip tx to peers");
+                }
+            }
+
             Ok(SubmitTxResult {
                 txid: hex::encode(txid),
             })
         }
         Err(e) => {
-            tracing::warn!(
+            tracing::debug!(
                 txid = %hex::encode(txid),
                 size_before,
                 error = %format!("{:?}", e),
-                mempool_ptr = format!("{:#x}", inner_ptr),
-                "RPC_DIAG: insert FAILED"
+                "RPC tx rejected"
             );
             drop(mempool_guard);
             Err(RpcError {

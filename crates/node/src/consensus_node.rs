@@ -24,6 +24,15 @@ use std::time::Instant;
 /// Prevents timeout on large catch-up ranges (e.g., 50k+ blocks).
 pub const SYNC_CHUNK_SIZE: u64 = 500;
 
+/// Sized wrapper around a shared `NonceProvider` trait object for gossip tx insertion.
+struct GossipNonceProvider(Arc<dyn mempool::NonceProvider + Send + Sync>);
+
+impl mempool::NonceProvider for GossipNonceProvider {
+    fn expected_nonce(&self, from: &Address) -> u64 {
+        self.0.expected_nonce(from)
+    }
+}
+
 /// Storage backend for the consensus node.
 ///
 /// Unifies `MemKv` (in-memory, volatile) and `RocksKv` (persistent, disk-backed)
@@ -130,6 +139,10 @@ pub struct ConsensusNode {
     pub connection_limiter: Arc<ConnectionLimiter>,
     /// Callback for post-commit execution (dispatch_tx + nonce updates).
     pub commit_callback: Option<Arc<dyn CommitCallback>>,
+    /// Shared mempool for inserting gossipped transactions from peers.
+    pub gossip_mempool: Option<Arc<Mutex<mempool::TxMempool>>>,
+    /// Nonce provider for validating gossipped transactions.
+    gossip_nonce: Option<Arc<dyn mempool::NonceProvider + Send + Sync>>,
 }
 
 impl ConsensusNode {
@@ -232,7 +245,22 @@ impl ConsensusNode {
                 novai_p2p::MAX_CONNECTIONS_PER_IP,
             )),
             commit_callback: None,
+            gossip_mempool: None,
+            gossip_nonce: None,
         }
+    }
+
+    /// Set the shared mempool and nonce provider for transaction gossip.
+    ///
+    /// When set, incoming `Transaction` messages from peers are decoded and
+    /// inserted into the mempool so all validators have txs available for proposal.
+    pub fn set_gossip_mempool(
+        &mut self,
+        mempool: Arc<Mutex<mempool::TxMempool>>,
+        nonce_provider: Arc<dyn mempool::NonceProvider + Send + Sync>,
+    ) {
+        self.gossip_mempool = Some(mempool);
+        self.gossip_nonce = Some(nonce_provider);
     }
 
     /// Set the commit callback for post-persist transaction execution.
@@ -1626,6 +1654,33 @@ impl ConsensusNode {
             NetworkMessage::Timeout(t) => self.handle_timeout(t).map(|_| ()),
             NetworkMessage::BlockRequest(req) => self.handle_block_request(req),
             NetworkMessage::BlockResponse(resp) => self.handle_block_response(resp),
+            NetworkMessage::Transaction(bytes) => self.handle_gossip_tx(bytes),
         }
+    }
+
+    /// Handle a gossipped transaction from a peer.
+    ///
+    /// Decodes, validates via nonce check, and inserts into the local mempool.
+    /// Duplicates and nonce-stale txs are silently ignored (expected).
+    fn handle_gossip_tx(&self, bytes: Vec<u8>) -> Result<(), String> {
+        let (mempool, nonce) = match (&self.gossip_mempool, &self.gossip_nonce) {
+            (Some(mp), Some(np)) => (mp, np),
+            _ => return Ok(()), // gossip not configured
+        };
+
+        let tx = novai_codec::decode_tx_v1_signed(&bytes)
+            .map_err(|e| format!("Invalid gossipped tx: {:?}", e))?;
+
+        let nonce_wrapper = GossipNonceProvider(Arc::clone(nonce));
+        let mut mp = mempool.lock_or_recover();
+        match mp.insert(tx, &nonce_wrapper) {
+            Ok(txid) => {
+                tracing::debug!(txid = %hex::encode(txid), "Gossip tx accepted");
+            }
+            Err(_) => {
+                // Duplicate or nonce-invalid — expected for already-known txs
+            }
+        }
+        Ok(())
     }
 }

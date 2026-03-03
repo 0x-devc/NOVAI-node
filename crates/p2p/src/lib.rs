@@ -32,6 +32,7 @@ pub enum MessageKind {
     Timeout = 4,
     BlockRequest = 5,
     BlockResponse = 6,
+    Transaction = 7,
 }
 
 impl MessageKind {
@@ -43,6 +44,7 @@ impl MessageKind {
             4 => Some(Self::Timeout),
             5 => Some(Self::BlockRequest),
             6 => Some(Self::BlockResponse),
+            7 => Some(Self::Transaction),
             _ => None,
         }
     }
@@ -57,6 +59,8 @@ pub enum NetworkMessage {
     Timeout(Timeout),
     BlockRequest(BlockRequest),
     BlockResponse(BlockResponse),
+    /// Raw signed transaction bytes for mempool gossip.
+    Transaction(Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -108,6 +112,7 @@ pub fn encode_wire_message(msg: &NetworkMessage) -> Result<Vec<u8>, P2PError> {
                 .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
             (MessageKind::BlockResponse, bytes)
         }
+        NetworkMessage::Transaction(bytes) => (MessageKind::Transaction, bytes.clone()),
     };
 
     #[allow(clippy::cast_possible_truncation)]
@@ -191,6 +196,7 @@ pub fn read_wire_message(stream: &mut impl Read) -> Result<NetworkMessage, P2PEr
                 .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
             Ok(NetworkMessage::BlockResponse(resp))
         }
+        MessageKind::Transaction => Ok(NetworkMessage::Transaction(payload)),
     }
 }
 

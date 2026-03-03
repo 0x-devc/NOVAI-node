@@ -816,6 +816,15 @@ fn main() {
             });
             node.set_commit_callback(commit_callback);
 
+            // Create mempool early so we can wire gossip before Arc-wrapping the node
+            let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
+
+            // Wire gossip: allows peers to insert received txs into our mempool
+            node.set_gossip_mempool(
+                Arc::clone(&mempool),
+                Arc::clone(&nonce_provider) as Arc<dyn NonceProvider + Send + Sync>,
+            );
+
             let node = Arc::new(node);
 
             // Start listener
@@ -836,9 +845,6 @@ fn main() {
 
             tracing::info!("Node started, waiting for peers...");
             std::thread::sleep(Duration::from_millis(500));
-
-            // Create mempool
-            let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
 
             // Graceful shutdown flag — created early so AI service can share it
             let shutdown = Arc::new(AtomicBool::new(false));
@@ -1044,6 +1050,7 @@ fn main() {
                 &rpc_addr,
                 Arc::clone(&mempool),
                 Arc::clone(&nonce_provider) as Arc<dyn NonceProvider + Send + Sync>,
+                Some(Arc::clone(&node.peer_manager)),
             ) {
                 tracing::error!(%e, "Failed to start RPC server");
             }
@@ -1178,10 +1185,7 @@ fn main() {
                             }
                         }
                         if reinserted > 0 {
-                            tracing::warn!(
-                                reinserted,
-                                "Recovered abandoned txs to mempool"
-                            );
+                            tracing::warn!(reinserted, "Recovered abandoned txs to mempool");
                         }
                     }
 
