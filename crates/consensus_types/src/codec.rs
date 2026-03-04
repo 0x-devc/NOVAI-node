@@ -505,8 +505,8 @@ pub fn decode_block_v1(input: &mut &[u8]) -> Result<Block, CodecError> {
     let mut txs: Vec<novai_types::TxV1> = Vec::with_capacity(tx_count as usize);
 
     for _ in 0..tx_count {
-        let tx =
-            novai_codec::decode_tx_v1_signed(input).map_err(|_| CodecError::TxDecodingFailed)?;
+        let tx = novai_codec::decode_tx_v1_signed_streaming(input)
+            .map_err(|_| CodecError::TxDecodingFailed)?;
         txs.push(tx);
     }
 
@@ -793,6 +793,89 @@ mod tests {
         let bytes1 = encode_block_v1(&block).unwrap();
         let bytes2 = encode_block_v1(&block).unwrap();
         assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn block_roundtrip_with_txs() {
+        let block = Block {
+            height: 10,
+            round: 3,
+            parent_hash: [0xaa; 32],
+            state_root: [0xbb; 32],
+            txs: vec![
+                TxV1 {
+                    version: TxVersion::V1,
+                    from: [0x01; 32],
+                    pubkey: [0x02; 32],
+                    nonce: 1,
+                    fee: 100,
+                    payload: vec![0x01, 0x03, 0x04, 0x05],
+                    sig: [0xee; 64],
+                },
+                TxV1 {
+                    version: TxVersion::V1,
+                    from: [0x03; 32],
+                    pubkey: [0x04; 32],
+                    nonce: 2,
+                    fee: 200,
+                    payload: vec![0x01, 0x06, 0x07, 0x08],
+                    sig: [0xff; 64],
+                },
+            ],
+        };
+
+        let encoded = encode_block_v1(&block).unwrap();
+        let mut input = encoded.as_slice();
+        let decoded = decode_block_v1(&mut input).unwrap();
+
+        assert_eq!(decoded.height, block.height);
+        assert_eq!(decoded.round, block.round);
+        assert_eq!(decoded.parent_hash, block.parent_hash);
+        assert_eq!(decoded.state_root, block.state_root);
+        assert_eq!(decoded.txs.len(), 2);
+        assert_eq!(decoded.txs[0].from, [0x01; 32]);
+        assert_eq!(decoded.txs[0].nonce, 1);
+        assert_eq!(decoded.txs[1].from, [0x03; 32]);
+        assert_eq!(decoded.txs[1].nonce, 2);
+
+        // Hash must be identical
+        let hash1 = hash_block_v1(&block).unwrap();
+        let hash2 = hash_block_v1(&decoded).unwrap();
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn signed_proposal_roundtrip_with_txs() {
+        let block = Block {
+            height: 5,
+            round: 0,
+            parent_hash: [0xaa; 32],
+            state_root: [0xbb; 32],
+            txs: vec![dummy_tx(), dummy_tx()],
+        };
+
+        let qc = QC {
+            height: 4,
+            round: 0,
+            block_hash: [0xcc; 32],
+            votes: vec![],
+        };
+
+        let sp = SignedProposal {
+            proposer: [0xdd; 32],
+            proposal: Proposal {
+                block: block.clone(),
+                justify_qc: qc,
+            },
+            signature: [0xee; 64],
+        };
+
+        let encoded = encode_signed_proposal_v1(&sp).unwrap();
+        let decoded = decode_signed_proposal_v1(&encoded).unwrap();
+
+        assert_eq!(decoded.proposal.block.txs.len(), 2);
+        assert_eq!(decoded.proposer, sp.proposer);
+        assert_eq!(decoded.signature, sp.signature);
     }
 
     #[test]

@@ -141,21 +141,31 @@ pub fn decode_tx_v1_unsigned(bytes: &[u8]) -> Result<TxV1, CodecError> {
 
 pub fn decode_tx_v1_signed(bytes: &[u8]) -> Result<TxV1, CodecError> {
     let mut input = bytes;
-    let v = read_u8(&mut input)?;
-    let version = TxVersion::from_u8(v).ok_or(CodecError::InvalidVersion)?;
-    let from: Address = read_32(&mut input)?;
-    let pubkey: [u8; 32] = read_32(&mut input)?;
-    let nonce = read_u64_le(&mut input)?;
-    let fee = read_u64_le(&mut input)?;
-
-    let payload_len = read_u32_le(&mut input)? as usize;
-    let payload = take(&mut input, payload_len)?.to_vec();
-
-    let sig: SignatureBytes = read_64(&mut input)?;
+    let tx = decode_tx_v1_signed_streaming(&mut input)?;
 
     if !input.is_empty() {
         return Err(CodecError::TrailingBytes);
     }
+
+    Ok(tx)
+}
+
+/// Streaming variant: reads one signed TxV1 from `input` and advances the
+/// cursor past the consumed bytes. Does NOT check for trailing bytes, so
+/// callers can decode multiple concatenated txs from a single buffer
+/// (e.g., inside `decode_block_v1`).
+pub fn decode_tx_v1_signed_streaming(input: &mut &[u8]) -> Result<TxV1, CodecError> {
+    let v = read_u8(input)?;
+    let version = TxVersion::from_u8(v).ok_or(CodecError::InvalidVersion)?;
+    let from: Address = read_32(input)?;
+    let pubkey: [u8; 32] = read_32(input)?;
+    let nonce = read_u64_le(input)?;
+    let fee = read_u64_le(input)?;
+
+    let payload_len = read_u32_le(input)? as usize;
+    let payload = take(input, payload_len)?.to_vec();
+
+    let sig: SignatureBytes = read_64(input)?;
 
     Ok(TxV1 {
         version,
