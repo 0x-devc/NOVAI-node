@@ -277,10 +277,20 @@ impl ConsensusNode {
     /// consensus persistence (no overlap), so this is safe.
     fn execute_committed_blocks(&self, db: &mut Storage, blocks: &[Block]) {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
-        tracing::info!(
+        for block in blocks {
+            let hash = novai_consensus_types::codec::hash_block_v1(block).ok();
+            tracing::warn!(
+                height = block.height,
+                round = block.round,
+                tx_count = block.txs.len(),
+                block_hash = ?hash.as_ref().map(|h| &h[..4]),
+                "COMMIT_DIAG: committed block"
+            );
+        }
+        tracing::warn!(
             block_count = blocks.len(),
             total_txs,
-            "execute_committed_blocks called"
+            "COMMIT_DIAG: execute_committed_blocks"
         );
         if let Some(ref cb) = self.commit_callback {
             cb.on_commit(db, blocks);
@@ -455,8 +465,14 @@ impl ConsensusNode {
     ///
     /// Returns Some(Timeout) if timeout duration elapsed and not already timed out.
     pub fn check_timeout(&self) -> Option<Timeout> {
-        let start_time = *self.round_start_time.lock_or_recover();
+        // CRITICAL: Acquire state lock FIRST, then read round_start_time.
+        // This prevents a race with handle_qc/handle_vote which update state
+        // (advancing view height) then reset round_start_time AFTER dropping
+        // the state lock. Without this fix, check_timeout could read a stale
+        // round_start_time, then see the advanced state, and fire a spurious
+        // timeout immediately after a QC is received.
         let state = self.state.lock_or_recover();
+        let start_time = *self.round_start_time.lock_or_recover();
 
         let timeout_ms =
             novai_consensus::timeout_for_round_with_base(state.round, self.base_timeout_ms);
@@ -480,10 +496,11 @@ impl ConsensusNode {
         match state.create_timeout(&self.signing_key) {
             Ok(timeout) => {
                 *self.last_timeout_time.lock_or_recover() = Some(Instant::now());
-                tracing::info!(
+                tracing::warn!(
                     round = state.round,
                     elapsed = ?start_time.elapsed(),
-                    "TIMEOUT triggered"
+                    highest_qc = ?state.highest_qc.as_ref().map(|q| q.height),
+                    "TIMEOUT_DIAG: timeout triggered"
                 );
                 Some(timeout)
             }
@@ -1019,21 +1036,24 @@ impl ConsensusNode {
             signature,
         };
 
+        // Reset timeout timer BEFORE dropping state lock — we just proposed,
+        // give ourselves a full fresh timeout window to collect votes.
+        // Must happen before dropping state to prevent check_timeout race.
+        *self.round_start_time.lock_or_recover() = Instant::now();
+        *self.last_timeout_time.lock_or_recover() = None;
+
         // Release locks before broadcasting
         drop(state);
         drop(db);
 
-        // Reset timeout timer — we just proposed, give ourselves a full fresh
-        // timeout window to collect votes. Without this, the stale round_start_time
-        // from the last received proposal can cause an immediate spurious timeout
-        // that clears pending_votes (including our self-vote) before QC forms.
-        *self.round_start_time.lock_or_recover() = Instant::now();
-        *self.last_timeout_time.lock_or_recover() = None;
-
-        tracing::debug!(
+        let block_hash = novai_consensus_types::codec::hash_block_v1(&block)
+            .map_err(|e| format!("Hash block failed: {:?}", e))?;
+        tracing::warn!(
             height = block.height,
             round = block.round,
-            "Proposing block"
+            tx_count = block.txs.len(),
+            block_hash = ?&block_hash[..4],
+            "PROPOSE_DIAG: proposed block"
         );
 
         self.broadcast(NetworkMessage::SignedProposal(signed_proposal))?;
@@ -1271,9 +1291,27 @@ impl ConsensusNode {
                 return Ok(());
             }
 
-            state
-                .verify_block(block, &*db)
-                .map_err(|e| format!("Block verification failed: {:?}", e))?;
+            if let Err(e) = state.verify_block(block, &*db) {
+                tracing::warn!(
+                    height = block.height,
+                    round = block.round,
+                    tx_count = block.txs.len(),
+                    proposer = ?&signed_proposal.proposer[..4],
+                    error = %format!("{:?}", e),
+                    "VERIFY_DIAG: block verification FAILED"
+                );
+                return Err(format!("Block verification failed: {:?}", e));
+            }
+
+            let recv_block_hash = novai_consensus_types::codec::hash_block_v1(block)
+                .map_err(|e| format!("Hash block failed: {:?}", e))?;
+            tracing::warn!(
+                height = block.height,
+                round = block.round,
+                tx_count = block.txs.len(),
+                block_hash = ?&recv_block_hash[..4],
+                "VERIFY_DIAG: block verified OK, voting"
+            );
 
             // 6. Cache block for commit rule (combined to avoid re-acquiring lock)
             state
@@ -1314,6 +1352,11 @@ impl ConsensusNode {
             // Mark ourselves as voted so duplicate proposals are rejected
             state.voted_in_round.insert(self.our_address);
 
+            // Reset round timer BEFORE dropping state lock to prevent race with
+            // check_timeout (same pattern as handle_vote and handle_qc).
+            *self.round_start_time.lock_or_recover() = Instant::now();
+            *self.last_timeout_time.lock_or_recover() = None;
+
             vote
         };
 
@@ -1326,10 +1369,6 @@ impl ConsensusNode {
         if let Some(ch) = committed_height_for_prune {
             self.prune_qc_broadcast_cache(ch);
         }
-
-        // Reset round timer - we received a valid proposal
-        *self.round_start_time.lock_or_recover() = Instant::now();
-        *self.last_timeout_time.lock_or_recover() = None;
 
         tracing::info!(height = block.height, "Voting for block");
 
@@ -1386,7 +1425,16 @@ impl ConsensusNode {
                 sent.insert(key);
             }
 
-            tracing::info!(votes = qc.votes.len(), "QC formed");
+            // Look up the certified block's tx_count for diagnostics
+            let qc_block_txs = state.block_by_hash.get(&qc.block_hash).map(|b| b.txs.len());
+            tracing::warn!(
+                qc_height = qc.height,
+                qc_round = qc.round,
+                votes = qc.votes.len(),
+                block_hash = ?&qc.block_hash[..4],
+                certified_block_txs = ?qc_block_txs,
+                "QC_DIAG: QC formed"
+            );
 
             // Process the QC locally before broadcasting.
             // Commit chain errors are non-fatal — highest_qc is updated
@@ -1437,6 +1485,13 @@ impl ConsensusNode {
                 }
             }
 
+            // Reset timeout timer BEFORE dropping state lock to prevent a race
+            // with check_timeout. If we drop state first, check_timeout can read
+            // the stale round_start_time and the advanced state, firing a spurious
+            // timeout immediately after QC formation.
+            *self.round_start_time.lock_or_recover() = Instant::now();
+            *self.last_timeout_time.lock_or_recover() = None;
+
             drop(state);
             drop(db);
 
@@ -1447,12 +1502,6 @@ impl ConsensusNode {
             if let Some(ch) = vote_committed_height {
                 self.prune_qc_broadcast_cache(ch);
             }
-
-            // Reset timeout timer — view height just advanced via our own QC.
-            // Without this, the stale round_start_time from the previous round
-            // causes immediate spurious timeouts that clear pending_votes.
-            *self.round_start_time.lock_or_recover() = Instant::now();
-            *self.last_timeout_time.lock_or_recover() = None;
 
             self.broadcast(NetworkMessage::Qc(qc))?;
         }
@@ -1524,16 +1573,18 @@ impl ConsensusNode {
         let qc_advanced = new_highest > old_highest;
         let round_was_reset = state.round == 0 && old_round != 0;
 
-        // Release locks before updating node-level flags and triggering sync
-        drop(state);
-        drop(db);
-
-        // When progress is made (round reset, commit, or QC advanced), reset the
-        // timeout timer so the new round gets a fresh timeout window.
+        // Reset timeout timer BEFORE dropping state lock to prevent a race
+        // with check_timeout. If we drop state first, check_timeout can read
+        // the stale round_start_time and the advanced state, firing a spurious
+        // timeout immediately after receiving a QC.
         if round_was_reset || committed || qc_advanced {
             *self.round_start_time.lock_or_recover() = Instant::now();
             *self.last_timeout_time.lock_or_recover() = None;
         }
+
+        // Release locks before updating node-level flags and triggering sync
+        drop(state);
+        drop(db);
 
         // Prune QC broadcast cache after commit
         if let Some(ch) = qc_committed_height {

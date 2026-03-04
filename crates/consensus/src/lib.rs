@@ -444,8 +444,21 @@ impl ConsensusState {
         // them silently since QC already formed for that height.
         if vote.height != expected_height {
             if vote.height + 1 == expected_height {
+                tracing::debug!(
+                    vote_height = vote.height,
+                    expected_height,
+                    voter = ?&vote.voter[..4],
+                    "VOTE_DIAG: stale vote (1 behind), dropping"
+                );
                 return Ok(()); // Stale vote, silently ignore
             }
+            tracing::warn!(
+                vote_height = vote.height,
+                expected_height,
+                voter = ?&vote.voter[..4],
+                vote_round = vote.round,
+                "VOTE_DIAG: vote REJECTED (height mismatch)"
+            );
             return Err(ConsensusError::InvalidVote(format!(
                 "Vote height mismatch: expected {}, got {}",
                 expected_height, vote.height
@@ -894,6 +907,14 @@ impl ConsensusState {
             let new_view_height = qc.height;
 
             if new_view_height > old_view_height {
+                let pending_vote_count: usize =
+                    self.pending_votes.values().map(|v| v.len()).sum();
+                tracing::warn!(
+                    old_view_height,
+                    new_view_height,
+                    pending_votes_cleared = pending_vote_count,
+                    "VIEW_DIAG: view height advanced, clearing state"
+                );
                 self.round = 0;
                 self.pending_votes.clear();
                 self.voted_in_round.clear();
