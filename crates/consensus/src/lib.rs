@@ -825,6 +825,40 @@ impl ConsensusState {
             );
         }
 
+        // H-02: Prune stale proposals and votes from old rounds to prevent
+        // unbounded memory growth during round escalation (timeout spirals).
+        // block_by_hash grows by 1 entry per round (each round proposes a
+        // different block hash at the same height). pending_votes similarly
+        // accumulates votes keyed by those stale hashes.
+        // Keep blocks/votes from recent rounds only; older ones can never
+        // form a QC since the proposer changes each round.
+        {
+            let bbh_before = self.block_by_hash.len();
+            self.block_by_hash.retain(|_, b| {
+                // Keep committed/near-committed blocks, prune stale proposals
+                b.height < expected_height || b.round >= prune_below_round
+            });
+            let bbh_pruned = bbh_before - self.block_by_hash.len();
+
+            // Collect surviving block hashes to filter pending_votes
+            let live_hashes: HashSet<[u8; 32]> =
+                self.block_by_hash.keys().copied().collect();
+            let pv_before = self.pending_votes.len();
+            self.pending_votes
+                .retain(|hash, _| live_hashes.contains(hash));
+            let pv_pruned = pv_before - self.pending_votes.len();
+
+            if bbh_pruned > 0 || pv_pruned > 0 {
+                tracing::debug!(
+                    bbh_pruned,
+                    bbh_remaining = self.block_by_hash.len(),
+                    pv_pruned,
+                    pv_remaining = self.pending_votes.len(),
+                    "Pruned stale proposals/votes on round advance"
+                );
+            }
+        }
+
         tracing::info!(
             round = self.round,
             height = expected_height,

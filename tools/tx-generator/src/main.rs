@@ -58,6 +58,10 @@ struct Args {
     /// Enable confirmation tracking (polls for tx confirmation)
     #[arg(long)]
     track_confirmations: bool,
+
+    /// Run continuously (equivalent to --duration 0). Overrides --duration.
+    #[arg(long)]
+    continuous: bool,
 }
 
 #[tokio::main]
@@ -73,7 +77,11 @@ async fn main() -> Result<()> {
     info!("=== Transaction Generator Starting ===");
     info!("Target TPS: {}", args.tps);
     info!("Senders: {}", args.senders);
-    info!("Duration: {} seconds", args.duration);
+    if args.continuous {
+        info!("Duration: continuous (infinite)");
+    } else {
+        info!("Duration: {} seconds", args.duration);
+    }
     info!("Endpoint: {}", args.endpoint);
     info!("Transaction Type: {}", args.tx_type);
     info!("Workers: {}", args.workers);
@@ -113,10 +121,10 @@ async fn main() -> Result<()> {
     let generator_config = generator::GeneratorConfig {
         target_tps: args.tps,
         tx_type: generator::TxType::from_str(&args.tx_type).context("Invalid transaction type")?,
-        max_duration: if args.duration > 0 {
-            Some(Duration::from_secs(args.duration))
-        } else {
+        max_duration: if args.continuous || args.duration == 0 {
             None
+        } else {
+            Some(Duration::from_secs(args.duration))
         },
         ..Default::default()
     };
@@ -229,6 +237,7 @@ mod tests {
             verbose: false,
             workers: 4,
             track_confirmations: false,
+            continuous: false,
         };
         assert!(validate_args(&args).is_ok());
     }
@@ -245,6 +254,7 @@ mod tests {
             verbose: false,
             workers: 4,
             track_confirmations: false,
+            continuous: false,
         };
         assert!(validate_args(&args).is_err());
     }
@@ -261,6 +271,7 @@ mod tests {
             verbose: false,
             workers: 4,
             track_confirmations: false,
+            continuous: false,
         };
         assert!(validate_args(&args).is_err());
     }

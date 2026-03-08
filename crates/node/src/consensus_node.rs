@@ -465,14 +465,19 @@ impl ConsensusNode {
     ///
     /// Returns Some(Timeout) if timeout duration elapsed and not already timed out.
     pub fn check_timeout(&self) -> Option<Timeout> {
-        // Acquire round_start_time FIRST, then state lock.
-        // The original race (stale round_start_time + advanced state) is prevented
-        // by the other half of the fix: handle_qc/handle_vote/handle_proposal/
-        // try_propose_block all reset round_start_time BEFORE dropping state lock.
-        // Acquiring state lock first here causes contention with the consensus
-        // loop which also holds state lock for extended periods.
-        let start_time = *self.round_start_time.lock_or_recover();
+        // CRITICAL: Acquire state lock FIRST, then read round_start_time.
+        // Lock order: state → round_start_time (matches handle_vote, handle_qc,
+        // handle_proposal, try_propose_block — all reset round_start_time while
+        // holding state lock).
+        //
+        // The previous ordering (round_start_time → state) caused a TOCTOU race:
+        //   1. check_timeout reads old round_start_time (T0)
+        //   2. handle_qc acquires state, advances view, resets round_start_time to NOW
+        //   3. check_timeout acquires state, sees round=0 but has stale T0
+        //   4. T0.elapsed() > timeout → spurious timeout fires at round 0
+        // This race caused the chain stall after hours of running.
         let state = self.state.lock_or_recover();
+        let start_time = *self.round_start_time.lock_or_recover();
 
         let timeout_ms =
             novai_consensus::timeout_for_round_with_base(state.round, self.base_timeout_ms);
