@@ -193,14 +193,12 @@ impl ConsensusState {
         // Drain ready transactions from mempool with size-aware filtering.
         // Drain up to MAX_TXS_PER_BLOCK candidates, then filter by cumulative
         // block size. Txs that don't fit are returned to the mempool.
-        let mempool_ptr = mempool as *const _ as usize;
         let mempool_size_before = mempool.len();
         let mut candidates = mempool.drain_ready(novai_types::MAX_TXS_PER_BLOCK, nonce_provider);
-        tracing::warn!(
+        tracing::debug!(
             tx_count = candidates.len(),
             mempool_size_before,
             mempool_remaining = mempool.len(),
-            mempool_ptr = format!("{:#x}", mempool_ptr),
             "CONSENSUS_DIAG: drain_ready returned"
         );
         let mut txs = Vec::new();
@@ -452,7 +450,7 @@ impl ConsensusState {
                 );
                 return Ok(()); // Stale vote, silently ignore
             }
-            tracing::warn!(
+            tracing::debug!(
                 vote_height = vote.height,
                 expected_height,
                 voter = ?&vote.voter[..4],
@@ -943,7 +941,7 @@ impl ConsensusState {
             if new_view_height > old_view_height {
                 let pending_vote_count: usize =
                     self.pending_votes.values().map(|v| v.len()).sum();
-                tracing::warn!(
+                tracing::debug!(
                     old_view_height,
                     new_view_height,
                     pending_votes_cleared = pending_vote_count,
@@ -1200,6 +1198,21 @@ impl ConsensusState {
         // MEMORY LEAK FIX: Prune pending_timeouts for old heights.
         self.pending_timeouts
             .retain(|&(height, _), _| height >= prune_below);
+
+        // FRAGMENTATION FIX: After millions of insert/remove cycles, HashMap
+        // internal capacity grows far beyond the number of live entries. The
+        // allocator keeps the old backing array allocated even after retain()
+        // removes entries. shrink_to_fit() releases that excess capacity.
+        // Only shrink periodically (every 1000 heights) to amortize cost.
+        if self.committed_height.is_multiple_of(1000) {
+            self.block_cache.shrink_to_fit();
+            self.qc_cache.shrink_to_fit();
+            self.block_by_hash.shrink_to_fit();
+            self.pending_votes.shrink_to_fit();
+            self.pending_timeouts.shrink_to_fit();
+            self.voted_in_round.shrink_to_fit();
+            self.timed_out_in_round.shrink_to_fit();
+        }
     }
 
     /// Apply commits with AI hook integration.

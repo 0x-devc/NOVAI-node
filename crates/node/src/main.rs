@@ -1160,8 +1160,15 @@ fn main() {
                         committed_height = state.committed_height,
                         round = state.round,
                         block_cache = state.block_cache.len(),
+                        block_by_hash = state.block_by_hash.len(),
+                        qc_cache = state.qc_cache.len(),
+                        pending_votes = state.pending_votes.len(),
+                        pending_timeouts = state.pending_timeouts.len(),
+                        voted_in_round = state.voted_in_round.len(),
+                        timed_out_in_round = state.timed_out_in_round.len(),
                         qc_broadcast_cache,
                         peers = node.peer_manager.peer_count(),
+                        view_changes = state.view_changes_total,
                         "RESOURCE_MONITOR"
                     );
                 }
@@ -1178,10 +1185,10 @@ fn main() {
                         let mut mp = mempool.lock_or_recover();
                         let mut reinserted = 0usize;
                         for tx in recovered {
-                            if tx.nonce >= nonce_provider.expected_nonce(&tx.from) {
-                                if mp.reinsert_unchecked(tx).is_ok() {
-                                    reinserted += 1;
-                                }
+                            if tx.nonce >= nonce_provider.expected_nonce(&tx.from)
+                                && mp.reinsert_unchecked(tx).is_ok()
+                            {
+                                reinserted += 1;
                             }
                         }
                         if reinserted > 0 {

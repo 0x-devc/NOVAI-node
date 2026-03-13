@@ -279,7 +279,7 @@ impl ConsensusNode {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
         for block in blocks {
             let hash = novai_consensus_types::codec::hash_block_v1(block).ok();
-            tracing::warn!(
+            tracing::debug!(
                 height = block.height,
                 round = block.round,
                 tx_count = block.txs.len(),
@@ -287,7 +287,7 @@ impl ConsensusNode {
                 "COMMIT_DIAG: committed block"
             );
         }
-        tracing::warn!(
+        tracing::debug!(
             block_count = blocks.len(),
             total_txs,
             "COMMIT_DIAG: execute_committed_blocks"
@@ -465,7 +465,22 @@ impl ConsensusNode {
     ///
     /// Returns Some(Timeout) if timeout duration elapsed and not already timed out.
     pub fn check_timeout(&self) -> Option<Timeout> {
-        // CRITICAL: Acquire state lock FIRST, then read round_start_time.
+        // FAST PATH: Read round_start_time WITHOUT the state lock to see if
+        // the minimum possible timeout (base_timeout_ms for round 0) has elapsed.
+        // This avoids acquiring the expensive state lock on ~99% of loop iterations
+        // (every 5ms when base_timeout_ms is typically 1000+ms).
+        //
+        // This is safe because the worst case of a stale read is that we acquire
+        // the state lock one extra time — we re-read round_start_time under the
+        // state lock below to prevent the TOCTOU race.
+        {
+            let start_time = *self.round_start_time.lock_or_recover();
+            if start_time.elapsed() < std::time::Duration::from_millis(self.base_timeout_ms) {
+                return None; // Definitely not timed out yet (even round 0 hasn't elapsed)
+            }
+        }
+
+        // SLOW PATH: Acquire state lock to get the actual round and recheck.
         // Lock order: state → round_start_time (matches handle_vote, handle_qc,
         // handle_proposal, try_propose_block — all reset round_start_time while
         // holding state lock).
@@ -501,7 +516,7 @@ impl ConsensusNode {
         match state.create_timeout(&self.signing_key) {
             Ok(timeout) => {
                 *self.last_timeout_time.lock_or_recover() = Some(Instant::now());
-                tracing::warn!(
+                tracing::debug!(
                     round = state.round,
                     elapsed = ?start_time.elapsed(),
                     highest_qc = ?state.highest_qc.as_ref().map(|q| q.height),
@@ -1053,7 +1068,7 @@ impl ConsensusNode {
 
         let block_hash = novai_consensus_types::codec::hash_block_v1(&block)
             .map_err(|e| format!("Hash block failed: {:?}", e))?;
-        tracing::warn!(
+        tracing::debug!(
             height = block.height,
             round = block.round,
             tx_count = block.txs.len(),
@@ -1297,7 +1312,7 @@ impl ConsensusNode {
             }
 
             if let Err(e) = state.verify_block(block, &*db) {
-                tracing::warn!(
+                tracing::debug!(
                     height = block.height,
                     round = block.round,
                     tx_count = block.txs.len(),
@@ -1310,7 +1325,7 @@ impl ConsensusNode {
 
             let recv_block_hash = novai_consensus_types::codec::hash_block_v1(block)
                 .map_err(|e| format!("Hash block failed: {:?}", e))?;
-            tracing::warn!(
+            tracing::debug!(
                 height = block.height,
                 round = block.round,
                 tx_count = block.txs.len(),
@@ -1432,7 +1447,7 @@ impl ConsensusNode {
 
             // Look up the certified block's tx_count for diagnostics
             let qc_block_txs = state.block_by_hash.get(&qc.block_hash).map(|b| b.txs.len());
-            tracing::warn!(
+            tracing::debug!(
                 qc_height = qc.height,
                 qc_round = qc.round,
                 votes = qc.votes.len(),
