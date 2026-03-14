@@ -33,6 +33,16 @@ pub const MAX_TIMEOUT_MS: u64 = 60_000; // 60 seconds
 /// from in-memory caches only (DB is never touched).
 pub const CACHE_RETAIN_DEPTH: u64 = 10;
 
+/// Number of committed blocks to retain on disk (RocksDB).
+/// When a new block is committed, blocks and QCs older than
+/// `committed_height - PRUNE_RETAIN_BLOCKS` are deleted from disk
+/// as part of the atomic commit batch.
+///
+/// 100,000 blocks at ~56 blocks/sec ≈ 30 minutes of history.
+/// The 3-chain commit rule only needs the last 3 blocks; catch-up sync
+/// needs more — 100K is generous.
+pub const PRUNE_RETAIN_BLOCKS: u64 = 100_000;
+
 /// Calculate timeout duration for a given round using the default base timeout.
 ///
 /// Uses exponential backoff: `min(BASE_TIMEOUT_MS * 2^round, MAX_TIMEOUT_MS)`
@@ -1408,6 +1418,25 @@ impl ConsensusState {
         // 5. AI operations (if provided)
         if let Some(ai_operations) = ai_ops {
             ops.extend_from_slice(ai_operations);
+        }
+
+        // 6. Prune old blocks and QCs from disk to cap DB size.
+        // Delete block/QC data older than PRUNE_RETAIN_BLOCKS behind the
+        // new committed height. This keeps RocksDB size bounded regardless
+        // of chain height. Deletions are part of the atomic batch, so
+        // pruning is crash-safe (either commit + prune both apply, or neither).
+        if new_committed_height > PRUNE_RETAIN_BLOCKS {
+            let prune_below = new_committed_height - PRUNE_RETAIN_BLOCKS;
+            // Delete block and QC for each newly-prunable height.
+            // Usually only 1 height per commit (blocks.len() == 1), but
+            // batch commits may prune multiple heights.
+            for block in blocks {
+                let prune_height = block.height.saturating_sub(PRUNE_RETAIN_BLOCKS);
+                if prune_height > 0 && prune_height <= prune_below {
+                    ops.push(WriteOp::Delete(block_key(prune_height)));
+                    ops.push(WriteOp::Delete(qc_key(prune_height)));
+                }
+            }
         }
 
         // Apply all writes atomically

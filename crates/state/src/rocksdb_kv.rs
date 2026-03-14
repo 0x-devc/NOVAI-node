@@ -52,6 +52,22 @@ impl RocksKv {
         // share a single machine (e.g., 4-node testnet on one server).
         opts.set_max_open_files(256);
 
+        // Write-heavy blockchain workload tuning:
+        // - 64MB write buffer (default 4MB) → fewer flushes, faster writes
+        // - 3 memtables → more write buffer capacity before stalling
+        // - 64MB L0 target file size → larger SST files, fewer compactions
+        // - Dynamic level sizing → optimizes LSM tree shape automatically
+        // - 4 background jobs → parallel flush + compaction
+        // - LZ4 compression → ~50% size reduction, fast enough for hot path
+        // - Zstd for bottommost level → best compression ratio for cold data
+        opts.set_write_buffer_size(64 * 1024 * 1024);
+        opts.set_max_write_buffer_number(3);
+        opts.set_target_file_size_base(64 * 1024 * 1024);
+        opts.set_level_compaction_dynamic_level_bytes(true);
+        opts.set_max_background_jobs(4);
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+
         // Try to list existing column families
         let existing_cfs = match DB::list_cf(&opts, path) {
             Ok(cfs) => cfs,
@@ -61,17 +77,25 @@ impl RocksKv {
             }
         };
 
-        // Build column family descriptors
+        // Build column family descriptors with matching compression settings.
+        // CF-level options override DB-level options, so we must set compression
+        // on each CF descriptor to ensure all column families use LZ4/Zstd.
+        let cf_opts = || {
+            let mut o = Options::default();
+            o.set_compression_type(rocksdb::DBCompressionType::Lz4);
+            o.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+            o
+        };
         let mut cf_descriptors = Vec::new();
 
         // Default CF always exists
-        cf_descriptors.push(ColumnFamilyDescriptor::new(CF_DEFAULT, Options::default()));
+        cf_descriptors.push(ColumnFamilyDescriptor::new(CF_DEFAULT, cf_opts()));
 
         // Add nnpx CF if it exists or create it
         if existing_cfs.contains(&CF_NNPX.to_string())
             || !existing_cfs.contains(&CF_NNPX.to_string())
         {
-            cf_descriptors.push(ColumnFamilyDescriptor::new(CF_NNPX, Options::default()));
+            cf_descriptors.push(ColumnFamilyDescriptor::new(CF_NNPX, cf_opts()));
         }
 
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)?;
