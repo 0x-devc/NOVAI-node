@@ -292,6 +292,10 @@ impl ConsensusNode {
             total_txs,
             "COMMIT_DIAG: execute_committed_blocks"
         );
+        if total_txs > 0 {
+            let block_count = blocks.len();
+            tracing::info!(block_count, total_txs, "Committed blocks with transactions");
+        }
         if let Some(ref cb) = self.commit_callback {
             cb.on_commit(db, blocks);
         }

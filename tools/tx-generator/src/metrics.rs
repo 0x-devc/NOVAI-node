@@ -223,11 +223,46 @@ pub struct MetricsHandle {
     collector_handle: tokio::task::JoinHandle<()>,
 }
 
+/// Lightweight read handle for periodic stats logging.
+///
+/// Provides direct access to counters without the full snapshot overhead.
+pub struct MetricsReadHandle {
+    state: Arc<RwLock<MetricsState>>,
+}
+
+impl MetricsReadHandle {
+    pub async fn read(&self) -> MetricsStateView<'_> {
+        MetricsStateView(self.state.read().await)
+    }
+}
+
+/// RAII view into metrics state for reading counters.
+pub struct MetricsStateView<'a>(tokio::sync::RwLockReadGuard<'a, MetricsState>);
+
+impl MetricsStateView<'_> {
+    pub fn accepted_count(&self) -> u64 {
+        self.0.accepted_count
+    }
+    pub fn rejected_count(&self) -> u64 {
+        self.0.rejected_count
+    }
+    pub fn elapsed_secs(&self) -> f64 {
+        self.0.start_time.elapsed().as_secs_f64()
+    }
+}
+
 impl MetricsHandle {
     /// Get current metrics snapshot.
     pub async fn snapshot(&self) -> MetricsSnapshot {
         let state = self.state.read().await;
         state.snapshot()
+    }
+
+    /// Clone the shared state for periodic stats logging.
+    pub fn clone_state(&self) -> MetricsReadHandle {
+        MetricsReadHandle {
+            state: Arc::clone(&self.state),
+        }
     }
 
     /// Wait for collector to finish (after channel closes).

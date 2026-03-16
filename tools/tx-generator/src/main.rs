@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
         track_confirmations: args.track_confirmations,
         ..Default::default()
     };
-    let submitter = submitter::Submitter::new(submitter_config);
+    let submitter = submitter::Submitter::new(submitter_config, Arc::clone(&sender_pool));
     let submitter_handle = submitter.start(tx_receiver, metric_tx);
     info!("Started {} submitter workers", args.workers);
 
@@ -134,6 +134,36 @@ async fn main() -> Result<()> {
 
     info!("=== Load test running ===");
 
+    // 5b. Start periodic stats logger (every 60s in continuous mode)
+    let stats_logger = if args.continuous || args.duration == 0 {
+        let metrics_for_stats = metrics_handle.clone_state();
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                let snap = metrics_for_stats.read().await;
+                let elapsed = snap.elapsed_secs();
+                let accepted = snap.accepted_count();
+                let rejected = snap.rejected_count();
+                let tps = if elapsed > 0.0 {
+                    accepted as f64 / elapsed
+                } else {
+                    0.0
+                };
+                info!(
+                    accepted,
+                    rejected,
+                    tps = format!("{:.1}", tps),
+                    elapsed_s = format!("{:.0}", elapsed),
+                    "TXGEN_STATS"
+                );
+            }
+        }))
+    } else {
+        None
+    };
+
     // 6. Wait for generator to complete (duration or Ctrl+C)
     let generator_stats = tokio::select! {
         stats = generator_handle.wait() => {
@@ -147,6 +177,11 @@ async fn main() -> Result<()> {
             generator::GeneratorStats::default()
         }
     };
+
+    // Stop periodic stats logger
+    if let Some(handle) = stats_logger {
+        handle.abort();
+    }
 
     info!(
         "Generator stats: generated={}, dropped={}, runtime={}ms, actual_tps={:.2}",

@@ -11,8 +11,10 @@
 //! - Channel closed - workers terminate
 
 use crate::metrics::MetricEvent;
+use crate::sender::SenderPool;
 use novai_codec::{encode_tx_v1_signed, txid_v1};
-use novai_types::{TxId, TxV1};
+use novai_types::{Address, TxId, TxV1};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -132,15 +134,22 @@ pub struct SubmitterStats {
     pub confirmed_count: u64, // TODO: Implement confirmation tracking
 }
 
+/// Number of consecutive rejections before resetting a sender's nonce to 0.
+const NONCE_RESET_THRESHOLD: u32 = 10;
+
 /// Transaction submitter with worker pool.
 pub struct Submitter {
     config: SubmitterConfig,
     http_client: reqwest::Client,
+    sender_pool: Arc<SenderPool>,
 }
 
 impl Submitter {
-    /// Create a new submitter with the given configuration.
-    pub fn new(config: SubmitterConfig) -> Self {
+    /// Create a new submitter with the given configuration and sender pool.
+    ///
+    /// The sender pool is used to reset nonces when a sender hits too many
+    /// consecutive rejections (e.g., after a node restart with fresh state).
+    pub fn new(config: SubmitterConfig, sender_pool: Arc<SenderPool>) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(config.request_timeout)
             .build()
@@ -149,6 +158,7 @@ impl Submitter {
         Self {
             config,
             http_client,
+            sender_pool,
         }
     }
 
@@ -179,9 +189,12 @@ impl Submitter {
             let metric_tx = metric_tx.clone();
             let mut shutdown_rx = shutdown_tx.subscribe();
             let tx_receiver = Arc::clone(&tx_receiver);
+            let sender_pool = Arc::clone(&self.sender_pool);
 
             let handle = tokio::spawn(async move {
                 let mut stats = WorkerStats::default();
+                // Track consecutive rejections per sender address for nonce reset
+                let mut consecutive_rejections: HashMap<Address, u32> = HashMap::new();
 
                 loop {
                     tokio::select! {
@@ -190,6 +203,7 @@ impl Submitter {
                             rx.recv().await
                         } => {
                             stats.submitted_count += 1;
+                            let sender_address = tx.from;
 
                             let result = submit_with_retry(
                                 &http_client,
@@ -204,9 +218,31 @@ impl Submitter {
                             match result {
                                 SubmitResult::Accepted { .. } => {
                                     stats.accepted_count += 1;
+                                    // Clear rejection streak on success
+                                    consecutive_rejections.remove(&sender_address);
                                 }
                                 SubmitResult::Rejected { .. } => {
                                     stats.rejected_count += 1;
+                                    let count = consecutive_rejections
+                                        .entry(sender_address)
+                                        .or_insert(0);
+                                    *count += 1;
+                                    if *count >= NONCE_RESET_THRESHOLD {
+                                        if let Some(sender) =
+                                            sender_pool.find_by_address(&sender_address)
+                                        {
+                                            let old_nonce = sender.current_nonce();
+                                            sender.reset_nonce(0);
+                                            info!(
+                                                worker_id,
+                                                sender = ?&sender_address[..4],
+                                                old_nonce,
+                                                "Nonce reset to 0 after {} consecutive rejections",
+                                                NONCE_RESET_THRESHOLD
+                                            );
+                                        }
+                                        *count = 0;
+                                    }
                                 }
                                 SubmitResult::Failed { .. } => {
                                     stats.failed_count += 1;
@@ -515,6 +551,7 @@ mod tests {
     #[tokio::test]
     async fn workers_shutdown_gracefully() {
         use crate::metrics;
+        use crate::sender::SenderPool;
 
         let (tx_sender, tx_receiver) = mpsc::channel(10);
         let (metric_tx, _metric_rx) = metrics::metric_channel();
@@ -524,7 +561,8 @@ mod tests {
             ..Default::default()
         };
 
-        let submitter = Submitter::new(config);
+        let pool = Arc::new(SenderPool::new(1));
+        let submitter = Submitter::new(config, pool);
         let handle = submitter.start(tx_receiver, metric_tx);
 
         // Send shutdown signal immediately

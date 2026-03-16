@@ -80,6 +80,15 @@ impl SenderAccount {
     pub fn rollback_nonce(&self) {
         self.nonce.fetch_sub(1, Ordering::SeqCst);
     }
+
+    /// Reset nonce to a specific value.
+    ///
+    /// Used to recover from nonce desync (e.g., after node restart with fresh
+    /// state). In-flight transactions with higher nonces will be rejected, but
+    /// subsequent transactions will use the reset value.
+    pub fn reset_nonce(&self, value: u64) {
+        self.nonce.store(value, Ordering::SeqCst);
+    }
 }
 
 /// Pool of sender accounts for transaction generation.
@@ -127,6 +136,11 @@ impl SenderPool {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.accounts.is_empty()
+    }
+
+    /// Find a sender account by its address.
+    pub fn find_by_address(&self, address: &Address) -> Option<Arc<SenderAccount>> {
+        self.accounts.iter().find(|a| a.address == *address).cloned()
     }
 
     /// Get all accounts (for reporting).
