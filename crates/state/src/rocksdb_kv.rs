@@ -60,6 +60,7 @@ impl RocksKv {
         // - 4 background jobs → parallel flush + compaction
         // - LZ4 compression → ~50% size reduction, fast enough for hot path
         // - Zstd for bottommost level → best compression ratio for cold data
+        // - Relaxed L0 write stall thresholds → prevent stalls at scale
         opts.set_write_buffer_size(64 * 1024 * 1024);
         opts.set_max_write_buffer_number(3);
         opts.set_target_file_size_base(64 * 1024 * 1024);
@@ -67,36 +68,35 @@ impl RocksKv {
         opts.set_max_background_jobs(4);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+        // Prevent write stalls under compaction pressure at scale.
+        // Defaults (slowdown=20, stop=36) can trigger on long-running
+        // chains with continuous insert/delete cycles. Raising these
+        // thresholds keeps the consensus hot path unblocked.
+        opts.set_level_zero_slowdown_writes_trigger(36);
+        opts.set_level_zero_stop_writes_trigger(64);
 
-        // Try to list existing column families
-        let existing_cfs = match DB::list_cf(&opts, path) {
-            Ok(cfs) => cfs,
-            Err(_) => {
-                // Database doesn't exist yet, will be created with both CFs
-                vec![CF_DEFAULT.to_string()]
-            }
-        };
-
-        // Build column family descriptors with matching compression settings.
-        // CF-level options override DB-level options, so we must set compression
-        // on each CF descriptor to ensure all column families use LZ4/Zstd.
+        // Build column family descriptors with full write-heavy tuning.
+        // CF-level options override DB-level options for per-CF settings
+        // (write buffers, compression, compaction triggers), so we must
+        // replicate the tuning on each CF descriptor.
         let cf_opts = || {
             let mut o = Options::default();
+            o.set_write_buffer_size(64 * 1024 * 1024);
+            o.set_max_write_buffer_number(3);
+            o.set_target_file_size_base(64 * 1024 * 1024);
+            o.set_level_compaction_dynamic_level_bytes(true);
             o.set_compression_type(rocksdb::DBCompressionType::Lz4);
             o.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+            o.set_level_zero_slowdown_writes_trigger(36);
+            o.set_level_zero_stop_writes_trigger(64);
             o
         };
-        let mut cf_descriptors = Vec::new();
-
-        // Default CF always exists
-        cf_descriptors.push(ColumnFamilyDescriptor::new(CF_DEFAULT, cf_opts()));
-
-        // Add nnpx CF if it exists or create it
-        if existing_cfs.contains(&CF_NNPX.to_string())
-            || !existing_cfs.contains(&CF_NNPX.to_string())
-        {
-            cf_descriptors.push(ColumnFamilyDescriptor::new(CF_NNPX, cf_opts()));
-        }
+        let cf_descriptors = vec![
+            ColumnFamilyDescriptor::new(CF_DEFAULT, cf_opts()),
+            // Always include nnpx CF — create_missing_column_families handles
+            // the case where the DB exists without it (migration support).
+            ColumnFamilyDescriptor::new(CF_NNPX, cf_opts()),
+        ];
 
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)?;
         Ok(Self { db })

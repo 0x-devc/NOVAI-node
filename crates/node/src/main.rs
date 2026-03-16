@@ -146,7 +146,7 @@ struct ExecutionCommitCallback {
 impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
     fn on_commit(&self, db: &mut Storage, blocks: &[novai_consensus_types::Block]) {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
-        tracing::info!(block_count = blocks.len(), total_txs, "on_commit executing");
+        tracing::debug!(block_count = blocks.len(), total_txs, "on_commit executing");
         for block in blocks {
             for tx in &block.txs {
                 match novai_execution::dispatch_tx(db, tx, block.height) {

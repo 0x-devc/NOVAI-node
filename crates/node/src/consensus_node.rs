@@ -1214,7 +1214,7 @@ impl ConsensusNode {
             };
 
             if dominated {
-                tracing::info!(
+                tracing::debug!(
                     qc_height = justify_qc.height,
                     qc_round = justify_qc.round,
                     our_highest_qc = ?state.highest_qc.as_ref().map(|q| (q.height, q.round)),
@@ -1238,7 +1238,7 @@ impl ConsensusNode {
                         })?;
                         self.execute_committed_blocks(&mut db, &to_commit);
                         committed_height_for_prune = Some(new_committed_height);
-                        tracing::info!(
+                        tracing::debug!(
                             committed_height = new_committed_height,
                             "QC catch-up committed blocks"
                         );
@@ -1462,6 +1462,7 @@ impl ConsensusNode {
             // nodes can advance.
             // Lock order: state (already held) → db
             let mut vote_committed_height: Option<u64> = None;
+            let mut committed_blocks: Vec<novai_consensus_types::Block> = Vec::new();
             let mut db = self.db.lock_or_recover();
             match state.cache_qc_and_check_commit(qc.clone(), &*db) {
                 Ok(to_commit) if !to_commit.is_empty() => {
@@ -1478,9 +1479,9 @@ impl ConsensusNode {
                     state.apply_commits(&to_commit).map_err(|e| {
                         format!("CONSENSUS SAFETY VIOLATION during vote commit: {:?}", e)
                     })?;
-                    self.execute_committed_blocks(&mut db, &to_commit);
                     vote_committed_height = Some(new_committed_height);
-                    tracing::info!(
+                    committed_blocks = to_commit;
+                    tracing::debug!(
                         committed_height = new_committed_height,
                         "Committed blocks (formed QC locally)"
                     );
@@ -1512,7 +1513,15 @@ impl ConsensusNode {
             *self.round_start_time.lock_or_recover() = Instant::now();
             *self.last_timeout_time.lock_or_recover() = None;
 
+            // Release state lock EARLY — execution writes to different DB
+            // namespaces than consensus (no overlap), so we only need the
+            // db lock. This frees the state lock for other threads during
+            // tx execution.
             drop(state);
+
+            if !committed_blocks.is_empty() {
+                self.execute_committed_blocks(&mut db, &committed_blocks);
+            }
             drop(db);
 
             // Trigger block sync for missing blocks (locks now dropped)
@@ -1549,6 +1558,7 @@ impl ConsensusNode {
         let mut db = self.db.lock_or_recover();
         let mut committed = false;
         let mut qc_committed_height: Option<u64> = None;
+        let mut committed_blocks: Vec<novai_consensus_types::Block> = Vec::new();
         match state.cache_qc_and_check_commit(qc.clone(), &*db) {
             Ok(to_commit) if !to_commit.is_empty() => {
                 let new_committed_height = to_commit.last().unwrap().height;
@@ -1558,9 +1568,9 @@ impl ConsensusNode {
                 state
                     .apply_commits(&to_commit)
                     .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during QC commit: {:?}", e))?;
-                self.execute_committed_blocks(&mut db, &to_commit);
                 committed = true;
                 qc_committed_height = Some(new_committed_height);
+                committed_blocks = to_commit;
                 tracing::debug!(
                     committed_height = state.committed_height(),
                     highest_qc = state.highest_qc.as_ref().map(|q| q.height).unwrap_or(0),
@@ -1602,8 +1612,15 @@ impl ConsensusNode {
             *self.last_timeout_time.lock_or_recover() = None;
         }
 
-        // Release locks before updating node-level flags and triggering sync
+        // Release state lock EARLY — execution writes to different DB
+        // namespaces than consensus (no overlap), so we only need the
+        // db lock. This frees the state lock for other threads during
+        // tx execution.
         drop(state);
+
+        if !committed_blocks.is_empty() {
+            self.execute_committed_blocks(&mut db, &committed_blocks);
+        }
         drop(db);
 
         // Prune QC broadcast cache after commit

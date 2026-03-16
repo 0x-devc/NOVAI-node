@@ -984,7 +984,7 @@ impl ConsensusState {
         }
 
         // === VERIFY CHAIN LINKAGE ===
-        tracing::info!(
+        tracing::debug!(
             qc_height,
             commit_target,
             committed_height = self.committed_height,
@@ -995,7 +995,7 @@ impl ConsensusState {
 
         // 1. Find B_H (certified block) by QC's block_hash (with DB fallback)
         let block_h = if let Some(b) = self.block_by_hash.get(&qc.block_hash) {
-            tracing::info!(
+            tracing::debug!(
                 height = b.height,
                 round = b.round,
                 tx_count = b.txs.len(),
@@ -1070,7 +1070,7 @@ impl ConsensusState {
                 (loaded, "db")
             };
 
-            tracing::info!(
+            tracing::debug!(
                 expected_height,
                 actual_height = block.height,
                 round = block.round,
@@ -1101,7 +1101,7 @@ impl ConsensusState {
         chain.reverse();
 
         let total_commit_txs: usize = chain.iter().map(|b| b.txs.len()).sum();
-        tracing::info!(
+        tracing::debug!(
             commit_blocks = chain.len(),
             total_commit_txs,
             "commit chain built"
