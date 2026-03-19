@@ -461,6 +461,10 @@ impl ConsensusNode {
         cache.retain(|&(height, _, _)| height >= prune_below);
         let pruned = before - cache.len();
         if pruned > 0 {
+            // Reclaim backing array capacity after pruning. Without
+            // shrink_to_fit, the HashSet keeps high-watermark capacity
+            // across millions of insert/retain cycles.
+            cache.shrink_to_fit();
             tracing::debug!(pruned, remaining = cache.len(), "Pruned QC broadcast cache");
         }
     }

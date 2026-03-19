@@ -963,6 +963,14 @@ impl ConsensusState {
                 self.timed_out_in_round.clear();
                 self.pending_timeouts.clear();
                 self.last_proposed = None;
+                // Reclaim capacity after clear() — without this,
+                // HashMap/HashSet backing arrays survive across every
+                // view advance, accumulating high-watermark capacity
+                // over millions of blocks.
+                self.pending_votes.shrink_to_fit();
+                self.voted_in_round.shrink_to_fit();
+                self.timed_out_in_round.shrink_to_fit();
+                self.pending_timeouts.shrink_to_fit();
             }
 
             self.highest_qc = Some(qc.clone());
@@ -1213,8 +1221,9 @@ impl ConsensusState {
         // internal capacity grows far beyond the number of live entries. The
         // allocator keeps the old backing array allocated even after retain()
         // removes entries. shrink_to_fit() releases that excess capacity.
-        // Only shrink periodically (every 1000 heights) to amortize cost.
-        if self.committed_height.is_multiple_of(1000) {
+        // Shrink every 256 heights (was 1000 — more aggressive to keep
+        // RSS bounded over multi-million block runs).
+        if self.committed_height & 0xFF == 0 {
             self.block_cache.shrink_to_fit();
             self.qc_cache.shrink_to_fit();
             self.block_by_hash.shrink_to_fit();

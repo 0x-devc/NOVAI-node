@@ -1155,22 +1155,34 @@ fn main() {
                 if last_resource_log.elapsed() >= Duration::from_secs(60) {
                     last_resource_log = std::time::Instant::now();
                     let state = node.state.lock_or_recover();
-                    let qc_broadcast_cache = node.qc_broadcasted.lock_or_recover().len();
+                    let qc_bc = node.qc_broadcasted.lock_or_recover();
+                    let nonce_map = nonce_provider.expected.lock().unwrap_or_else(|p| p.into_inner());
                     tracing::info!(
                         committed_height = state.committed_height,
                         round = state.round,
-                        block_cache = state.block_cache.len(),
-                        block_by_hash = state.block_by_hash.len(),
-                        qc_cache = state.qc_cache.len(),
-                        pending_votes = state.pending_votes.len(),
-                        pending_timeouts = state.pending_timeouts.len(),
-                        voted_in_round = state.voted_in_round.len(),
-                        timed_out_in_round = state.timed_out_in_round.len(),
-                        qc_broadcast_cache,
+                        block_cache_len = state.block_cache.len(),
+                        block_cache_cap = state.block_cache.capacity(),
+                        block_by_hash_len = state.block_by_hash.len(),
+                        block_by_hash_cap = state.block_by_hash.capacity(),
+                        qc_cache_len = state.qc_cache.len(),
+                        qc_cache_cap = state.qc_cache.capacity(),
+                        pending_votes_len = state.pending_votes.len(),
+                        pending_votes_cap = state.pending_votes.capacity(),
+                        pending_timeouts_len = state.pending_timeouts.len(),
+                        pending_timeouts_cap = state.pending_timeouts.capacity(),
+                        voted_in_round_len = state.voted_in_round.len(),
+                        voted_in_round_cap = state.voted_in_round.capacity(),
+                        timed_out_in_round_len = state.timed_out_in_round.len(),
+                        qc_broadcast_len = qc_bc.len(),
+                        qc_broadcast_cap = qc_bc.capacity(),
+                        nonce_map_len = nonce_map.len(),
                         peers = node.peer_manager.peer_count(),
                         view_changes = state.view_changes_total,
                         "RESOURCE_MONITOR"
                     );
+                    drop(nonce_map);
+                    drop(qc_bc);
+                    drop(state);
                 }
 
                 // Propose every proposal_interval_ms (must be less than BASE_TIMEOUT_MS for consensus to work)
