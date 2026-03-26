@@ -134,7 +134,8 @@ pub struct SubmitterStats {
     pub confirmed_count: u64, // TODO: Implement confirmation tracking
 }
 
-/// Number of consecutive rejections before resetting a sender's nonce to 0.
+/// Number of consecutive rejections before querying the chain for the
+/// correct nonce and resetting the sender.
 const NONCE_RESET_THRESHOLD: u32 = 10;
 
 /// Transaction submitter with worker pool.
@@ -232,12 +233,25 @@ impl Submitter {
                                             sender_pool.find_by_address(&sender_address)
                                         {
                                             let old_nonce = sender.current_nonce();
-                                            sender.reset_nonce(0);
+                                            // Query chain for the expected nonce instead of
+                                            // blindly resetting to 0. Resetting to 0 causes
+                                            // an infinite rejection loop when the chain has
+                                            // already committed transactions (expected > 0).
+                                            let chain_nonce = query_chain_nonce(
+                                                &http_client,
+                                                &endpoint,
+                                                &sender_address,
+                                            )
+                                            .await;
+                                            let new_nonce = chain_nonce.unwrap_or(0);
+                                            sender.reset_nonce(new_nonce);
                                             info!(
                                                 worker_id,
                                                 sender = ?&sender_address[..4],
                                                 old_nonce,
-                                                "Nonce reset to 0 after {} consecutive rejections",
+                                                new_nonce,
+                                                from_chain = chain_nonce.is_some(),
+                                                "Nonce reset after {} consecutive rejections",
                                                 NONCE_RESET_THRESHOLD
                                             );
                                         }
@@ -418,6 +432,44 @@ async fn submit_once(
     txid.copy_from_slice(&txid_bytes);
 
     Ok(txid)
+}
+
+/// Query the chain's expected nonce for an address via RPC.
+///
+/// Returns `Some(nonce)` on success, `None` if the RPC call fails
+/// (in which case the caller falls back to 0).
+async fn query_chain_nonce(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    address: &Address,
+) -> Option<u64> {
+    let rpc_request = RpcRequest {
+        jsonrpc: "2.0",
+        method: "novai_getNonce",
+        params: serde_json::json!({ "address": hex::encode(address) }),
+        id: 1,
+    };
+
+    let response = http_client
+        .post(endpoint)
+        .json(&rpc_request)
+        .send()
+        .await
+        .ok()?;
+
+    let rpc_response: RpcResponse<GetNonceResponse> = response.json().await.ok()?;
+
+    if rpc_response.error.is_some() {
+        return None;
+    }
+
+    rpc_response.result.map(|r| r.nonce)
+}
+
+/// Response from novai_getNonce.
+#[derive(serde::Deserialize)]
+struct GetNonceResponse {
+    nonce: u64,
 }
 
 /// Check if error is a validation error (should not retry).

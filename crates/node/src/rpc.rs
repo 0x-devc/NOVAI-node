@@ -93,6 +93,18 @@ struct SubmitTxResult {
     txid: String, // Hex-encoded transaction ID
 }
 
+/// Parameters for novai_getNonce.
+#[derive(Debug, Deserialize)]
+struct GetNonceParams {
+    address: String, // Hex-encoded 32-byte address
+}
+
+/// Result for novai_getNonce.
+#[derive(Debug, Serialize)]
+struct GetNonceResult {
+    nonce: u64,
+}
+
 // ============================================================================
 // SIGNAL QUERY RPC TYPES (Week 14 - D14.5)
 // ============================================================================
@@ -246,6 +258,24 @@ pub fn start_rpc_server(
                         }
                     }
                 }
+                "novai_getNonce" => match handle_get_nonce(&rpc_request, &nonce) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
                 _ => {
                     let response = RpcErrorResponse {
                         jsonrpc: "2.0",
@@ -530,6 +560,38 @@ fn handle_submit_tx(
             })
         }
     }
+}
+
+/// Handle novai_getNonce RPC method.
+///
+/// Returns the expected next nonce for a given address. The tx-generator
+/// uses this to resync after consecutive rejections instead of blindly
+/// resetting to 0.
+fn handle_get_nonce(
+    request: &RpcRequest,
+    nonce_provider: &SharedNonceProvider,
+) -> Result<GetNonceResult, RpcError> {
+    let params: GetNonceParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {}", e),
+        })?;
+
+    let addr_bytes = hex::decode(&params.address).map_err(|e| RpcError {
+        code: -32602,
+        message: format!("Invalid address hex: {}", e),
+    })?;
+    if addr_bytes.len() != 32 {
+        return Err(RpcError {
+            code: -32602,
+            message: format!("Address must be 32 bytes, got {}", addr_bytes.len()),
+        });
+    }
+    let mut address = [0u8; 32];
+    address.copy_from_slice(&addr_bytes);
+
+    let nonce = nonce_provider.expected_nonce(&address);
+    Ok(GetNonceResult { nonce })
 }
 
 // ============================================================================
