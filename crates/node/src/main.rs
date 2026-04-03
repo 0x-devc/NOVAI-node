@@ -1044,13 +1044,14 @@ fn main() {
                 tracing::error!(%e, "Failed to start metrics server");
             }
 
-            // Start RPC server for transaction submission
+            // Start RPC server with state access (transaction submission + queries)
             let rpc_addr = format!("0.0.0.0:{}", rpc_port);
-            if let Err(e) = rpc::start_rpc_server(
+            if let Err(e) = rpc::start_rpc_server_with_state(
                 &rpc_addr,
                 Arc::clone(&mempool),
                 Arc::clone(&nonce_provider) as Arc<dyn NonceProvider + Send + Sync>,
-                Some(Arc::clone(&node.peer_manager)),
+                Arc::clone(&node.db),
+                dev_keys,
             ) {
                 tracing::error!(%e, "Failed to start RPC server");
             }
@@ -1156,7 +1157,10 @@ fn main() {
                     last_resource_log = std::time::Instant::now();
                     let state = node.state.lock_or_recover();
                     let qc_bc = node.qc_broadcasted.lock_or_recover();
-                    let nonce_map = nonce_provider.expected.lock().unwrap_or_else(|p| p.into_inner());
+                    let nonce_map = nonce_provider
+                        .expected
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     tracing::info!(
                         committed_height = state.committed_height,
                         round = state.round,

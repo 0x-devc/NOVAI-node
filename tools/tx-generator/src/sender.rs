@@ -140,7 +140,10 @@ impl SenderPool {
 
     /// Find a sender account by its address.
     pub fn find_by_address(&self, address: &Address) -> Option<Arc<SenderAccount>> {
-        self.accounts.iter().find(|a| a.address == *address).cloned()
+        self.accounts
+            .iter()
+            .find(|a| a.address == *address)
+            .cloned()
     }
 
     /// Get all accounts (for reporting).

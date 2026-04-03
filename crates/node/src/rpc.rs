@@ -16,13 +16,17 @@
 //! - Mempool full → returns RPC error -32001
 //! - State query error → returns RPC error -32002
 
+use crate::consensus_node::Storage;
 use mempool::{NonceProvider, TxMempool};
 use novai_ai_entities::{AiSignalType, SignalCommitment};
 use novai_codec::{decode_tx_v1_signed, txid_v1};
-use novai_execution::{get_signals_by_height, get_signals_by_issuer, get_signals_by_type};
+use novai_crypto::{address_from_pubkey, sign_tx_v1};
+use novai_execution::{
+    get_memory_objects_by_entity, get_signals_by_height, get_signals_by_issuer,
+    get_signals_by_type, read_account_or_default, read_ai_entity,
+};
 use novai_p2p::{NetworkMessage, PeerManager};
-use novai_state::MemKv;
-use novai_types::{Address, TxV1};
+use novai_types::{Address, TxV1, TxVersion};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -156,6 +160,96 @@ impl From<SignalCommitment> for SignalCommitmentJson {
 struct SignalQueryResult {
     signals: Vec<SignalCommitmentJson>,
 }
+
+// ============================================================================
+// STATE QUERY RPC TYPES (CLI support)
+// ============================================================================
+
+/// Parameters for novai_getBalance.
+#[derive(Debug, Deserialize)]
+struct GetBalanceParams {
+    address: String, // Hex-encoded 32-byte address
+}
+
+/// Result for novai_getBalance.
+#[derive(Debug, Serialize)]
+struct GetBalanceResult {
+    balance: String, // u128 as decimal string (avoids JSON number precision loss)
+    nonce: u64,
+}
+
+/// Parameters for novai_getAiEntity.
+#[derive(Debug, Deserialize)]
+struct GetAiEntityParams {
+    entity_id: String, // Hex-encoded 32-byte entity ID
+}
+
+/// JSON-serializable AI entity.
+#[derive(Debug, Serialize)]
+struct AiEntityJson {
+    id: String,
+    code_hash: String,
+    creator: String,
+    autonomy_mode: u8,
+    capabilities: u8,
+    economic_balance: String,
+    nonce: u64,
+    pubkey: String,
+    memory_root: String,
+    params_root: String,
+    registered_at: u64,
+    last_active_at: u64,
+    is_active: bool,
+}
+
+/// Result for novai_getAiEntity.
+#[derive(Debug, Serialize)]
+struct GetAiEntityResult {
+    entity: Option<AiEntityJson>,
+}
+
+/// Parameters for novai_getMemoryObjects.
+#[derive(Debug, Deserialize)]
+struct GetMemoryObjectsParams {
+    entity_id: String, // Hex-encoded 32-byte entity ID
+}
+
+/// JSON-serializable memory object.
+#[derive(Debug, Serialize)]
+struct MemoryObjectJson {
+    object_id: String,
+    object_type: u8,
+    owner_entity: String,
+    created_at: u64,
+    updated_at: u64,
+    data: String, // Hex-encoded
+    data_size: usize,
+}
+
+/// Result for novai_getMemoryObjects.
+#[derive(Debug, Serialize)]
+struct GetMemoryObjectsResult {
+    objects: Vec<MemoryObjectJson>,
+}
+
+/// Parameters for novai_faucet.
+#[derive(Debug, Deserialize)]
+struct FaucetParams {
+    address: String, // Hex-encoded 32-byte address to fund
+}
+
+/// Result for novai_faucet.
+#[derive(Debug, Serialize)]
+struct FaucetResult {
+    txid: String,
+    amount: String, // u64 as decimal string
+}
+
+/// Faucet account index (dev account 99).
+const FAUCET_ACCOUNT_INDEX: usize = 99;
+
+/// Amount dispensed per faucet request.
+const FAUCET_AMOUNT: u64 = 10_000_000;
 
 /// Start the JSON-RPC server.
 ///
@@ -298,13 +392,14 @@ pub fn start_rpc_server(
 
 /// Start the JSON-RPC server with state access (Week 14 - D14.5).
 ///
-/// Extended server that supports both transaction submission and signal queries.
+/// Extended server that supports both transaction submission and state queries.
 ///
 /// # Arguments
 /// - `bind_addr` - Address to bind the HTTP server (e.g., "0.0.0.0:9545")
 /// - `mempool` - Shared mempool for transaction submission
 /// - `nonce_provider` - Provides expected nonces for transaction validation
-/// - `db` - Shared state database for signal queries
+/// - `db` - Shared state database for queries
+/// - `dev_keys` - Whether dev mode is active (enables faucet endpoint)
 ///
 /// # Errors
 /// Returns error if the server cannot bind to the address.
@@ -312,7 +407,8 @@ pub fn start_rpc_server_with_state(
     bind_addr: &str,
     mempool: Arc<Mutex<TxMempool>>,
     nonce_provider: Arc<dyn NonceProvider + Send + Sync>,
-    db: Arc<Mutex<MemKv>>,
+    db: Arc<Mutex<Storage>>,
+    dev_keys: bool,
 ) -> Result<(), String> {
     let addr: SocketAddr = bind_addr
         .parse()
@@ -397,6 +493,24 @@ pub fn start_rpc_server_with_state(
                         }
                     }
                 }
+                "novai_getNonce" => match handle_get_nonce(&rpc_request, &nonce) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
                 // Week 14 - D14.5: Signal query methods
                 "novai_getSignalsByHeight" => {
                     match handle_get_signals_by_height(&rpc_request, &db) {
@@ -439,6 +553,78 @@ pub fn start_rpc_server_with_state(
                     }
                 }
                 "novai_getSignalsByType" => match handle_get_signals_by_type(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_getBalance" => match handle_get_balance(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_getAiEntity" => match handle_get_ai_entity(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_getMemoryObjects" => match handle_get_memory_objects(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_faucet" => match handle_faucet(&rpc_request, &mempool, &nonce, dev_keys) {
                     Ok(result) => {
                         let response = RpcResponse {
                             jsonrpc: "2.0",
@@ -601,7 +787,7 @@ fn handle_get_nonce(
 /// Handle novai_getSignalsByHeight RPC method.
 fn handle_get_signals_by_height(
     request: &RpcRequest,
-    db: &Arc<Mutex<MemKv>>,
+    db: &Arc<Mutex<Storage>>,
 ) -> Result<SignalQueryResult, RpcError> {
     let params: GetSignalsByHeightParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
@@ -626,7 +812,7 @@ fn handle_get_signals_by_height(
 /// Handle novai_getSignalsByIssuer RPC method.
 fn handle_get_signals_by_issuer(
     request: &RpcRequest,
-    db: &Arc<Mutex<MemKv>>,
+    db: &Arc<Mutex<Storage>>,
 ) -> Result<SignalQueryResult, RpcError> {
     let params: GetSignalsByIssuerParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
@@ -676,7 +862,7 @@ fn handle_get_signals_by_issuer(
 /// Handle novai_getSignalsByType RPC method.
 fn handle_get_signals_by_type(
     request: &RpcRequest,
-    db: &Arc<Mutex<MemKv>>,
+    db: &Arc<Mutex<Storage>>,
 ) -> Result<SignalQueryResult, RpcError> {
     let params: GetSignalsByTypeParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
@@ -712,6 +898,210 @@ fn handle_get_signals_by_type(
             .into_iter()
             .map(SignalCommitmentJson::from)
             .collect(),
+    })
+}
+
+// ============================================================================
+// STATE QUERY HANDLERS (CLI support)
+// ============================================================================
+
+/// Parse and validate a 32-byte hex-encoded value.
+fn parse_hex32(hex_str: &str, field_name: &str) -> Result<[u8; 32], RpcError> {
+    let bytes = hex::decode(hex_str).map_err(|e| RpcError {
+        code: -32602,
+        message: format!("Invalid {} hex: {}", field_name, e),
+    })?;
+    if bytes.len() != 32 {
+        return Err(RpcError {
+            code: -32602,
+            message: format!("{} must be 32 bytes, got {}", field_name, bytes.len()),
+        });
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Handle novai_getBalance RPC method.
+fn handle_get_balance(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetBalanceResult, RpcError> {
+    let params: GetBalanceParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {}", e),
+        })?;
+
+    let address = parse_hex32(&params.address, "address")?;
+    let db = db.lock().unwrap();
+    let account = read_account_or_default(&*db, &address).map_err(|e| RpcError {
+        code: -32002,
+        message: format!("State query error: {:?}", e),
+    })?;
+
+    Ok(GetBalanceResult {
+        balance: account.balance.to_string(),
+        nonce: account.nonce,
+    })
+}
+
+/// Handle novai_getAiEntity RPC method.
+fn handle_get_ai_entity(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetAiEntityResult, RpcError> {
+    let params: GetAiEntityParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {}", e),
+        })?;
+
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+    let db = db.lock().unwrap();
+    let entity = read_ai_entity(&*db, &entity_id).map_err(|e| RpcError {
+        code: -32002,
+        message: format!("State query error: {:?}", e),
+    })?;
+
+    Ok(GetAiEntityResult {
+        entity: entity.map(|e| AiEntityJson {
+            id: hex::encode(e.id),
+            code_hash: hex::encode(e.code_hash),
+            creator: hex::encode(e.creator),
+            autonomy_mode: e.autonomy_mode.to_byte(),
+            capabilities: e.capabilities.to_byte(),
+            economic_balance: e.economic_balance.to_string(),
+            nonce: e.nonce,
+            pubkey: hex::encode(e.pubkey),
+            memory_root: hex::encode(e.memory_root),
+            params_root: hex::encode(e.params_root),
+            registered_at: e.registered_at,
+            last_active_at: e.last_active_at,
+            is_active: e.is_active,
+        }),
+    })
+}
+
+/// Handle novai_getMemoryObjects RPC method.
+fn handle_get_memory_objects(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetMemoryObjectsResult, RpcError> {
+    let params: GetMemoryObjectsParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {}", e),
+        })?;
+
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+    let db = db.lock().unwrap();
+    let objects = get_memory_objects_by_entity(&*db, &entity_id).map_err(|e| RpcError {
+        code: -32002,
+        message: format!("State query error: {:?}", e),
+    })?;
+
+    Ok(GetMemoryObjectsResult {
+        objects: objects
+            .into_iter()
+            .map(|o| MemoryObjectJson {
+                object_id: hex::encode(o.object_id),
+                object_type: o.object_type.to_byte(),
+                owner_entity: hex::encode(o.owner_entity),
+                created_at: o.created_at,
+                updated_at: o.updated_at,
+                data_size: o.data.len(),
+                data: hex::encode(o.data),
+            })
+            .collect(),
+    })
+}
+
+/// Handle novai_faucet RPC method.
+///
+/// Creates and submits a transfer from the dev faucet account (index 99).
+/// Only active when `dev_keys` is true.
+fn handle_faucet(
+    request: &RpcRequest,
+    mempool: &Arc<Mutex<TxMempool>>,
+    nonce_provider: &SharedNonceProvider,
+    dev_keys: bool,
+) -> Result<FaucetResult, RpcError> {
+    if !dev_keys {
+        return Err(RpcError {
+            code: -32000,
+            message: "Faucet is only available in dev mode (--dev-keys)".to_string(),
+        });
+    }
+
+    let params: FaucetParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {}", e),
+        })?;
+
+    let to_address = parse_hex32(&params.address, "address")?;
+
+    // Derive faucet signing key from dev account index 99
+    let seed_byte = (FAUCET_ACCOUNT_INDEX % 256) as u8;
+    let mut seed = [seed_byte; 32];
+    let index_bytes = FAUCET_ACCOUNT_INDEX.to_le_bytes();
+    for (j, &b) in index_bytes.iter().enumerate() {
+        seed[j] ^= b;
+    }
+    let faucet_sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let faucet_pk = faucet_sk.verifying_key();
+    let faucet_addr = address_from_pubkey(&faucet_pk);
+
+    // Get current nonce for faucet account
+    let nonce = nonce_provider.expected_nonce(&faucet_addr);
+
+    // Build transfer payload: [version:1][to:32][amount:8 BE]
+    let mut payload = Vec::with_capacity(41);
+    payload.push(1); // Transfer payload version
+    payload.extend_from_slice(&to_address);
+    payload.extend_from_slice(&FAUCET_AMOUNT.to_be_bytes());
+
+    let mut tx = TxV1 {
+        version: TxVersion::V1,
+        from: faucet_addr,
+        pubkey: faucet_pk.to_bytes(),
+        nonce,
+        fee: 100, // MIN_FEE_TRANSFER
+        payload,
+        sig: [0u8; 64],
+    };
+
+    sign_tx_v1(&faucet_sk, &mut tx).map_err(|e| RpcError {
+        code: -32000,
+        message: format!("Failed to sign faucet tx: {:?}", e),
+    })?;
+
+    let txid = txid_v1(&tx).map_err(|e| RpcError {
+        code: -32000,
+        message: format!("Failed to compute txid: {:?}", e),
+    })?;
+
+    // Submit to mempool
+    let mut mempool_guard = mempool.lock().unwrap();
+    mempool_guard
+        .insert(tx, nonce_provider)
+        .map_err(|e| RpcError {
+            code: -32001,
+            message: format!("Faucet tx rejected by mempool: {:?}", e),
+        })?;
+    drop(mempool_guard);
+
+    tracing::info!(
+        to = %hex::encode(to_address),
+        amount = FAUCET_AMOUNT,
+        txid = %hex::encode(txid),
+        "Faucet dispensed tokens"
+    );
+
+    Ok(FaucetResult {
+        txid: hex::encode(txid),
+        amount: FAUCET_AMOUNT.to_string(),
     })
 }
 

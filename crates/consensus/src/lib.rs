@@ -849,8 +849,7 @@ impl ConsensusState {
             let bbh_pruned = bbh_before - self.block_by_hash.len();
 
             // Collect surviving block hashes to filter pending_votes
-            let live_hashes: HashSet<[u8; 32]> =
-                self.block_by_hash.keys().copied().collect();
+            let live_hashes: HashSet<[u8; 32]> = self.block_by_hash.keys().copied().collect();
             let pv_before = self.pending_votes.len();
             self.pending_votes
                 .retain(|hash, _| live_hashes.contains(hash));
@@ -949,8 +948,7 @@ impl ConsensusState {
             let new_view_height = qc.height;
 
             if new_view_height > old_view_height {
-                let pending_vote_count: usize =
-                    self.pending_votes.values().map(|v| v.len()).sum();
+                let pending_vote_count: usize = self.pending_votes.values().map(|v| v.len()).sum();
                 tracing::debug!(
                     old_view_height,
                     new_view_height,

@@ -850,7 +850,13 @@ fn u64_to_u128_checked(x: u64) -> u128 {
     u128::from(x)
 }
 
-fn read_account_or_default<K: Kv>(
+/// Read account state, returning default (zero balance, zero nonce) if absent.
+///
+/// # Errors
+///
+/// Returns `ExecError::Db` on storage read failure or `ExecError::CodecDecode`
+/// if stored bytes are malformed.
+pub fn read_account_or_default<K: Kv>(
     db: &K,
     addr: &Address,
 ) -> Result<AccountStateV1, ExecError<K::Error>> {

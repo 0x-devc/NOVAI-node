@@ -1,0 +1,38 @@
+[package]
+name = "novai-cli"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "novai-cli"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime (for reqwest HTTP client)
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Cryptography (must match novai-crypto)
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+
+# HTTP client for RPC
+reqwest = { version = "0.11", features = ["json"] }
+
+# Hex encoding
+hex = "0.4"
+
+# Hashing (for entity ID derivation)
+blake3 = "1.8"
+
+# Local workspace dependencies
+novai-types = { path = "../../crates/types" }
+novai-crypto = { path = "../../crates/crypto" }
+novai-codec = { path = "../../crates/codec" }
+novai-ai-entities = { path = "../../crates/ai_entities" }

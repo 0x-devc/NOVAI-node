@@ -14,7 +14,9 @@
 use crate::{is_nnpx_key, Kv, KvBatch, WriteOp, CF_DEFAULT, CF_NNPX};
 
 #[cfg(feature = "rocksdb")]
-use rocksdb::{BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
+use rocksdb::{
+    BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB,
+};
 
 #[cfg(feature = "rocksdb")]
 use std::path::Path;

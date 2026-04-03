@@ -1391,6 +1391,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "novai-cli"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "novai-ai-entities",
+ "novai-codec",
+ "novai-crypto",
+ "novai-types",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "novai-codec"
 version = "0.1.0"
 dependencies = [

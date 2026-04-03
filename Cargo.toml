@@ -17,6 +17,7 @@ members = [
     "crates/genesis",
     "tools/tx-generator",
     "tools/genesis-generator",
+    "tools/novai-cli",
     "crates/ai_service",
 ]
 
