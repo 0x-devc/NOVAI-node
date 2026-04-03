@@ -1,0 +1,28 @@
+[package]
+name = "novai-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust SDK for interacting with NOVAI blockchain nodes"
+
+[dependencies]
+# Workspace crates
+novai-types = { path = "../../crates/types" }
+novai-crypto = { path = "../../crates/crypto" }
+novai-codec = { path = "../../crates/codec" }
+novai-ai-entities = { path = "../../crates/ai_entities" }
+
+# Cryptography
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+blake3 = "1.8"
+
+# Async HTTP
+reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Encoding
+hex = "0.4"

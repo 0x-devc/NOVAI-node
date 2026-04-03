@@ -18,6 +18,7 @@ members = [
     "tools/tx-generator",
     "tools/genesis-generator",
     "tools/novai-cli",
+    "sdk/novai-sdk",
     "crates/ai_service",
 ]
 

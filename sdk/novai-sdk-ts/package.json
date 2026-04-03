@@ -1,0 +1,20 @@
+{
+  "name": "@novai/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for interacting with NOVAI blockchain nodes",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "blake3": "^2.1.7",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.5"
+  }
+}
