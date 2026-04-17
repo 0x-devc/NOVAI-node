@@ -1107,6 +1107,7 @@ fn main() {
             let mut last_sync_check = std::time::Instant::now();
             let mut last_sync_trigger = std::time::Instant::now();
             let mut last_resource_log = std::time::Instant::now();
+            let mut last_mempool_purge = std::time::Instant::now();
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     tracing::info!("Shutting down gracefully...");
@@ -1187,6 +1188,17 @@ fn main() {
                     drop(nonce_map);
                     drop(qc_bc);
                     drop(state);
+                }
+
+                // Purge stale mempool transactions every 30 seconds.
+                // Prevents future-nonce orphans from permanently filling capacity.
+                if last_mempool_purge.elapsed() >= Duration::from_secs(30) {
+                    last_mempool_purge = std::time::Instant::now();
+                    let mut mp = mempool.lock_or_recover();
+                    let purged = mp.purge_stale(Duration::from_secs(120));
+                    if purged > 0 {
+                        tracing::info!(purged, "Purged stale transactions from mempool");
+                    }
                 }
 
                 // Propose every proposal_interval_ms (must be less than BASE_TIMEOUT_MS for consensus to work)

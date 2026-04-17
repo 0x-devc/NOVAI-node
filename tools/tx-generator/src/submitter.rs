@@ -1,20 +1,26 @@
 //! Transaction submitter with worker pool and retry logic.
 //!
 //! INVARIANTS:
-//! - All received transactions are submitted (or failed after retries)
+//! - Workers claim nonces and sign just before submission (no stale nonces)
+//! - MempoolFull triggers retry with backoff (nonce preserved, no gaps)
+//! - HTTP 429 triggers rate-limit-aware retry (longer backoff)
 //! - Metrics events are sent for every submission attempt
 //! - Workers respect shutdown signal
 //!
 //! FAILURE MODES:
 //! - Network unreachable - retries then fails
-//! - Node rejects tx - logged as validation error
+//! - Node rejects tx (validation) - logged, tx discarded
+//! - MempoolFull - retries indefinitely with 2s backoff
 //! - Channel closed - workers terminate
 
+use crate::generator::TxTemplate;
 use crate::metrics::MetricEvent;
 use crate::sender::SenderPool;
 use novai_codec::{encode_tx_v1_signed, txid_v1};
-use novai_types::{Address, TxId, TxV1};
+use novai_crypto::sign_tx_v1;
+use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -27,7 +33,7 @@ pub struct SubmitterConfig {
     pub endpoint: String,
     /// Number of concurrent worker tasks.
     pub worker_count: usize,
-    /// Maximum retries per transaction.
+    /// Maximum retries per transaction (for network errors).
     pub max_retries: u32,
     /// Base delay for exponential backoff.
     pub base_retry_delay: Duration,
@@ -134,23 +140,38 @@ pub struct SubmitterStats {
     pub confirmed_count: u64, // TODO: Implement confirmation tracking
 }
 
-/// Number of consecutive rejections before querying the chain for the
-/// correct nonce and resetting the sender.
+/// Number of consecutive NonceTooLow rejections before querying the chain
+/// for the correct nonce and resetting the sender.
 const NONCE_RESET_THRESHOLD: u32 = 10;
+
+/// Maximum MempoolFull retries before giving up on a single transaction.
+/// At 2 seconds per retry, this is ~2 minutes of waiting.
+const MAX_MEMPOOL_FULL_RETRIES: u32 = 60;
+
+/// Backoff duration when mempool is full (seconds).
+const MEMPOOL_FULL_BACKOFF_SECS: u64 = 2;
+
+/// Backoff duration when rate limited by server (seconds).
+const RATE_LIMITED_BACKOFF_SECS: u64 = 1;
 
 /// Transaction submitter with worker pool.
 pub struct Submitter {
     config: SubmitterConfig,
     http_client: reqwest::Client,
     sender_pool: Arc<SenderPool>,
+    paused: Arc<AtomicBool>,
 }
 
 impl Submitter {
     /// Create a new submitter with the given configuration and sender pool.
     ///
-    /// The sender pool is used to reset nonces when a sender hits too many
-    /// consecutive rejections (e.g., after a node restart with fresh state).
-    pub fn new(config: SubmitterConfig, sender_pool: Arc<SenderPool>) -> Self {
+    /// The `paused` flag is shared with the generator; workers set it to `true`
+    /// when the mempool is full and clear it when submissions resume.
+    pub fn new(
+        config: SubmitterConfig,
+        sender_pool: Arc<SenderPool>,
+        paused: Arc<AtomicBool>,
+    ) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(config.request_timeout)
             .build()
@@ -160,14 +181,15 @@ impl Submitter {
             config,
             http_client,
             sender_pool,
+            paused,
         }
     }
 
-    /// Start the worker pool consuming from the transaction channel.
+    /// Start the worker pool consuming from the transaction template channel.
     /// Sends metric events to the provided channel.
     pub fn start(
         self,
-        tx_receiver: mpsc::Receiver<TxV1>,
+        tx_receiver: mpsc::Receiver<TxTemplate>,
         metric_tx: mpsc::UnboundedSender<MetricEvent>,
     ) -> SubmitterHandle {
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -191,20 +213,39 @@ impl Submitter {
             let mut shutdown_rx = shutdown_tx.subscribe();
             let tx_receiver = Arc::clone(&tx_receiver);
             let sender_pool = Arc::clone(&self.sender_pool);
+            let paused = Arc::clone(&self.paused);
 
             let handle = tokio::spawn(async move {
                 let mut stats = WorkerStats::default();
-                // Track consecutive rejections per sender address for nonce reset
-                let mut consecutive_rejections: HashMap<Address, u32> = HashMap::new();
+                // Track consecutive NonceTooLow rejections per sender for nonce reset
+                let mut consecutive_nonce_errors: HashMap<Address, u32> = HashMap::new();
 
                 loop {
                     tokio::select! {
-                        Some(tx) = async {
+                        Some(template) = async {
                             let mut rx = tx_receiver.lock().await;
                             rx.recv().await
                         } => {
                             stats.submitted_count += 1;
-                            let sender_address = tx.from;
+                            let sender_address = template.sender.address;
+
+                            // Claim nonce and sign just before submission
+                            let nonce = template.sender.claim_nonce();
+                            let mut tx = TxV1 {
+                                version: TxVersion::V1,
+                                from: template.sender.address,
+                                pubkey: template.sender.verifying_key.to_bytes(),
+                                nonce,
+                                fee: template.fee,
+                                payload: template.payload,
+                                sig: [0u8; 64],
+                            };
+
+                            if let Err(e) = sign_tx_v1(&template.sender.signing_key, &mut tx) {
+                                warn!("Failed to sign tx: {:?}", e);
+                                stats.failed_count += 1;
+                                continue;
+                            }
 
                             let result = submit_with_retry(
                                 &http_client,
@@ -213,49 +254,53 @@ impl Submitter {
                                 max_retries,
                                 base_delay,
                                 &metric_tx,
+                                &paused,
                             )
                             .await;
 
                             match result {
                                 SubmitResult::Accepted { .. } => {
                                     stats.accepted_count += 1;
-                                    // Clear rejection streak on success
-                                    consecutive_rejections.remove(&sender_address);
+                                    // Clear nonce error streak on success
+                                    consecutive_nonce_errors.remove(&sender_address);
                                 }
-                                SubmitResult::Rejected { .. } => {
+                                SubmitResult::Rejected { ref reason } => {
                                     stats.rejected_count += 1;
-                                    let count = consecutive_rejections
-                                        .entry(sender_address)
-                                        .or_insert(0);
-                                    *count += 1;
-                                    if *count >= NONCE_RESET_THRESHOLD {
-                                        if let Some(sender) =
-                                            sender_pool.find_by_address(&sender_address)
-                                        {
-                                            let old_nonce = sender.current_nonce();
-                                            // Query chain for the expected nonce instead of
-                                            // blindly resetting to 0. Resetting to 0 causes
-                                            // an infinite rejection loop when the chain has
-                                            // already committed transactions (expected > 0).
-                                            let chain_nonce = query_chain_nonce(
-                                                &http_client,
-                                                &endpoint,
-                                                &sender_address,
-                                            )
-                                            .await;
-                                            let new_nonce = chain_nonce.unwrap_or(0);
-                                            sender.reset_nonce(new_nonce);
-                                            info!(
-                                                worker_id,
-                                                sender = ?&sender_address[..4],
-                                                old_nonce,
-                                                new_nonce,
-                                                from_chain = chain_nonce.is_some(),
-                                                "Nonce reset after {} consecutive rejections",
-                                                NONCE_RESET_THRESHOLD
-                                            );
+                                    // Only track NonceTooLow for nonce reset
+                                    // (MempoolFull is retried inline, not counted here)
+                                    if reason.contains("NonceTooLow") {
+                                        let count = consecutive_nonce_errors
+                                            .entry(sender_address)
+                                            .or_insert(0);
+                                        *count += 1;
+                                        if *count >= NONCE_RESET_THRESHOLD {
+                                            if let Some(sender) =
+                                                sender_pool.find_by_address(&sender_address)
+                                            {
+                                                let old_nonce = sender.current_nonce();
+                                                let chain_nonce = query_chain_nonce(
+                                                    &http_client,
+                                                    &endpoint,
+                                                    &sender_address,
+                                                )
+                                                .await;
+                                                let new_nonce = chain_nonce.unwrap_or(0);
+                                                sender.reset_nonce(new_nonce);
+                                                info!(
+                                                    worker_id,
+                                                    sender = ?&sender_address[..4],
+                                                    old_nonce,
+                                                    new_nonce,
+                                                    from_chain = chain_nonce.is_some(),
+                                                    "Nonce reset after {} NonceTooLow errors",
+                                                    NONCE_RESET_THRESHOLD
+                                                );
+                                            }
+                                            *count = 0;
                                         }
-                                        *count = 0;
+                                    } else {
+                                        // Non-nonce rejection: clear nonce error streak
+                                        consecutive_nonce_errors.remove(&sender_address);
                                     }
                                 }
                                 SubmitResult::Failed { .. } => {
@@ -303,7 +348,7 @@ impl Submitter {
     }
 }
 
-/// Submit transaction with retry logic and exponential backoff.
+/// Submit transaction with retry logic, MempoolFull backoff, and rate limit handling.
 async fn submit_with_retry(
     http_client: &reqwest::Client,
     endpoint: &str,
@@ -311,6 +356,7 @@ async fn submit_with_retry(
     max_retries: u32,
     base_delay: Duration,
     metric_tx: &mpsc::UnboundedSender<MetricEvent>,
+    paused: &AtomicBool,
 ) -> SubmitResult {
     let txid = txid_v1(&tx).unwrap_or([0u8; 32]); // Should never fail for valid tx
     let start_time = Instant::now();
@@ -322,11 +368,18 @@ async fn submit_with_retry(
     });
 
     let mut attempt = 0;
+    let mut mempool_full_retries = 0u32;
 
     loop {
         match submit_once(http_client, endpoint, &tx).await {
             Ok(returned_txid) => {
                 let latency = start_time.elapsed();
+
+                // Unpause generator on success (mempool has capacity)
+                if paused.load(Ordering::Relaxed) {
+                    paused.store(false, Ordering::Relaxed);
+                    info!("Mempool has capacity, resuming generator");
+                }
 
                 // Send accepted event
                 let _ = metric_tx.send(MetricEvent::Accepted {
@@ -337,6 +390,42 @@ async fn submit_with_retry(
                 return SubmitResult::Accepted {
                     txid: returned_txid,
                 };
+            }
+            Err(SubmitError::MempoolFull(msg)) => {
+                mempool_full_retries += 1;
+                if mempool_full_retries >= MAX_MEMPOOL_FULL_RETRIES {
+                    let latency = start_time.elapsed();
+                    let reason = format!(
+                        "MempoolFull after {} retries: {}",
+                        mempool_full_retries, msg
+                    );
+                    let _ = metric_tx.send(MetricEvent::Failed {
+                        txid,
+                        error: reason.clone(),
+                        latency,
+                    });
+                    return SubmitResult::Failed { error: reason };
+                }
+
+                // Pause the generator so it stops flooding the channel
+                if !paused.load(Ordering::Relaxed) {
+                    paused.store(true, Ordering::Relaxed);
+                    info!(
+                        "Mempool full, pausing generator (retry {}/{})",
+                        mempool_full_retries, MAX_MEMPOOL_FULL_RETRIES
+                    );
+                }
+
+                tokio::time::sleep(Duration::from_secs(MEMPOOL_FULL_BACKOFF_SECS)).await;
+                continue;
+            }
+            Err(SubmitError::RateLimited) => {
+                debug!(
+                    "Rate limited by server, backing off {}s",
+                    RATE_LIMITED_BACKOFF_SECS
+                );
+                tokio::time::sleep(Duration::from_secs(RATE_LIMITED_BACKOFF_SECS)).await;
+                continue; // Retry indefinitely for rate limiting
             }
             Err(e) if is_validation_error(&e) => {
                 let latency = start_time.elapsed();
@@ -402,6 +491,12 @@ async fn submit_once(
         .await
         .map_err(|e| SubmitError::Network(e.to_string()))?;
 
+    // Check HTTP status before parsing JSON body
+    let status = response.status().as_u16();
+    if status == 429 {
+        return Err(SubmitError::RateLimited);
+    }
+
     // Parse response
     let rpc_response: RpcResponse<SubmitTxResponse> = response
         .json()
@@ -410,6 +505,10 @@ async fn submit_once(
 
     // Check for RPC error
     if let Some(error) = rpc_response.error {
+        // Distinguish MempoolFull (-32001) from other validation errors
+        if error.code == -32001 && error.message.contains("MempoolFull") {
+            return Err(SubmitError::MempoolFull(error.message));
+        }
         return Err(SubmitError::Rpc(error.code, error.message));
     }
 
@@ -495,6 +594,10 @@ enum SubmitError {
     Parse(String),
     /// RPC error from server.
     Rpc(i32, String),
+    /// Mempool full — retry with backoff.
+    MempoolFull(String),
+    /// HTTP 429 rate limited — retry with backoff.
+    RateLimited,
 }
 
 impl std::fmt::Display for SubmitError {
@@ -504,6 +607,8 @@ impl std::fmt::Display for SubmitError {
             SubmitError::Network(s) => write!(f, "Network error: {}", s),
             SubmitError::Parse(s) => write!(f, "Parse error: {}", s),
             SubmitError::Rpc(code, msg) => write!(f, "RPC error {}: {}", code, msg),
+            SubmitError::MempoolFull(msg) => write!(f, "Mempool full: {}", msg),
+            SubmitError::RateLimited => write!(f, "Rate limited (HTTP 429)"),
         }
     }
 }
@@ -598,6 +703,22 @@ mod tests {
         assert!(!is_validation_error(&SubmitError::Parse(
             "bad json".to_string()
         )));
+        // MempoolFull is NOT a validation error (handled separately)
+        assert!(!is_validation_error(&SubmitError::MempoolFull(
+            "full".to_string()
+        )));
+    }
+
+    #[test]
+    fn mempool_full_error_display() {
+        let err = SubmitError::MempoolFull("at capacity".to_string());
+        assert_eq!(format!("{}", err), "Mempool full: at capacity");
+    }
+
+    #[test]
+    fn rate_limited_error_display() {
+        let err = SubmitError::RateLimited;
+        assert_eq!(format!("{}", err), "Rate limited (HTTP 429)");
     }
 
     #[tokio::test]
@@ -614,7 +735,8 @@ mod tests {
         };
 
         let pool = Arc::new(SenderPool::new(1));
-        let submitter = Submitter::new(config, pool);
+        let paused = Arc::new(AtomicBool::new(false));
+        let submitter = Submitter::new(config, pool, paused);
         let handle = submitter.start(tx_receiver, metric_tx);
 
         // Send shutdown signal immediately

@@ -2,16 +2,15 @@
 //!
 //! INVARIANTS:
 //! - Generates at most target TPS (may be less under backpressure)
-//! - All transactions are validly signed
+//! - Pauses when mempool signals full (adaptive rate control)
 //! - Channel never exceeds capacity (blocks on full)
 //!
 //! FAILURE MODES:
-//! - Signing failure (codec error) - logged and skipped
 //! - Channel closed - terminates gracefully
+//! - Paused indefinitely - waits until unpaused or shutdown
 
-use crate::sender::SenderPool;
-use novai_crypto::sign_tx_v1;
-use novai_types::{TxV1, TxVersion};
+use crate::sender::{SenderAccount, SenderPool};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -37,6 +36,20 @@ impl TxType {
             _ => None,
         }
     }
+}
+
+/// Unsigned transaction template for deferred nonce assignment.
+///
+/// The generator creates templates without claiming a nonce or signing.
+/// The submitter worker claims the nonce just before submission, preventing
+/// nonce gaps when transactions are rejected (e.g., MempoolFull).
+pub struct TxTemplate {
+    /// Sender account (holds signing key, verifying key, address).
+    pub sender: Arc<SenderAccount>,
+    /// Fee for this transaction.
+    pub fee: u64,
+    /// Transaction payload.
+    pub payload: Vec<u8>,
 }
 
 /// Configuration for the generator.
@@ -100,34 +113,46 @@ pub struct GeneratorStats {
     pub actual_tps: f64,
 }
 
-/// Transaction generator that produces signed transactions at a target rate.
+/// Transaction generator that produces unsigned templates at a target rate.
+///
+/// Templates are finalized (nonce + signature) by the submitter workers
+/// just before submission, ensuring nonces stay synchronized with the chain.
 pub struct Generator {
     config: GeneratorConfig,
     sender_pool: Arc<SenderPool>,
+    paused: Arc<AtomicBool>,
 }
 
 impl Generator {
     /// Create a new generator with the given configuration.
-    pub fn new(config: GeneratorConfig, sender_pool: Arc<SenderPool>) -> Self {
+    ///
+    /// The `paused` flag is shared with the submitter; when set to `true`
+    /// the generator skips tick intervals until the flag clears.
+    pub fn new(
+        config: GeneratorConfig,
+        sender_pool: Arc<SenderPool>,
+        paused: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             config,
             sender_pool,
+            paused,
         }
     }
 
-    /// Start generating transactions, sending them to the provided channel.
+    /// Start generating transaction templates, sending them to the provided channel.
     /// Returns a handle to control/await the generator.
-    pub fn start(self, tx_sender: mpsc::Sender<TxV1>) -> GeneratorHandle {
+    pub fn start(self, tx_sender: mpsc::Sender<TxTemplate>) -> GeneratorHandle {
         let join_handle = tokio::spawn(async move { self.run(tx_sender).await });
 
         GeneratorHandle { join_handle }
     }
 
     /// Main generation loop.
-    async fn run(self, tx_sender: mpsc::Sender<TxV1>) -> GeneratorStats {
+    async fn run(self, tx_sender: mpsc::Sender<TxTemplate>) -> GeneratorStats {
         let start_time = Instant::now();
         let mut generated_count = 0u64;
-        let mut dropped_count = 0u64;
+        let dropped_count = 0u64;
 
         // Calculate interval between transactions
         if self.config.target_tps == 0 {
@@ -156,30 +181,30 @@ impl Generator {
                 }
             }
 
+            // Adaptive rate control: skip generation when mempool is full
+            if self.paused.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+
             // Wait for next tick
             interval.tick().await;
 
-            // Generate transaction
-            match self.generate_transaction() {
-                Ok(tx) => {
-                    // Try to send (non-blocking check, but will block if channel has space)
-                    match tx_sender.send(tx).await {
-                        Ok(_) => {
-                            generated_count += 1;
-                            if generated_count.is_multiple_of(1000) {
-                                debug!("Generated {} transactions", generated_count);
-                            }
-                        }
-                        Err(_) => {
-                            // Channel closed, exit
-                            info!("Transaction channel closed, stopping generator");
-                            break;
-                        }
+            // Generate template
+            let template = self.generate_template();
+
+            // Try to send (blocks if channel is full)
+            match tx_sender.send(template).await {
+                Ok(_) => {
+                    generated_count += 1;
+                    if generated_count.is_multiple_of(1000) {
+                        debug!("Generated {} transactions", generated_count);
                     }
                 }
-                Err(e) => {
-                    warn!("Failed to generate transaction: {}, skipping", e);
-                    dropped_count += 1;
+                Err(_) => {
+                    // Channel closed, exit
+                    info!("Transaction channel closed, stopping generator");
+                    break;
                 }
             }
         }
@@ -205,13 +230,13 @@ impl Generator {
         }
     }
 
-    /// Generate a single transaction.
-    fn generate_transaction(&self) -> Result<TxV1, String> {
+    /// Generate a single unsigned transaction template.
+    ///
+    /// No nonce is claimed and no signature is produced — that happens
+    /// in the submitter worker just before the RPC call.
+    fn generate_template(&self) -> TxTemplate {
         // Get next sender in round-robin
         let sender = self.sender_pool.next_sender();
-
-        // Get next nonce
-        let nonce = sender.claim_nonce();
 
         // Generate payload based on tx type
         let payload = match self.config.tx_type {
@@ -220,22 +245,11 @@ impl Generator {
             TxType::AiSignal => generate_ai_signal_payload(),
         };
 
-        // Build unsigned transaction
-        let mut tx = TxV1 {
-            version: TxVersion::V1,
-            from: sender.address,
-            pubkey: sender.verifying_key.to_bytes(),
-            nonce,
+        TxTemplate {
+            sender,
             fee: self.config.fee,
             payload,
-            sig: [0u8; 64], // Will be filled by sign_tx_v1
-        };
-
-        // Sign transaction
-        sign_tx_v1(&sender.signing_key, &mut tx)
-            .map_err(|e| format!("Failed to sign transaction: {:?}", e))?;
-
-        Ok(tx)
+        }
     }
 }
 
@@ -270,88 +284,80 @@ mod tests {
     }
 
     #[test]
-    fn generated_tx_is_validly_signed() {
-        let pool = Arc::new(SenderPool::new(5));
-        let config = GeneratorConfig::default();
-        let generator = Generator::new(config, pool);
-
-        let tx = generator.generate_transaction().unwrap();
-
-        // Verify signature using crypto module
-        use novai_crypto::{pubkey_from_bytes, verify_tx_v1};
-        let pk = pubkey_from_bytes(&tx.pubkey).unwrap();
-        assert!(verify_tx_v1(&pk, &tx).unwrap());
-    }
-
-    #[test]
-    fn generated_tx_has_correct_nonce() {
+    fn template_has_correct_fee() {
         let pool = Arc::new(SenderPool::new(1));
-        let config = GeneratorConfig::default();
-        let generator = Generator::new(config, Arc::clone(&pool));
-
-        let tx1 = generator.generate_transaction().unwrap();
-        let tx2 = generator.generate_transaction().unwrap();
-        let tx3 = generator.generate_transaction().unwrap();
-
-        // Nonces should increment
-        assert_eq!(tx1.nonce, 0);
-        assert_eq!(tx2.nonce, 1);
-        assert_eq!(tx3.nonce, 2);
-    }
-
-    #[test]
-    fn generated_tx_has_correct_fee() {
-        let pool = Arc::new(SenderPool::new(1));
+        let paused = Arc::new(AtomicBool::new(false));
         let config = GeneratorConfig {
             fee: 42,
             ..Default::default()
         };
-        let generator = Generator::new(config, pool);
+        let generator = Generator::new(config, pool, paused);
 
-        let tx = generator.generate_transaction().unwrap();
-        assert_eq!(tx.fee, 42);
+        let template = generator.generate_template();
+        assert_eq!(template.fee, 42);
     }
 
     #[test]
-    fn transfer_tx_has_empty_payload() {
+    fn transfer_template_has_empty_payload() {
         let pool = Arc::new(SenderPool::new(1));
+        let paused = Arc::new(AtomicBool::new(false));
         let config = GeneratorConfig {
             tx_type: TxType::Transfer,
             ..Default::default()
         };
-        let generator = Generator::new(config, pool);
+        let generator = Generator::new(config, pool, paused);
 
-        let tx = generator.generate_transaction().unwrap();
-        assert!(tx.payload.is_empty());
+        let template = generator.generate_template();
+        assert!(template.payload.is_empty());
     }
 
     #[test]
-    fn ai_register_tx_has_payload() {
+    fn ai_register_template_has_payload() {
         let pool = Arc::new(SenderPool::new(1));
+        let paused = Arc::new(AtomicBool::new(false));
         let config = GeneratorConfig {
             tx_type: TxType::AiRegister,
             ..Default::default()
         };
-        let generator = Generator::new(config, pool);
+        let generator = Generator::new(config, pool, paused);
 
-        let tx = generator.generate_transaction().unwrap();
-        assert!(!tx.payload.is_empty());
+        let template = generator.generate_template();
+        assert!(!template.payload.is_empty());
+    }
+
+    #[test]
+    fn template_sender_cycles_round_robin() {
+        let pool = Arc::new(SenderPool::new(3));
+        let paused = Arc::new(AtomicBool::new(false));
+        let config = GeneratorConfig::default();
+        let generator = Generator::new(config, Arc::clone(&pool), paused);
+
+        let t0 = generator.generate_template();
+        let t1 = generator.generate_template();
+        let t2 = generator.generate_template();
+        let t3 = generator.generate_template();
+
+        assert_eq!(t0.sender.index, 0);
+        assert_eq!(t1.sender.index, 1);
+        assert_eq!(t2.sender.index, 2);
+        assert_eq!(t3.sender.index, 0); // wraps around
     }
 
     #[tokio::test]
     async fn generator_respects_max_duration() {
         let pool = Arc::new(SenderPool::new(1));
+        let paused = Arc::new(AtomicBool::new(false));
         let config = GeneratorConfig {
-            target_tps: 1000, // High TPS to ensure we hit duration limit, not generation limit
+            target_tps: 1000,
             max_duration: Some(Duration::from_millis(100)),
             ..Default::default()
         };
 
         let (tx_sender, mut tx_receiver) = mpsc::channel(100);
-        let generator = Generator::new(config, pool);
+        let generator = Generator::new(config, pool, paused);
         let handle = generator.start(tx_sender);
 
-        // Consume transactions in background
+        // Consume templates in background
         tokio::spawn(async move {
             while tx_receiver.recv().await.is_some() {
                 // Drain channel
@@ -368,14 +374,15 @@ mod tests {
     #[tokio::test]
     async fn generator_stops_on_channel_close() {
         let pool = Arc::new(SenderPool::new(1));
+        let paused = Arc::new(AtomicBool::new(false));
         let config = GeneratorConfig {
             target_tps: 100,
-            max_duration: None, // Run forever unless channel closes
+            max_duration: None,
             ..Default::default()
         };
 
         let (tx_sender, tx_receiver) = mpsc::channel(10);
-        let generator = Generator::new(config, pool);
+        let generator = Generator::new(config, pool, paused);
         let handle = generator.start(tx_sender);
 
         // Drop receiver immediately to close channel
@@ -383,6 +390,34 @@ mod tests {
 
         // Generator should stop quickly
         let stats = handle.wait().await;
-        assert!(stats.runtime_ms < 1000); // Should stop within 1 second
+        assert!(stats.runtime_ms < 1000);
+    }
+
+    #[tokio::test]
+    async fn generator_pauses_when_flag_set() {
+        let pool = Arc::new(SenderPool::new(1));
+        let paused = Arc::new(AtomicBool::new(true)); // Start paused
+        let config = GeneratorConfig {
+            target_tps: 1000,
+            max_duration: Some(Duration::from_millis(200)),
+            ..Default::default()
+        };
+
+        let (tx_sender, mut tx_receiver) = mpsc::channel(100);
+        let generator = Generator::new(config, pool, Arc::clone(&paused));
+        let handle = generator.start(tx_sender);
+
+        // Consume in background
+        tokio::spawn(async move { while tx_receiver.recv().await.is_some() {} });
+
+        // Stay paused for 100ms, then unpause
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        paused.store(false, Ordering::Relaxed);
+
+        let stats = handle.wait().await;
+
+        // Should have generated far fewer txs than 200ms at 1000 TPS would allow
+        // because it was paused for the first 100ms
+        assert!(stats.generated_count < 150);
     }
 }

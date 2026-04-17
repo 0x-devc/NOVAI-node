@@ -13,6 +13,7 @@ mod submitter;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -42,6 +43,10 @@ struct Args {
     /// Transaction type: transfer, ai_register, ai_signal
     #[arg(long, default_value = "transfer")]
     tx_type: String,
+
+    /// Fee per transaction (must exceed dynamic fee floor under congestion)
+    #[arg(short, long, default_value_t = 1000)]
+    fee: u64,
 
     /// Output format: text, json, csv
     #[arg(short, long, default_value = "text")]
@@ -84,6 +89,7 @@ async fn main() -> Result<()> {
     }
     info!("Endpoint: {}", args.endpoint);
     info!("Transaction Type: {}", args.tx_type);
+    info!("Fee: {}", args.fee);
     info!("Workers: {}", args.workers);
     info!("Confirmation Tracking: {}", args.track_confirmations);
 
@@ -91,7 +97,7 @@ async fn main() -> Result<()> {
     let sender_pool = Arc::new(sender::SenderPool::new(args.senders));
     info!("Initialized {} sender accounts", sender_pool.len());
 
-    // 2. Create channels
+    // 2. Create channels (carries unsigned TxTemplates, not signed TxV1)
     let channel_capacity = (args.tps * 2) as usize;
     let (tx_sender, tx_receiver) = mpsc::channel(channel_capacity);
     let (metric_tx, metric_rx) = metrics::metric_channel();
@@ -101,40 +107,47 @@ async fn main() -> Result<()> {
         channel_capacity
     );
 
-    // 3. Start metrics collector
+    // 3. Shared pause flag: submitter sets true on MempoolFull, generator skips ticks
+    let paused = Arc::new(AtomicBool::new(false));
+
+    // 4. Start metrics collector
     let metrics_collector = metrics::MetricsCollector::new(args.track_confirmations);
     let metrics_handle = metrics_collector.start(metric_rx);
     info!("Started metrics collector");
 
-    // 4. Start submitter workers
+    // 5. Start submitter workers (claims nonces and signs at submission time)
     let submitter_config = submitter::SubmitterConfig {
         endpoint: args.endpoint.clone(),
         worker_count: args.workers,
         track_confirmations: args.track_confirmations,
         ..Default::default()
     };
-    let submitter = submitter::Submitter::new(submitter_config, Arc::clone(&sender_pool));
+    let submitter = submitter::Submitter::new(
+        submitter_config,
+        Arc::clone(&sender_pool),
+        Arc::clone(&paused),
+    );
     let submitter_handle = submitter.start(tx_receiver, metric_tx);
     info!("Started {} submitter workers", args.workers);
 
-    // 5. Start generator
+    // 6. Start generator (produces unsigned templates)
     let generator_config = generator::GeneratorConfig {
         target_tps: args.tps,
         tx_type: generator::TxType::from_str(&args.tx_type).context("Invalid transaction type")?,
+        fee: args.fee,
         max_duration: if args.continuous || args.duration == 0 {
             None
         } else {
             Some(Duration::from_secs(args.duration))
         },
-        ..Default::default()
     };
-    let generator = generator::Generator::new(generator_config, sender_pool);
+    let generator = generator::Generator::new(generator_config, sender_pool, paused);
     let generator_handle = generator.start(tx_sender);
     info!("Started transaction generator");
 
     info!("=== Load test running ===");
 
-    // 5b. Start periodic stats logger (every 60s in continuous mode)
+    // 6b. Start periodic stats logger (every 60s in continuous mode)
     let stats_logger = if args.continuous || args.duration == 0 {
         let metrics_for_stats = metrics_handle.clone_state();
         Some(tokio::spawn(async move {
@@ -164,7 +177,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    // 6. Wait for generator to complete (duration or Ctrl+C)
+    // 7. Wait for generator to complete (duration or Ctrl+C)
     let generator_stats = tokio::select! {
         stats = generator_handle.wait() => {
             info!("Generator completed normally");
@@ -172,8 +185,6 @@ async fn main() -> Result<()> {
         }
         _ = tokio::signal::ctrl_c() => {
             warn!("Received Ctrl+C, aborting generator...");
-            // Note: generator_handle is consumed, so we can't call shutdown
-            // It will be aborted when dropped
             generator::GeneratorStats::default()
         }
     };
@@ -191,7 +202,7 @@ async fn main() -> Result<()> {
         generator_stats.actual_tps
     );
 
-    // 7. Shutdown submitter and wait for pending submissions
+    // 8. Shutdown submitter and wait for pending submissions
     info!("Shutting down submitters, draining pending transactions...");
     submitter_handle.shutdown();
     let submitter_stats = submitter_handle.wait().await;
@@ -205,12 +216,12 @@ async fn main() -> Result<()> {
         submitter_stats.total_retries
     );
 
-    // 8. Get final metrics and wait for collector
+    // 9. Get final metrics and wait for collector
     info!("Collecting final metrics...");
     let final_metrics = metrics_handle.snapshot().await;
     metrics_handle.wait().await;
 
-    // 9. Output results
+    // 10. Output results
     info!("=== Load test complete ===");
     match args.output.as_str() {
         "json" => println!("{}", final_metrics.to_json()),
@@ -268,6 +279,7 @@ mod tests {
             duration: 60,
             endpoint: "http://localhost:3030".to_string(),
             tx_type: "transfer".to_string(),
+            fee: 1000,
             output: "text".to_string(),
             verbose: false,
             workers: 4,
@@ -285,6 +297,7 @@ mod tests {
             duration: 60,
             endpoint: "http://localhost:3030".to_string(),
             tx_type: "transfer".to_string(),
+            fee: 1000,
             output: "text".to_string(),
             verbose: false,
             workers: 4,
@@ -302,6 +315,7 @@ mod tests {
             duration: 60,
             endpoint: "http://localhost:3030".to_string(),
             tx_type: "invalid".to_string(),
+            fee: 1000,
             output: "text".to_string(),
             verbose: false,
             workers: 4,

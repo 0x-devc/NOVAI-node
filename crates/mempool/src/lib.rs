@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Errors returned by [`Mempool`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,6 +152,10 @@ pub struct TxMempool {
     /// Fast-path flag: true when threat_scores map is known to be empty.
     /// Avoids Mutex lock in `drain_ready()` when no spam has been detected.
     threat_scores_empty: Arc<AtomicBool>,
+    /// Insertion timestamps for stale transaction eviction.
+    /// Txs older than a configurable max age are purged to free capacity
+    /// (prevents future-nonce txs from permanently filling the mempool).
+    insertion_times: HashMap<TxId, Instant>,
 }
 
 impl TxMempool {
@@ -163,6 +168,7 @@ impl TxMempool {
             dynamic_fee_floor: Arc::new(AtomicU64::new(0)),
             threat_scores: Arc::new(Mutex::new(BTreeMap::new())),
             threat_scores_empty: Arc::new(AtomicBool::new(true)),
+            insertion_times: HashMap::new(),
         }
     }
 
@@ -214,6 +220,7 @@ impl TxMempool {
     pub fn remove(&mut self, id: &TxId) -> Option<TxV1> {
         let tx = self.by_id.remove(id)?;
         self.total_bytes -= novai_codec::tx_encoded_size(&tx);
+        self.insertion_times.remove(id);
         Some(tx)
     }
 
@@ -280,6 +287,7 @@ impl TxMempool {
         }
 
         self.total_bytes += size;
+        self.insertion_times.insert(id, Instant::now());
         self.by_id.insert(id, tx);
         Ok(id)
     }
@@ -356,6 +364,7 @@ impl TxMempool {
         for id in selected_ids {
             if let Some(tx) = self.by_id.remove(&id) {
                 self.total_bytes -= novai_codec::tx_encoded_size(&tx);
+                self.insertion_times.remove(&id);
                 out.push(tx);
             }
         }
@@ -378,8 +387,37 @@ impl TxMempool {
 
         let size = novai_codec::tx_encoded_size(&tx);
         self.total_bytes += size;
+        self.insertion_times.insert(id, Instant::now());
         self.by_id.insert(id, tx);
         Ok(id)
+    }
+
+    /// Purge transactions that have been in the mempool longer than `max_age`.
+    ///
+    /// This prevents future-nonce transactions from permanently filling the
+    /// mempool. When the tx-generator's nonce desyncs from the chain, it can
+    /// leave orphan transactions (nonce > expected) that `drain_ready()` will
+    /// never select. Without eviction these consume capacity forever.
+    ///
+    /// Returns the number of transactions purged.
+    pub fn purge_stale(&mut self, max_age: std::time::Duration) -> usize {
+        let now = Instant::now();
+        let stale_ids: Vec<TxId> = self
+            .insertion_times
+            .iter()
+            .filter(|(_, &inserted_at)| now.duration_since(inserted_at) >= max_age)
+            .map(|(&id, _)| id)
+            .collect();
+
+        let count = stale_ids.len();
+        for id in stale_ids {
+            if let Some(tx) = self.by_id.remove(&id) {
+                self.total_bytes -= novai_codec::tx_encoded_size(&tx);
+            }
+            self.insertion_times.remove(&id);
+        }
+
+        count
     }
 }
 
