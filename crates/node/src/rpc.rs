@@ -29,6 +29,7 @@ use novai_p2p::{NetworkMessage, PeerManager};
 use novai_types::{Address, TxV1, TxVersion};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -37,6 +38,11 @@ use tiny_http::{Response, Server, StatusCode};
 
 /// Maximum RPC requests per second before rate limiting kicks in.
 const MAX_RPC_REQUESTS_PER_SEC: usize = 100;
+
+/// Maximum RPC request body size in bytes.
+/// Prevents OOM from oversized HTTP bodies. 512KB is generous for any
+/// valid JSON-RPC request (max tx is 128KB → 256KB hex-encoded).
+const MAX_RPC_BODY_SIZE: usize = 512 * 1024;
 
 /// Maximum height range for signal queries (prevents massive result sets).
 const MAX_SIGNAL_QUERY_RANGE: u64 = 10_000;
@@ -289,12 +295,23 @@ pub fn start_rpc_server(
                 );
                 continue;
             }
-            // Read request body
+            // Read request body (bounded to prevent OOM from oversized requests)
             let mut body = String::new();
-            if let Err(e) = request.as_reader().read_to_string(&mut body) {
+            if let Err(e) = request
+                .as_reader()
+                .take(MAX_RPC_BODY_SIZE as u64 + 1)
+                .read_to_string(&mut body)
+            {
                 let _ = request.respond(
                     Response::from_string(format!("Failed to read request: {}", e))
                         .with_status_code(StatusCode(400)),
+                );
+                continue;
+            }
+            if body.len() > MAX_RPC_BODY_SIZE {
+                let _ = request.respond(
+                    Response::from_string("Request body too large")
+                        .with_status_code(StatusCode(413)),
                 );
                 continue;
             }
@@ -430,12 +447,23 @@ pub fn start_rpc_server_with_state(
                 );
                 continue;
             }
-            // Read request body
+            // Read request body (bounded to prevent OOM from oversized requests)
             let mut body = String::new();
-            if let Err(e) = request.as_reader().read_to_string(&mut body) {
+            if let Err(e) = request
+                .as_reader()
+                .take(MAX_RPC_BODY_SIZE as u64 + 1)
+                .read_to_string(&mut body)
+            {
                 let _ = request.respond(
                     Response::from_string(format!("Failed to read request: {}", e))
                         .with_status_code(StatusCode(400)),
+                );
+                continue;
+            }
+            if body.len() > MAX_RPC_BODY_SIZE {
+                let _ = request.respond(
+                    Response::from_string("Request body too large")
+                        .with_status_code(StatusCode(413)),
                 );
                 continue;
             }
@@ -675,6 +703,19 @@ fn handle_submit_tx(
             code: -32602,
             message: format!("Invalid params: {}", e),
         })?;
+
+    // Reject oversized hex strings before allocating for decode.
+    // MAX_TX_SIZE is 128KB; hex-encoded is 2x = 256KB max hex chars.
+    if params.tx.len() > novai_types::MAX_TX_SIZE * 2 {
+        return Err(RpcError {
+            code: -32000,
+            message: format!(
+                "Transaction hex too large: {} bytes exceeds limit of {} bytes",
+                params.tx.len() / 2,
+                novai_types::MAX_TX_SIZE,
+            ),
+        });
+    }
 
     // Decode hex transaction
     let tx_bytes = hex::decode(&params.tx).map_err(|e| RpcError {

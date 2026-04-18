@@ -125,6 +125,12 @@ pub struct ConsensusState {
     pub last_proposed: Option<(u64, u64)>,
     /// Voters in current round (deduplication).
     pub voted_in_round: HashSet<Address>,
+    /// Per-height vote tracking: maps voter → block_hash they voted for.
+    /// Persists across round advances within the same height. Cleared
+    /// only when height advances (QC formation or commit).
+    /// Detects cross-round equivocation: voting for different blocks
+    /// at the same consensus height.
+    pub voted_at_height: HashMap<Address, [u8; 32]>,
     /// Highest committed height.
     pub committed_height: u64,
     /// Block cache by height (for commit rule).
@@ -155,6 +161,7 @@ impl ConsensusState {
             our_address,
             last_proposed: None,
             voted_in_round: HashSet::new(),
+            voted_at_height: HashMap::new(),
             committed_height: 0,
             block_cache: HashMap::new(),
             qc_cache: HashMap::new(),
@@ -480,6 +487,19 @@ impl ConsensusState {
             .map(|(_, pk)| pk)
             .ok_or_else(|| ConsensusError::InvalidVote("Voter not in validator set".to_string()))?;
 
+        // Cross-round equivocation detection: check if this voter already
+        // voted for a DIFFERENT block at this height in a previous round.
+        // voted_in_round catches within-round duplicates;
+        // voted_at_height catches across-round equivocation.
+        if let Some(prev_hash) = self.voted_at_height.get(&vote.voter) {
+            if *prev_hash != vote.block_hash {
+                return Err(ConsensusError::InvalidVote(format!(
+                    "Equivocation: voter {:?} voted for different blocks at same height",
+                    &vote.voter[..4],
+                )));
+            }
+        }
+
         // Check for duplicate vote from same voter in this round (BEFORE expensive signature check)
         if self.voted_in_round.contains(&vote.voter) {
             return Err(ConsensusError::InvalidVote(
@@ -514,8 +534,9 @@ impl ConsensusState {
             tracing::debug!(?commitment, "Vote includes AI signal");
         }
 
-        // Mark this voter as having voted in this round
+        // Mark this voter as having voted in this round and at this height
         self.voted_in_round.insert(vote.voter);
+        self.voted_at_height.insert(vote.voter, vote.block_hash);
 
         // Add vote to pending votes
         self.pending_votes
@@ -958,6 +979,7 @@ impl ConsensusState {
                 self.round = 0;
                 self.pending_votes.clear();
                 self.voted_in_round.clear();
+                self.voted_at_height.clear();
                 self.timed_out_in_round.clear();
                 self.pending_timeouts.clear();
                 self.last_proposed = None;
@@ -967,6 +989,7 @@ impl ConsensusState {
                 // over millions of blocks.
                 self.pending_votes.shrink_to_fit();
                 self.voted_in_round.shrink_to_fit();
+                self.voted_at_height.shrink_to_fit();
                 self.timed_out_in_round.shrink_to_fit();
                 self.pending_timeouts.shrink_to_fit();
             }
@@ -1173,6 +1196,7 @@ impl ConsensusState {
         if !blocks.is_empty() {
             self.pending_votes.clear();
             self.voted_in_round.clear();
+            self.voted_at_height.clear();
             self.timed_out_in_round.clear();
             self.pending_timeouts.clear();
             self.last_proposed = None;
@@ -1228,6 +1252,7 @@ impl ConsensusState {
             self.pending_votes.shrink_to_fit();
             self.pending_timeouts.shrink_to_fit();
             self.voted_in_round.shrink_to_fit();
+            self.voted_at_height.shrink_to_fit();
             self.timed_out_in_round.shrink_to_fit();
         }
     }
@@ -1757,6 +1782,7 @@ impl ConsensusState {
             our_address,
             last_proposed: None,
             voted_in_round: HashSet::new(),
+            voted_at_height: HashMap::new(),
             committed_height,
             block_cache: HashMap::new(),
             qc_cache: HashMap::new(),

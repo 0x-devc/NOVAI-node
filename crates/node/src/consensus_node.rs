@@ -755,12 +755,16 @@ impl ConsensusNode {
             .collect();
 
         if blocks.is_empty() {
-            tracing::debug!(
-                committed_height,
-                response_start = response.blocks[0].height,
-                response_end = response.blocks.last().unwrap().height,
-                "Stale sync response — all blocks already committed"
-            );
+            if let (Some(first), Some(last)) = (response.blocks.first(), response.blocks.last()) {
+                tracing::debug!(
+                    committed_height,
+                    response_start = first.height,
+                    response_end = last.height,
+                    "Stale sync response — all blocks already committed"
+                );
+            } else {
+                tracing::debug!(committed_height, "Empty sync response");
+            }
             drop(state);
             drop(db);
             self.try_request_missing_blocks();
