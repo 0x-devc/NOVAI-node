@@ -224,7 +224,9 @@ pub const MAX_PEERS: usize = 128;
 /// channels — no thread spawning, no blocking on network I/O.
 pub struct PeerManager {
     /// Channel senders to dedicated per-peer writer threads.
-    peer_senders: Arc<Mutex<Vec<mpsc::SyncSender<Vec<u8>>>>>,
+    /// Uses `Arc<Vec<u8>>` so broadcast clones a refcount, not the full message.
+    #[allow(clippy::type_complexity)]
+    peer_senders: Arc<Mutex<Vec<mpsc::SyncSender<Arc<Vec<u8>>>>>>,
 }
 
 impl Default for PeerManager {
@@ -263,7 +265,7 @@ impl PeerManager {
             tracing::warn!(max = MAX_PEERS, "Peer connection rejected: at capacity");
             return false;
         }
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PEER_CHANNEL_CAPACITY);
+        let (tx, rx) = mpsc::sync_channel::<Arc<Vec<u8>>>(PEER_CHANNEL_CAPACITY);
         thread::Builder::new()
             .name("peer-writer".into())
             .spawn(move || {
@@ -295,9 +297,9 @@ impl PeerManager {
     /// # Panics
     /// Panics if the mutex is poisoned.
     pub fn broadcast(&self, msg: &NetworkMessage) -> Result<(), P2PError> {
-        let wire_bytes = encode_wire_message(msg)?;
+        let wire_bytes = Arc::new(encode_wire_message(msg)?);
         let mut senders = self.peer_senders.lock().unwrap();
-        senders.retain(|tx| match tx.try_send(wire_bytes.clone()) {
+        senders.retain(|tx| match tx.try_send(Arc::clone(&wire_bytes)) {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(

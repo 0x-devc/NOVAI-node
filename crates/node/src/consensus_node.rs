@@ -674,7 +674,7 @@ impl ConsensusNode {
                 _ => {
                     // Fallback: check in-memory block cache
                     if let Some(block) = state.block_cache.get(&height) {
-                        blocks.push(block.clone());
+                        blocks.push(Block::clone(block));
                     } else {
                         break; // Stop at first missing block
                     }

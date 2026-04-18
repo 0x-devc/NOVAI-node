@@ -25,8 +25,13 @@ members = [
 resolver = "2"
 
 [workspace.package]
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+description = "NOVAI Protocol — from-scratch Layer 1 blockchain with HotStuff BFT consensus and AI-native primitives"
+repository = "https://github.com/0x-devc/NOVAI-node"
+homepage = "https://novai.network"
+authors = ["NOVAI Contributors"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

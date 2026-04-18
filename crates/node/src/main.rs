@@ -47,12 +47,20 @@ examples:
     );
 }
 
+/// Print an error message to stderr and exit with code 1.
+/// Used for user-facing errors (bad CLI args, missing files, etc.)
+/// so users see clean text instead of Rust backtraces.
+fn fatal(msg: impl std::fmt::Display) -> ! {
+    eprintln!("Error: {msg}");
+    std::process::exit(1);
+}
+
 fn parse_u64(opt: Option<String>, what: &str) -> u64 {
     let Some(s) = opt else {
-        panic!("missing value for {what}");
+        fatal(format!("missing value for {what}"));
     };
     s.parse::<u64>()
-        .unwrap_or_else(|_| panic!("invalid {what}: {s}"))
+        .unwrap_or_else(|_| fatal(format!("invalid {what}: {s}")))
 }
 
 struct InMemoryNonceProvider {
@@ -138,9 +146,10 @@ impl NonceProvider for InMemoryNonceProvider {
     }
 }
 
-/// Post-commit callback: executes transactions and advances the nonce provider.
+/// Post-commit callback: executes transactions, advances nonces, and updates the blockchain index.
 struct ExecutionCommitCallback {
     nonce_provider: Arc<InMemoryNonceProvider>,
+    blockchain_index: Arc<Mutex<rpc::BlockchainIndex>>,
 }
 
 impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
@@ -171,6 +180,23 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
             }
         }
         self.nonce_provider.advance_nonces_for_blocks(blocks);
+
+        // Update blockchain index for block explorer queries
+        if let Ok(mut idx) = self.blockchain_index.lock() {
+            for block in blocks {
+                // Index block hash
+                if let Ok(hash) = novai_consensus_types::codec::hash_block_v1(block) {
+                    idx.block_hashes.insert(hash, block.height);
+                }
+                // Index transaction receipts
+                for (tx_index, tx) in block.txs.iter().enumerate() {
+                    if let Ok(txid) = novai_codec::txid_v1(tx) {
+                        idx.tx_receipts.insert(txid, (block.height, tx_index));
+                    }
+                }
+                idx.committed_height = block.height;
+            }
+        }
     }
 }
 
@@ -309,14 +335,14 @@ fn short_id(id: &TxId) -> String {
 
 /// Load an Ed25519 signing key from a 32-byte seed file.
 fn load_key_file(path: &str) -> ed25519_dalek::SigningKey {
-    let bytes =
-        std::fs::read(path).unwrap_or_else(|e| panic!("Failed to read key file {}: {}", path, e));
+    let bytes = std::fs::read(path)
+        .unwrap_or_else(|e| fatal(format!("Failed to read key file {}: {}", path, e)));
     if bytes.len() != 32 {
-        panic!(
+        fatal(format!(
             "Key file {} must be exactly 32 bytes (got {} bytes)",
             path,
             bytes.len()
-        );
+        ));
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&bytes);
@@ -327,12 +353,17 @@ fn load_key_file(path: &str) -> ed25519_dalek::SigningKey {
 fn save_key_file(path: &str, seed: &[u8; 32]) {
     // Create parent directories if needed
     if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent)
-            .unwrap_or_else(|e| panic!("Failed to create directory {}: {}", parent.display(), e));
+        std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+            fatal(format!(
+                "Failed to create directory {}: {}",
+                parent.display(),
+                e
+            ))
+        });
     }
 
     let mut file = std::fs::File::create(path)
-        .unwrap_or_else(|e| panic!("Failed to create key file {}: {}", path, e));
+        .unwrap_or_else(|e| fatal(format!("Failed to create key file {}: {}", path, e)));
 
     // Set 0600 permissions before writing
     #[cfg(unix)]
@@ -340,25 +371,33 @@ fn save_key_file(path: &str, seed: &[u8; 32]) {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
         file.set_permissions(perms)
-            .unwrap_or_else(|e| panic!("Failed to set permissions on {}: {}", path, e));
+            .unwrap_or_else(|e| fatal(format!("Failed to set permissions on {}: {}", path, e)));
     }
 
     file.write_all(seed)
-        .unwrap_or_else(|e| panic!("Failed to write key file {}: {}", path, e));
+        .unwrap_or_else(|e| fatal(format!("Failed to write key file {}: {}", path, e)));
 }
 
 /// Parse genesis.json and extract validator set (pubkeys + addresses).
 fn parse_genesis_validator_set(
     genesis_path: &str,
 ) -> (Vec<Address>, HashMap<Address, ed25519_dalek::VerifyingKey>) {
-    let json = std::fs::read_to_string(genesis_path)
-        .unwrap_or_else(|e| panic!("Failed to read genesis file {}: {}", genesis_path, e));
-    let parsed: serde_json::Value = serde_json::from_str(&json)
-        .unwrap_or_else(|e| panic!("Failed to parse genesis JSON {}: {}", genesis_path, e));
+    let json = std::fs::read_to_string(genesis_path).unwrap_or_else(|e| {
+        fatal(format!(
+            "Failed to read genesis file {}: {}",
+            genesis_path, e
+        ))
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| {
+        fatal(format!(
+            "Failed to parse genesis JSON {}: {}",
+            genesis_path, e
+        ))
+    });
 
     let validators = parsed["validators"]
         .as_array()
-        .unwrap_or_else(|| panic!("genesis.json missing 'validators' array"));
+        .unwrap_or_else(|| fatal("genesis.json missing 'validators' array"));
 
     let mut validator_set = Vec::new();
     let mut validator_pubkeys = HashMap::new();
@@ -366,24 +405,24 @@ fn parse_genesis_validator_set(
     for (i, v) in validators.iter().enumerate() {
         let pubkey_hex = v["pubkey"]
             .as_str()
-            .unwrap_or_else(|| panic!("Validator {} missing 'pubkey' field", i));
+            .unwrap_or_else(|| fatal(format!("Validator {} missing 'pubkey' field", i)));
 
         let pubkey_bytes = hex::decode(pubkey_hex)
-            .unwrap_or_else(|e| panic!("Validator {} pubkey invalid hex: {}", i, e));
+            .unwrap_or_else(|e| fatal(format!("Validator {} pubkey invalid hex: {}", i, e)));
 
         if pubkey_bytes.len() != 32 {
-            panic!(
+            fatal(format!(
                 "Validator {} pubkey must be 32 bytes (got {})",
                 i,
                 pubkey_bytes.len()
-            );
+            ));
         }
 
         let mut pk_array = [0u8; 32];
         pk_array.copy_from_slice(&pubkey_bytes);
 
         let vk = novai_crypto::pubkey_from_bytes(&pk_array)
-            .unwrap_or_else(|e| panic!("Validator {} pubkey invalid Ed25519: {:?}", i, e));
+            .unwrap_or_else(|e| fatal(format!("Validator {} pubkey invalid Ed25519: {:?}", i, e)));
 
         let addr = address_from_pubkey(&vk);
         validator_set.push(addr);
@@ -476,7 +515,7 @@ fn main() {
                         i += 2;
                     }
                     other => {
-                        panic!("unknown flag: {other}");
+                        fatal(format!("unknown flag: {other}"));
                     }
                 }
             }
@@ -591,7 +630,7 @@ fn main() {
                         i += 1;
                     }
                     other => {
-                        panic!("unknown flag: {other}");
+                        fatal(format!("unknown flag: {other}"));
                     }
                 }
             }
@@ -608,7 +647,7 @@ fn main() {
                 eprintln!("Seeds: [0;32], [1;32], [2;32], [3;32] — any attacker can derive them.");
                 eprintln!();
                 eprintln!("To proceed, add: --allow-insecure-dev-keys");
-                panic!("Refusing to start with --dev-keys without explicit acknowledgment");
+                fatal("Refusing to start with --dev-keys without explicit acknowledgment");
             }
             if dev_keys && allow_insecure_dev_keys {
                 eprintln!("WARNING: Running with DETERMINISTIC dev keys — NOT SAFE FOR PRODUCTION");
@@ -649,11 +688,11 @@ fn main() {
                         .collect();
 
                 if idx >= dev_validator_keys.len() {
-                    panic!(
+                    fatal(format!(
                         "--validator {} out of range (dev-keys supports 0..{})",
                         idx,
                         dev_validator_keys.len() - 1
-                    );
+                    ));
                 }
 
                 // Precompute X25519 noise PUBLIC keys for all dev validators
@@ -686,10 +725,10 @@ fn main() {
 
                 if !vs.contains(&our_addr) {
                     let our_pubkey_hex = hex::encode(our_pk.as_bytes());
-                    panic!(
+                    fatal(format!(
                         "Our public key {} is not in the genesis validator set at {}",
                         our_pubkey_hex, gp
-                    );
+                    ));
                 }
 
                 tracing::info!(key_file = %kf, "Key loaded");
@@ -719,13 +758,15 @@ fn main() {
                     };
                     let db_path = format!("{}/{}", base, db_subdir);
 
-                    std::fs::create_dir_all(&db_path)
-                        .unwrap_or_else(|e| panic!("Failed to create data dir {}: {}", db_path, e));
+                    std::fs::create_dir_all(&db_path).unwrap_or_else(|e| {
+                        fatal(format!("Failed to create data dir {}: {}", db_path, e))
+                    });
 
                     tracing::info!(backend = "RocksDB", path = %db_path, "Storage initialized");
 
-                    let rocks = RocksKv::open(&db_path)
-                        .unwrap_or_else(|e| panic!("Failed to open RocksDB at {}: {}", db_path, e));
+                    let rocks = RocksKv::open(&db_path).unwrap_or_else(|e| {
+                        fatal(format!("Failed to open RocksDB at {}: {}", db_path, e))
+                    });
                     Storage::Rocks(rocks)
                 }
                 "memory" => {
@@ -733,10 +774,10 @@ fn main() {
                     Storage::Memory(MemKv::new())
                 }
                 other => {
-                    panic!(
+                    fatal(format!(
                         "unknown --storage value: {} (expected: rocksdb | memory)",
                         other
-                    );
+                    ));
                 }
             };
 
@@ -798,8 +839,8 @@ fn main() {
                 eprintln!("  1. Use --dev-keys for testing (NOT for production)");
                 eprintln!("  2. Use --no-encryption to disable Noise (reduced security)");
                 eprintln!("  3. Configure validator noise pubkeys via genesis (future feature)");
-                panic!(
-                    "Refusing to start: peer authentication required for multi-validator network"
+                fatal(
+                    "Refusing to start: peer authentication required for multi-validator network",
                 );
             }
 
@@ -810,9 +851,13 @@ fn main() {
                 nonce_provider.seed_dev_accounts(&db_guard);
             }
 
+            // Shared blockchain index for block explorer RPC endpoints
+            let blockchain_index = Arc::new(Mutex::new(rpc::BlockchainIndex::new()));
+
             // Wire execution commit callback
             let commit_callback = Arc::new(ExecutionCommitCallback {
                 nonce_provider: Arc::clone(&nonce_provider),
+                blockchain_index: Arc::clone(&blockchain_index),
             });
             node.set_commit_callback(commit_callback);
 
@@ -1052,6 +1097,7 @@ fn main() {
                 Arc::clone(&nonce_provider) as Arc<dyn NonceProvider + Send + Sync>,
                 Arc::clone(&node.db),
                 dev_keys,
+                Arc::clone(&blockchain_index),
             ) {
                 tracing::error!(%e, "Failed to start RPC server");
             }
@@ -1282,7 +1328,7 @@ fn main() {
                         i += 2;
                     }
                     other => {
-                        panic!("unknown flag: {other}");
+                        fatal(format!("unknown flag: {other}"));
                     }
                 }
             }
@@ -1353,7 +1399,7 @@ fn main() {
                         i += 2;
                     }
                     other => {
-                        panic!("unknown flag: {other}");
+                        fatal(format!("unknown flag: {other}"));
                     }
                 }
             }

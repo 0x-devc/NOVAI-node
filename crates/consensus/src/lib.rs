@@ -10,6 +10,7 @@ use novai_consensus_types::{Block, Timeout, Vote, QC};
 use novai_state::{block_key, qc_key, Kv, KvBatch, KEY_COMMITTED_HEIGHT, KEY_HIGHEST_QC};
 use novai_types::{Address, TxV1};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 // ========== WEEK 8: TIMEOUT CONFIGURATION ==========
 
@@ -133,12 +134,13 @@ pub struct ConsensusState {
     pub voted_at_height: HashMap<Address, [u8; 32]>,
     /// Highest committed height.
     pub committed_height: u64,
-    /// Block cache by height (for commit rule).
-    pub block_cache: HashMap<u64, Block>,
+    /// Block cache by height (for commit rule). Uses Arc to avoid
+    /// cloning full blocks (50-100KB) on every proposal.
+    pub block_cache: HashMap<u64, Arc<Block>>,
     /// QC cache by height (for commit rule).
     pub qc_cache: HashMap<u64, QC>,
     /// Block cache by hash (for chain-following in commit rule).
-    pub block_by_hash: HashMap<[u8; 32], Block>,
+    pub block_by_hash: HashMap<[u8; 32], Arc<Block>>,
     /// Pending timeouts by (height, round).
     pub pending_timeouts: HashMap<(u64, u64), Vec<Timeout>>,
     /// Addresses that already sent timeout in current round (deduplication).
@@ -912,8 +914,9 @@ impl ConsensusState {
             hash = ?&hash[..4],
             "cache_block"
         );
-        self.block_cache.insert(block.height, block.clone());
-        self.block_by_hash.insert(hash, block);
+        let arc = Arc::new(block);
+        self.block_cache.insert(arc.height, Arc::clone(&arc));
+        self.block_by_hash.insert(hash, arc);
     }
 
     /// Cache a QC and check if commit rule triggers.
@@ -1055,7 +1058,7 @@ impl ConsensusState {
                 )));
             }
             self.cache_block(loaded.clone());
-            loaded
+            Arc::new(loaded)
         };
 
         if block_h.height != qc_height {
@@ -1071,7 +1074,7 @@ impl ConsensusState {
 
         for expected_height in (self.committed_height + 1..=qc_height).rev() {
             let (block, source) = if let Some(b) = self.block_by_hash.get(&current_hash) {
-                (b.clone(), "cache")
+                (Block::clone(b), "cache")
             } else {
                 // DB fallback: load by expected height, verify hash matches
                 let loaded = Self::load_block(db, expected_height)

@@ -20,6 +20,7 @@ use crate::consensus_node::Storage;
 use mempool::{NonceProvider, TxMempool};
 use novai_ai_entities::{AiSignalType, SignalCommitment};
 use novai_codec::{decode_tx_v1_signed, txid_v1};
+use novai_consensus_types;
 use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_execution::{
     get_memory_objects_by_entity, get_signals_by_height, get_signals_by_issuer,
@@ -28,9 +29,9 @@ use novai_execution::{
 use novai_p2p::{NetworkMessage, PeerManager};
 use novai_types::{Address, TxV1, TxVersion};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -113,6 +114,68 @@ struct GetNonceParams {
 #[derive(Debug, Serialize)]
 struct GetNonceResult {
     nonce: u64,
+}
+
+// ============================================================================
+// BLOCK EXPLORER RPC TYPES (P1-4 + P1-5)
+// ============================================================================
+
+/// Shared index populated during block commits.
+/// Provides O(1) tx receipt and block hash lookups for the RPC layer.
+#[derive(Default)]
+pub struct BlockchainIndex {
+    /// txid → (block_height, tx_index)
+    pub tx_receipts: HashMap<[u8; 32], (u64, usize)>,
+    /// block_hash → block_height
+    pub block_hashes: HashMap<[u8; 32], u64>,
+    /// Latest committed height
+    pub committed_height: u64,
+}
+
+impl BlockchainIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Parameters for novai_getTransaction.
+#[derive(Debug, Deserialize)]
+struct GetTxParams {
+    txid: String,
+}
+
+/// Result for novai_getTransaction.
+#[derive(Debug, Serialize)]
+struct GetTxResult {
+    block_height: u64,
+    tx_index: usize,
+    from: String,
+    nonce: u64,
+    fee: u64,
+    payload_len: usize,
+}
+
+/// Parameters for novai_getBlockByHeight.
+#[derive(Debug, Deserialize)]
+struct GetBlockByHeightParams {
+    height: u64,
+}
+
+/// Parameters for novai_getBlockByHash.
+#[derive(Debug, Deserialize)]
+struct GetBlockByHashParams {
+    hash: String,
+}
+
+/// Result for block queries.
+#[derive(Debug, Serialize)]
+struct BlockResult {
+    height: u64,
+    round: u64,
+    block_hash: String,
+    parent_hash: String,
+    state_root: String,
+    tx_count: usize,
 }
 
 // ============================================================================
@@ -284,15 +347,22 @@ pub fn start_rpc_server(
     tracing::info!(%addr, "RPC server listening");
 
     thread::spawn(move || {
-        let mut recent_requests: VecDeque<Instant> = VecDeque::new();
+        let mut per_ip_limits: HashMap<IpAddr, VecDeque<Instant>> = HashMap::new();
+        let mut last_cleanup = Instant::now();
         let nonce = SharedNonceProvider(nonce_provider);
 
         for mut request in server.incoming_requests() {
-            // Rate limiting: sliding 1-second window
-            if rpc_rate_limited(&mut recent_requests) {
-                let _ = request.respond(
+            // Per-IP rate limiting: sliding 1-second window
+            let client_ip = request
+                .remote_addr()
+                .map(|a| a.ip())
+                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            if rpc_rate_limited(&mut per_ip_limits, client_ip, &mut last_cleanup) {
+                if let Err(e) = request.respond(
                     Response::from_string("Too Many Requests").with_status_code(StatusCode(429)),
-                );
+                ) {
+                    tracing::warn!(%e, "Failed to send 429 response");
+                }
                 continue;
             }
             // Read request body (bounded to prevent OOM from oversized requests)
@@ -302,17 +372,21 @@ pub fn start_rpc_server(
                 .take(MAX_RPC_BODY_SIZE as u64 + 1)
                 .read_to_string(&mut body)
             {
-                let _ = request.respond(
+                if let Err(re) = request.respond(
                     Response::from_string(format!("Failed to read request: {}", e))
                         .with_status_code(StatusCode(400)),
-                );
+                ) {
+                    tracing::warn!(%re, "Failed to send 400 response");
+                }
                 continue;
             }
             if body.len() > MAX_RPC_BODY_SIZE {
-                let _ = request.respond(
+                if let Err(e) = request.respond(
                     Response::from_string("Request body too large")
                         .with_status_code(StatusCode(413)),
-                );
+                ) {
+                    tracing::warn!(%e, "Failed to send 413 response");
+                }
                 continue;
             }
 
@@ -328,7 +402,9 @@ pub fn start_rpc_server(
                         },
                         id: serde_json::Value::Null,
                     };
-                    let _ = request.respond(json_response(error_response));
+                    if let Err(e) = request.respond(json_response(error_response)) {
+                        tracing::warn!(%e, "Failed to send RPC error response");
+                    }
                     continue;
                 }
             };
@@ -343,7 +419,9 @@ pub fn start_rpc_server(
                     },
                     id: rpc_request.id,
                 };
-                let _ = request.respond(json_response(error_response));
+                if let Err(e) = request.respond(json_response(error_response)) {
+                    tracing::warn!(%e, "Failed to send RPC error response");
+                }
                 continue;
             }
 
@@ -400,7 +478,9 @@ pub fn start_rpc_server(
                 }
             };
 
-            let _ = request.respond(http_response);
+            if let Err(e) = request.respond(http_response) {
+                tracing::warn!(%e, "Failed to send RPC response");
+            }
         }
     });
 
@@ -426,6 +506,7 @@ pub fn start_rpc_server_with_state(
     nonce_provider: Arc<dyn NonceProvider + Send + Sync>,
     db: Arc<Mutex<Storage>>,
     dev_keys: bool,
+    blockchain_index: Arc<Mutex<BlockchainIndex>>,
 ) -> Result<(), String> {
     let addr: SocketAddr = bind_addr
         .parse()
@@ -436,15 +517,22 @@ pub fn start_rpc_server_with_state(
     tracing::info!(%addr, "RPC server listening (with state queries)");
 
     thread::spawn(move || {
-        let mut recent_requests: VecDeque<Instant> = VecDeque::new();
+        let mut per_ip_limits: HashMap<IpAddr, VecDeque<Instant>> = HashMap::new();
+        let mut last_cleanup = Instant::now();
         let nonce = SharedNonceProvider(nonce_provider);
 
         for mut request in server.incoming_requests() {
-            // Rate limiting: sliding 1-second window
-            if rpc_rate_limited(&mut recent_requests) {
-                let _ = request.respond(
+            // Per-IP rate limiting: sliding 1-second window
+            let client_ip = request
+                .remote_addr()
+                .map(|a| a.ip())
+                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            if rpc_rate_limited(&mut per_ip_limits, client_ip, &mut last_cleanup) {
+                if let Err(e) = request.respond(
                     Response::from_string("Too Many Requests").with_status_code(StatusCode(429)),
-                );
+                ) {
+                    tracing::warn!(%e, "Failed to send 429 response");
+                }
                 continue;
             }
             // Read request body (bounded to prevent OOM from oversized requests)
@@ -454,17 +542,21 @@ pub fn start_rpc_server_with_state(
                 .take(MAX_RPC_BODY_SIZE as u64 + 1)
                 .read_to_string(&mut body)
             {
-                let _ = request.respond(
+                if let Err(re) = request.respond(
                     Response::from_string(format!("Failed to read request: {}", e))
                         .with_status_code(StatusCode(400)),
-                );
+                ) {
+                    tracing::warn!(%re, "Failed to send 400 response");
+                }
                 continue;
             }
             if body.len() > MAX_RPC_BODY_SIZE {
-                let _ = request.respond(
+                if let Err(e) = request.respond(
                     Response::from_string("Request body too large")
                         .with_status_code(StatusCode(413)),
-                );
+                ) {
+                    tracing::warn!(%e, "Failed to send 413 response");
+                }
                 continue;
             }
 
@@ -480,7 +572,9 @@ pub fn start_rpc_server_with_state(
                         },
                         id: serde_json::Value::Null,
                     };
-                    let _ = request.respond(json_response(error_response));
+                    if let Err(e) = request.respond(json_response(error_response)) {
+                        tracing::warn!(%e, "Failed to send RPC error response");
+                    }
                     continue;
                 }
             };
@@ -495,7 +589,9 @@ pub fn start_rpc_server_with_state(
                     },
                     id: rpc_request.id,
                 };
-                let _ = request.respond(json_response(error_response));
+                if let Err(e) = request.respond(json_response(error_response)) {
+                    tracing::warn!(%e, "Failed to send RPC error response");
+                }
                 continue;
             }
 
@@ -670,6 +766,71 @@ pub fn start_rpc_server_with_state(
                         json_response(response)
                     }
                 },
+                // Block explorer endpoints (P1-4 + P1-5)
+                "novai_getTransaction" => {
+                    match handle_get_transaction(&rpc_request, &blockchain_index, &db) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => json_response(RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        }),
+                    }
+                }
+                "novai_getBlockByHeight" => match handle_get_block_by_height(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => json_response(RpcErrorResponse {
+                        jsonrpc: "2.0",
+                        error,
+                        id: rpc_request.id,
+                    }),
+                },
+                "novai_getBlockByHash" => {
+                    match handle_get_block_by_hash(&rpc_request, &blockchain_index, &db) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => json_response(RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        }),
+                    }
+                }
+                "novai_getLatestBlock" => match handle_get_latest_block(&blockchain_index, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => json_response(RpcErrorResponse {
+                        jsonrpc: "2.0",
+                        error,
+                        id: rpc_request.id,
+                    }),
+                },
                 _ => {
                     let response = RpcErrorResponse {
                         jsonrpc: "2.0",
@@ -683,7 +844,9 @@ pub fn start_rpc_server_with_state(
                 }
             };
 
-            let _ = request.respond(http_response);
+            if let Err(e) = request.respond(http_response) {
+                tracing::warn!(%e, "Failed to send RPC response");
+            }
         }
     });
 
@@ -1146,11 +1309,199 @@ fn handle_faucet(
     })
 }
 
-/// Check and enforce the sliding-window rate limit.
+// ============================================================================
+// BLOCK EXPLORER HANDLERS (P1-4 + P1-5)
+// ============================================================================
+
+/// Handle novai_getTransaction — lookup tx receipt by txid.
+fn handle_get_transaction(
+    request: &RpcRequest,
+    index: &Arc<Mutex<BlockchainIndex>>,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<serde_json::Value, RpcError> {
+    let params: GetTxParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {}", e),
+        })?;
+
+    let txid = parse_hex32(&params.txid, "txid")?;
+    let idx = index.lock().unwrap();
+    let Some(&(height, tx_index)) = idx.tx_receipts.get(&txid) else {
+        return Ok(serde_json::Value::Null);
+    };
+    drop(idx);
+
+    // Load block to get tx details
+    let db_guard = db.lock().unwrap();
+    let block = novai_consensus::ConsensusState::load_block(&*db_guard, height)
+        .map_err(|e| RpcError {
+            code: -32002,
+            message: format!("Failed to load block: {:?}", e),
+        })?
+        .ok_or_else(|| RpcError {
+            code: -32002,
+            message: format!("Block at height {} not found (pruned?)", height),
+        })?;
+    drop(db_guard);
+
+    let tx = block.txs.get(tx_index).ok_or_else(|| RpcError {
+        code: -32002,
+        message: format!("Tx index {} out of range in block {}", tx_index, height),
+    })?;
+
+    Ok(serde_json::to_value(GetTxResult {
+        block_height: height,
+        tx_index,
+        from: hex::encode(tx.from),
+        nonce: tx.nonce,
+        fee: tx.fee,
+        payload_len: tx.payload.len(),
+    })
+    .unwrap())
+}
+
+/// Handle novai_getBlockByHeight — return block header by height.
+fn handle_get_block_by_height(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<serde_json::Value, RpcError> {
+    let params: GetBlockByHeightParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {}", e),
+        })?;
+
+    let db_guard = db.lock().unwrap();
+    let block =
+        novai_consensus::ConsensusState::load_block(&*db_guard, params.height).map_err(|e| {
+            RpcError {
+                code: -32002,
+                message: format!("Failed to load block: {:?}", e),
+            }
+        })?;
+    drop(db_guard);
+
+    match block {
+        Some(b) => {
+            let hash = novai_consensus_types::codec::hash_block_v1(&b).map_err(|e| RpcError {
+                code: -32002,
+                message: format!("Failed to hash block: {:?}", e),
+            })?;
+            Ok(serde_json::to_value(BlockResult {
+                height: b.height,
+                round: b.round,
+                block_hash: hex::encode(hash),
+                parent_hash: hex::encode(b.parent_hash),
+                state_root: hex::encode(b.state_root),
+                tx_count: b.txs.len(),
+            })
+            .unwrap())
+        }
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
+/// Handle novai_getBlockByHash — lookup block height from hash index, then load.
+fn handle_get_block_by_hash(
+    request: &RpcRequest,
+    index: &Arc<Mutex<BlockchainIndex>>,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<serde_json::Value, RpcError> {
+    let params: GetBlockByHashParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {}", e),
+        })?;
+
+    let hash = parse_hex32(&params.hash, "hash")?;
+    let idx = index.lock().unwrap();
+    let height = idx.block_hashes.get(&hash).copied();
+    drop(idx);
+
+    match height {
+        Some(h) => {
+            let db_guard = db.lock().unwrap();
+            let block =
+                novai_consensus::ConsensusState::load_block(&*db_guard, h).map_err(|e| {
+                    RpcError {
+                        code: -32002,
+                        message: format!("Failed to load block: {:?}", e),
+                    }
+                })?;
+            drop(db_guard);
+            match block {
+                Some(b) => Ok(serde_json::to_value(BlockResult {
+                    height: b.height,
+                    round: b.round,
+                    block_hash: hex::encode(hash),
+                    parent_hash: hex::encode(b.parent_hash),
+                    state_root: hex::encode(b.state_root),
+                    tx_count: b.txs.len(),
+                })
+                .unwrap()),
+                None => Ok(serde_json::Value::Null),
+            }
+        }
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
+/// Handle novai_getLatestBlock — return the latest committed block.
+fn handle_get_latest_block(
+    index: &Arc<Mutex<BlockchainIndex>>,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<serde_json::Value, RpcError> {
+    let height = index.lock().unwrap().committed_height;
+    if height == 0 {
+        return Ok(serde_json::Value::Null);
+    }
+    let db_guard = db.lock().unwrap();
+    let block =
+        novai_consensus::ConsensusState::load_block(&*db_guard, height).map_err(|e| RpcError {
+            code: -32002,
+            message: format!("Failed to load block: {:?}", e),
+        })?;
+    drop(db_guard);
+    match block {
+        Some(b) => {
+            let hash = novai_consensus_types::codec::hash_block_v1(&b).map_err(|e| RpcError {
+                code: -32002,
+                message: format!("Failed to hash block: {:?}", e),
+            })?;
+            Ok(serde_json::to_value(BlockResult {
+                height: b.height,
+                round: b.round,
+                block_hash: hex::encode(hash),
+                parent_hash: hex::encode(b.parent_hash),
+                state_root: hex::encode(b.state_root),
+                tx_count: b.txs.len(),
+            })
+            .unwrap())
+        }
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
+/// Check and enforce the per-IP sliding-window rate limit.
 ///
-/// Returns `true` if the request should be rejected (rate exceeded).
-fn rpc_rate_limited(recent: &mut VecDeque<Instant>) -> bool {
+/// Returns `true` if the request from this IP should be rejected.
+/// Periodically evicts stale IP entries (no requests in last 10s).
+fn rpc_rate_limited(
+    per_ip: &mut HashMap<IpAddr, VecDeque<Instant>>,
+    ip: IpAddr,
+    last_cleanup: &mut Instant,
+) -> bool {
     let now = Instant::now();
+
+    // Periodic cleanup: evict IPs with no recent activity (every 60s)
+    if last_cleanup.elapsed() >= Duration::from_secs(60) {
+        *last_cleanup = now;
+        let stale_cutoff = now - Duration::from_secs(10);
+        per_ip.retain(|_, timestamps| timestamps.back().is_some_and(|&t| t >= stale_cutoff));
+    }
+
+    let recent = per_ip.entry(ip).or_default();
     let one_sec_ago = now - Duration::from_secs(1);
     while recent.front().is_some_and(|&t| t < one_sec_ago) {
         recent.pop_front();
