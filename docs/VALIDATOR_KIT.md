@@ -1,8 +1,8 @@
 # NOVAI Validator Kit
 
 **Version**: 1.0.0
-**Status**: DRAFT
-**Last Updated**: 2026-02-03
+**Status**: READY
+**Last Updated**: 2026-04-17
 
 Complete guide for setting up and operating a NOVAI mainnet validator node.
 
@@ -848,6 +848,82 @@ df -h /var/lib/novai
 - **GitHub Issues**: https://github.com/novai-protocol/novai-node/issues
 - **Discord**: #validator-support channel
 - **Emergency**: Contact ceremony coordinator
+
+---
+
+## 12. Joining an Existing Network
+
+If the network is already running and you are joining as a new validator:
+
+### 12.1 Prerequisites
+
+1. Obtain `genesis.json` from the network operator or official repository
+2. Verify the genesis state root: `genesis-generator --config genesis.json --verify <published_root>`
+3. Generate your validator key: `novai-node generate-key --output ~/.novai/data/validator.key`
+4. Share your public key with the network operator
+
+### 12.2 Starting Your Node
+
+```bash
+novai-node run \
+  --port 9090 \
+  --genesis /path/to/genesis.json \
+  --key-file ~/.novai/data/validator.key \
+  --seed seed-1.mainnet.novai.io:9090 \
+  --seed seed-2.mainnet.novai.io:9090 \
+  --data-dir ~/.novai/data \
+  --metrics-port 8081 \
+  --rpc-port 3030
+```
+
+The `--seed` flag resolves hostnames via DNS — no need to hardcode IP addresses. You can combine `--seed` with `--peer` for direct connections.
+
+### 12.3 Monitoring Sync Progress
+
+```bash
+# Check committed height (should increase toward network height)
+curl -s http://localhost:8081/metrics | grep novai_committed_height
+
+# Check peer count (should be >= 2)
+curl -s http://localhost:8081/metrics | grep novai_peer_count
+
+# Check round number (high values indicate timeout issues)
+curl -s http://localhost:8081/metrics | grep novai_current_round
+```
+
+Your node is synced when `novai_committed_height` matches the network's latest height. Block production begins once caught up.
+
+### 12.4 Hardware Requirements
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| CPU | 2 cores | 4+ cores |
+| RAM | 2 GB | 4+ GB |
+| Disk | 20 GB SSD | 100+ GB NVMe |
+| Bandwidth | 10 Mbps | 100+ Mbps |
+| OS | Ubuntu 22.04+ | Ubuntu 24.04 |
+
+### 12.5 Troubleshooting — Common Issues
+
+**Node won't sync / no new blocks:**
+- Check `novai_peer_count` — if 0, verify firewall allows port 9090 (TCP inbound+outbound)
+- Verify `genesis.json` matches the network's genesis (re-run genesis verification)
+- Ensure `--seed` hostnames resolve: `dig seed-1.mainnet.novai.io`
+
+**High round numbers (timeout spiral):**
+- Indicates the node is timing out without receiving proposals
+- Check `novai_peer_count` — may be partitioned from the network
+- If all nodes show high rounds, a network-wide issue may require coordinator intervention
+
+**RPC not responding:**
+- Verify `--rpc-port` is set and not conflicting with another service
+- Check per-IP rate limit (100 req/sec per IP) — reduce client request rate
+- Test health endpoint: `curl http://localhost:3030/health`
+
+**Disk space growing unexpectedly:**
+- Block pruning retains the last 100,000 blocks by default
+- Check `du -sh ~/.novai/data/` — typical testnet usage is 1-5 GB
+- If growing beyond 10 GB, verify pruning is active in logs
 
 ---
 

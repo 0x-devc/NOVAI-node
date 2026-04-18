@@ -29,8 +29,8 @@ use std::time::Duration;
 fn usage() {
     eprintln!(
         "usage:
-  novai-node run --port <port> --genesis <path> [--peer <addr>]... [--key-file <path>] [--metrics-port <port>] [--base-timeout <ms>] [--proposal-interval <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
-  novai-node run --port <port> --dev-keys --allow-insecure-dev-keys --validator <index> [--peer <addr>]... [--metrics-port <port>] [--base-timeout <ms>] [--proposal-interval <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
+  novai-node run --port <port> --genesis <path> [--peer <addr>]... [--seed <host:port>]... [--key-file <path>] [--metrics-port <port>] [--base-timeout <ms>] [--proposal-interval <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
+  novai-node run --port <port> --dev-keys --allow-insecure-dev-keys --validator <index> [--peer <addr>]... [--seed <host:port>]... [--metrics-port <port>] [--base-timeout <ms>] [--proposal-interval <ms>] [--storage <rocksdb|memory>] [--data-dir <path>] [--no-encryption]
   novai-node generate-key [--output <path>]
   novai-node submit-tx <payload> [--nonce <u64>] [--fee <u64>] [--min-fee <u64>] [--cap <u64>]
   novai-node drain-mempool <payload> [<payload> ...] [--max <u64>] [--min-fee <u64>] [--cap <u64>]
@@ -545,6 +545,7 @@ fn main() {
             // Parse flags
             let mut port: Option<u16> = None;
             let mut peers: Vec<String> = Vec::new();
+            let mut seeds: Vec<String> = Vec::new();
             let mut validator_idx: Option<usize> = None;
             let mut metrics_port: Option<u16> = None;
             let mut rpc_port: Option<u16> = None;
@@ -568,6 +569,10 @@ fn main() {
                     }
                     "--peer" => {
                         peers.push(rest.get(i + 1).cloned().expect("missing --peer value"));
+                        i += 2;
+                    }
+                    "--seed" => {
+                        seeds.push(rest.get(i + 1).cloned().expect("missing --seed value"));
                         i += 2;
                     }
                     "--validator" => {
@@ -885,6 +890,34 @@ fn main() {
                 match node.connect_to_peer(peer_addr) {
                     Ok(_) => tracing::info!(peer = %peer, "Connected to peer"),
                     Err(e) => tracing::warn!(peer = %peer, %e, "Failed to connect to peer"),
+                }
+            }
+
+            // Resolve and connect to DNS seed nodes
+            for seed in &seeds {
+                use std::net::ToSocketAddrs;
+                match seed.to_socket_addrs() {
+                    Ok(addrs) => {
+                        let mut connected = false;
+                        for addr in addrs {
+                            match node.connect_to_peer(addr) {
+                                Ok(_) => {
+                                    tracing::info!(seed = %seed, addr = %addr, "Connected to seed node");
+                                    connected = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    tracing::debug!(seed = %seed, addr = %addr, %e, "Seed address failed, trying next");
+                                }
+                            }
+                        }
+                        if !connected {
+                            tracing::warn!(seed = %seed, "Failed to connect to any address for seed node");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(seed = %seed, %e, "Failed to resolve seed node DNS");
+                    }
                 }
             }
 

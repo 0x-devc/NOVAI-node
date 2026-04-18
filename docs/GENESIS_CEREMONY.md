@@ -1,7 +1,7 @@
 # NOVAI Genesis Ceremony Procedure
 
 **Version**: 1.0.0
-**Status**: DRAFT
+**Status**: READY
 **Last Updated**: 2026-02-03
 
 This document defines the secure procedure for generating the NOVAI mainnet genesis state. Multiple independent parties must participate to ensure no single entity controls the genesis configuration.
@@ -609,9 +609,60 @@ genesis-generator --config mainnet_config.json --verbose
 
 | Role | Contact | Backup |
 |------|---------|--------|
-| Ceremony Coordinator | [TBD] | [TBD] |
-| Security Lead | [TBD] | [TBD] |
-| Emergency Hotline | [TBD] | [TBD] |
+| Ceremony Coordinator | NOVAInetwork@protonmail.com | See SECURITY.md |
+| Security Lead | NOVAInetwork@protonmail.com | See SECURITY.md |
+| Emergency Hotline | NOVAInetwork@protonmail.com | See SECURITY.md |
+
+---
+
+## Joining an Existing Network (Post-Genesis)
+
+If the genesis ceremony has already been completed and the network is running, follow these steps to join as a new validator:
+
+### 1. Obtain the Genesis Configuration
+
+Download the canonical `genesis.json` from the network operator or the official repository. Verify the file hash matches the published value.
+
+### 2. Verify the Genesis State Root
+
+Run the genesis generator tool to independently verify the state root:
+
+```bash
+cargo run --release -p genesis-generator -- --config genesis.json --verify <published_state_root_hex>
+```
+
+If verification succeeds, the tool prints `MATCH`. If it fails, **do not start your node** — contact the ceremony coordinator.
+
+### 3. Generate Your Validator Key
+
+```bash
+novai-node generate-key --output ~/.novai/data/validator.key
+```
+
+Share your **public key** (printed to stdout) with the network operator for inclusion in the next validator set update.
+
+### 4. Start Your Node
+
+```bash
+novai-node run \
+  --port 9090 \
+  --genesis genesis.json \
+  --key-file ~/.novai/data/validator.key \
+  --seed seed.novai.network:9090 \
+  --data-dir ~/.novai/data
+```
+
+Your node will connect to seed nodes, sync the chain from genesis height, and begin participating in consensus once caught up.
+
+### 5. Verify Sync
+
+Monitor your node's committed height via the metrics endpoint:
+
+```bash
+curl -s http://localhost:8080/metrics | grep novai_committed_height
+```
+
+Once your committed height matches the network's latest height, your node is fully synced.
 
 ---
 

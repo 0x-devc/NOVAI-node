@@ -1171,6 +1171,19 @@ impl ConsensusNode {
                 ));
             }
 
+            // Reject oversized QCs before expensive signature verification.
+            // A legitimate QC has at most validator_count votes; anything beyond
+            // quorum + 5 is either malicious or malformed.
+            let max_qc_votes = quorum + 5;
+            if justify_qc.votes.len() > max_qc_votes {
+                return Err(format!(
+                    "Height {} proposal has too many justify_qc votes: {} > max {}",
+                    block.height,
+                    justify_qc.votes.len(),
+                    max_qc_votes
+                ));
+            }
+
             // Verify each vote signature in justify_qc (prevents malicious leader
             // from fabricating a QC with fake votes that passes the count check).
             for vote in &justify_qc.votes {

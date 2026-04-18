@@ -540,11 +540,14 @@ impl ConsensusState {
         self.voted_in_round.insert(vote.voter);
         self.voted_at_height.insert(vote.voter, vote.block_hash);
 
-        // Add vote to pending votes
-        self.pending_votes
-            .entry(vote.block_hash)
-            .or_default()
-            .push(vote);
+        // Add vote to pending votes (capped to prevent unbounded memory from
+        // Byzantine vote spam — each block hash stores at most validator_count + 5 votes)
+        let max_per_hash = validator_pubkeys.len() + 5;
+        let votes_for_hash = self.pending_votes.entry(vote.block_hash).or_default();
+        if votes_for_hash.len() >= max_per_hash {
+            return Ok(()); // Silently drop excess votes
+        }
+        votes_for_hash.push(vote);
 
         Ok(())
     }
