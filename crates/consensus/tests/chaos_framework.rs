@@ -323,7 +323,7 @@ impl ValidatorHandle {
     /// Cache a block in the validator's state.
     #[allow(dead_code)]
     pub fn cache_block(&self, block: Block) {
-        self.state.lock().unwrap().cache_block(block);
+        self.state.lock().unwrap().cache_block(block).unwrap();
     }
 
     /// Process a vote (if not crashed).

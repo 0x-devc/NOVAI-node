@@ -259,9 +259,9 @@ fn commit_rule_3_chain() {
     let hash3 = hash_block_v1(&block3).unwrap();
 
     // Cache blocks
-    state.cache_block(block1.clone());
-    state.cache_block(block2.clone());
-    state.cache_block(block3.clone());
+    state.cache_block(block1.clone()).unwrap();
+    state.cache_block(block2.clone()).unwrap();
+    state.cache_block(block3.clone()).unwrap();
 
     // QC at height 1 - no commits yet (need height >= 2 for 3-chain)
     let qc1 = novai_consensus_types::QC {
@@ -307,7 +307,7 @@ fn commit_rule_3_chain() {
     // Create block 4 linked to block 3
     let block4 = make_block(4, hash3);
     let hash4 = hash_block_v1(&block4).unwrap();
-    state.cache_block(block4);
+    state.cache_block(block4).unwrap();
 
     // QC at height 4 - commits block at height 2
     let qc4 = novai_consensus_types::QC {
@@ -354,11 +354,11 @@ fn commit_rule_batch_commits() {
     let hash5 = hash_block_v1(&block5).unwrap();
 
     // Cache all blocks
-    state.cache_block(block1);
-    state.cache_block(block2);
-    state.cache_block(block3);
-    state.cache_block(block4);
-    state.cache_block(block5);
+    state.cache_block(block1).unwrap();
+    state.cache_block(block2).unwrap();
+    state.cache_block(block3).unwrap();
+    state.cache_block(block4).unwrap();
+    state.cache_block(block5).unwrap();
 
     // QC at height 5 should commit blocks 1, 2, 3 (heights <= 5-2=3)
     let qc5 = novai_consensus_types::QC {
@@ -390,15 +390,15 @@ fn highest_qc_updated() {
     // Create blocks for QC references
     let block1 = make_block(1, [0u8; 32]);
     let hash1 = hash_block_v1(&block1).unwrap();
-    state.cache_block(block1);
+    state.cache_block(block1).unwrap();
 
     let block2 = make_block(2, hash1);
     let hash2 = hash_block_v1(&block2).unwrap();
-    state.cache_block(block2);
+    state.cache_block(block2).unwrap();
 
     let block3 = make_block(3, hash2);
     let hash3 = hash_block_v1(&block3).unwrap();
-    state.cache_block(block3);
+    state.cache_block(block3).unwrap();
 
     // Initially no highest QC
     assert!(state.highest_qc.is_none());
@@ -459,8 +459,8 @@ fn commit_fails_on_missing_block() {
     let hash3 = hash_block_v1(&block3).unwrap();
 
     // Only cache block 1 and 3, skip block 2
-    state.cache_block(block1);
-    state.cache_block(block3);
+    state.cache_block(block1).unwrap();
+    state.cache_block(block3).unwrap();
 
     // QC at height 3 should fail because block 2 is missing from chain
     let qc3 = novai_consensus_types::QC {
@@ -493,9 +493,9 @@ fn commit_fails_on_wrong_block_hash_in_qc() {
     let block3 = make_block(3, hash2);
     // Don't compute hash3, use a fake one
 
-    state.cache_block(block1);
-    state.cache_block(block2);
-    state.cache_block(block3);
+    state.cache_block(block1).unwrap();
+    state.cache_block(block2).unwrap();
+    state.cache_block(block3).unwrap();
 
     // QC with wrong block_hash (doesn't match any cached block)
     let qc3 = novai_consensus_types::QC {

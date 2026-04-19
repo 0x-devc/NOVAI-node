@@ -549,6 +549,8 @@ fn main() {
             let mut validator_idx: Option<usize> = None;
             let mut metrics_port: Option<u16> = None;
             let mut rpc_port: Option<u16> = None;
+            let mut rpc_bind: Option<String> = None;
+            let mut faucet_key_path: Option<String> = None;
             let mut base_timeout_ms: u64 = novai_consensus::BASE_TIMEOUT_MS;
             let mut storage_backend: String = "rocksdb".to_string();
             let mut data_dir: Option<String> = None;
@@ -587,6 +589,19 @@ fn main() {
                     }
                     "--rpc-port" => {
                         rpc_port = Some(parse_u64(rest.get(i + 1).cloned(), "--rpc-port") as u16);
+                        i += 2;
+                    }
+                    "--rpc-bind" => {
+                        rpc_bind =
+                            Some(rest.get(i + 1).cloned().expect("missing --rpc-bind value"));
+                        i += 2;
+                    }
+                    "--faucet-key" => {
+                        faucet_key_path = Some(
+                            rest.get(i + 1)
+                                .cloned()
+                                .expect("missing --faucet-key value"),
+                        );
                         i += 2;
                     }
                     "--base-timeout" => {
@@ -1123,7 +1138,30 @@ fn main() {
             }
 
             // Start RPC server with state access (transaction submission + queries)
-            let rpc_addr = format!("0.0.0.0:{}", rpc_port);
+            let rpc_host = rpc_bind.unwrap_or_else(|| "127.0.0.1".to_string());
+            if rpc_host == "0.0.0.0" {
+                tracing::warn!(
+                    "RPC server binding to 0.0.0.0 — ALL interfaces publicly accessible. \
+                     Use --rpc-bind 127.0.0.1 for local-only access."
+                );
+            }
+            let rpc_addr = format!("{}:{}", rpc_host, rpc_port);
+
+            // C-04: Load faucet key from file if provided, else use deterministic
+            // dev key (acceptable for local dev), else disable faucet.
+            let faucet_key: Option<ed25519_dalek::SigningKey> =
+                if let Some(ref path) = faucet_key_path {
+                    let key = load_key_file(path);
+                    tracing::info!("Faucet key loaded from {}", path);
+                    Some(key)
+                } else if dev_keys {
+                    tracing::info!("Faucet using DETERMINISTIC dev key (dev-mode only)");
+                    None // rpc.rs will derive it internally
+                } else {
+                    tracing::info!("Faucet disabled (no --faucet-key and not in dev-mode)");
+                    None
+                };
+
             if let Err(e) = rpc::start_rpc_server_with_state(
                 &rpc_addr,
                 Arc::clone(&mempool),
@@ -1131,6 +1169,7 @@ fn main() {
                 Arc::clone(&node.db),
                 dev_keys,
                 Arc::clone(&blockchain_index),
+                faucet_key,
             ) {
                 tracing::error!(%e, "Failed to start RPC server");
             }

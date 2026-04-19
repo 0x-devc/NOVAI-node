@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -44,6 +45,10 @@ const MAX_RPC_REQUESTS_PER_SEC: usize = 100;
 /// Prevents OOM from oversized HTTP bodies. 512KB is generous for any
 /// valid JSON-RPC request (max tx is 128KB → 256KB hex-encoded).
 const MAX_RPC_BODY_SIZE: usize = 512 * 1024;
+
+/// Maximum concurrent RPC requests being processed (C-06).
+/// Prevents thread exhaustion from Slowloris or SYN flood attacks.
+const MAX_CONCURRENT_RPC: usize = 64;
 
 /// Maximum height range for signal queries (prevents massive result sets).
 const MAX_SIGNAL_QUERY_RANGE: u64 = 10_000;
@@ -507,6 +512,7 @@ pub fn start_rpc_server_with_state(
     db: Arc<Mutex<Storage>>,
     dev_keys: bool,
     blockchain_index: Arc<Mutex<BlockchainIndex>>,
+    faucet_key: Option<ed25519_dalek::SigningKey>,
 ) -> Result<(), String> {
     let addr: SocketAddr = bind_addr
         .parse()
@@ -516,12 +522,39 @@ pub fn start_rpc_server_with_state(
 
     tracing::info!(%addr, "RPC server listening (with state queries)");
 
+    // C-06: Concurrent request counter to prevent Slowloris / connection exhaustion.
+    let active_requests = Arc::new(AtomicUsize::new(0));
+
     thread::spawn(move || {
         let mut per_ip_limits: HashMap<IpAddr, VecDeque<Instant>> = HashMap::new();
         let mut last_cleanup = Instant::now();
         let nonce = SharedNonceProvider(nonce_provider);
 
         for mut request in server.incoming_requests() {
+            // C-06: Check concurrent request limit before processing.
+            let current = active_requests.fetch_add(1, Ordering::SeqCst);
+            if current >= MAX_CONCURRENT_RPC {
+                active_requests.fetch_sub(1, Ordering::SeqCst);
+                tracing::warn!(
+                    active = current,
+                    limit = MAX_CONCURRENT_RPC,
+                    "RPC connection limit reached, returning 503"
+                );
+                let _ = request.respond(
+                    Response::from_string("Service Unavailable — too many concurrent requests")
+                        .with_status_code(StatusCode(503)),
+                );
+                continue;
+            }
+            // RAII guard: decrement active count when this request scope ends.
+            struct RequestGuard<'a>(&'a AtomicUsize);
+            impl Drop for RequestGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let _req_guard = RequestGuard(&active_requests);
+
             // Per-IP rate limiting: sliding 1-second window
             let client_ip = request
                 .remote_addr()
@@ -748,24 +781,26 @@ pub fn start_rpc_server_with_state(
                         json_response(response)
                     }
                 },
-                "novai_faucet" => match handle_faucet(&rpc_request, &mempool, &nonce, dev_keys) {
-                    Ok(result) => {
-                        let response = RpcResponse {
-                            jsonrpc: "2.0",
-                            result: serde_json::to_value(&result).unwrap(),
-                            id: rpc_request.id,
-                        };
-                        json_response(response)
+                "novai_faucet" => {
+                    match handle_faucet(&rpc_request, &mempool, &nonce, dev_keys, &faucet_key) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
                     }
-                    Err(error) => {
-                        let response = RpcErrorResponse {
-                            jsonrpc: "2.0",
-                            error,
-                            id: rpc_request.id,
-                        };
-                        json_response(response)
-                    }
-                },
+                }
                 // Block explorer endpoints (P1-4 + P1-5)
                 "novai_getTransaction" => {
                     match handle_get_transaction(&rpc_request, &blockchain_index, &db) {
@@ -1230,13 +1265,31 @@ fn handle_faucet(
     mempool: &Arc<Mutex<TxMempool>>,
     nonce_provider: &SharedNonceProvider,
     dev_keys: bool,
+    faucet_key: &Option<ed25519_dalek::SigningKey>,
 ) -> Result<FaucetResult, RpcError> {
-    if !dev_keys {
+    // C-04: Faucet key resolution:
+    // 1. If --faucet-key was provided: use the loaded key
+    // 2. If dev-mode: fall back to deterministic dev key (local dev only)
+    // 3. Otherwise: faucet is disabled
+    let faucet_sk = if let Some(ref key) = faucet_key {
+        key.clone()
+    } else if dev_keys {
+        // Deterministic dev key — acceptable for local development only.
+        // This key is trivially recoverable from source code.
+        let seed_byte = (FAUCET_ACCOUNT_INDEX % 256) as u8;
+        let mut seed = [seed_byte; 32];
+        let index_bytes = FAUCET_ACCOUNT_INDEX.to_le_bytes();
+        for (j, &b) in index_bytes.iter().enumerate() {
+            seed[j] ^= b;
+        }
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+    } else {
         return Err(RpcError {
             code: -32000,
-            message: "Faucet is only available in dev mode (--dev-keys)".to_string(),
+            message: "Faucet disabled. Use --faucet-key <path> or --dev-keys to enable."
+                .to_string(),
         });
-    }
+    };
 
     let params: FaucetParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
@@ -1246,14 +1299,6 @@ fn handle_faucet(
 
     let to_address = parse_hex32(&params.address, "address")?;
 
-    // Derive faucet signing key from dev account index 99
-    let seed_byte = (FAUCET_ACCOUNT_INDEX % 256) as u8;
-    let mut seed = [seed_byte; 32];
-    let index_bytes = FAUCET_ACCOUNT_INDEX.to_le_bytes();
-    for (j, &b) in index_bytes.iter().enumerate() {
-        seed[j] ^= b;
-    }
-    let faucet_sk = ed25519_dalek::SigningKey::from_bytes(&seed);
     let faucet_pk = faucet_sk.verifying_key();
     let faucet_addr = address_from_pubkey(&faucet_pk);
 

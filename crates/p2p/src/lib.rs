@@ -424,6 +424,90 @@ impl Drop for ConnectionGuard {
     }
 }
 
+/// In-memory ban list for misbehaving peers.
+///
+/// Tracks banned IPs with expiry timestamps. Ban duration escalates
+/// exponentially: 5 min → 10 → 20 → ... → 1440 min (24h) cap.
+pub struct PeerBanList {
+    bans: Mutex<HashMap<IpAddr, BanEntry>>,
+}
+
+struct BanEntry {
+    expires: std::time::Instant,
+    offense_count: u32,
+}
+
+/// Initial ban duration in seconds.
+const BAN_BASE_SECS: u64 = 300; // 5 minutes
+/// Maximum ban duration in seconds.
+const BAN_MAX_SECS: u64 = 86_400; // 24 hours
+
+impl PeerBanList {
+    /// Create a new empty ban list.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            bans: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Check if an IP is currently banned (also evicts expired entries).
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    #[must_use]
+    pub fn is_banned(&self, ip: &IpAddr) -> bool {
+        let mut bans = self.bans.lock().unwrap();
+        if let Some(entry) = bans.get(ip) {
+            if entry.expires > std::time::Instant::now() {
+                return true;
+            }
+            // Expired — remove
+            bans.remove(ip);
+        }
+        false
+    }
+
+    /// Ban an IP address. Duration escalates with repeat offenses.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    pub fn ban(&self, ip: IpAddr, reason: &str) {
+        let mut bans = self.bans.lock().unwrap();
+        let offense_count = bans.get(&ip).map_or(1, |e| e.offense_count + 1);
+
+        // Exponential backoff: 5min * 2^(offense-1), capped at 24h
+        let duration_secs = std::cmp::min(
+            BAN_BASE_SECS.saturating_mul(1u64 << offense_count.min(16).saturating_sub(1)),
+            BAN_MAX_SECS,
+        );
+
+        let expires = std::time::Instant::now() + std::time::Duration::from_secs(duration_secs);
+
+        tracing::warn!(
+            %ip,
+            %reason,
+            offense_count,
+            ban_duration_secs = duration_secs,
+            "Peer banned"
+        );
+
+        bans.insert(
+            ip,
+            BanEntry {
+                expires,
+                offense_count,
+            },
+        );
+    }
+}
+
+impl Default for PeerBanList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Start a TCP listener for incoming peer connections.
 ///
 /// Callback is invoked for each accepted TCP connection. The caller is

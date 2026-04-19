@@ -133,6 +133,14 @@ fn test_sync_from_peer_on_restart() {
     let result = node2.request_blocks_from_peer(1, 2);
     assert!(result.is_ok(), "Block request failed: {:?}", result);
 
+    // Set node2's SMT root to match the first synced block's state_root
+    // (C-01 fix: synced blocks are now verified against local state root)
+    {
+        let mut db2 = node2.db.lock().unwrap();
+        let root_bytes = novai_state::encode_smt_root_v1(&block1.state_root);
+        db2.put(novai_state::KEY_SMT_ROOT, &root_bytes).unwrap();
+    }
+
     // Simulate node1 responding with blocks
     let response = BlockResponse {
         responder: addr1,
@@ -236,7 +244,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
     {
         let mut state = node.state.lock().unwrap();
         // Cache block 1 (as if we voted on it via handle_proposal)
-        state.cache_block(block1.clone());
+        state.cache_block(block1.clone()).unwrap();
         // Crucially: highest_qc is still None — the QC broadcast hasn't arrived
         assert!(state.highest_qc.is_none(), "Precondition: no QC yet");
     }

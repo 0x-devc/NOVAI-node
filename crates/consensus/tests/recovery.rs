@@ -262,7 +262,7 @@ fn partition_and_rejoin_syncs_correctly() {
     let mut active_state = ConsensusState::new(validator_set[0]);
     for block in &blocks {
         active_state.persist_block(&mut shared_db, block).unwrap();
-        active_state.cache_block(block.clone());
+        active_state.cache_block(block.clone()).unwrap();
     }
 
     // Update committed height

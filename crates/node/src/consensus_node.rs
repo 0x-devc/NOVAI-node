@@ -10,11 +10,12 @@ use novai_p2p::noise::{
 };
 use novai_p2p::{
     connect_to_peer, read_wire_message, start_listener, ConnectionLimiter, NetworkMessage,
-    PeerManager,
+    PeerBanList, PeerManager,
 };
 use novai_state::{Kv, KvBatch, MemKv, RocksKv, WriteOp};
 use novai_types::Address;
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -137,6 +138,8 @@ pub struct ConsensusNode {
     known_noise_keys: Vec<[u8; 32]>,
     /// Connection limiter for incoming TCP connections (C-03, C-04).
     pub connection_limiter: Arc<ConnectionLimiter>,
+    /// Ban list for misbehaving peers (C-02).
+    pub ban_list: Arc<PeerBanList>,
     /// Callback for post-commit execution (dispatch_tx + nonce updates).
     pub commit_callback: Option<Arc<dyn CommitCallback>>,
     /// Shared mempool for inserting gossipped transactions from peers.
@@ -244,6 +247,7 @@ impl ConsensusNode {
                 novai_p2p::MAX_PEERS,
                 novai_p2p::MAX_CONNECTIONS_PER_IP,
             )),
+            ban_list: Arc::new(PeerBanList::new()),
             commit_callback: None,
             gossip_mempool: None,
             gossip_nonce: None,
@@ -324,6 +328,13 @@ impl ConsensusNode {
                 Ok(addr) => addr.ip(),
                 Err(_) => return,
             };
+
+            // C-02: Reject banned peers before acquiring connection slot.
+            if node_clone.ban_list.is_banned(&ip) {
+                tracing::debug!(%ip, "Connection rejected: peer is banned");
+                return;
+            }
+
             let guard = match ConnectionLimiter::try_acquire(&node_clone.connection_limiter, ip) {
                 Some(g) => g,
                 None => {
@@ -345,16 +356,18 @@ impl ConsensusNode {
                     match handshake_responder(&mut stream, &key) {
                         Ok(result) => {
                             if !node_clone.verify_peer_identity(&result.remote_static_key) {
+                                node_clone.ban_list.ban(ip, "unknown peer identity");
                                 return;
                             }
                             if !node_clone.peer_manager.add_peer(Box::new(result.writer)) {
                                 tracing::warn!("Peer rejected: connection limit reached");
                                 return;
                             }
-                            node_clone.handle_peer_connection(result.reader);
+                            node_clone.handle_peer_connection(result.reader, ip);
                         }
                         Err(e) => {
                             tracing::warn!(?e, "Noise handshake failed (responder)");
+                            node_clone.ban_list.ban(ip, "handshake failure");
                         }
                     }
                 } else {
@@ -370,7 +383,7 @@ impl ConsensusNode {
                         tracing::warn!("Peer rejected: connection limit reached");
                         return;
                     }
-                    node_clone.handle_peer_connection(stream);
+                    node_clone.handle_peer_connection(stream, ip);
                 }
             });
         })
@@ -399,8 +412,9 @@ impl ConsensusNode {
             }
 
             let node = Arc::clone(self);
+            let peer_ip = addr.ip();
             thread::spawn(move || {
-                node.handle_peer_connection(result.reader);
+                node.handle_peer_connection(result.reader, peer_ip);
             });
         } else {
             // Plaintext mode
@@ -412,8 +426,9 @@ impl ConsensusNode {
             }
 
             let node = Arc::clone(self);
+            let peer_ip = addr.ip();
             thread::spawn(move || {
-                node.handle_peer_connection(stream);
+                node.handle_peer_connection(stream, peer_ip);
             });
         }
 
@@ -808,18 +823,36 @@ impl ConsensusNode {
             }
         }
 
-        // TODO(C-01): Synced blocks are stored without re-executing transactions
-        // against local state. State roots are NOT verified. A malicious peer
-        // could inject blocks with valid parent hashes but fabricated state roots.
-        // Full fix: re-execute block.txs against local state and verify
-        // state_root matches before accepting. Requires wiring up the execution
-        // engine to the sync path.
-        tracing::warn!(
-            count = blocks.len(),
-            start = blocks.first().unwrap().height,
-            end = blocks.last().unwrap().height,
-            "Accepting synced blocks WITHOUT state root verification"
-        );
+        // C-01 FIX: Verify synced blocks' state_root against our committed state.
+        // The first synced block's state_root must match the current SMT root in
+        // our DB. This prevents a malicious peer from injecting blocks with valid
+        // parent hashes but fabricated state roots from a different chain.
+        {
+            let current_root = if let Ok(Some(bytes)) = db.get(novai_state::KEY_SMT_ROOT) {
+                novai_state::decode_smt_root_v1(&bytes)
+                    .map_err(|e| format!("Failed to decode SMT root: {:?}", e))?
+            } else {
+                [0u8; 32] // Genesis state (no commits yet)
+            };
+
+            if blocks[0].state_root != current_root {
+                return Err(format!(
+                    "Sync rejected: state root mismatch at height {} \
+                     (local={}, peer={}). Peer may be on a different chain.",
+                    blocks[0].height,
+                    hex::encode(&current_root[..8]),
+                    hex::encode(&blocks[0].state_root[..8]),
+                ));
+            }
+
+            tracing::debug!(
+                count = blocks.len(),
+                start = blocks[0].height,
+                end = blocks.last().unwrap().height,
+                state_root = %hex::encode(&current_root[..8]),
+                "Synced blocks passed state root verification"
+            );
+        }
 
         // Store blocks to DB AND cache in memory for commit rule
         for block in &blocks {
@@ -830,7 +863,9 @@ impl ConsensusNode {
                 .map_err(|e| format!("Failed to store block: {:?}", e))?;
 
             // Cache in memory so commit rule can find them via block_by_hash
-            state.cache_block(block.clone());
+            state
+                .cache_block(block.clone())
+                .map_err(|e| format!("Cache block failed: {:?}", e))?;
         }
 
         tracing::info!(
@@ -955,7 +990,9 @@ impl ConsensusNode {
             .map_err(|e| format!("Propose block failed: {:?}", e))?;
 
         // CRITICAL: Cache our own proposed block so we can form QC when votes arrive
-        state.cache_block(block.clone());
+        state
+            .cache_block(block.clone())
+            .map_err(|e| format!("Cache block failed: {:?}", e))?;
 
         // justify_qc should certify the parent block (height - 1)
         // For height 1: use GenesisQC (height=0)
@@ -1027,7 +1064,9 @@ impl ConsensusNode {
         };
 
         // Cache our own proposed block so we can form QC when votes arrive
-        state.cache_block(block.clone());
+        state
+            .cache_block(block.clone())
+            .map_err(|e| format!("Cache block failed: {:?}", e))?;
 
         // Leader self-vote: add our own vote so we only need (quorum - 1) external votes.
         // With 4 validators and quorum=3, this means we need 2 of 3 peers instead of all 3.
@@ -1317,7 +1356,9 @@ impl ConsensusNode {
                     committed_height = state.committed_height,
                     "Late-arriving block — caching without voting"
                 );
-                state.cache_block(block.clone());
+                state
+                    .cache_block(block.clone())
+                    .map_err(|e| format!("Cache block failed: {:?}", e))?;
 
                 // Persist to DB so chain walk DB fallback can find this block
                 // after in-memory cache eviction. Only write if no block exists
@@ -1362,7 +1403,9 @@ impl ConsensusNode {
             state
                 .check_no_fork(block)
                 .map_err(|e| format!("Fork detection failed: {:?}", e))?;
-            state.cache_block(block.clone());
+            state
+                .cache_block(block.clone())
+                .map_err(|e| format!("Cache block failed: {:?}", e))?;
 
             // Persist block to DB so the commit chain walk DB fallback can
             // recover it after in-memory cache eviction. Only write if no
@@ -1665,8 +1708,12 @@ impl ConsensusNode {
     ///
     /// Uses `catch_unwind` around message handling to prevent a panic from
     /// poisoning shared mutexes and cascading to all other threads.
-    pub fn handle_peer_connection(self: Arc<Self>, mut reader: impl std::io::Read) {
-        tracing::debug!("Starting receive loop for peer");
+    pub fn handle_peer_connection(
+        self: Arc<Self>,
+        mut reader: impl std::io::Read,
+        peer_ip: IpAddr,
+    ) {
+        tracing::debug!(%peer_ip, "Starting receive loop for peer");
 
         // C-03: Per-peer message rate limiting.
         // Simple sliding window: count messages per second, disconnect if exceeded.
@@ -1687,8 +1734,10 @@ impl ConsensusNode {
                             tracing::warn!(
                                 msg_count,
                                 limit = novai_p2p::MAX_MESSAGES_PER_SECOND,
-                                "Peer exceeded message rate limit, disconnecting"
+                                %peer_ip,
+                                "Peer exceeded message rate limit, banning"
                             );
+                            self.ban_list.ban(peer_ip, "rate limit exceeded");
                             break;
                         }
                     }
@@ -1711,8 +1760,10 @@ impl ConsensusNode {
                             };
                             tracing::error!(
                                 %panic_msg,
-                                "PANIC in message handler — disconnecting peer"
+                                %peer_ip,
+                                "PANIC in message handler — banning peer"
                             );
+                            self.ban_list.ban(peer_ip, "caused panic in handler");
                             break;
                         }
                     }

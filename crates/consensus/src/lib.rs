@@ -907,9 +907,12 @@ impl ConsensusState {
     /// Cache a block for commit rule tracking.
     ///
     /// Stores block by both height and hash for chain-following.
-    pub fn cache_block(&mut self, block: Block) {
+    ///
+    /// # Errors
+    /// Returns error if the block cannot be encoded for hashing.
+    pub fn cache_block(&mut self, block: Block) -> Result<(), ConsensusError> {
         let hash = novai_consensus_types::codec::hash_block_v1(&block)
-            .expect("block must encode for hashing");
+            .map_err(|e| ConsensusError::CodecError(format!("block hash failed: {:?}", e)))?;
         tracing::debug!(
             height = block.height,
             round = block.round,
@@ -920,6 +923,7 @@ impl ConsensusState {
         let arc = Arc::new(block);
         self.block_cache.insert(arc.height, Arc::clone(&arc));
         self.block_by_hash.insert(hash, arc);
+        Ok(())
     }
 
     /// Cache a QC and check if commit rule triggers.
@@ -1060,7 +1064,7 @@ impl ConsensusState {
                     qc_height
                 )));
             }
-            self.cache_block(loaded.clone());
+            self.cache_block(loaded.clone())?;
             Arc::new(loaded)
         };
 
@@ -1101,7 +1105,7 @@ impl ConsensusState {
                         expected_height
                     )));
                 }
-                self.cache_block(loaded.clone());
+                self.cache_block(loaded.clone())?;
                 (loaded, "db")
             };
 
@@ -1501,7 +1505,7 @@ impl ConsensusState {
                         "Invalid committed height encoding".to_string(),
                     ));
                 }
-                let arr: [u8; 8] = bytes.try_into().unwrap();
+                let arr: [u8; 8] = bytes.try_into().expect("length verified as 8 above");
                 Ok(u64::from_be_bytes(arr))
             }
             Ok(None) => Ok(0), // No committed height yet
@@ -1704,7 +1708,7 @@ impl ConsensusState {
         // Cache blocks for commit rule
         let count = blocks.len();
         for block in blocks {
-            self.cache_block(block);
+            self.cache_block(block)?;
         }
 
         // Update height to match target
@@ -1745,7 +1749,9 @@ impl ConsensusState {
             let start = cache_start.max(1); // Don't try to load height 0
             if let Ok(blocks) = Self::load_blocks_range(db, start, state.committed_height) {
                 for block in blocks {
-                    state.cache_block(block);
+                    if let Err(e) = state.cache_block(block) {
+                        tracing::warn!(?e, "RECOVERY: Failed to cache block, skipping");
+                    }
                 }
                 tracing::info!(
                     cached = state.block_cache.len(),
