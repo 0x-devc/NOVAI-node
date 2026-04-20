@@ -972,4 +972,26 @@ curl http://localhost:8080/metrics
 
 ---
 
+## Known Limitations
+
+### Noise Key Distribution (M-10)
+
+The Noise XX protocol for P2P encryption requires each validator to know the X25519
+public keys of all other validators. Currently, this is only implemented for
+`--dev-keys` mode (where keys are deterministic).
+
+**Impact**: In production mode with encryption enabled, the node cannot verify peer
+identities. `verify_peer_identity()` accepts ALL peers when `known_noise_keys` is
+empty, logging a warning about eclipse attack risk.
+
+**Workaround for testnet**:
+1. Use `--peer <ip:port>` with known validator IPs instead of `--seed` DNS names
+2. Deploy validators in a private network with firewall rules on P2P ports
+3. Monitor logs for "Peer identity verification DISABLED" warnings
+
+**Future fix**: Add `validator_noise_pubkeys` field to genesis.json so noise keys
+are distributed alongside signing public keys at genesis time.
+
+---
+
 **End of Validator Kit**

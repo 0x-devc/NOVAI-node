@@ -64,12 +64,20 @@ pub fn timeout_for_round(round: u64) -> u64 {
 /// - Round 6+: 60000ms (60s, capped)
 #[must_use]
 pub fn timeout_for_round_with_base(round: u64, base_ms: u64) -> u64 {
+    timeout_for_round_capped(round, base_ms, MAX_TIMEOUT_MS)
+}
+
+/// L-04: Configurable variant that accepts a custom max timeout cap.
+/// WAN deployments may need higher caps (e.g., 300_000ms) to avoid
+/// consensus livelock under high latency.
+#[must_use]
+pub fn timeout_for_round_capped(round: u64, base_ms: u64, max_timeout_ms: u64) -> u64 {
     // Prevent overflow: cap the shift at a reasonable value
     // 2^16 * 2000 = 131_072_000 which is > MAX_TIMEOUT_MS
     let effective_round = round.min(16);
 
     let timeout = base_ms.saturating_mul(TIMEOUT_MULTIPLIER.saturating_pow(effective_round as u32));
-    timeout.min(MAX_TIMEOUT_MS)
+    timeout.min(max_timeout_ms)
 }
 
 /// Trait for processing AI state updates during block commit.
@@ -981,6 +989,10 @@ impl ConsensusState {
         // accumulates votes keyed by those stale hashes.
         // Keep blocks/votes from recent rounds only; older ones can never
         // form a QC since the proposer changes each round.
+        // M-11: HashMap iteration order in retain() is non-deterministic, but this
+        // is SAFE because pruning only affects local in-memory caches — NOT committed
+        // state. Each validator prunes independently; the same SET of entries is removed
+        // regardless of iteration order. No consensus property depends on prune order.
         {
             let bbh_before = self.block_by_hash.len();
             self.block_by_hash.retain(|_, b| {

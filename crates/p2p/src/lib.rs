@@ -331,6 +331,13 @@ impl PeerManager {
 pub const MAX_CONNECTIONS_PER_IP: usize = 10;
 
 /// TCP socket read/write timeout for peer connections (seconds).
+///
+/// L-01: 30s is a deliberate tradeoff — short enough to evict truly dead
+/// connections, long enough to survive consensus round gaps in low-activity
+/// testnets. A slow-drip attacker can hold connections with 1 byte per 29s,
+/// but this is bounded by `MAX_PEERS` (128) and `MAX_CONNECTIONS_PER_IP` (10).
+/// If tighter resource management is needed, reduce to 15s and test that
+/// legitimate validators don't get disconnected during idle periods.
 pub const PEER_SOCKET_TIMEOUT_SECS: u64 = 30;
 
 /// Per-peer message rate limit (messages per second).

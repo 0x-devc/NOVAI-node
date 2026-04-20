@@ -285,6 +285,22 @@ impl TxMempool {
             });
         }
 
+        // M-07: Size limits BEFORE expensive signature verification.
+        // No point verifying a signature if the tx is too large or mempool is full.
+        let size = novai_codec::tx_encoded_size(&tx);
+        if size > novai_types::MAX_TX_SIZE {
+            return Err(TxMempoolError::TxTooLarge {
+                size,
+                max: novai_types::MAX_TX_SIZE,
+            });
+        }
+        if self.total_bytes + size > novai_types::MAX_MEMPOOL_BYTES {
+            return Err(TxMempoolError::MempoolFull {
+                current: self.total_bytes,
+                max: novai_types::MAX_MEMPOOL_BYTES,
+            });
+        }
+
         // Verify address matches pubkey
         let vk = pubkey_from_bytes(&tx.pubkey).map_err(|_| TxMempoolError::InvalidPublicKey)?;
         let expected_addr = address_from_pubkey(&vk);
@@ -304,21 +320,6 @@ impl TxMempool {
         // dedupe
         if self.by_id.contains_key(&id) {
             return Err(TxMempoolError::Duplicate);
-        }
-
-        // size limits (defense-in-depth: also checked at RPC layer)
-        let size = novai_codec::tx_encoded_size(&tx);
-        if size > novai_types::MAX_TX_SIZE {
-            return Err(TxMempoolError::TxTooLarge {
-                size,
-                max: novai_types::MAX_TX_SIZE,
-            });
-        }
-        if self.total_bytes + size > novai_types::MAX_MEMPOOL_BYTES {
-            return Err(TxMempoolError::MempoolFull {
-                current: self.total_bytes,
-                max: novai_types::MAX_MEMPOOL_BYTES,
-            });
         }
 
         self.total_bytes += size;

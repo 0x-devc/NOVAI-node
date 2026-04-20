@@ -32,9 +32,17 @@ fn smt_root_matches_fresh_recompute_from_state() {
     let alice = mk_addr(0xA1);
     let bob = mk_addr(0xB2);
 
-    // Seed Alice so the tx succeeds.
+    // Seed Alice and Bob so the tx succeeds (M-06 requires minimum balance for new accounts).
     db.put(
         &account_key(&alice),
+        &encode_account_v1(&AccountStateV1 {
+            balance: 1_000,
+            nonce: 0,
+        }),
+    )
+    .unwrap();
+    db.put(
+        &account_key(&bob),
         &encode_account_v1(&AccountStateV1 {
             balance: 1_000,
             nonce: 0,

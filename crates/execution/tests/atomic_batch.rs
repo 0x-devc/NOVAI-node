@@ -181,7 +181,7 @@ fn batch_success_applies_all_changes() {
     let mut db = FaultyKv::new(999); // Won't fail
 
     let from_acct = AccountStateV1 {
-        balance: 1000,
+        balance: 10_000,
         nonce: 0,
     };
     db.put(&account_key(&from), &encode_account_v1(&from_acct))
@@ -191,19 +191,20 @@ fn batch_success_applies_all_changes() {
     db.put(KEY_FEE_POOL, &encode_fee_pool_v1(&fee_pool))
         .unwrap();
 
-    // Apply transaction (should succeed)
-    let t = tx(from, 0, 5, to, 100);
+    // Apply transaction (should succeed). Amount must meet MIN_ACCOUNT_BALANCE
+    // for new recipient accounts (M-06).
+    let t = tx(from, 0, 5, to, 5000);
     apply_tx_v1_transfer(&mut db, &t).unwrap();
 
     // Verify ALL changes applied
     let from_bytes = db.get(&account_key(&from)).unwrap().unwrap();
     let from_after = novai_state::decode_account_v1(&from_bytes).unwrap();
-    assert_eq!(from_after.balance, 1000 - 100 - 5); // Debited
+    assert_eq!(from_after.balance, 10_000 - 5000 - 5); // Debited
     assert_eq!(from_after.nonce, 1); // Incremented
 
     let to_bytes = db.get(&account_key(&to)).unwrap().unwrap();
     let to_after = novai_state::decode_account_v1(&to_bytes).unwrap();
-    assert_eq!(to_after.balance, 100); // Credited
+    assert_eq!(to_after.balance, 5000); // Credited
 
     let pool_bytes = db.get(KEY_FEE_POOL).unwrap().unwrap();
     let pool_after = novai_state::decode_fee_pool_v1(&pool_bytes).unwrap();

@@ -1077,6 +1077,18 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
         .checked_add(fee_u128)
         .ok_or(ExecError::Overflow)?;
 
+    // M-06: Prevent state spam with dust accounts. If the recipient has no
+    // account in the DB (truly new, not just drained), require the transfer
+    // amount to meet MIN_ACCOUNT_BALANCE.
+    let to_key = account_key(&payload.to);
+    let recipient_exists = db.get(&to_key).map_err(ExecError::Db)?.is_some();
+    if !recipient_exists && amount_u128 < MIN_ACCOUNT_BALANCE {
+        return Err(ExecError::InsufficientFunds {
+            balance: amount_u128,
+            needed: MIN_ACCOUNT_BALANCE,
+        });
+    }
+
     let mut to_acct = read_account_or_default(db, &payload.to)?;
     let mut fee_pool = read_fee_pool_or_default(db)?;
 
@@ -1587,6 +1599,18 @@ pub fn apply_governance_execute_tx<K: KvBatch>(
                     return Err(ExecError::Tier0ActionForbidden);
                 }
             }
+
+            // M-05: Block any governance action that would grant read_nnpx_derived.
+            // This capability is a privacy boundary violation and must NEVER be
+            // grantable via governance — only protocol upgrades can change this.
+            if proposal
+                .proposal_data
+                .windows(b"read_nnpx_derived".len())
+                .any(|w| w == b"read_nnpx_derived")
+            {
+                return Err(ExecError::Tier0ActionForbidden);
+            }
+
             // These types would modify protocol parameters
             // For now, we just mark them as executed (implementation depends on specific params)
             // Full implementation would parse proposal_data and apply the parameter changes
@@ -3094,6 +3118,10 @@ pub fn is_derived_view(key: &[u8]) -> bool {
 // ============================================================================
 // FEE SCHEDULE (Tiered Minimum Fee Enforcement)
 // ============================================================================
+
+/// M-06: Minimum balance for new account creation via transfer.
+/// Prevents state spam with dust accounts. Existing accounts are not affected.
+pub const MIN_ACCOUNT_BALANCE: u128 = 1_000;
 
 /// Minimum fee for a base transfer transaction.
 pub const MIN_FEE_TRANSFER: u64 = 100;

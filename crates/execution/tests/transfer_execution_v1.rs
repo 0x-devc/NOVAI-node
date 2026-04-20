@@ -10,6 +10,16 @@ const fn addr(b: u8) -> Address {
     [b; 32]
 }
 
+/// Pre-create an account in the DB to satisfy M-06 minimum balance requirement.
+fn seed_recipient(db: &mut MemKv, who: &Address) {
+    let s = AccountStateV1 {
+        balance: 10_000,
+        nonce: 0,
+    };
+    db.put(&novai_state::account_key(who), &encode_account_v1(&s))
+        .unwrap();
+}
+
 fn tx(from: Address, nonce: u64, fee: u64, to: Address, amount: u64) -> TxV1 {
     let payload = encode_transfer_payload_v1(&TransferPayloadV1 { to, amount }).to_vec();
     TxV1 {
@@ -44,6 +54,7 @@ fn transfer_happy_path_updates_balances_nonce_and_fee_pool() {
     let fee_pool = FeePoolV1 { balance: 0 };
     db.put(KEY_FEE_POOL, &encode_fee_pool_v1(&fee_pool))
         .unwrap();
+    seed_recipient(&mut db, &to);
 
     let t = tx(from, 0, 7, to, 100);
     apply_tx_v1_transfer(&mut db, &t).unwrap();
@@ -64,7 +75,7 @@ fn transfer_happy_path_updates_balances_nonce_and_fee_pool() {
 
     assert_eq!(from_after.nonce, 1);
     assert_eq!(from_after.balance, 1000 - 100 - 7);
-    assert_eq!(to_after.balance, 100);
+    assert_eq!(to_after.balance, 10_000 + 100); // Pre-seeded with 10_000 (M-06)
     assert_eq!(to_after.nonce, 0);
     assert_eq!(pool_after.balance, 7);
 }
@@ -84,6 +95,7 @@ fn nonce_must_match_exactly() {
         &encode_account_v1(&from_state),
     )
     .unwrap();
+    seed_recipient(&mut db, &to);
 
     let t = tx(from, 4, 1, to, 1);
     let err = apply_tx_v1_transfer(&mut db, &t).unwrap_err();
@@ -111,6 +123,7 @@ fn balance_must_cover_amount_plus_fee() {
         &encode_account_v1(&from_state),
     )
     .unwrap();
+    seed_recipient(&mut db, &to);
 
     let t = tx(from, 0, 9, to, 2); // needs 11
     let err = apply_tx_v1_transfer(&mut db, &t).unwrap_err();
@@ -177,6 +190,8 @@ fn determinism_same_initial_state_same_txs_same_final_state() {
         &encode_account_v1(&from_state),
     )
     .unwrap();
+    seed_recipient(&mut db1, &to);
+    seed_recipient(&mut db2, &to);
 
     let txs = vec![
         tx(from, 0, 1, to, 10),

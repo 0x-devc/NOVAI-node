@@ -113,6 +113,10 @@ pub struct PendingSyncRequest {
     pub request_time: Instant,
 }
 
+// L-05: Lock contention metrics (e.g., time spent waiting on state/db mutexes)
+// are planned for future observability improvements. Currently, the H-11 fix
+// (signature verification outside lock) is the primary contention mitigation.
+// When adding metrics, instrument lock_or_recover() with Instant::now() delta.
 pub struct ConsensusNode {
     pub our_address: Address,
     pub signing_key: SigningKey,

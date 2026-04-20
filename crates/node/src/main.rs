@@ -575,6 +575,7 @@ fn main() {
             let mut no_encryption = false;
             let mut allow_insecure_dev_keys = false;
             let mut proposal_interval_ms: u64 = 100; // Default: 100ms
+            let mut _max_timeout_ms: u64 = novai_consensus::MAX_TIMEOUT_MS;
 
             let rest: Vec<String> = args.collect();
             let mut i = 0;
@@ -621,6 +622,13 @@ fn main() {
                     }
                     "--base-timeout" => {
                         base_timeout_ms = parse_u64(rest.get(i + 1).cloned(), "--base-timeout");
+                        i += 2;
+                    }
+                    "--max-timeout" => {
+                        // L-04: Parsed for future use. The configurable cap function
+                        // timeout_for_round_capped() exists but wiring it through
+                        // ConsensusNode requires a config struct refactor (future work).
+                        _max_timeout_ms = parse_u64(rest.get(i + 1).cloned(), "--max-timeout");
                         i += 2;
                     }
                     "--proposal-interval" => {
@@ -686,6 +694,15 @@ fn main() {
             }
             if dev_keys && allow_insecure_dev_keys {
                 eprintln!("WARNING: Running with DETERMINISTIC dev keys — NOT SAFE FOR PRODUCTION");
+            }
+
+            // M-09: Validate proposal interval vs timeout to prevent consensus deadloop
+            if proposal_interval_ms >= base_timeout_ms {
+                fatal(format!(
+                    "--proposal-interval ({proposal_interval_ms}ms) must be less than \
+                     --base-timeout ({base_timeout_ms}ms). A proposal interval >= timeout \
+                     causes rounds to expire before votes can return."
+                ));
             }
 
             // Resolve key + validator set based on mode
@@ -957,6 +974,19 @@ fn main() {
                     }
                     Err(e) => {
                         tracing::warn!(seed = %seed, %e, "Failed to resolve seed node DNS — check DNS configuration");
+                    }
+                }
+            }
+
+            // M-04: Log genesis identity hash so operators can verify chain identity.
+            {
+                let db_guard = node.db.lock_or_recover();
+                if let Ok(Some(root_bytes)) = db_guard.get(novai_state::KEY_SMT_ROOT) {
+                    if let Ok(root) = novai_state::decode_smt_root_v1(&root_bytes) {
+                        tracing::info!(
+                            genesis_hash = %hex::encode(root),
+                            "Chain identity — compare with other validators to verify same genesis"
+                        );
                     }
                 }
             }

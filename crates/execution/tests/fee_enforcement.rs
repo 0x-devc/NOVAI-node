@@ -108,7 +108,7 @@ fn transfer_at_minimum_accepted() {
 
     let payload = encode_transfer_payload_v1(&TransferPayloadV1 {
         to: receiver,
-        amount: 100,
+        amount: 5000, // Must meet MIN_ACCOUNT_BALANCE for new accounts (M-06)
     })
     .to_vec();
 
@@ -135,7 +135,7 @@ fn transfer_above_minimum_accepted() {
 
     let payload = encode_transfer_payload_v1(&TransferPayloadV1 {
         to: receiver,
-        amount: 100,
+        amount: 5000, // Must meet MIN_ACCOUNT_BALANCE for new accounts (M-06)
     })
     .to_vec();
 

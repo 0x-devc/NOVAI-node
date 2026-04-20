@@ -260,6 +260,11 @@ impl<S: SmtStore> Smt<S> {
                 let parent_hash = hash_internal(&left, &right);
 
                 // Store the internal node for this height (h+1).
+                // L-03: Old nodes from previous updates become unreachable ("dead")
+                // but remain in storage indefinitely. This is a known limitation —
+                // SMT compaction/garbage collection is future work. Dead nodes do
+                // NOT affect correctness (only the root-reachable tree matters)
+                // but will cause gradual storage growth over the chain's lifetime.
                 let node = Node {
                     left: child_ptr_for_hash(&left, h),
                     right: child_ptr_for_hash(&right, h),

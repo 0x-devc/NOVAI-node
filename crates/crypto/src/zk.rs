@@ -77,6 +77,14 @@ pub trait ZkVerifier {
 /// assert!(StubZkVerifier::verify_proof(&[], &[]));
 /// assert!(StubZkVerifier::verify_proof(b"any_proof", b"any_inputs"));
 /// ```
+/// M-08: WARNING — This stub verifier accepts ALL proofs as valid.
+/// It exists ONLY for development and testing. It **MUST** be replaced with a
+/// real ZK verifier before mainnet. Using this in production means any
+/// entity can forge ZK proofs.
+///
+/// # Safety (NOT safe for production)
+/// The stub returns `true` for all inputs. Do NOT deploy to mainnet without
+/// replacing this with a real SNARK/STARK verifier.
 pub struct StubZkVerifier;
 
 impl ZkVerifier for StubZkVerifier {
@@ -93,7 +101,7 @@ impl ZkVerifier for StubZkVerifier {
         #[cfg(not(feature = "zk-logging"))]
         let _ = (proof, public_inputs);
 
-        // Stub always returns true
+        // Stub always returns true — NOT SAFE for production
         true
     }
 }

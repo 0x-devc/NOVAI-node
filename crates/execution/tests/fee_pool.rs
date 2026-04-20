@@ -28,15 +28,22 @@ fn tx(from: Address, nonce: u64, fee: u64, to: Address, amount: u64) -> TxV1 {
 fn fee_pool_accumulates_correctly() {
     let mut db = MemKv::new();
 
-    // Setup 3 accounts, each with balance 1000, nonce 0
+    // Setup 3 accounts + recipient with sufficient balance
     for i in 1..=3 {
         let a = AccountStateV1 {
-            balance: 1000,
+            balance: 100_000,
             nonce: 0,
         };
         db.put(&account_key(&addr(i)), &encode_account_v1(&a))
             .unwrap();
     }
+    // Pre-create recipient so M-06 minimum balance doesn't apply
+    let recv = AccountStateV1 {
+        balance: 1000,
+        nonce: 0,
+    };
+    db.put(&account_key(&addr(99)), &encode_account_v1(&recv))
+        .unwrap();
 
     // Fee pool starts at 0
     let pool = FeePoolV1 { balance: 0 };
@@ -64,12 +71,19 @@ fn fee_pool_accumulates_correctly() {
 fn fee_pool_starts_from_nonzero() {
     let mut db = MemKv::new();
 
-    // Account with balance 100
+    // Account with sufficient balance
     let a = AccountStateV1 {
-        balance: 100,
+        balance: 100_000,
         nonce: 0,
     };
     db.put(&account_key(&addr(1)), &encode_account_v1(&a))
+        .unwrap();
+    // Pre-create recipient so M-06 minimum balance doesn't apply
+    let recv = AccountStateV1 {
+        balance: 1000,
+        nonce: 0,
+    };
+    db.put(&account_key(&addr(2)), &encode_account_v1(&recv))
         .unwrap();
 
     // Fee pool starts at 50

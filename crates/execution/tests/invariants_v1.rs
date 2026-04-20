@@ -51,6 +51,7 @@ fn nonce_is_monotonic_for_successful_transfers() {
 
     let mut db = MemKv::new();
     put_account(&mut db, &from, 1_000, 0);
+    put_account(&mut db, &to, 1_000, 0); // Pre-create recipient (M-06 minimum balance)
     put_fee_pool(&mut db, 0);
 
     // Apply 3 successful txs in sequence; nonce should strictly increase by 1 each time.
@@ -74,6 +75,7 @@ fn failed_nonce_mismatch_does_not_mutate_state() {
 
     let mut db = MemKv::new();
     put_account(&mut db, &from, 500, 5);
+    put_account(&mut db, &to, 1_000, 0); // Pre-create recipient (M-06)
     put_fee_pool(&mut db, 7);
 
     // Snapshot canonical bytes.
@@ -107,6 +109,7 @@ fn failed_insufficient_funds_does_not_mutate_state() {
 
     let mut db = MemKv::new();
     put_account(&mut db, &from, 10, 0);
+    put_account(&mut db, &to, 1_000, 0); // Pre-create recipient (M-06)
     put_fee_pool(&mut db, 0);
 
     let k_from = account_key(&from);
@@ -140,6 +143,7 @@ fn exact_balance_amount_plus_fee_succeeds_and_never_underflows() {
     let mut db = MemKv::new();
     // Exactly enough: amount 7 + fee 3 = 10
     put_account(&mut db, &from, 10, 0);
+    put_account(&mut db, &to, 1_000, 0); // Pre-create recipient (M-06)
     put_fee_pool(&mut db, 0);
 
     let t = tx(from, 0, 3, to, 7);
@@ -151,7 +155,7 @@ fn exact_balance_amount_plus_fee_succeeds_and_never_underflows() {
 
     assert_eq!(from_after.balance, 0);
     assert_eq!(from_after.nonce, 1);
-    assert_eq!(to_after.balance, 7);
+    assert_eq!(to_after.balance, 1_000 + 7); // Pre-created with 1000 (M-06)
     assert_eq!(pool_after.balance, 3);
 }
 
@@ -163,6 +167,7 @@ fn below_exact_balance_fails_and_state_is_unchanged() {
     let mut db = MemKv::new();
     // One short: needs 10 but has 9
     put_account(&mut db, &from, 9, 0);
+    put_account(&mut db, &to, 1_000, 0); // Pre-create recipient (M-06)
     put_fee_pool(&mut db, 0);
 
     let k_from = account_key(&from);

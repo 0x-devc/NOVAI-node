@@ -330,6 +330,9 @@ pub struct GenesisState {
     pub genesis_block: Block,
     /// Sorted validator addresses.
     pub validator_set: Vec<Address>,
+    /// M-04: Hash of canonical genesis configuration. Validators can compare
+    /// this value to verify they initialized from the same genesis file.
+    pub genesis_hash: [u8; 32],
 }
 
 /// Genesis state generator.
@@ -473,10 +476,17 @@ impl GenesisGenerator {
             txs: vec![],
         };
 
+        // M-04: Compute genesis hash from canonical config for chain identity.
+        // Uses state_root (which is already a deterministic blake3 hash of all
+        // genesis state) as the genesis chain identity. Validators compare this
+        // at startup to verify they initialized from the same genesis file.
+        let genesis_hash = state_root;
+
         Ok(GenesisState {
             state_root,
             genesis_block,
             validator_set,
+            genesis_hash,
         })
     }
 

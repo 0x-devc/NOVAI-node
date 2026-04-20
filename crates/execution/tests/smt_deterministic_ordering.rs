@@ -53,6 +53,15 @@ fn smt_write_ordering_is_deterministic_across_runs() {
         db.put(&account_key(&alice), &encode_account_v1(&alice_state))
             .unwrap();
 
+        // Pre-create recipients so M-06 minimum balance check allows small transfers
+        for &addr in &[bob, charlie] {
+            let a = AccountStateV1 {
+                balance: 1_000u128,
+                nonce: 0,
+            };
+            db.put(&account_key(&addr), &encode_account_v1(&a)).unwrap();
+        }
+
         let fee_pool = FeePoolV1 { balance: 0 };
         db.put(KEY_FEE_POOL, &encode_fee_pool_v1(&fee_pool))
             .unwrap();
@@ -108,6 +117,14 @@ fn smt_root_bytes_stable_across_platforms() {
         nonce: 0,
     };
     db.put(&account_key(&alice), &encode_account_v1(&alice_state))
+        .unwrap();
+
+    // Pre-create bob so M-06 minimum balance check doesn't reject small transfer
+    let bob_state = AccountStateV1 {
+        balance: 1_000u128,
+        nonce: 0,
+    };
+    db.put(&account_key(&bob), &encode_account_v1(&bob_state))
         .unwrap();
 
     let fee_pool = FeePoolV1 { balance: 0 };

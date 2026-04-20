@@ -831,21 +831,23 @@ pub fn start_rpc_server_with_state(
                         }),
                     }
                 }
-                "novai_getBlockByHeight" => match handle_get_block_by_height(&rpc_request, &db) {
-                    Ok(result) => {
-                        let response = RpcResponse {
+                "novai_getBlockByHeight" => {
+                    match handle_get_block_by_height(&rpc_request, &db, &blockchain_index) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => json_response(RpcErrorResponse {
                             jsonrpc: "2.0",
-                            result,
+                            error,
                             id: rpc_request.id,
-                        };
-                        json_response(response)
+                        }),
                     }
-                    Err(error) => json_response(RpcErrorResponse {
-                        jsonrpc: "2.0",
-                        error,
-                        id: rpc_request.id,
-                    }),
-                },
+                }
                 "novai_getBlockByHash" => {
                     match handle_get_block_by_hash(&rpc_request, &blockchain_index, &db) {
                         Ok(result) => {
@@ -1163,6 +1165,10 @@ fn handle_get_signals_by_type(
 // ============================================================================
 
 /// Parse and validate a 32-byte hex-encoded value.
+///
+/// L-02: Hex values are case-insensitive (both "ab" and "AB" are valid).
+/// This is standard hex behavior and intentional — API consumers should
+/// normalize to lowercase for consistency but uppercase is accepted.
 fn parse_hex32(hex_str: &str, field_name: &str) -> Result<[u8; 32], RpcError> {
     let bytes = hex::decode(hex_str).map_err(|e| RpcError {
         code: -32602,
@@ -1470,12 +1476,25 @@ fn handle_get_transaction(
 fn handle_get_block_by_height(
     request: &RpcRequest,
     db: &Arc<Mutex<Storage>>,
+    index: &Arc<Mutex<BlockchainIndex>>,
 ) -> Result<serde_json::Value, RpcError> {
     let params: GetBlockByHeightParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
             message: format!("Invalid params: {}", e),
         })?;
+
+    // M-03: Reject queries beyond committed height to avoid expensive failed lookups
+    let committed = index.lock_or_recover().committed_height;
+    if params.height > committed {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height {} exceeds committed height {}",
+                params.height, committed
+            ),
+        });
+    }
 
     let db_guard = db.lock_or_recover();
     let block =
@@ -1618,14 +1637,48 @@ fn rpc_rate_limited(
     false
 }
 
-/// Helper to create JSON response.
+/// Maximum RPC response body size (10MB). Prevents bandwidth exhaustion
+/// from endpoints returning very large result sets.
+const MAX_RPC_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Helper to create JSON response with security headers.
 fn json_response<T: Serialize>(data: T) -> Response<std::io::Cursor<Vec<u8>>> {
     let json = serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string());
-    Response::from_string(json).with_header(
-        "Content-Type: application/json"
-            .parse::<tiny_http::Header>()
-            .unwrap(),
-    )
+
+    // M-02: Reject responses that exceed size limit
+    if json.len() > MAX_RPC_RESPONSE_SIZE {
+        let err = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {"code": -32003, "message": "Response too large"},
+            "id": null,
+        });
+        let err_json = serde_json::to_string(&err).unwrap_or_else(|_| "{}".to_string());
+        return Response::from_string(err_json)
+            .with_header(
+                "Content-Type: application/json"
+                    .parse::<tiny_http::Header>()
+                    .unwrap(),
+            )
+            .with_header(
+                "Access-Control-Allow-Origin: null"
+                    .parse::<tiny_http::Header>()
+                    .unwrap(),
+            );
+    }
+
+    // M-01: Restrictive CORS — deny cross-origin by default.
+    // Use --rpc-bind behind a reverse proxy with custom CORS if web access needed.
+    Response::from_string(json)
+        .with_header(
+            "Content-Type: application/json"
+                .parse::<tiny_http::Header>()
+                .unwrap(),
+        )
+        .with_header(
+            "Access-Control-Allow-Origin: null"
+                .parse::<tiny_http::Header>()
+                .unwrap(),
+        )
 }
 
 #[cfg(test)]
