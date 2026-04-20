@@ -54,12 +54,18 @@ impl<'a, K: Kv> SmtStore for DbStore<'a, K> {
             Some(v) => {
                 // Strict length check. We cannot "guess" or truncate.
                 if v.len() != Node::ENCODED_LEN {
-                    // Cannot return SmtError here because trait is Result<_, Self::Error>.
-                    // We surface deterministically by treating it as missing at the store layer,
-                    // and SMT logic will report MissingNode for the hash along the accessed path.
-                    //
-                    // NOTE: If you want explicit corruption reporting, we can extend SmtStore
-                    // to return a richer error. For Week 4 we keep trait minimal.
+                    // H-09: Log corruption explicitly so operators can detect it.
+                    // We cannot return SmtError here because trait returns Self::Error.
+                    // Treating as missing is deterministic but WRONG — alert via stderr
+                    // so monitoring detects corruption rather than silent divergence.
+                    // Uses eprintln because smt crate has no tracing dependency.
+                    eprintln!(
+                        "CORRUPTED SMT NODE: hash={:?} expected_len={} actual_len={} — \
+                         treating as missing. This may cause state root divergence!",
+                        &node_hash[..8],
+                        Node::ENCODED_LEN,
+                        v.len(),
+                    );
                     return Ok(None);
                 }
                 let mut out = [0u8; Node::ENCODED_LEN];

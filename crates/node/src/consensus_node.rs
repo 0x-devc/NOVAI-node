@@ -440,7 +440,14 @@ impl ConsensusNode {
     /// Returns `true` if the peer is authorized, `false` otherwise.
     fn verify_peer_identity(&self, remote_static: &[u8; 32]) -> bool {
         if self.known_noise_keys.is_empty() {
-            // No known keys configured — skip verification (production bootstrapping)
+            // H-02: Warn loudly when accepting peers without verification.
+            // In production, known_noise_keys should be distributed via genesis.
+            tracing::warn!(
+                peer_key = %hex::encode(&remote_static[..16]),
+                "Peer identity verification DISABLED (known_noise_keys empty). \
+                 Any peer can connect — eclipse attack risk. \
+                 Configure validator noise pubkeys for production."
+            );
             return true;
         }
 
@@ -1465,12 +1472,38 @@ impl ConsensusNode {
 
     /// Handle incoming vote.
     pub fn handle_vote(&self, vote: Vote) -> Result<(), String> {
+        // H-11: Verify vote signature BEFORE acquiring state lock.
+        // Crypto verification (~100µs) no longer blocks other consensus operations.
+        let pubkey = self
+            .validator_pubkeys
+            .get(&vote.voter)
+            .ok_or_else(|| format!("Vote from unknown validator {:?}", &vote.voter[..4]))?;
+        {
+            let unsigned_vote = Vote {
+                height: vote.height,
+                round: vote.round,
+                block_hash: vote.block_hash,
+                voter: vote.voter,
+                signature: [0u8; 64],
+                ai_signal_commitment: vote.ai_signal_commitment,
+            };
+            let unsigned_bytes =
+                novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
+            let domain_tag = b"NOVAI_VOTE_V1";
+            let mut to_verify = Vec::new();
+            to_verify.extend_from_slice(domain_tag);
+            to_verify.extend_from_slice(&unsigned_bytes);
+            if !novai_crypto::verify_bytes(pubkey, &to_verify, &vote.signature) {
+                return Err("Invalid vote signature".to_string());
+            }
+        }
+
         let mut state = self.state.lock_or_recover();
 
-        // Use cached pubkeys_vec to avoid allocation on every vote.
+        // Use add_vote_verified since we already checked the signature above.
         // Duplicate/equivocation votes are expected during normal operation
         // (e.g., redundant network paths) — treat them as no-ops, not errors.
-        match state.add_vote(vote.clone(), &self.validator_pubkeys_vec) {
+        match state.add_vote_verified(vote.clone(), &self.validator_pubkeys_vec) {
             Ok(()) => {}
             Err(novai_consensus::ConsensusError::InvalidVote(ref msg))
                 if msg.contains("Duplicate vote") || msg.contains("height mismatch") =>

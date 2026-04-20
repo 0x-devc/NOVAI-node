@@ -17,6 +17,7 @@
 //! - State query error → returns RPC error -32002
 
 use crate::consensus_node::Storage;
+use crate::MutexExt;
 use mempool::{NonceProvider, TxMempool};
 use novai_ai_entities::{AiSignalType, SignalCommitment};
 use novai_codec::{decode_tx_v1_signed, txid_v1};
@@ -529,6 +530,9 @@ pub fn start_rpc_server_with_state(
         let mut per_ip_limits: HashMap<IpAddr, VecDeque<Instant>> = HashMap::new();
         let mut last_cleanup = Instant::now();
         let nonce = SharedNonceProvider(nonce_provider);
+        // H-04: Per-address faucet rate limiting
+        let mut faucet_last_dispense: HashMap<[u8; 32], Instant> = HashMap::new();
+        let mut faucet_last_global: Option<Instant> = None;
 
         for mut request in server.incoming_requests() {
             // C-06: Check concurrent request limit before processing.
@@ -782,7 +786,15 @@ pub fn start_rpc_server_with_state(
                     }
                 },
                 "novai_faucet" => {
-                    match handle_faucet(&rpc_request, &mempool, &nonce, dev_keys, &faucet_key) {
+                    match handle_faucet(
+                        &rpc_request,
+                        &mempool,
+                        &nonce,
+                        dev_keys,
+                        &faucet_key,
+                        &mut faucet_last_dispense,
+                        &mut faucet_last_global,
+                    ) {
                         Ok(result) => {
                             let response = RpcResponse {
                                 jsonrpc: "2.0",
@@ -922,9 +934,12 @@ fn handle_submit_tx(
     })?;
 
     // Decode transaction
-    let tx: TxV1 = decode_tx_v1_signed(&tx_bytes).map_err(|e| RpcError {
-        code: -32000,
-        message: format!("Invalid transaction encoding: {:?}", e),
+    let tx: TxV1 = decode_tx_v1_signed(&tx_bytes).map_err(|e| {
+        tracing::debug!(?e, "Transaction decoding failed");
+        RpcError {
+            code: -32000,
+            message: "Invalid transaction encoding".to_string(),
+        }
     })?;
 
     // Size limit check (cheapest rejection point — before touching the mempool)
@@ -941,13 +956,16 @@ fn handle_submit_tx(
     }
 
     // Compute transaction ID
-    let txid = txid_v1(&tx).map_err(|e| RpcError {
-        code: -32000,
-        message: format!("Failed to compute txid: {:?}", e),
+    let txid = txid_v1(&tx).map_err(|e| {
+        tracing::debug!(?e, "Txid computation failed");
+        RpcError {
+            code: -32000,
+            message: "Failed to compute transaction ID".to_string(),
+        }
     })?;
 
     // Submit to mempool
-    let mut mempool_guard = mempool.lock().unwrap();
+    let mut mempool_guard = mempool.lock_or_recover();
     let size_before = mempool_guard.len();
     match mempool_guard.insert(tx, nonce_provider) {
         Ok(id) => {
@@ -981,7 +999,7 @@ fn handle_submit_tx(
             drop(mempool_guard);
             Err(RpcError {
                 code: -32001,
-                message: format!("Mempool rejected transaction: {:?}", e),
+                message: "Transaction rejected by mempool".to_string(),
             })
         }
     }
@@ -1034,10 +1052,10 @@ fn handle_get_signals_by_height(
             message: format!("Invalid params: {}", e),
         })?;
 
-    let db = db.lock().unwrap();
-    let signals = get_signals_by_height(&*db, params.height).map_err(|e| RpcError {
+    let db = db.lock_or_recover();
+    let signals = get_signals_by_height(&*db, params.height).map_err(|_| RpcError {
         code: -32002,
-        message: format!("State query error: {:?}", e),
+        message: "State query failed".to_string(),
     })?;
 
     Ok(SignalQueryResult {
@@ -1083,11 +1101,11 @@ fn handle_get_signals_by_issuer(
     let mut issuer = [0u8; 32];
     issuer.copy_from_slice(&issuer_bytes);
 
-    let db = db.lock().unwrap();
+    let db = db.lock_or_recover();
     let signals = get_signals_by_issuer(&*db, &issuer, params.start_height, params.end_height)
-        .map_err(|e| RpcError {
+        .map_err(|_| RpcError {
             code: -32002,
-            message: format!("State query error: {:?}", e),
+            message: "State query failed".to_string(),
         })?;
 
     Ok(SignalQueryResult {
@@ -1125,11 +1143,11 @@ fn handle_get_signals_by_type(
         message: format!("Invalid signal type: {} (must be 0-6)", params.signal_type),
     })?;
 
-    let db = db.lock().unwrap();
+    let db = db.lock_or_recover();
     let signals = get_signals_by_type(&*db, signal_type, params.start_height, params.end_height)
-        .map_err(|e| RpcError {
+        .map_err(|_| RpcError {
             code: -32002,
-            message: format!("State query error: {:?}", e),
+            message: "State query failed".to_string(),
         })?;
 
     Ok(SignalQueryResult {
@@ -1173,10 +1191,10 @@ fn handle_get_balance(
         })?;
 
     let address = parse_hex32(&params.address, "address")?;
-    let db = db.lock().unwrap();
-    let account = read_account_or_default(&*db, &address).map_err(|e| RpcError {
+    let db = db.lock_or_recover();
+    let account = read_account_or_default(&*db, &address).map_err(|_| RpcError {
         code: -32002,
-        message: format!("State query error: {:?}", e),
+        message: "State query failed".to_string(),
     })?;
 
     Ok(GetBalanceResult {
@@ -1197,10 +1215,10 @@ fn handle_get_ai_entity(
         })?;
 
     let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
-    let db = db.lock().unwrap();
-    let entity = read_ai_entity(&*db, &entity_id).map_err(|e| RpcError {
+    let db = db.lock_or_recover();
+    let entity = read_ai_entity(&*db, &entity_id).map_err(|_| RpcError {
         code: -32002,
-        message: format!("State query error: {:?}", e),
+        message: "State query failed".to_string(),
     })?;
 
     Ok(GetAiEntityResult {
@@ -1234,10 +1252,10 @@ fn handle_get_memory_objects(
         })?;
 
     let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
-    let db = db.lock().unwrap();
-    let objects = get_memory_objects_by_entity(&*db, &entity_id).map_err(|e| RpcError {
+    let db = db.lock_or_recover();
+    let objects = get_memory_objects_by_entity(&*db, &entity_id).map_err(|_| RpcError {
         code: -32002,
-        message: format!("State query error: {:?}", e),
+        message: "State query failed".to_string(),
     })?;
 
     Ok(GetMemoryObjectsResult {
@@ -1260,12 +1278,19 @@ fn handle_get_memory_objects(
 ///
 /// Creates and submits a transfer from the dev faucet account (index 99).
 /// Only active when `dev_keys` is true.
+/// Minimum seconds between faucet calls for the same address.
+const FAUCET_PER_ADDRESS_COOLDOWN_SECS: u64 = 3600; // 1 hour
+/// Minimum seconds between any faucet call (global cooldown).
+const FAUCET_GLOBAL_COOLDOWN_SECS: u64 = 10;
+
 fn handle_faucet(
     request: &RpcRequest,
     mempool: &Arc<Mutex<TxMempool>>,
     nonce_provider: &SharedNonceProvider,
     dev_keys: bool,
     faucet_key: &Option<ed25519_dalek::SigningKey>,
+    faucet_last_dispense: &mut HashMap<[u8; 32], Instant>,
+    faucet_last_global: &mut Option<Instant>,
 ) -> Result<FaucetResult, RpcError> {
     // C-04: Faucet key resolution:
     // 1. If --faucet-key was provided: use the loaded key
@@ -1299,6 +1324,34 @@ fn handle_faucet(
 
     let to_address = parse_hex32(&params.address, "address")?;
 
+    // H-04: Global cooldown — prevent rapid-fire faucet calls
+    let now = Instant::now();
+    if let Some(last) = faucet_last_global {
+        let elapsed = now.duration_since(*last);
+        if elapsed < Duration::from_secs(FAUCET_GLOBAL_COOLDOWN_SECS) {
+            let remaining = FAUCET_GLOBAL_COOLDOWN_SECS - elapsed.as_secs();
+            return Err(RpcError {
+                code: -32000,
+                message: format!("Faucet global cooldown: try again in {} seconds", remaining),
+            });
+        }
+    }
+
+    // H-04: Per-address cooldown — max 1 dispense per address per hour
+    if let Some(&last) = faucet_last_dispense.get(&to_address) {
+        let elapsed = now.duration_since(last);
+        if elapsed < Duration::from_secs(FAUCET_PER_ADDRESS_COOLDOWN_SECS) {
+            let remaining = FAUCET_PER_ADDRESS_COOLDOWN_SECS - elapsed.as_secs();
+            return Err(RpcError {
+                code: -32000,
+                message: format!(
+                    "Faucet rate limit: address already received tokens. Try again in {} seconds",
+                    remaining
+                ),
+            });
+        }
+    }
+
     let faucet_pk = faucet_sk.verifying_key();
     let faucet_addr = address_from_pubkey(&faucet_pk);
 
@@ -1321,23 +1374,26 @@ fn handle_faucet(
         sig: [0u8; 64],
     };
 
-    sign_tx_v1(&faucet_sk, &mut tx).map_err(|e| RpcError {
+    sign_tx_v1(&faucet_sk, &mut tx).map_err(|_| RpcError {
         code: -32000,
-        message: format!("Failed to sign faucet tx: {:?}", e),
+        message: "Faucet transaction signing failed".to_string(),
     })?;
 
-    let txid = txid_v1(&tx).map_err(|e| RpcError {
-        code: -32000,
-        message: format!("Failed to compute txid: {:?}", e),
+    let txid = txid_v1(&tx).map_err(|e| {
+        tracing::debug!(?e, "Txid computation failed");
+        RpcError {
+            code: -32000,
+            message: "Failed to compute transaction ID".to_string(),
+        }
     })?;
 
     // Submit to mempool
-    let mut mempool_guard = mempool.lock().unwrap();
+    let mut mempool_guard = mempool.lock_or_recover();
     mempool_guard
         .insert(tx, nonce_provider)
-        .map_err(|e| RpcError {
+        .map_err(|_| RpcError {
             code: -32001,
-            message: format!("Faucet tx rejected by mempool: {:?}", e),
+            message: "Faucet transaction rejected by mempool".to_string(),
         })?;
     drop(mempool_guard);
 
@@ -1347,6 +1403,10 @@ fn handle_faucet(
         txid = %hex::encode(txid),
         "Faucet dispensed tokens"
     );
+
+    // H-04: Record successful dispense for rate limiting
+    faucet_last_dispense.insert(to_address, now);
+    *faucet_last_global = Some(now);
 
     Ok(FaucetResult {
         txid: hex::encode(txid),
@@ -1371,18 +1431,18 @@ fn handle_get_transaction(
         })?;
 
     let txid = parse_hex32(&params.txid, "txid")?;
-    let idx = index.lock().unwrap();
+    let idx = index.lock_or_recover();
     let Some(&(height, tx_index)) = idx.tx_receipts.get(&txid) else {
         return Ok(serde_json::Value::Null);
     };
     drop(idx);
 
     // Load block to get tx details
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock_or_recover();
     let block = novai_consensus::ConsensusState::load_block(&*db_guard, height)
-        .map_err(|e| RpcError {
+        .map_err(|_| RpcError {
             code: -32002,
-            message: format!("Failed to load block: {:?}", e),
+            message: "Failed to load block".to_string(),
         })?
         .ok_or_else(|| RpcError {
             code: -32002,
@@ -1417,21 +1477,21 @@ fn handle_get_block_by_height(
             message: format!("Invalid params: {}", e),
         })?;
 
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock_or_recover();
     let block =
-        novai_consensus::ConsensusState::load_block(&*db_guard, params.height).map_err(|e| {
+        novai_consensus::ConsensusState::load_block(&*db_guard, params.height).map_err(|_| {
             RpcError {
                 code: -32002,
-                message: format!("Failed to load block: {:?}", e),
+                message: "Failed to load block".to_string(),
             }
         })?;
     drop(db_guard);
 
     match block {
         Some(b) => {
-            let hash = novai_consensus_types::codec::hash_block_v1(&b).map_err(|e| RpcError {
+            let hash = novai_consensus_types::codec::hash_block_v1(&b).map_err(|_| RpcError {
                 code: -32002,
-                message: format!("Failed to hash block: {:?}", e),
+                message: "Failed to hash block".to_string(),
             })?;
             Ok(serde_json::to_value(BlockResult {
                 height: b.height,
@@ -1460,18 +1520,18 @@ fn handle_get_block_by_hash(
         })?;
 
     let hash = parse_hex32(&params.hash, "hash")?;
-    let idx = index.lock().unwrap();
+    let idx = index.lock_or_recover();
     let height = idx.block_hashes.get(&hash).copied();
     drop(idx);
 
     match height {
         Some(h) => {
-            let db_guard = db.lock().unwrap();
+            let db_guard = db.lock_or_recover();
             let block =
-                novai_consensus::ConsensusState::load_block(&*db_guard, h).map_err(|e| {
+                novai_consensus::ConsensusState::load_block(&*db_guard, h).map_err(|_| {
                     RpcError {
                         code: -32002,
-                        message: format!("Failed to load block: {:?}", e),
+                        message: "Failed to load block".to_string(),
                     }
                 })?;
             drop(db_guard);
@@ -1497,22 +1557,22 @@ fn handle_get_latest_block(
     index: &Arc<Mutex<BlockchainIndex>>,
     db: &Arc<Mutex<Storage>>,
 ) -> Result<serde_json::Value, RpcError> {
-    let height = index.lock().unwrap().committed_height;
+    let height = index.lock_or_recover().committed_height;
     if height == 0 {
         return Ok(serde_json::Value::Null);
     }
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock_or_recover();
     let block =
-        novai_consensus::ConsensusState::load_block(&*db_guard, height).map_err(|e| RpcError {
+        novai_consensus::ConsensusState::load_block(&*db_guard, height).map_err(|_| RpcError {
             code: -32002,
-            message: format!("Failed to load block: {:?}", e),
+            message: "Failed to load block".to_string(),
         })?;
     drop(db_guard);
     match block {
         Some(b) => {
-            let hash = novai_consensus_types::codec::hash_block_v1(&b).map_err(|e| RpcError {
+            let hash = novai_consensus_types::codec::hash_block_v1(&b).map_err(|_| RpcError {
                 code: -32002,
-                message: format!("Failed to hash block: {:?}", e),
+                message: "Failed to hash block".to_string(),
             })?;
             Ok(serde_json::to_value(BlockResult {
                 height: b.height,

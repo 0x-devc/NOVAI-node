@@ -3312,6 +3312,56 @@ fn read_treasury_balance<K: Kv>(db: &K, key: &[u8]) -> Result<u128, ExecError<K:
 /// # Errors
 ///
 /// Returns `UnknownPayloadVersion` if the payload is empty or the version byte
+/// H-07: Purge expired/executed governance proposals from the database.
+///
+/// Scans all proposals and deletes those that are:
+/// - Executed and finalized (`current_height > executed_at + finality_window`)
+/// - Expired and finalized (`current_height > expires_at + finality_window`)
+///
+/// Returns the number of proposals purged.
+pub fn purge_expired_proposals<K: KvBatch>(
+    db: &mut K,
+    current_height: u64,
+    finality_window: u64,
+) -> usize {
+    let Ok(proposals) = db.scan_prefix(novai_state::KEY_PREFIX_GOVERNANCE_PROPOSALS) else {
+        return 0;
+    };
+
+    let mut purged = 0;
+    for (key, value) in &proposals {
+        // Decode proposal to check state
+        let Ok(proposal) = novai_governance::codec::decode_proposal_v1(value) else {
+            continue; // Skip malformed proposals
+        };
+
+        let should_purge = match proposal.state {
+            novai_governance::ProposalState::Executed => {
+                proposal.executed_at > 0 && current_height > proposal.executed_at + finality_window
+            }
+            _ => {
+                proposal.is_expired(current_height)
+                    && current_height > proposal.expires_at + finality_window
+            }
+        };
+
+        if should_purge {
+            // Delete proposal record
+            if db.delete(key).is_ok() {
+                purged += 1;
+            }
+            // Delete by-state index entries (best-effort)
+            let state_key = novai_state::governance_proposal_by_state_key(
+                proposal.state.to_byte(),
+                &proposal.id,
+            );
+            let _ = db.delete(&state_key);
+        }
+    }
+
+    purged
+}
+
 /// does not match any known transaction type. All other errors are forwarded
 /// from the underlying apply function.
 pub fn dispatch_tx<K: KvBatch>(

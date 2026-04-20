@@ -4,6 +4,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// H-08: Maximum pending transactions from a single sender during insertion.
+/// Prevents one address from monopolizing mempool capacity.
+pub const MAX_PENDING_PER_SENDER: usize = 16;
+
 /// Errors returned by [`Mempool`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MempoolError {
@@ -117,14 +121,32 @@ pub trait NonceProvider {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxMempoolError {
     Duplicate,
-    FeeTooLow { min_fee: u64, got: u64 },
-    NonceTooLow { expected: u64, got: u64 },
+    FeeTooLow {
+        min_fee: u64,
+        got: u64,
+    },
+    NonceTooLow {
+        expected: u64,
+        got: u64,
+    },
     InvalidSignature,
     InvalidPublicKey,
     AddressMismatch,
     CodecError,
-    TxTooLarge { size: usize, max: usize },
-    MempoolFull { current: usize, max: usize },
+    TxTooLarge {
+        size: usize,
+        max: usize,
+    },
+    MempoolFull {
+        current: usize,
+        max: usize,
+    },
+    /// H-08: Too many pending transactions from a single sender.
+    SenderLimitExceeded {
+        address: Address,
+        count: usize,
+        max: usize,
+    },
 }
 
 /// A mempool specifically for canonical TxV1.
@@ -156,6 +178,8 @@ pub struct TxMempool {
     /// Txs older than a configurable max age are purged to free capacity
     /// (prevents future-nonce txs from permanently filling the mempool).
     insertion_times: HashMap<TxId, Instant>,
+    /// H-08: Per-sender pending transaction count for admission control.
+    by_sender_count: HashMap<Address, usize>,
 }
 
 impl TxMempool {
@@ -169,6 +193,7 @@ impl TxMempool {
             threat_scores: Arc::new(Mutex::new(BTreeMap::new())),
             threat_scores_empty: Arc::new(AtomicBool::new(true)),
             insertion_times: HashMap::new(),
+            by_sender_count: HashMap::new(),
         }
     }
 
@@ -250,6 +275,16 @@ impl TxMempool {
             });
         }
 
+        // H-08: Per-sender admission control (before expensive sig verification)
+        let sender_count = self.by_sender_count.get(&tx.from).copied().unwrap_or(0);
+        if sender_count >= MAX_PENDING_PER_SENDER {
+            return Err(TxMempoolError::SenderLimitExceeded {
+                address: tx.from,
+                count: sender_count,
+                max: MAX_PENDING_PER_SENDER,
+            });
+        }
+
         // Verify address matches pubkey
         let vk = pubkey_from_bytes(&tx.pubkey).map_err(|_| TxMempoolError::InvalidPublicKey)?;
         let expected_addr = address_from_pubkey(&vk);
@@ -288,6 +323,7 @@ impl TxMempool {
 
         self.total_bytes += size;
         self.insertion_times.insert(id, Instant::now());
+        *self.by_sender_count.entry(tx.from).or_insert(0) += 1;
         self.by_id.insert(id, tx);
         Ok(id)
     }
@@ -365,6 +401,13 @@ impl TxMempool {
             if let Some(tx) = self.by_id.remove(&id) {
                 self.total_bytes -= novai_codec::tx_encoded_size(&tx);
                 self.insertion_times.remove(&id);
+                // H-08: Decrement per-sender count
+                if let Some(c) = self.by_sender_count.get_mut(&tx.from) {
+                    *c = c.saturating_sub(1);
+                    if *c == 0 {
+                        self.by_sender_count.remove(&tx.from);
+                    }
+                }
                 out.push(tx);
             }
         }
@@ -388,6 +431,7 @@ impl TxMempool {
         let size = novai_codec::tx_encoded_size(&tx);
         self.total_bytes += size;
         self.insertion_times.insert(id, Instant::now());
+        *self.by_sender_count.entry(tx.from).or_insert(0) += 1;
         self.by_id.insert(id, tx);
         Ok(id)
     }
@@ -413,6 +457,13 @@ impl TxMempool {
         for id in stale_ids {
             if let Some(tx) = self.by_id.remove(&id) {
                 self.total_bytes -= novai_codec::tx_encoded_size(&tx);
+                // H-08: Decrement per-sender count
+                if let Some(c) = self.by_sender_count.get_mut(&tx.from) {
+                    *c = c.saturating_sub(1);
+                    if *c == 0 {
+                        self.by_sender_count.remove(&tx.from);
+                    }
+                }
             }
             self.insertion_times.remove(&id);
         }
@@ -746,32 +797,40 @@ mod tests {
 
     #[test]
     fn rejects_mempool_full() {
-        let (sk, vk) = test_keypair(11);
-        let from: Address = address_from_pubkey(&vk);
-
-        let mut np = TestNonceProvider::default();
-        np.set(from, 0);
-
         let mut mp = TxMempool::new(1, 1000);
+        let mut np = TestNonceProvider::default();
 
-        // Fill the mempool close to MAX_MEMPOOL_BYTES.
-        // Each tx with 1-byte payload is 150 bytes encoded (TX_V1_OVERHEAD + 1).
-        // Insert enough txs to nearly fill 64MB, then verify the next one fails.
-        // For speed, we use a large payload per tx to fill faster.
+        // Fill the mempool close to MAX_MEMPOOL_BYTES using multiple senders
+        // (each sender limited to MAX_PENDING_PER_SENDER by H-08).
         let payload_size = 64 * 1024; // 64KB payload per tx
         let tx_size = novai_codec::TX_V1_OVERHEAD + payload_size;
         let count_to_fill = novai_types::MAX_MEMPOOL_BYTES / tx_size; // ~1023
+        let per_sender = super::MAX_PENDING_PER_SENDER;
+        let num_senders = (count_to_fill / per_sender) + 1;
 
-        for i in 0..count_to_fill {
-            let payload = vec![0xBB; payload_size];
-            let tx = make_signed_tx(&sk, &vk, i as u64, 1, &payload);
-            mp.insert(tx, &np).unwrap();
-            np.set(from, (i + 1) as u64);
+        let mut inserted = 0;
+        for s in 0..num_senders {
+            let (sk, vk) = test_keypair(100 + s as u8);
+            let from: Address = address_from_pubkey(&vk);
+            np.set(from, 0);
+            for i in 0..per_sender {
+                if inserted >= count_to_fill {
+                    break;
+                }
+                let payload = vec![0xBB; payload_size];
+                let tx = make_signed_tx(&sk, &vk, i as u64, 1, &payload);
+                mp.insert(tx, &np).unwrap();
+                np.set(from, (i + 1) as u64);
+                inserted += 1;
+            }
         }
 
-        // Now the mempool should be nearly full. One more should fail.
+        // Now the mempool should be nearly full. One more from a new sender should fail.
+        let (sk_extra, vk_extra) = test_keypair(200);
+        let from_extra: Address = address_from_pubkey(&vk_extra);
+        np.set(from_extra, 0);
         let payload = vec![0xCC; payload_size];
-        let tx = make_signed_tx(&sk, &vk, count_to_fill as u64, 1, &payload);
+        let tx = make_signed_tx(&sk_extra, &vk_extra, 0, 1, &payload);
         let err = mp.insert(tx, &np).unwrap_err();
         assert!(
             matches!(err, TxMempoolError::MempoolFull { .. }),

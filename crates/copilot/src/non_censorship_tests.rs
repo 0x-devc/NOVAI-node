@@ -179,8 +179,12 @@ mod tests {
             .any(|p| matches!(p.kind, SpamPatternKind::HighTxRate { .. }));
         assert!(has_high_rate, "Should detect high tx rate");
 
+        // Purge mempool to clear per-sender count (H-08 limits to 16 pending per sender)
+        mempool.purge_stale(std::time::Duration::ZERO);
+
         // STEP 3: Sender submits ANOTHER valid transaction AFTER being flagged
-        let post_flag_tx = make_signed_tx(spammy_sender_seed, 20, 100, b"after_flag");
+        let post_flag_nonce = nonce_provider.expected_nonce(&spammy_address);
+        let post_flag_tx = make_signed_tx(spammy_sender_seed, post_flag_nonce, 100, b"after_flag");
 
         // CRITICAL ASSERTION: Transaction MUST be accepted
         let insert_result = mempool.insert(post_flag_tx, &nonce_provider);

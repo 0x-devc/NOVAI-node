@@ -552,6 +552,73 @@ impl ConsensusState {
         Ok(())
     }
 
+    /// H-11: Add a vote whose signature has already been verified by the caller.
+    ///
+    /// This allows `handle_vote()` in the node layer to verify signatures
+    /// BEFORE acquiring the state lock, reducing lock contention.
+    /// All other checks (height, round, duplicates, caps) still apply.
+    ///
+    /// # Errors
+    /// Returns error if vote fails non-signature checks.
+    pub fn add_vote_verified(
+        &mut self,
+        vote: Vote,
+        validator_pubkeys: &[(Address, VerifyingKey)],
+    ) -> Result<(), ConsensusError> {
+        // Height check
+        let expected_height = match &self.highest_qc {
+            Some(qc) => std::cmp::max(self.height, qc.height) + 1,
+            None => self.height + 1,
+        };
+
+        if vote.height != expected_height {
+            if vote.height + 1 == expected_height {
+                return Ok(());
+            }
+            return Err(ConsensusError::InvalidVote(format!(
+                "Vote height mismatch: expected {}, got {}",
+                expected_height, vote.height
+            )));
+        }
+
+        // Voter must be in validator set
+        if !validator_pubkeys
+            .iter()
+            .any(|(addr, _)| *addr == vote.voter)
+        {
+            return Err(ConsensusError::InvalidVote(format!(
+                "Unknown voter {:?}",
+                &vote.voter[..4]
+            )));
+        }
+
+        // Duplicate check
+        if self.voted_in_round.contains(&vote.voter) {
+            return Err(ConsensusError::InvalidVote(
+                "Duplicate vote from same voter in current round (equivocation)".to_string(),
+            ));
+        }
+
+        // Advisory AI signal logging
+        if let Some(commitment) = vote.ai_signal_commitment {
+            tracing::debug!(?commitment, "Vote includes AI signal");
+        }
+
+        // Mark voted
+        self.voted_in_round.insert(vote.voter);
+        self.voted_at_height.insert(vote.voter, vote.block_hash);
+
+        // Add vote (capped)
+        let max_per_hash = validator_pubkeys.len() + 5;
+        let votes_for_hash = self.pending_votes.entry(vote.block_hash).or_default();
+        if votes_for_hash.len() >= max_per_hash {
+            return Ok(());
+        }
+        votes_for_hash.push(vote);
+
+        Ok(())
+    }
+
     /// Try to form a QC for a given block hash.
     ///
     /// # Errors
@@ -747,7 +814,8 @@ impl ConsensusState {
             ));
         }
 
-        // Update highest_qc if timeout includes a better QC
+        // H-01: Update highest_qc if timeout includes a better QC,
+        // but ONLY after re-verifying all vote signatures in the QC.
         if let Some(ref qc) = timeout.highest_qc {
             let dominated = match &self.highest_qc {
                 None => true,
@@ -757,6 +825,53 @@ impl ConsensusState {
                 }
             };
             if dominated {
+                // Verify quorum: need 2f+1 votes
+                let n = validator_pubkeys.len();
+                let f = (n - 1) / 3;
+                let quorum = 2 * f + 1;
+                if qc.votes.len() < quorum {
+                    return Err(ConsensusError::InvalidVote(format!(
+                        "Timeout QC has insufficient votes: {} < quorum {}",
+                        qc.votes.len(),
+                        quorum,
+                    )));
+                }
+
+                // Re-verify each vote signature in the QC
+                for vote in &qc.votes {
+                    let vote_pk = validator_pubkeys
+                        .iter()
+                        .find(|(addr, _)| *addr == vote.voter)
+                        .map(|(_, pk)| pk)
+                        .ok_or_else(|| {
+                            ConsensusError::InvalidVote(format!(
+                                "Timeout QC contains vote from unknown validator {:?}",
+                                &vote.voter[..4]
+                            ))
+                        })?;
+
+                    let unsigned_vote = Vote {
+                        height: vote.height,
+                        round: vote.round,
+                        block_hash: vote.block_hash,
+                        voter: vote.voter,
+                        signature: [0u8; 64],
+                        ai_signal_commitment: vote.ai_signal_commitment,
+                    };
+                    let unsigned_bytes =
+                        novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
+                    let domain_tag = b"NOVAI_VOTE_V1";
+                    let mut to_verify = Vec::new();
+                    to_verify.extend_from_slice(domain_tag);
+                    to_verify.extend_from_slice(&unsigned_bytes);
+
+                    if !novai_crypto::verify_bytes(vote_pk, &to_verify, &vote.signature) {
+                        return Err(ConsensusError::InvalidVote(
+                            "Timeout QC contains invalid vote signature".to_string(),
+                        ));
+                    }
+                }
+
                 self.highest_qc = Some(qc.clone());
             }
         }

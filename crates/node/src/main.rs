@@ -181,6 +181,21 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
         }
         self.nonce_provider.advance_nonces_for_blocks(blocks);
 
+        // H-07: Periodically purge expired governance proposals (every 1000 blocks)
+        if let Some(last_block) = blocks.last() {
+            if last_block.height % 1000 == 0 {
+                let purged =
+                    novai_execution::purge_expired_proposals(db, last_block.height, 10_000);
+                if purged > 0 {
+                    tracing::info!(
+                        purged,
+                        height = last_block.height,
+                        "Purged expired governance proposals"
+                    );
+                }
+            }
+        }
+
         // Update blockchain index for block explorer queries
         if let Ok(mut idx) = self.blockchain_index.lock() {
             for block in blocks {
@@ -909,13 +924,23 @@ fn main() {
             }
 
             // Resolve and connect to DNS seed nodes
+            // H-03: Log all resolved IPs so operators can audit for DNS poisoning.
             for seed in &seeds {
                 use std::net::ToSocketAddrs;
                 match seed.to_socket_addrs() {
                     Ok(addrs) => {
+                        let resolved: Vec<_> = addrs.collect();
+                        // Log ALL resolved addresses for operator auditing
+                        let ip_list: Vec<String> = resolved.iter().map(|a| a.to_string()).collect();
+                        tracing::info!(
+                            seed = %seed,
+                            resolved_ips = ?ip_list,
+                            "DNS seed resolved — verify IPs match expected infrastructure"
+                        );
+
                         let mut connected = false;
-                        for addr in addrs {
-                            match node.connect_to_peer(addr) {
+                        for addr in &resolved {
+                            match node.connect_to_peer(*addr) {
                                 Ok(_) => {
                                     tracing::info!(seed = %seed, addr = %addr, "Connected to seed node");
                                     connected = true;
@@ -931,7 +956,7 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(seed = %seed, %e, "Failed to resolve seed node DNS");
+                        tracing::warn!(seed = %seed, %e, "Failed to resolve seed node DNS — check DNS configuration");
                     }
                 }
             }

@@ -50,6 +50,9 @@ impl RocksKv {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+        // H-10: Enable comprehensive consistency checks on every DB operation.
+        // Detects bit rot and silent corruption instead of propagating bad data.
+        opts.set_paranoid_checks(true);
         // Cap open files to prevent FD exhaustion when multiple instances
         // share a single machine (e.g., 4-node testnet on one server).
         opts.set_max_open_files(256);
