@@ -999,10 +999,27 @@ fn handle_submit_tx(
                 "RPC tx rejected"
             );
             drop(mempool_guard);
-            Err(RpcError {
-                code: -32001,
-                message: "Transaction rejected by mempool".to_string(),
-            })
+            // Map mempool errors to distinct codes so clients can distinguish
+            // rejection types without leaking internal debug details (H-06).
+            // Codes: -32001 = MempoolFull, -32010 = NonceTooLow,
+            //        -32011 = FeeTooLow, -32012 = SenderLimitExceeded,
+            //        -32013 = other validation error
+            let (code, message) = match e {
+                mempool::TxMempoolError::MempoolFull { .. } => (-32001, "MempoolFull".to_string()),
+                mempool::TxMempoolError::NonceTooLow { expected, got } => (
+                    -32010,
+                    format!("NonceTooLow: expected {expected}, got {got}"),
+                ),
+                mempool::TxMempoolError::FeeTooLow { min_fee, got } => {
+                    (-32011, format!("FeeTooLow: minimum {min_fee}, got {got}"))
+                }
+                mempool::TxMempoolError::SenderLimitExceeded { max, .. } => (
+                    -32012,
+                    format!("SenderLimitExceeded: max {max} pending per sender"),
+                ),
+                _ => (-32013, "Transaction validation failed".to_string()),
+            };
+            Err(RpcError { code, message })
         }
     }
 }

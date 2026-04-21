@@ -266,9 +266,10 @@ impl Submitter {
                                 }
                                 SubmitResult::Rejected { ref reason } => {
                                     stats.rejected_count += 1;
-                                    // Only track NonceTooLow for nonce reset
-                                    // (MempoolFull is retried inline, not counted here)
-                                    if reason.contains("NonceTooLow") {
+                                    // Track NonceTooLow for nonce reset.
+                                    // Uses code-based detection (not string matching)
+                                    // since H-06 sanitized error messages.
+                                    if reason.starts_with("NonceTooLow") {
                                         let count = consecutive_nonce_errors
                                             .entry(sender_address)
                                             .or_insert(0);
@@ -419,6 +420,18 @@ async fn submit_with_retry(
                 tokio::time::sleep(Duration::from_secs(MEMPOOL_FULL_BACKOFF_SECS)).await;
                 continue;
             }
+            Err(SubmitError::NonceTooLow(msg)) => {
+                // NonceTooLow is a rejection — return immediately so the
+                // worker's nonce resync logic can handle it.
+                let latency = start_time.elapsed();
+                let reason = format!("NonceTooLow: {msg}");
+                let _ = metric_tx.send(MetricEvent::Rejected {
+                    txid,
+                    reason: reason.clone(),
+                    latency,
+                });
+                return SubmitResult::Rejected { reason };
+            }
             Err(SubmitError::RateLimited) => {
                 debug!(
                     "Rate limited by server, backing off {}s",
@@ -505,11 +518,13 @@ async fn submit_once(
 
     // Check for RPC error
     if let Some(error) = rpc_response.error {
-        // Distinguish MempoolFull (-32001) from other validation errors
-        if error.code == -32001 && error.message.contains("MempoolFull") {
-            return Err(SubmitError::MempoolFull(error.message));
+        // Distinguish rejection types by error CODE (not message string).
+        // Codes defined in crates/node/src/rpc.rs handle_submit_tx.
+        match error.code {
+            -32001 => return Err(SubmitError::MempoolFull(error.message)),
+            -32010 => return Err(SubmitError::NonceTooLow(error.message)),
+            _ => return Err(SubmitError::Rpc(error.code, error.message)),
         }
-        return Err(SubmitError::Rpc(error.code, error.message));
     }
 
     // Extract txid from result
@@ -575,10 +590,15 @@ struct GetNonceResponse {
 fn is_validation_error(error: &SubmitError) -> bool {
     match error {
         SubmitError::Rpc(code, _) => {
-            // RPC error codes for validation failures (do not retry)
-            // -32000 to -32099 are server errors (may be validation)
+            // RPC error codes for validation failures (do not retry).
+            // -32001 (MempoolFull) and -32010 (NonceTooLow) are handled
+            // separately before reaching this check.
             *code >= -32099 && *code <= -32000
         }
+        // NonceTooLow is NOT a validation error — it needs nonce resync, not discard.
+        SubmitError::NonceTooLow(_) => false,
+        // MempoolFull is NOT a validation error — handled separately with backoff.
+        SubmitError::MempoolFull(_) => false,
         _ => false,
     }
 }
@@ -596,6 +616,8 @@ enum SubmitError {
     Rpc(i32, String),
     /// Mempool full — retry with backoff.
     MempoolFull(String),
+    /// Nonce too low — sender needs nonce resync.
+    NonceTooLow(String),
     /// HTTP 429 rate limited — retry with backoff.
     RateLimited,
 }
@@ -608,6 +630,7 @@ impl std::fmt::Display for SubmitError {
             SubmitError::Parse(s) => write!(f, "Parse error: {}", s),
             SubmitError::Rpc(code, msg) => write!(f, "RPC error {}: {}", code, msg),
             SubmitError::MempoolFull(msg) => write!(f, "Mempool full: {}", msg),
+            SubmitError::NonceTooLow(msg) => write!(f, "Nonce too low: {}", msg),
             SubmitError::RateLimited => write!(f, "Rate limited (HTTP 429)"),
         }
     }
@@ -706,6 +729,10 @@ mod tests {
         // MempoolFull is NOT a validation error (handled separately)
         assert!(!is_validation_error(&SubmitError::MempoolFull(
             "full".to_string()
+        )));
+        // NonceTooLow is NOT a validation error (needs nonce resync)
+        assert!(!is_validation_error(&SubmitError::NonceTooLow(
+            "expected 5, got 0".to_string()
         )));
     }
 
