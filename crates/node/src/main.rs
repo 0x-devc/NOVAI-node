@@ -121,22 +121,6 @@ impl InMemoryNonceProvider {
         let mut map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
         map.insert(from, nonce);
     }
-
-    /// Advance nonces for all senders in committed blocks.
-    ///
-    /// Called after execution, regardless of individual tx success — a
-    /// consensus-committed tx occupies its nonce slot forever.
-    fn advance_nonces_for_blocks(&self, blocks: &[novai_consensus_types::Block]) {
-        let mut map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
-        for block in blocks {
-            for tx in &block.txs {
-                let entry = map.entry(tx.from).or_insert(tx.nonce);
-                if tx.nonce >= *entry {
-                    *entry = tx.nonce + 1;
-                }
-            }
-        }
-    }
 }
 
 impl NonceProvider for InMemoryNonceProvider {
@@ -156,6 +140,13 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
     fn on_commit(&self, db: &mut Storage, blocks: &[novai_consensus_types::Block]) {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
         tracing::debug!(block_count = blocks.len(), total_txs, "on_commit executing");
+
+        // Track which txs executed successfully so we only advance nonces
+        // for those. Failed txs should NOT advance the nonce provider —
+        // otherwise the provider diverges from state and creates a permanent
+        // nonce gap that prevents future txs from draining.
+        let mut executed_txs: Vec<&novai_types::TxV1> = Vec::new();
+
         for block in blocks {
             for tx in &block.txs {
                 match novai_execution::dispatch_tx(db, tx, block.height) {
@@ -166,6 +157,7 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                             nonce = tx.nonce,
                             "Executed tx"
                         );
+                        executed_txs.push(tx);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -179,7 +171,21 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                 }
             }
         }
-        self.nonce_provider.advance_nonces_for_blocks(blocks);
+
+        // Only advance nonces for successfully executed transactions.
+        {
+            let mut map = self
+                .nonce_provider
+                .expected
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for tx in &executed_txs {
+                let entry = map.entry(tx.from).or_insert(tx.nonce);
+                if tx.nonce >= *entry {
+                    *entry = tx.nonce + 1;
+                }
+            }
+        }
 
         // H-07: Periodically purge expired governance proposals (every 1000 blocks)
         if let Some(last_block) = blocks.last() {

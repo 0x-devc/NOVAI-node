@@ -432,6 +432,15 @@ async fn submit_with_retry(
                 });
                 return SubmitResult::Rejected { reason };
             }
+            Err(SubmitError::SenderLimitExceeded(_)) => {
+                // Sender has too many pending txs in the mempool. Backoff
+                // briefly and retry — the pending txs will drain into blocks.
+                // CRITICAL: Do NOT discard this tx or advance the nonce.
+                // Discarding creates a nonce gap that prevents drain_ready
+                // from ever selecting future txs for this sender (death spiral).
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
             Err(SubmitError::RateLimited) => {
                 debug!(
                     "Rate limited by server, backing off {}s",
@@ -523,6 +532,7 @@ async fn submit_once(
         match error.code {
             -32001 => return Err(SubmitError::MempoolFull(error.message)),
             -32010 => return Err(SubmitError::NonceTooLow(error.message)),
+            -32012 => return Err(SubmitError::SenderLimitExceeded(error.message)),
             _ => return Err(SubmitError::Rpc(error.code, error.message)),
         }
     }
@@ -599,6 +609,8 @@ fn is_validation_error(error: &SubmitError) -> bool {
         SubmitError::NonceTooLow(_) => false,
         // MempoolFull is NOT a validation error — handled separately with backoff.
         SubmitError::MempoolFull(_) => false,
+        // SenderLimitExceeded is NOT a validation error — backoff and retry.
+        SubmitError::SenderLimitExceeded(_) => false,
         _ => false,
     }
 }
@@ -618,6 +630,8 @@ enum SubmitError {
     MempoolFull(String),
     /// Nonce too low — sender needs nonce resync.
     NonceTooLow(String),
+    /// Per-sender mempool limit exceeded — backoff and retry.
+    SenderLimitExceeded(String),
     /// HTTP 429 rate limited — retry with backoff.
     RateLimited,
 }
@@ -631,6 +645,7 @@ impl std::fmt::Display for SubmitError {
             SubmitError::Rpc(code, msg) => write!(f, "RPC error {}: {}", code, msg),
             SubmitError::MempoolFull(msg) => write!(f, "Mempool full: {}", msg),
             SubmitError::NonceTooLow(msg) => write!(f, "Nonce too low: {}", msg),
+            SubmitError::SenderLimitExceeded(msg) => write!(f, "Sender limit exceeded: {}", msg),
             SubmitError::RateLimited => write!(f, "Rate limited (HTTP 429)"),
         }
     }

@@ -240,7 +240,7 @@ impl Generator {
 
         // Generate payload based on tx type
         let payload = match self.config.tx_type {
-            TxType::Transfer => vec![], // Empty payload for simple transfer
+            TxType::Transfer => generate_transfer_payload(&sender),
             TxType::AiRegister => generate_ai_register_payload(),
             TxType::AiSignal => generate_ai_signal_payload(),
         };
@@ -251,6 +251,24 @@ impl Generator {
             payload,
         }
     }
+}
+
+/// Generate a valid TransferPayloadV1 for load testing.
+///
+/// Format: [version:1][to:32][amount:8 BE] = 41 bytes.
+/// Sends to a deterministic recipient derived from the sender index
+/// (shifted by 1000 to avoid overlap with sender accounts).
+/// Amount is 5000 (above MIN_ACCOUNT_BALANCE = 1000).
+fn generate_transfer_payload(sender: &Arc<SenderAccount>) -> Vec<u8> {
+    // Deterministic recipient: offset sender index to avoid self-transfers
+    let recipient_index = sender.index + 1000;
+    let recipient = SenderAccount::from_index(recipient_index);
+
+    let mut payload = Vec::with_capacity(41);
+    payload.push(1); // Transfer payload version
+    payload.extend_from_slice(&recipient.address);
+    payload.extend_from_slice(&5000u64.to_be_bytes()); // Amount: 5000 (> MIN_ACCOUNT_BALANCE)
+    payload
 }
 
 /// Generate a synthetic AI entity registration payload.
@@ -298,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn transfer_template_has_empty_payload() {
+    fn transfer_template_has_valid_payload() {
         let pool = Arc::new(SenderPool::new(1));
         let paused = Arc::new(AtomicBool::new(false));
         let config = GeneratorConfig {
@@ -308,7 +326,9 @@ mod tests {
         let generator = Generator::new(config, pool, paused);
 
         let template = generator.generate_template();
-        assert!(template.payload.is_empty());
+        // Transfer payload: [version:1][to:32][amount:8] = 41 bytes
+        assert_eq!(template.payload.len(), 41);
+        assert_eq!(template.payload[0], 1); // version byte
     }
 
     #[test]
