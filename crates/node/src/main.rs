@@ -141,12 +141,6 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
         tracing::debug!(block_count = blocks.len(), total_txs, "on_commit executing");
 
-        // Track which txs executed successfully so we only advance nonces
-        // for those. Failed txs should NOT advance the nonce provider —
-        // otherwise the provider diverges from state and creates a permanent
-        // nonce gap that prevents future txs from draining.
-        let mut executed_txs: Vec<&novai_types::TxV1> = Vec::new();
-
         for block in blocks {
             for tx in &block.txs {
                 match novai_execution::dispatch_tx(db, tx, block.height) {
@@ -157,7 +151,6 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                             nonce = tx.nonce,
                             "Executed tx"
                         );
-                        executed_txs.push(tx);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -172,17 +165,23 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
             }
         }
 
-        // Only advance nonces for successfully executed transactions.
+        // Advance nonces for ALL committed transactions, regardless of
+        // execution success. A consensus-committed tx permanently occupies
+        // its nonce slot — if we only advanced on success, a single failed
+        // tx would stall drain_ready (which requires nonce == expected)
+        // and block all future txs from that sender indefinitely.
         {
             let mut map = self
                 .nonce_provider
                 .expected
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
-            for tx in &executed_txs {
-                let entry = map.entry(tx.from).or_insert(tx.nonce);
-                if tx.nonce >= *entry {
-                    *entry = tx.nonce + 1;
+            for block in blocks {
+                for tx in &block.txs {
+                    let entry = map.entry(tx.from).or_insert(tx.nonce);
+                    if tx.nonce >= *entry {
+                        *entry = tx.nonce + 1;
+                    }
                 }
             }
         }
