@@ -222,12 +222,18 @@ impl ConsensusState {
         // block size. Txs that don't fit are returned to the mempool.
         let mempool_size_before = mempool.len();
         let mut candidates = mempool.drain_ready(novai_types::MAX_TXS_PER_BLOCK, nonce_provider);
-        tracing::debug!(
-            tx_count = candidates.len(),
-            mempool_size_before,
-            mempool_remaining = mempool.len(),
-            "CONSENSUS_DIAG: drain_ready returned"
-        );
+        // DIAGNOSTIC: Upgraded to info! so it appears in production logs.
+        // This is the #1 signal for "why are blocks empty?"
+        if mempool_size_before > 0 || !candidates.is_empty() {
+            tracing::info!(
+                tx_count = candidates.len(),
+                mempool_size_before,
+                mempool_remaining = mempool.len(),
+                height = next_height,
+                round = self.round,
+                "DRAIN_DIAG: drain_ready returned"
+            );
+        }
         let mut txs = Vec::new();
         let mut block_bytes = 0usize;
         let mut overflow = Vec::new();

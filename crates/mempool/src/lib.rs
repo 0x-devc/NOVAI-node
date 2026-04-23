@@ -353,9 +353,11 @@ impl TxMempool {
         let mut candidates: Vec<(u64, u64, TxId, Address)> = Vec::with_capacity(self.by_id.len());
 
         let mut mismatch_sample = 0u32;
+        let mut match_count = 0u32;
         for (id, tx) in &self.by_id {
             let expected = nonce_provider.expected_nonce(&tx.from);
             if tx.nonce == expected {
+                match_count += 1;
                 let score = scores.get(&tx.from).copied().unwrap_or(0);
                 let s = (score.min(100)) as u64;
                 let eff = tx.fee * (100 - s) / 100;
@@ -369,6 +371,17 @@ impl TxMempool {
                     "nonce mismatch (tx skipped)"
                 );
             }
+        }
+
+        // DIAGNOSTIC: Log drain_ready match statistics
+        if !self.by_id.is_empty() {
+            tracing::info!(
+                mempool_size = self.by_id.len(),
+                nonce_matches = match_count,
+                nonce_mismatches = mismatch_sample,
+                candidates = candidates.len(),
+                "MEMPOOL_DIAG: drain_ready nonce check"
+            );
         }
 
         // Sort: effective_fee DESC, then raw_fee DESC, then txid ASC (deterministic).

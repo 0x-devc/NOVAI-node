@@ -966,17 +966,24 @@ fn handle_submit_tx(
         }
     })?;
 
+    // Capture sender info before mempool consumes the tx
+    let tx_from = tx.from;
+    let tx_nonce = tx.nonce;
+
     // Submit to mempool
     let mut mempool_guard = mempool.lock_or_recover();
     let size_before = mempool_guard.len();
     match mempool_guard.insert(tx, nonce_provider) {
         Ok(id) => {
             let size_after = mempool_guard.len();
-            tracing::debug!(
+            // DIAGNOSTIC: Log at info so it's visible in production logs
+            tracing::info!(
                 txid = %hex::encode(id),
+                from = %hex::encode(&tx_from[..4]),
+                nonce = tx_nonce,
                 size_before,
                 size_after,
-                "RPC tx accepted"
+                "RPC tx accepted into mempool"
             );
             drop(mempool_guard);
 
