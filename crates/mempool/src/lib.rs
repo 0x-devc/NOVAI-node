@@ -373,14 +373,24 @@ impl TxMempool {
             }
         }
 
-        // DIAGNOSTIC: Log drain_ready match statistics
-        if !self.by_id.is_empty() {
-            tracing::info!(
-                mempool_size = self.by_id.len(),
-                nonce_matches = match_count,
-                nonce_mismatches = mismatch_sample,
-                candidates = candidates.len(),
-                "MEMPOOL_DIAG: drain_ready nonce check"
+        // DIAGNOSTIC: Print to stderr to bypass tracing filters
+        // (mempool crate name doesn't match "novai=" filter)
+        if !self.by_id.is_empty() && match_count == 0 {
+            for (_, tx) in self.by_id.iter().take(3) {
+                let expected = nonce_provider.expected_nonce(&tx.from);
+                eprintln!(
+                    "MEMPOOL_DIAG: tx from={:?} tx.nonce={} expected_nonce={} match={}",
+                    &tx.from[..4],
+                    tx.nonce,
+                    expected,
+                    tx.nonce == expected,
+                );
+            }
+            eprintln!(
+                "MEMPOOL_DIAG: total={} matches={} mismatches={}",
+                self.by_id.len(),
+                match_count,
+                mismatch_sample,
             );
         }
 

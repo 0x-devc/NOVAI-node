@@ -139,6 +139,13 @@ struct ExecutionCommitCallback {
 impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
     fn on_commit(&self, db: &mut Storage, blocks: &[novai_consensus_types::Block]) {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
+        if total_txs > 0 {
+            eprintln!(
+                "ON_COMMIT_DIAG: block_count={} total_txs={}",
+                blocks.len(),
+                total_txs,
+            );
+        }
         tracing::debug!(block_count = blocks.len(), total_txs, "on_commit executing");
 
         for block in blocks {
@@ -178,9 +185,17 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                 .unwrap_or_else(|p| p.into_inner());
             for block in blocks {
                 for tx in &block.txs {
+                    let old = map.get(&tx.from).copied().unwrap_or(0);
                     let entry = map.entry(tx.from).or_insert(tx.nonce);
                     if tx.nonce >= *entry {
                         *entry = tx.nonce + 1;
+                        eprintln!(
+                            "NONCE_ADVANCE_DIAG: from={:?} old={} new={} tx.nonce={}",
+                            &tx.from[..4],
+                            old,
+                            tx.nonce + 1,
+                            tx.nonce,
+                        );
                     }
                 }
             }
