@@ -201,7 +201,10 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
             }
         }
 
-        // Update blockchain index for block explorer queries
+        // Update blockchain index for block explorer queries.
+        // Cap at 100K entries to prevent unbounded memory growth
+        // (2.5M blocks × ~120 bytes/entry = 300MB without cap).
+        const MAX_INDEX_ENTRIES: usize = 100_000;
         if let Ok(mut idx) = self.blockchain_index.lock() {
             for block in blocks {
                 // Index block hash
@@ -215,6 +218,15 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                     }
                 }
                 idx.committed_height = block.height;
+            }
+
+            // Evict old entries when index exceeds cap
+            if idx.block_hashes.len() > MAX_INDEX_ENTRIES {
+                let cutoff = idx
+                    .committed_height
+                    .saturating_sub(MAX_INDEX_ENTRIES as u64);
+                idx.block_hashes.retain(|_, &mut h| h > cutoff);
+                idx.tx_receipts.retain(|_, &mut (h, _)| h > cutoff);
             }
         }
     }

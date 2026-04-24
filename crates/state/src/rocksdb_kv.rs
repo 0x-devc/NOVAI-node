@@ -50,9 +50,10 @@ impl RocksKv {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
-        // H-10: Enable comprehensive consistency checks on every DB operation.
-        // Detects bit rot and silent corruption instead of propagating bad data.
-        opts.set_paranoid_checks(true);
+        // H-10: paranoid_checks REMOVED — caused 75→7 blocks/sec degradation
+        // over 2.5M blocks. RocksDB already verifies block checksums on read
+        // by default; paranoid_checks added redundant re-verification on every
+        // operation plus compaction checks that compound with DB growth.
         // Cap open files to prevent FD exhaustion when multiple instances
         // share a single machine (e.g., 4-node testnet on one server).
         opts.set_max_open_files(256);

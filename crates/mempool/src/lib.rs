@@ -338,38 +338,6 @@ impl TxMempool {
             return Vec::new();
         }
 
-        // Evict stale txs whose nonce has been superseded by committed blocks.
-        // These txs were valid when inserted (nonce >= expected at insert time)
-        // but became unreachable after the chain committed past their nonce slot.
-        // Without eviction they fill per-sender slots and block fresh txs.
-        {
-            let stale_ids: Vec<TxId> = self
-                .by_id
-                .iter()
-                .filter(|(_, tx)| tx.nonce < nonce_provider.expected_nonce(&tx.from))
-                .map(|(id, _)| *id)
-                .collect();
-
-            if !stale_ids.is_empty() {
-                for id in &stale_ids {
-                    if let Some(tx) = self.by_id.remove(id) {
-                        self.total_bytes -= novai_codec::tx_encoded_size(&tx);
-                        self.insertion_times.remove(id);
-                        if let Some(c) = self.by_sender_count.get_mut(&tx.from) {
-                            *c = c.saturating_sub(1);
-                            if *c == 0 {
-                                self.by_sender_count.remove(&tx.from);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if self.by_id.is_empty() {
-            return Vec::new();
-        }
-
         // Fast-path: skip Mutex lock when no threat scores exist.
         let scores = if self.threat_scores_empty.load(Ordering::Relaxed) {
             BTreeMap::new()
@@ -380,17 +348,36 @@ impl TxMempool {
                 .unwrap_or_default()
         };
 
-        // Gather ready candidates with effective fee.
-        // Tuple: (effective_fee, raw_fee, txid, sender)
+        // Single pass: evict stale txs AND gather ready candidates.
+        // Stale = nonce < expected (chain committed past their slot, provably dead).
+        // Ready = nonce == expected (eligible for next block).
+        // Combined to avoid O(2n) double-scan with Mutex lock per tx.
         let mut candidates: Vec<(u64, u64, TxId, Address)> = Vec::with_capacity(self.by_id.len());
+        let mut stale_ids: Vec<TxId> = Vec::new();
 
         for (id, tx) in &self.by_id {
             let expected = nonce_provider.expected_nonce(&tx.from);
-            if tx.nonce == expected {
+            if tx.nonce < expected {
+                stale_ids.push(*id);
+            } else if tx.nonce == expected {
                 let score = scores.get(&tx.from).copied().unwrap_or(0);
                 let s = (score.min(100)) as u64;
                 let eff = tx.fee * (100 - s) / 100;
                 candidates.push((eff, tx.fee, *id, tx.from));
+            }
+        }
+
+        // Remove stale txs (frees per-sender slots for fresh txs)
+        for id in &stale_ids {
+            if let Some(tx) = self.by_id.remove(id) {
+                self.total_bytes -= novai_codec::tx_encoded_size(&tx);
+                self.insertion_times.remove(id);
+                if let Some(c) = self.by_sender_count.get_mut(&tx.from) {
+                    *c = c.saturating_sub(1);
+                    if *c == 0 {
+                        self.by_sender_count.remove(&tx.from);
+                    }
+                }
             }
         }
 
