@@ -1,5 +1,9 @@
 /target
 **/*.rs.bk
+*.bak
+*.backup
+*.orig
+*~
 .DS_Store
 *.log
 *.pem
