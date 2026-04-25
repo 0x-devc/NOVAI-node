@@ -11,3 +11,8 @@
 .env
 .env.*
 .private/
+NOVAI_ROADMAP.md
+CLAUDE.md
+.claude/
+clippy_full.txt
+week8.sh
