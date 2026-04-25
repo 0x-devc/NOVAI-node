@@ -28,8 +28,8 @@ use novai_execution::{
     UPDATE_MEMORY_OBJECT_PAYLOAD_V1,
 };
 use novai_state::{
-    account_key, decode_fee_pool_v1, encode_account_v1, AccountStateV1, KvBatch, MemKv, WriteOp,
-    KEY_FEE_POOL,
+    account_key, ai_entity_by_address_key, decode_fee_pool_v1, encode_account_v1, AccountStateV1,
+    KvBatch, MemKv, WriteOp, KEY_FEE_POOL,
 };
 use novai_types::{TxV1, TxVersion};
 
@@ -211,7 +211,11 @@ fn signal_at_minimum_accepted() {
     let entity_id = entity.id;
     let mut funded = entity;
     funded.economic_balance = 100_000;
-    db.apply_batch(&[write_ai_entity_op(&funded)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&funded),
+        WriteOp::Put(ai_entity_by_address_key(&entity_id), entity_id.to_vec()),
+    ])
+    .unwrap();
 
     let payload = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
         signal_hash: [0xAAu8; 32],

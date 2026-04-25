@@ -19,8 +19,9 @@ use novai_execution::{
 };
 use novai_smt::hash::empty_hash_at_height;
 use novai_state::{
-    account_key, decode_smt_root_v1, encode_account_v1, encode_fee_pool_v1, AccountStateV1,
-    FeePoolV1, Kv, KvBatch, MemKv, KEY_FEE_POOL, KEY_SMT_ROOT,
+    account_key, ai_entity_by_address_key, decode_smt_root_v1, encode_account_v1,
+    encode_fee_pool_v1, AccountStateV1, FeePoolV1, Kv, KvBatch, MemKv, WriteOp, KEY_FEE_POOL,
+    KEY_SMT_ROOT,
 };
 use novai_types::{Address, TxV1, TxVersion};
 
@@ -173,8 +174,11 @@ fn init_state_with_ai_entities() -> (MemKv, [[u8; 32]; 3]) {
         // Store the entity ID
         entity_ids[(i - 1) as usize] = entity.id;
 
-        let op = write_ai_entity_op(&entity);
-        db.apply_batch(&[op]).unwrap();
+        db.apply_batch(&[
+            write_ai_entity_op(&entity),
+            WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+        ])
+        .unwrap();
     }
 
     (db, entity_ids)

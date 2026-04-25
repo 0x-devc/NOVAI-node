@@ -864,7 +864,7 @@ mod tests {
         let sp = SignedProposal {
             proposer: [0xdd; 32],
             proposal: Proposal {
-                block: block.clone(),
+                block,
                 justify_qc: qc,
             },
             signature: [0xee; 64],

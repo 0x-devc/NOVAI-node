@@ -28,7 +28,7 @@ use novai_execution::{
     SignalCommitmentPayloadV1, SubmitProposalPayloadV1,
 };
 use novai_governance::ProposalType;
-use novai_state::{approval_gate_key, KvBatch, MemKv, WriteOp};
+use novai_state::{ai_entity_by_address_key, approval_gate_key, KvBatch, MemKv, WriteOp};
 use novai_types::{TxV1, TxVersion};
 
 // ============================================================================
@@ -76,9 +76,16 @@ fn create_entity(
     entity
 }
 
-/// Store an AI entity in the database.
+/// Store an AI entity in the database. These tests build txs with
+/// `tx.from = entity.id`, so we also write a reverse-index entry mapping that
+/// id to itself — mirroring the (`address` → `entity_id`) lookup the inner
+/// handlers depend on.
 fn store_entity(db: &mut MemKv, entity: &AiEntity) {
-    db.apply_batch(&[write_ai_entity_op(entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 }
 
 /// Create a test transaction.

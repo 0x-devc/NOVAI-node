@@ -27,7 +27,7 @@ use novai_execution::{
     ExecError, ExecuteProposalPayloadV1, SignalCommitmentPayloadV1, SubmitProposalPayloadV1,
 };
 use novai_governance::ProposalType;
-use novai_state::{approval_gate_key, KvBatch, MemKv, WriteOp};
+use novai_state::{ai_entity_by_address_key, approval_gate_key, KvBatch, MemKv, WriteOp};
 use novai_types::{TxV1, TxVersion};
 
 // ============================================================================
@@ -151,7 +151,11 @@ fn full_path_signal_to_rollback() {
     // Setup: Create Core Observer and gate
     let entity = create_core_observer(10_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let gate = create_timelock_gate(10, 1000); // 10 block timelock, 1000 block expiry
     store_gate(&mut db, &gate);
@@ -220,7 +224,11 @@ fn third_party_module_registration() {
     // Setup: Create third-party module (starts inactive)
     let module = create_third_party_module(10_000_000_000, 0);
     let module_id = module.id;
-    db.apply_batch(&[write_ai_entity_op(&module)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&module),
+        WriteOp::Put(ai_entity_by_address_key(&module.id), module.id.to_vec()),
+    ])
+    .unwrap();
 
     // Create a governance account that can submit proposals
     let governance_account = *blake3::hash(b"GOVERNANCE_MULTISIG").as_bytes();
@@ -231,7 +239,14 @@ fn third_party_module_registration() {
         Capabilities::gated(),
         0,
     );
-    db.apply_batch(&[write_ai_entity_op(&gov_entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&gov_entity),
+        WriteOp::Put(
+            ai_entity_by_address_key(&gov_entity.id),
+            gov_entity.id.to_vec(),
+        ),
+    ])
+    .unwrap();
 
     let gate = create_timelock_gate(5, 500);
     store_gate(&mut db, &gate);
@@ -275,7 +290,11 @@ fn timelock_enforcement() {
 
     let entity = create_core_observer(10_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let gate = create_timelock_gate(100, 1000); // 100 block timelock
     store_gate(&mut db, &gate);
@@ -316,7 +335,11 @@ fn expired_proposal_rejected() {
 
     let entity = create_core_observer(10_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let gate = create_timelock_gate(10, 50); // 10 block timelock, 50 block expiry
     store_gate(&mut db, &gate);
@@ -357,7 +380,11 @@ fn module_activation_via_proposal() {
     let mut entity = create_core_observer(10_000_000_000, 0);
     entity.is_active = false;
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Create a separate active governance account to submit the proposal
     let gov_account = *blake3::hash(b"GOVERNANCE_ACTIVATION").as_bytes();
@@ -368,7 +395,14 @@ fn module_activation_via_proposal() {
         Capabilities::gated(),
         0,
     );
-    db.apply_batch(&[write_ai_entity_op(&gov_entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&gov_entity),
+        WriteOp::Put(
+            ai_entity_by_address_key(&gov_entity.id),
+            gov_entity.id.to_vec(),
+        ),
+    ])
+    .unwrap();
 
     let gate = create_timelock_gate(5, 500);
     store_gate(&mut db, &gate);
@@ -405,7 +439,11 @@ fn emergency_freeze_proposal() {
 
     let entity = create_core_observer(10_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Emergency gate with shorter timelock
     let gate = create_timelock_gate(2, 100); // Only 2 blocks timelock for emergencies
@@ -439,7 +477,11 @@ fn proposal_not_found_error() {
     let mut db = MemKv::new();
 
     let entity = create_core_observer(10_000_000_000, 0);
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Try to execute non-existent proposal
     let fake_proposal_id = [0xDEu8; 32];
@@ -463,7 +505,11 @@ fn gate_not_found_error() {
 
     let entity = create_core_observer(10_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Don't create the gate - try to submit proposal
     let rollback_payload =
@@ -488,7 +534,11 @@ fn full_module_lifecycle() {
     // Setup: Create third-party module (inactive) and gate
     let module = create_third_party_module(10_000_000_000, 0);
     let module_id = module.id;
-    db.apply_batch(&[write_ai_entity_op(&module)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&module),
+        WriteOp::Put(ai_entity_by_address_key(&module.id), module.id.to_vec()),
+    ])
+    .unwrap();
 
     let gate = create_timelock_gate(5, 500);
     store_gate(&mut db, &gate);

@@ -18,22 +18,22 @@ echo ""
 
 # Node 0: First node (no peers initially)
 echo "Starting node 0 on port 9000..."
-$BIN run --port 9000 --dev-keys --validator 0 > /tmp/node0.log 2>&1 &
+$BIN run --port 9000 --dev-keys --allow-insecure-dev-keys --validator 0 > /tmp/node0.log 2>&1 &
 sleep 1
 
 # Node 1: Connects to node 0
 echo "Starting node 1 on port 9001..."
-$BIN run --port 9001 --peer 127.0.0.1:9000 --dev-keys --validator 1 > /tmp/node1.log 2>&1 &
+$BIN run --port 9001 --peer 127.0.0.1:9000 --dev-keys --allow-insecure-dev-keys --validator 1 > /tmp/node1.log 2>&1 &
 sleep 1
 
 # Node 2: Connects to nodes 0 and 1
 echo "Starting node 2 on port 9002..."
-$BIN run --port 9002 --peer 127.0.0.1:9000 --peer 127.0.0.1:9001 --dev-keys --validator 2 > /tmp/node2.log 2>&1 &
+$BIN run --port 9002 --peer 127.0.0.1:9000 --peer 127.0.0.1:9001 --dev-keys --allow-insecure-dev-keys --validator 2 > /tmp/node2.log 2>&1 &
 sleep 1
 
 # Node 3: Connects to nodes 0, 1, 2
 echo "Starting node 3 on port 9003..."
-$BIN run --port 9003 --peer 127.0.0.1:9000 --peer 127.0.0.1:9001 --peer 127.0.0.1:9002 --dev-keys --validator 3 > /tmp/node3.log 2>&1 &
+$BIN run --port 9003 --peer 127.0.0.1:9000 --peer 127.0.0.1:9001 --peer 127.0.0.1:9002 --dev-keys --allow-insecure-dev-keys --validator 3 > /tmp/node3.log 2>&1 &
 sleep 1
 
 

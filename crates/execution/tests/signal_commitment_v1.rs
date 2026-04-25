@@ -17,7 +17,7 @@ use novai_execution::{
     get_signals_by_issuer, get_signals_by_type, read_ai_entity, write_ai_entity_op, ExecError,
     SignalCommitmentPayloadV1,
 };
-use novai_state::{KvBatch, MemKv};
+use novai_state::{ai_entity_by_address_key, KvBatch, MemKv, WriteOp};
 use novai_types::{TxV1, TxVersion};
 
 /// Create a test AI entity with emit_proposals capability.
@@ -74,7 +74,11 @@ fn valid_signal_commitment_is_accepted() {
     let creator = [0x01u8; 32];
     let entity = create_test_entity(creator, 1000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Create signal commitment payload
     let signal_hash = [0xAAu8; 32];
@@ -137,7 +141,11 @@ fn issuer_without_capability_is_rejected() {
     );
     entity.economic_balance = 1000;
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let signal_hash = [0xAAu8; 32];
     let payload = create_signal_payload(signal_hash, AiSignalType::RiskScore, entity_id);
@@ -158,7 +166,11 @@ fn issuer_mismatch_is_rejected() {
     let creator = [0x01u8; 32];
     let entity = create_test_entity(creator, 1000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Payload claims different issuer than tx.from
     let different_issuer = [0xFFu8; 32];
@@ -183,7 +195,11 @@ fn insufficient_balance_is_rejected() {
     let creator = [0x01u8; 32];
     let entity = create_test_entity(creator, 5, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let signal_hash = [0xAAu8; 32];
     let payload = create_signal_payload(signal_hash, AiSignalType::AuditReport, entity_id);
@@ -206,7 +222,11 @@ fn wrong_nonce_is_rejected() {
     let creator = [0x01u8; 32];
     let entity = create_test_entity(creator, 1000, 5);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let signal_hash = [0xAAu8; 32];
     let payload = create_signal_payload(signal_hash, AiSignalType::CongestionForecast, entity_id);
@@ -234,8 +254,13 @@ fn query_by_height_returns_correct_signals() {
     let entity2 = create_test_entity([0x02u8; 32], 10000, 0);
     let id1 = entity1.id;
     let id2 = entity2.id;
-    db.apply_batch(&[write_ai_entity_op(&entity1), write_ai_entity_op(&entity2)])
-        .unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity1),
+        WriteOp::Put(ai_entity_by_address_key(&entity1.id), entity1.id.to_vec()),
+        write_ai_entity_op(&entity2),
+        WriteOp::Put(ai_entity_by_address_key(&entity2.id), entity2.id.to_vec()),
+    ])
+    .unwrap();
 
     // Entity 1 submits at height 100
     let payload1 = create_signal_payload([0x01u8; 32], AiSignalType::Prediction, id1);
@@ -275,8 +300,13 @@ fn query_by_issuer_returns_correct_signals() {
     let entity2 = create_test_entity([0x02u8; 32], 10000, 0);
     let id1 = entity1.id;
     let id2 = entity2.id;
-    db.apply_batch(&[write_ai_entity_op(&entity1), write_ai_entity_op(&entity2)])
-        .unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity1),
+        WriteOp::Put(ai_entity_by_address_key(&entity1.id), entity1.id.to_vec()),
+        write_ai_entity_op(&entity2),
+        WriteOp::Put(ai_entity_by_address_key(&entity2.id), entity2.id.to_vec()),
+    ])
+    .unwrap();
 
     // Entity 1 submits 2 signals
     for i in 0..2 {
@@ -308,7 +338,11 @@ fn query_by_type_returns_correct_signals() {
 
     let entity = create_test_entity([0x01u8; 32], 10000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Submit signals of different types
     let types = [
@@ -352,7 +386,11 @@ fn fee_is_deducted_from_entity_balance() {
 
     let entity = create_test_entity([0x01u8; 32], initial_balance, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let signal_hash = [0xAAu8; 32];
     let payload = create_signal_payload(signal_hash, AiSignalType::Prediction, entity_id);
@@ -375,7 +413,11 @@ fn nonce_is_incremented_after_signal() {
 
     let entity = create_test_entity([0x01u8; 32], 1000, 5);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let signal_hash = [0xAAu8; 32];
     let payload = create_signal_payload(signal_hash, AiSignalType::RiskScore, entity_id);
@@ -396,7 +438,11 @@ fn last_active_at_is_updated() {
 
     let entity = create_test_entity([0x01u8; 32], 1000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let signal_hash = [0xAAu8; 32];
     let payload = create_signal_payload(signal_hash, AiSignalType::Optimization, entity_id);

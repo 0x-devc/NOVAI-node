@@ -26,7 +26,7 @@ use novai_execution::{
     ExecuteProposalPayloadV1, SignalCommitmentPayloadV1, SubmitProposalPayloadV1,
 };
 use novai_governance::ProposalType;
-use novai_state::{approval_gate_key, KvBatch, MemKv, WriteOp};
+use novai_state::{ai_entity_by_address_key, approval_gate_key, KvBatch, MemKv, WriteOp};
 use novai_types::{TxV1, TxVersion};
 
 // ============================================================================
@@ -70,7 +70,11 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
     module.is_active = false; // CRITICAL: Third-party starts inactive
     let module_id = module.id;
 
-    db.apply_batch(&[write_ai_entity_op(&module)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&module),
+        WriteOp::Put(ai_entity_by_address_key(&module.id), module.id.to_vec()),
+    ])
+    .unwrap();
 
     // Create governance gate (TimelockOnly for testnet simplicity)
     let gate_id = *blake3::hash(b"TESTNET_GOVERNANCE_GATE").as_bytes();

@@ -24,7 +24,7 @@ use novai_execution::{
     get_memory_objects_by_entity, get_signals_by_issuer, get_signals_by_type, read_ai_entity,
     write_ai_entity_op, CreateMemoryObjectPayloadV1, SignalCommitmentPayloadV1,
 };
-use novai_state::{KvBatch, MemKv};
+use novai_state::{ai_entity_by_address_key, KvBatch, MemKv, WriteOp};
 use novai_types::{TxV1, TxVersion};
 
 // ============================================================================
@@ -144,7 +144,11 @@ fn core_observer_registered_in_state() {
     let entity_id = entity.id;
 
     // Register entity in state (simulating genesis)
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Read back from state
     let loaded = read_ai_entity(&db, &entity_id)
@@ -170,7 +174,11 @@ fn core_observer_emits_anomaly_signal() {
     // Setup: Register Core Observer
     let entity = create_core_observer(1_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Create anomaly signal
     // In production, this would be blake3(off-chain_anomaly_report)
@@ -200,7 +208,11 @@ fn core_observer_emits_congestion_forecast_signal() {
     // Setup: Register Core Observer
     let entity = create_core_observer(1_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Create congestion forecast signal
     let forecast_hash =
@@ -229,7 +241,11 @@ fn core_observer_emits_multiple_signal_types() {
     // Setup: Register Core Observer with enough balance
     let entity = create_core_observer(1_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Emit Anomaly signal
     let anomaly_hash = blake3::hash(b"anomaly:1").into();
@@ -264,7 +280,11 @@ fn core_observer_creates_chain_summary_memory_object() {
     // Setup: Register Core Observer
     let entity = create_core_observer(1_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Create ChainSummary data
     let summary = ChainSummaryData {
@@ -309,7 +329,11 @@ fn core_observer_creates_statistics_snapshot_memory_object() {
     // Setup: Register Core Observer
     let entity = create_core_observer(1_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     // Create StatisticsSnapshot data
     let snapshot = StatisticsSnapshotData {
@@ -355,7 +379,11 @@ fn core_observer_full_workflow() {
     // 1. Register Core Observer at "genesis"
     let entity = create_core_observer(10_000_000_000, 0);
     let entity_id = entity.id;
-    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+    db.apply_batch(&[
+        write_ai_entity_op(&entity),
+        WriteOp::Put(ai_entity_by_address_key(&entity.id), entity.id.to_vec()),
+    ])
+    .unwrap();
 
     let mut current_nonce = 0u64;
 

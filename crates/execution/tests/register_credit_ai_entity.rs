@@ -21,8 +21,8 @@ use novai_execution::{
     CreditAiEntityPayloadV1, ExecError, RegisterAiEntityPayloadV1, SignalCommitmentPayloadV1,
 };
 use novai_state::{
-    account_key, decode_account_v1, decode_fee_pool_v1, encode_account_v1, AccountStateV1, KvBatch,
-    MemKv, WriteOp, KEY_FEE_POOL,
+    account_key, ai_entity_by_address_key, decode_account_v1, decode_fee_pool_v1,
+    encode_account_v1, AccountStateV1, KvBatch, MemKv, WriteOp, KEY_FEE_POOL,
 };
 use novai_types::{TxV1, TxVersion};
 
@@ -530,6 +530,15 @@ fn register_then_signal() {
 
     let reg_tx = create_test_tx(creator, 0, 10, reg_payload);
     let entity_id = apply_register_ai_entity_tx(&mut db, &reg_tx, 100).unwrap();
+
+    // Type-8 register doesn't store a pubkey (entity can't sign in production).
+    // This test exercises the signal handler with `tx.from = entity_id`, so we
+    // hand-write the reverse-index entry the wrapper expects.
+    db.apply_batch(&[WriteOp::Put(
+        ai_entity_by_address_key(&entity_id),
+        entity_id.to_vec(),
+    )])
+    .unwrap();
 
     // Step 2: Submit signal commitment from the registered entity
     let signal_hash = [0xAAu8; 32];

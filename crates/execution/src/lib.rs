@@ -1671,6 +1671,25 @@ pub fn apply_signal_commitment_tx<K: KvBatch>(
     tx: &TxV1,
     current_height: u64,
 ) -> Result<(), ExecError<K::Error>> {
+    let entity = lookup_ai_entity_by_address(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
+    apply_signal_commitment_tx_inner(db, tx, entity, current_height)
+}
+
+/// Inner signal-commitment implementation taking a pre-resolved AI entity.
+///
+/// Called by `dispatch_tx` (which already resolved the entity via
+/// `check_ai_entity_sender`) and by the public `apply_signal_commitment_tx`
+/// wrapper (which does its own lookup for standalone callers).
+///
+/// Storage keys are derived from the canonical `entity.id` rather than `tx.from`,
+/// because `tx.from` is `address_from_pubkey(entity.pubkey)` while signals are
+/// indexed by the entity's primary id (`compute_id(code_hash, creator)`).
+fn apply_signal_commitment_tx_inner<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    mut entity: AiEntity,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
     // Kill switch: block all AI entity operations when active
     if read_ai_kill_switch(db)? {
         return Err(ExecError::AiKillSwitchActive);
@@ -1687,14 +1706,12 @@ pub fn apply_signal_commitment_tx<K: KvBatch>(
         _ => ExecError::Overflow,
     })?;
 
-    // D14.2: Validate issuer_entity_id matches tx.from
-    if payload.issuer_entity_id != tx.from {
+    // The payload's issuer_entity_id must match the canonical entity.id.
+    // The entity was resolved from tx.from via the address→id reverse index;
+    // this check pins the user-supplied issuer to the same identity.
+    if payload.issuer_entity_id != entity.id {
         return Err(ExecError::IssuerMismatch);
     }
-
-    // D14.2: Load and validate AI entity
-    let mut entity =
-        read_ai_entity(db, &payload.issuer_entity_id)?.ok_or(ExecError::IssuerNotFound)?;
 
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
@@ -1738,35 +1755,28 @@ pub fn apply_signal_commitment_tx<K: KvBatch>(
     // D14.6: Update last_active_at
     entity.last_active_at = current_height;
 
-    // D14.3: Build SignalCommitment for storage
+    // D14.3: Build SignalCommitment for storage (issuer = canonical entity.id)
     let commitment = SignalCommitment {
         commitment_hash: payload.signal_hash,
         signal_type: payload.signal_type,
         height: current_height,
-        issuer: payload.issuer_entity_id,
+        issuer: entity.id,
     };
     let commitment_bytes = encode_signal_commitment_v1(&commitment);
 
-    // Build atomic batch of all state changes
+    // Build atomic batch of all state changes; all keys use canonical entity.id.
     let mut ops = Vec::new();
 
-    // D14.3: Store commitment at primary key
-    let primary_key = ai_signal_key(current_height, &payload.issuer_entity_id);
+    let primary_key = ai_signal_key(current_height, &entity.id);
     ops.push(WriteOp::Put(primary_key, commitment_bytes.clone()));
 
-    // D14.4: Secondary index by type
-    let type_key = ai_signal_by_type_key(
-        payload.signal_type.to_byte(),
-        current_height,
-        &payload.issuer_entity_id,
-    );
+    let type_key =
+        ai_signal_by_type_key(payload.signal_type.to_byte(), current_height, &entity.id);
     ops.push(WriteOp::Put(type_key, commitment_bytes.clone()));
 
-    // D14.4: Secondary index by issuer
-    let issuer_key = ai_signal_by_issuer_key(&payload.issuer_entity_id, current_height);
+    let issuer_key = ai_signal_by_issuer_key(&entity.id, current_height);
     ops.push(WriteOp::Put(issuer_key, commitment_bytes));
 
-    // D14.6: Update AI entity
     ops.push(write_ai_entity_op(&entity));
 
     // Apply all changes atomically
@@ -2310,6 +2320,21 @@ pub fn apply_create_memory_object_tx<K: KvBatch>(
     tx: &TxV1,
     current_height: u64,
 ) -> Result<[u8; 32], ExecError<K::Error>> {
+    let entity = lookup_ai_entity_by_address(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
+    apply_create_memory_object_tx_inner(db, tx, entity, current_height)
+}
+
+/// Inner create-memory-object implementation taking a pre-resolved AI entity.
+///
+/// Storage keys (object key, type index, count) are derived from `entity.id`
+/// rather than `tx.from`, which equals `address_from_pubkey(entity.pubkey)` and
+/// would not match what `get_memory_objects_by_entity(entity_id)` reads.
+fn apply_create_memory_object_tx_inner<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    mut entity: AiEntity,
+    current_height: u64,
+) -> Result<[u8; 32], ExecError<K::Error>> {
     // Kill switch: block all AI entity operations when active
     if read_ai_kill_switch(db)? {
         return Err(ExecError::AiKillSwitchActive);
@@ -2334,9 +2359,6 @@ pub fn apply_create_memory_object_tx<K: KvBatch>(
             max: MAX_MEMORY_OBJECT_SIZE,
         });
     }
-
-    // Load and validate AI entity
-    let mut entity = read_ai_entity(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
 
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
@@ -2365,8 +2387,8 @@ pub fn apply_create_memory_object_tx<K: KvBatch>(
         });
     }
 
-    // Check memory object count limit
-    let current_count = read_memory_count(db, &tx.from)?;
+    // Check memory object count limit (keyed by canonical entity.id)
+    let current_count = read_memory_count(db, &entity.id)?;
     if current_count >= MAX_MEMORY_OBJECTS_PER_ENTITY {
         return Err(ExecError::MemoryObjectCountExceeded {
             count: current_count,
@@ -2374,9 +2396,9 @@ pub fn apply_create_memory_object_tx<K: KvBatch>(
         });
     }
 
-    // Create memory object
+    // Create memory object owned by canonical entity.id
     let memory_object =
-        MemoryObject::new(tx.from, payload.object_type, current_height, payload.data);
+        MemoryObject::new(entity.id, payload.object_type, current_height, payload.data);
     let object_id = memory_object.object_id;
     let encoded = encode_memory_object_v1(&memory_object);
 
@@ -2391,25 +2413,21 @@ pub fn apply_create_memory_object_tx<K: KvBatch>(
         .ok_or(ExecError::NonceOverflow)?;
     entity.last_active_at = current_height;
 
-    // Build atomic batch
+    // Build atomic batch — all storage keys use canonical entity.id
     let mut ops = Vec::new();
 
-    // Store memory object
-    let obj_key = ai_memory_object_key(&tx.from, &object_id);
+    let obj_key = ai_memory_object_key(&entity.id, &object_id);
     ops.push(WriteOp::Put(obj_key, encoded));
 
-    // Type index
-    let type_key = ai_memory_by_type_key(payload.object_type.to_byte(), &tx.from, &object_id);
+    let type_key = ai_memory_by_type_key(payload.object_type.to_byte(), &entity.id, &object_id);
     ops.push(WriteOp::Put(type_key, vec![])); // Presence-only index
 
-    // Update count
-    let count_key = ai_memory_count_key(&tx.from);
+    let count_key = ai_memory_count_key(&entity.id);
     ops.push(WriteOp::Put(
         count_key,
         encode_memory_count(current_count + 1).to_vec(),
     ));
 
-    // Update entity
     ops.push(write_ai_entity_op(&entity));
 
     // Apply atomically
@@ -2438,6 +2456,17 @@ pub fn apply_update_memory_object_tx<K: KvBatch>(
     tx: &TxV1,
     current_height: u64,
 ) -> Result<(), ExecError<K::Error>> {
+    let entity = lookup_ai_entity_by_address(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
+    apply_update_memory_object_tx_inner(db, tx, entity, current_height)
+}
+
+/// Inner update-memory-object implementation taking a pre-resolved AI entity.
+fn apply_update_memory_object_tx_inner<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    mut entity: AiEntity,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
     // Kill switch: block all AI entity operations when active
     if read_ai_kill_switch(db)? {
         return Err(ExecError::AiKillSwitchActive);
@@ -2461,9 +2490,6 @@ pub fn apply_update_memory_object_tx<K: KvBatch>(
             max: MAX_MEMORY_OBJECT_SIZE,
         });
     }
-
-    // Load and validate AI entity
-    let mut entity = read_ai_entity(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
 
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
@@ -2492,12 +2518,12 @@ pub fn apply_update_memory_object_tx<K: KvBatch>(
         });
     }
 
-    // Load memory object
-    let mut memory_object = read_memory_object(db, &tx.from, &payload.object_id)?
+    // Load memory object — keyed by canonical entity.id
+    let mut memory_object = read_memory_object(db, &entity.id, &payload.object_id)?
         .ok_or(ExecError::MemoryObjectNotFound)?;
 
-    // Validate ownership
-    if memory_object.owner_entity != tx.from {
+    // Validate ownership against canonical entity.id
+    if memory_object.owner_entity != entity.id {
         return Err(ExecError::MemoryObjectOwnerMismatch);
     }
 
@@ -2520,11 +2546,9 @@ pub fn apply_update_memory_object_tx<K: KvBatch>(
     // Build atomic batch
     let mut ops = Vec::new();
 
-    // Update memory object
-    let obj_key = ai_memory_object_key(&tx.from, &payload.object_id);
+    let obj_key = ai_memory_object_key(&entity.id, &payload.object_id);
     ops.push(WriteOp::Put(obj_key, encoded));
 
-    // Update entity
     ops.push(write_ai_entity_op(&entity));
 
     // Apply atomically
@@ -2554,6 +2578,17 @@ pub fn apply_delete_memory_object_tx<K: KvBatch>(
     tx: &TxV1,
     current_height: u64,
 ) -> Result<(), ExecError<K::Error>> {
+    let entity = lookup_ai_entity_by_address(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
+    apply_delete_memory_object_tx_inner(db, tx, entity, current_height)
+}
+
+/// Inner delete-memory-object implementation taking a pre-resolved AI entity.
+fn apply_delete_memory_object_tx_inner<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    mut entity: AiEntity,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
     // Kill switch: block all AI entity operations when active
     if read_ai_kill_switch(db)? {
         return Err(ExecError::AiKillSwitchActive);
@@ -2569,9 +2604,6 @@ pub fn apply_delete_memory_object_tx<K: KvBatch>(
         }
         _ => ExecError::Overflow,
     })?;
-
-    // Load and validate AI entity
-    let mut entity = read_ai_entity(db, &tx.from)?.ok_or(ExecError::IssuerNotFound)?;
 
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
@@ -2600,17 +2632,17 @@ pub fn apply_delete_memory_object_tx<K: KvBatch>(
         });
     }
 
-    // Load memory object
-    let memory_object = read_memory_object(db, &tx.from, &payload.object_id)?
+    // Load memory object — keyed by canonical entity.id
+    let memory_object = read_memory_object(db, &entity.id, &payload.object_id)?
         .ok_or(ExecError::MemoryObjectNotFound)?;
 
-    // Validate ownership
-    if memory_object.owner_entity != tx.from {
+    // Validate ownership against canonical entity.id
+    if memory_object.owner_entity != entity.id {
         return Err(ExecError::MemoryObjectOwnerMismatch);
     }
 
-    // Get current count
-    let current_count = read_memory_count(db, &tx.from)?;
+    // Get current count (keyed by entity.id)
+    let current_count = read_memory_count(db, &entity.id)?;
 
     // Update entity state
     entity.economic_balance = entity
@@ -2623,29 +2655,26 @@ pub fn apply_delete_memory_object_tx<K: KvBatch>(
         .ok_or(ExecError::NonceOverflow)?;
     entity.last_active_at = current_height;
 
-    // Build atomic batch
+    // Build atomic batch — all storage keys use canonical entity.id
     let mut ops = Vec::new();
 
-    // Delete memory object
-    let obj_key = ai_memory_object_key(&tx.from, &payload.object_id);
+    let obj_key = ai_memory_object_key(&entity.id, &payload.object_id);
     ops.push(WriteOp::Delete(obj_key));
 
-    // Delete type index
     let type_key = ai_memory_by_type_key(
         memory_object.object_type.to_byte(),
-        &tx.from,
+        &entity.id,
         &payload.object_id,
     );
     ops.push(WriteOp::Delete(type_key));
 
     // Update count (decrement, but don't go below 0)
-    let count_key = ai_memory_count_key(&tx.from);
+    let count_key = ai_memory_count_key(&entity.id);
     ops.push(WriteOp::Put(
         count_key,
         encode_memory_count(current_count.saturating_sub(1)).to_vec(),
     ));
 
-    // Update entity
     ops.push(write_ai_entity_op(&entity));
 
     // Apply atomically
@@ -3334,25 +3363,6 @@ fn read_treasury_balance<K: Kv>(db: &K, key: &[u8]) -> Result<u128, ExecError<K:
 // TRANSACTION DISPATCH (routes TxV1 by payload version byte)
 // ============================================================================
 
-/// Dispatch a `TxV1` to the correct apply function based on its payload version byte.
-///
-/// The first byte of `tx.payload` identifies the transaction type:
-///
-/// | Byte | Type                     | Apply function                        |
-/// |------|--------------------------|---------------------------------------|
-/// |  1   | Transfer                 | `apply_tx_v1_transfer`                |
-/// |  2   | Signal Commitment        | `apply_signal_commitment_tx`          |
-/// |  3   | Create Memory Object     | `apply_create_memory_object_tx`       |
-/// |  4   | Update Memory Object     | `apply_update_memory_object_tx`       |
-/// |  5   | Delete Memory Object     | `apply_delete_memory_object_tx`       |
-/// |  6   | Submit Governance Proposal| `apply_governance_submit_tx`          |
-/// |  7   | Execute Governance Proposal| `apply_governance_execute_tx`        |
-/// |  8   | Register AI Entity       | `apply_register_ai_entity_tx`         |
-/// |  9   | Credit AI Entity         | `apply_credit_ai_entity_tx`           |
-///
-/// # Errors
-///
-/// Returns `UnknownPayloadVersion` if the payload is empty or the version byte
 /// H-07: Purge expired/executed governance proposals from the database.
 ///
 /// Scans all proposals and deletes those that are:
@@ -3403,8 +3413,34 @@ pub fn purge_expired_proposals<K: KvBatch>(
     purged
 }
 
-/// does not match any known transaction type. All other errors are forwarded
-/// from the underlying apply function.
+/// Dispatch a `TxV1` to the correct apply function based on its payload version byte.
+///
+/// The first byte of `tx.payload` identifies the transaction type:
+///
+/// | Byte | Type                       | Apply function                        |
+/// |------|----------------------------|---------------------------------------|
+/// |  1   | Transfer                   | `apply_tx_v1_transfer_inner`          |
+/// |  2   | Signal Commitment          | `apply_signal_commitment_tx_inner`    |
+/// |  3   | Create Memory Object       | `apply_create_memory_object_tx_inner` |
+/// |  4   | Update Memory Object       | `apply_update_memory_object_tx_inner` |
+/// |  5   | Delete Memory Object       | `apply_delete_memory_object_tx_inner` |
+/// |  6   | Submit Governance Proposal | `apply_governance_submit_tx`          |
+/// |  7   | Execute Governance Proposal| `apply_governance_execute_tx`         |
+/// |  8   | Register AI Entity         | `apply_register_ai_entity_tx`         |
+/// |  9   | Credit AI Entity           | `apply_credit_ai_entity_tx`           |
+/// | 10   | Register AI Entity w/ Key  | `apply_register_ai_entity_with_key_tx`|
+///
+/// For tx types 2–5 (entity-signed), the dispatcher requires `tx.from` to
+/// resolve to a registered AI entity via the address→id reverse index. The
+/// resolved entity is passed into the inner handler so storage keys can use
+/// the canonical `entity.id`.
+///
+/// # Errors
+///
+/// Returns `UnknownPayloadVersion` if the payload is empty or the version byte
+/// does not match any known transaction type. Returns `IssuerNotFound` if a
+/// signal or memory tx's sender is not a registered AI entity. All other
+/// errors are forwarded from the underlying apply function.
 pub fn dispatch_tx<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -3438,12 +3474,22 @@ pub fn dispatch_tx<K: KvBatch>(
 
     match version {
         TRANSFER_PAYLOAD_V1 => apply_tx_v1_transfer_inner(db, tx, ai_entity),
-        SIGNAL_COMMITMENT_PAYLOAD_V1 => apply_signal_commitment_tx(db, tx, current_height),
-        CREATE_MEMORY_OBJECT_PAYLOAD_V1 => {
-            apply_create_memory_object_tx(db, tx, current_height).map(|_| ())
+        SIGNAL_COMMITMENT_PAYLOAD_V1 => {
+            let entity = ai_entity.ok_or(ExecError::IssuerNotFound)?;
+            apply_signal_commitment_tx_inner(db, tx, entity, current_height)
         }
-        UPDATE_MEMORY_OBJECT_PAYLOAD_V1 => apply_update_memory_object_tx(db, tx, current_height),
-        DELETE_MEMORY_OBJECT_PAYLOAD_V1 => apply_delete_memory_object_tx(db, tx, current_height),
+        CREATE_MEMORY_OBJECT_PAYLOAD_V1 => {
+            let entity = ai_entity.ok_or(ExecError::IssuerNotFound)?;
+            apply_create_memory_object_tx_inner(db, tx, entity, current_height).map(|_| ())
+        }
+        UPDATE_MEMORY_OBJECT_PAYLOAD_V1 => {
+            let entity = ai_entity.ok_or(ExecError::IssuerNotFound)?;
+            apply_update_memory_object_tx_inner(db, tx, entity, current_height)
+        }
+        DELETE_MEMORY_OBJECT_PAYLOAD_V1 => {
+            let entity = ai_entity.ok_or(ExecError::IssuerNotFound)?;
+            apply_delete_memory_object_tx_inner(db, tx, entity, current_height)
+        }
         SUBMIT_PROPOSAL_PAYLOAD_V1 => {
             apply_governance_submit_tx(db, tx, current_height).map(|_| ())
         }
@@ -3702,8 +3748,18 @@ mod tests {
         );
         entity.economic_balance = 1_000_000u128;
 
-        let op = write_ai_entity_op(&entity);
-        db.apply_batch(&[op]).unwrap();
+        // In production, the reverse index is keyed on
+        // `address_from_pubkey(entity.pubkey)`. In these tests txs use
+        // `tx.from = entity.id`, so we index the entity at its own id so the
+        // public wrapper's `lookup_ai_entity_by_address(tx.from)` succeeds.
+        db.apply_batch(&[
+            write_ai_entity_op(&entity),
+            WriteOp::Put(
+                novai_state::ai_entity_by_address_key(&entity.id),
+                entity.id.to_vec(),
+            ),
+        ])
+        .unwrap();
 
         entity
     }
