@@ -984,7 +984,20 @@ impl<K: Kv> SmtStore for SmtOverlayStore<'_, K> {
     }
 }
 
-fn append_smt_ops_for_state_ops<K: Kv>(
+/// Compute SMT updates for a set of state operations and append them to the
+/// provided output Vec, returning the new SMT root.
+///
+/// This is the single source of truth for translating `account` /
+/// `fee_pool` / etc. state writes into authenticated SMT updates.
+/// `apply_tx_v1_transfer_inner` uses it to bundle SMT writes with state
+/// writes in a single atomic batch. Genesis code paths use it to get a
+/// consistent `state_root` for the genesis block.
+///
+/// The caller is responsible for actually writing `out_ops` to the DB.
+///
+/// # Errors
+/// Returns error on DB read failure or SMT internal errors.
+pub fn append_smt_ops_for_state_ops<K: Kv>(
     db: &K,
     state_ops: &[WriteOp],
     out_ops: &mut Vec<WriteOp>,

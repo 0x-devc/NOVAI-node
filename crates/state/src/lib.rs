@@ -28,6 +28,24 @@ pub const KEY_PREFIX_SMT_NODE: &[u8] = b"smt/node/";
 /// Canonical key for committed height (u64 big-endian).
 pub const KEY_COMMITTED_HEIGHT: &[u8] = b"consensus/committed_height";
 
+/// Canonical key for executed height (u64 big-endian).
+///
+/// CRASH-SAFE COMMIT/EXECUTE INVARIANT:
+/// - `KEY_COMMITTED_HEIGHT` is written by `persist_commit_atomic` (consensus
+///   layer). It marks the highest height whose block + QC are durable on disk.
+/// - `KEY_EXECUTED_HEIGHT` is written by the commit callback **after** every
+///   tx in those blocks has been dispatched (account state + SMT updated).
+/// - On startup, if `executed < committed`, blocks `(executed+1)..=committed`
+///   are replayed before the node rejoins consensus. Replay is idempotent —
+///   already-applied txs fail nonce/balance checks and are skipped, identical
+///   to the original on_commit error path.
+///
+/// Without this cursor, a crash between `persist_commit_atomic` and the end
+/// of execute_committed_blocks leaves account/SMT state behind committed
+/// state forever, producing permanent state-root divergence on the next
+/// peer's proposal.
+pub const KEY_EXECUTED_HEIGHT: &[u8] = b"consensus/executed_height";
+
 /// Canonical prefix for block records by height.
 pub const KEY_PREFIX_BLOCKS: &[u8] = b"consensus/blocks/";
 

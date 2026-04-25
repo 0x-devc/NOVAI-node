@@ -137,6 +137,26 @@ impl RocksKv {
                 .expect("default column family must exist")
         }
     }
+
+    /// Force a compaction over the half-open range `[start, end)` on the
+    /// default column family.
+    ///
+    /// `persist_commit_atomic` writes `WriteOp::Delete` tombstones for blocks
+    /// and QCs older than `PRUNE_RETAIN_BLOCKS`, but RocksDB only frees the
+    /// underlying SST bytes when a compaction visits the range. On a
+    /// long-running chain (millions of heights), background compaction may
+    /// not get there for a long time. Periodically forcing a compaction over
+    /// the pruned range bounds disk usage near the retention window.
+    ///
+    /// `start = None` means "from the start of the keyspace"; same for `end`.
+    /// This is a blocking call but is fast over already-tombstoned data.
+    pub fn compact_range_default(&self, start: Option<&[u8]>, end: Option<&[u8]>) {
+        let cf = self
+            .db
+            .cf_handle(CF_DEFAULT)
+            .expect("default column family must exist");
+        self.db.compact_range_cf(cf, start, end);
+    }
 }
 
 #[cfg(feature = "rocksdb")]

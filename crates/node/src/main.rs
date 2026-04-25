@@ -15,8 +15,8 @@ use novai_node::metrics;
 use novai_node::rpc;
 use novai_node::MutexExt;
 use novai_state::{
-    account_key, encode_account_v1, AccountStateV1, Kv, KvBatch, MemKv, RocksKv, WriteOp,
-    KEY_COMMITTED_HEIGHT,
+    account_key, block_key, encode_account_v1, qc_key, AccountStateV1, Kv, KvBatch, MemKv, RocksKv,
+    WriteOp, KEY_COMMITTED_HEIGHT, KEY_EXECUTED_HEIGHT,
 };
 use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
@@ -227,6 +227,49 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                     .saturating_sub(MAX_INDEX_ENTRIES as u64);
                 idx.block_hashes.retain(|_, &mut h| h > cutoff);
                 idx.tx_receipts.retain(|_, &mut (h, _)| h > cutoff);
+            }
+        }
+
+        // CRASH-SAFE COMMIT/EXECUTE: advance executed_height after every tx
+        // in every block has been dispatched. On startup, if executed_height
+        // is behind committed_height, the missing blocks are replayed before
+        // the node rejoins consensus. Without this cursor, a crash between
+        // persist_commit_atomic (which advances committed_height) and the end
+        // of dispatch_tx leaves account/SMT state behind committed state
+        // forever, producing permanent state-root divergence.
+        if let Some(last_block) = blocks.last() {
+            if let Err(e) = db.put(KEY_EXECUTED_HEIGHT, &last_block.height.to_be_bytes()) {
+                tracing::error!(
+                    height = last_block.height,
+                    error = %e,
+                    "Failed to persist executed_height — replay-on-startup may re-execute"
+                );
+            }
+
+            // Force compaction over the pruned block/QC range every COMPACT_INTERVAL
+            // heights. persist_commit_atomic writes Delete tombstones for blocks and
+            // QCs older than PRUNE_RETAIN_BLOCKS, but RocksDB only frees the
+            // underlying SST bytes when a compaction visits the range. Without this,
+            // disk usage grows far beyond the retention window (observed: 6.3GB per
+            // node at 4M blocks, expected ~88MB).
+            const COMPACT_INTERVAL: u64 = 10_000;
+            const SAFETY_MARGIN: u64 = 100; // never compact too close to the live tail
+            if last_block.height % COMPACT_INTERVAL == 0
+                && last_block.height > novai_consensus::PRUNE_RETAIN_BLOCKS + SAFETY_MARGIN
+            {
+                let prune_below =
+                    last_block.height - novai_consensus::PRUNE_RETAIN_BLOCKS - SAFETY_MARGIN;
+                let block_start = block_key(0);
+                let block_end = block_key(prune_below);
+                let qc_start = qc_key(0);
+                let qc_end = qc_key(prune_below);
+                db.compact_range_default(Some(&block_start), Some(&block_end));
+                db.compact_range_default(Some(&qc_start), Some(&qc_end));
+                tracing::info!(
+                    height = last_block.height,
+                    prune_below,
+                    "Forced compaction on pruned block/QC range"
+                );
             }
         }
     }
@@ -468,6 +511,14 @@ fn parse_genesis_validator_set(
 ///
 /// Uses the same deterministic key derivation as `tools/tx-generator/src/sender.rs`
 /// (`SenderAccount::from_index`). Only runs on fresh storage (no committed height).
+///
+/// **Updates the SMT** so the genesis state_root reflects the funded accounts.
+/// Without this, every node has the funded accounts in its DB but NOT in its
+/// SMT — the SMT root only authenticates txs that touched the account, not the
+/// genesis balance. While this is consistent across validators (they all do the
+/// same wrong thing), it breaks any external state-root verification and is a
+/// latent determinism risk if the on-chain state ever has to be reconstructed
+/// from canonical genesis data.
 fn apply_dev_genesis(storage: &mut Storage) {
     // Skip if DB already has state (restart)
     if storage.get(KEY_COMMITTED_HEIGHT).ok().flatten().is_some() {
@@ -477,7 +528,7 @@ fn apply_dev_genesis(storage: &mut Storage) {
     const FUNDED_ACCOUNTS: usize = 100;
     const INITIAL_BALANCE: u128 = 1_000_000_000;
 
-    let mut ops = Vec::with_capacity(FUNDED_ACCOUNTS);
+    let mut state_ops = Vec::with_capacity(FUNDED_ACCOUNTS);
 
     for index in 0..FUNDED_ACCOUNTS {
         // Replicate sender.rs SenderAccount::from_index key derivation
@@ -495,18 +546,136 @@ fn apply_dev_genesis(storage: &mut Storage) {
             balance: INITIAL_BALANCE,
             nonce: 0,
         };
-        ops.push(WriteOp::Put(
+        state_ops.push(WriteOp::Put(
             account_key(&addr),
             encode_account_v1(&account).to_vec(),
         ));
     }
 
-    storage.apply_batch(&ops).expect("dev genesis write failed");
+    // Compute SMT root over the genesis accounts and bundle SMT node writes
+    // with the state writes in a single atomic batch. This makes the SMT
+    // consistent with the DB from block 0.
+    let mut all_ops = state_ops.clone();
+    let state_root =
+        novai_execution::append_smt_ops_for_state_ops(&*storage, &state_ops, &mut all_ops)
+            .expect("dev genesis SMT computation failed");
+
+    storage
+        .apply_batch(&all_ops)
+        .expect("dev genesis write failed");
     tracing::info!(
         accounts = FUNDED_ACCOUNTS,
         balance = INITIAL_BALANCE,
-        "Dev genesis: funded tx-generator sender accounts"
+        state_root = ?&state_root[..4],
+        "Dev genesis: funded tx-generator sender accounts (with SMT root)"
     );
+}
+
+/// Replay any committed-but-unexecuted blocks before joining consensus.
+///
+/// CRASH-SAFE COMMIT/EXECUTE INVARIANT:
+/// - `KEY_COMMITTED_HEIGHT` (consensus layer) is durably bumped by
+///   `persist_commit_atomic` BEFORE `execute_committed_blocks` dispatches the
+///   txs. A crash in that window leaves committed_height ahead of executed
+///   state, producing permanent state-root divergence on restart.
+/// - `KEY_EXECUTED_HEIGHT` (execution layer) is bumped at the END of
+///   on_commit, after every tx in every block has been dispatched.
+///
+/// On startup, if executed < committed, we reload the missing blocks from
+/// disk and feed them through `dispatch_tx`. Replay is naturally idempotent:
+/// a tx whose effects were already persisted will fail nonce/balance/exists
+/// checks and be silently skipped (same code path as the existing on_commit
+/// "Tx execution failed (committed, skipping)" branch).
+///
+/// Returns the post-replay executed_height.
+fn replay_unexecuted_blocks(storage: &mut Storage) -> u64 {
+    let committed_height = match storage.get(KEY_COMMITTED_HEIGHT) {
+        Ok(Some(bytes)) if bytes.len() == 8 => {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&bytes);
+            u64::from_be_bytes(arr)
+        }
+        _ => return 0, // No committed state → nothing to replay
+    };
+
+    let executed_height = match storage.get(KEY_EXECUTED_HEIGHT) {
+        Ok(Some(bytes)) if bytes.len() == 8 => {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&bytes);
+            u64::from_be_bytes(arr)
+        }
+        // Missing cursor = legacy DB or fresh DB. Treat as "everything up to
+        // committed_height has already been executed" — we can't reconstruct
+        // earlier intent, and the dispatch_tx replay is idempotent anyway,
+        // so on a legacy DB we simply mark the cursor up-to-date and proceed.
+        _ => {
+            if committed_height > 0 {
+                tracing::info!(
+                    committed_height,
+                    "No executed_height cursor found — initializing to committed_height \
+                     (assuming no prior crash). Future commits will track this cursor."
+                );
+                let _ = storage.put(KEY_EXECUTED_HEIGHT, &committed_height.to_be_bytes());
+            }
+            return committed_height;
+        }
+    };
+
+    if executed_height >= committed_height {
+        return executed_height;
+    }
+
+    let count = committed_height - executed_height;
+    tracing::warn!(
+        executed_height,
+        committed_height,
+        count,
+        "REPLAY: executed_height behind committed_height — replaying missing blocks"
+    );
+
+    let start_height = executed_height + 1;
+    for height in start_height..=committed_height {
+        let block = match novai_consensus::ConsensusState::load_block(&*storage, height) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                fatal(format!(
+                    "REPLAY FAILED: block at height {height} missing from disk \
+                     (committed_height={committed_height}, executed_height={executed_height}). \
+                     This usually means the DB was wiped while committed_height was retained. \
+                     Wipe the data dir and resync from peers."
+                ));
+            }
+            Err(e) => {
+                fatal(format!(
+                    "REPLAY FAILED: load_block({height}) returned error: {e:?}"
+                ));
+            }
+        };
+
+        for tx in &block.txs {
+            if let Err(e) = novai_execution::dispatch_tx(storage, tx, height) {
+                tracing::debug!(
+                    height,
+                    from = ?&tx.from[..4],
+                    nonce = tx.nonce,
+                    ?e,
+                    "REPLAY: tx skipped (likely already applied)"
+                );
+            }
+        }
+    }
+
+    if let Err(e) = storage.put(KEY_EXECUTED_HEIGHT, &committed_height.to_be_bytes()) {
+        fatal(format!("REPLAY FAILED: persist executed_height: {e}"));
+    }
+
+    tracing::info!(
+        replayed_blocks = count,
+        new_executed_height = committed_height,
+        "REPLAY complete"
+    );
+
+    committed_height
 }
 
 fn main() {
@@ -855,6 +1024,11 @@ fn main() {
             if dev_keys {
                 apply_dev_genesis(&mut storage);
             }
+
+            // Replay any committed-but-unexecuted blocks before joining
+            // consensus. Closes the persist_commit_atomic + execute_committed_blocks
+            // crash window that produces permanent state-root divergence.
+            replay_unexecuted_blocks(&mut storage);
 
             let encryption_enabled = !no_encryption;
             if encryption_enabled {

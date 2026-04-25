@@ -92,6 +92,22 @@ impl KvBatch for Storage {
     }
 }
 
+impl Storage {
+    /// Force a compaction over `[start, end)` on the default column family.
+    ///
+    /// No-op on the in-memory backend. On RocksDB, used to materialize block
+    /// and QC delete tombstones written by `persist_commit_atomic` so the
+    /// underlying SST bytes are actually reclaimed. Without periodic
+    /// compaction, tombstones accumulate and disk usage grows beyond the
+    /// `PRUNE_RETAIN_BLOCKS` retention window.
+    pub fn compact_range_default(&self, start: Option<&[u8]>, end: Option<&[u8]>) {
+        match self {
+            Storage::Memory(_) => {}
+            Storage::Rocks(kv) => kv.compact_range_default(start, end),
+        }
+    }
+}
+
 /// Callback invoked after blocks are committed and consensus state is updated.
 ///
 /// Implementations execute transactions against the state DB and update the
