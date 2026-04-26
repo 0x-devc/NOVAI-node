@@ -477,7 +477,7 @@ fn attack_toggle_state() {
             "MISMATCH!"
         };
         if !(5..15).contains(&i) {
-            println!("  {i}: {ptype:?} -> is_active={is_active} [{status}]",);
+            println!("  {i}: {ptype:?} -> is_active={is_active} [{status}]");
         } else if i == 5 {
             println!("  ... (10 more transitions)");
         }
