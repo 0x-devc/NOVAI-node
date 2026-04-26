@@ -187,7 +187,7 @@ pub fn encode_qc_v1(qc: &QC) -> Result<Vec<u8>, CodecError> {
 
     // Sort votes by voter (canonical ordering)
     let mut sorted_votes = qc.votes.clone();
-    sorted_votes.sort_by(|a, b| a.voter.cmp(&b.voter));
+    sorted_votes.sort_by_key(|a| a.voter);
 
     // Check for duplicates (adjacent after sorting)
     for i in 1..sorted_votes.len() {
