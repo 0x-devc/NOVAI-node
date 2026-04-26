@@ -39,7 +39,7 @@ const FEATURES = [
     icon: Shield,
     title: "Quantum-Aware Design",
     description:
-      "Designed with future post-quantum migration in mind. As NIST standards mature, the architecture is positioned for transition to quantum-resistant primitives.",
+      "Forward-looking cryptographic posture. Today: Ed25519 signatures and Blake3 hashing. Long-term roadmap: a cryptographic abstraction layer for transition to NIST-standardized quantum-resistant primitives as they mature.",
   },
   {
     icon: Zap,
@@ -103,7 +103,7 @@ const PILLARS = [
   {
     title: "Quantum-Aware Design",
     description:
-      "Designed with future post-quantum migration in mind. As NIST standards mature, the architecture is positioned for transition to quantum-resistant primitives. A forward-looking design consideration, not a bolted-on afterthought.",
+      "Designed with future post-quantum migration in mind. The current implementation uses Ed25519 signatures and Blake3 hashing. As NIST standards for quantum-resistant primitives mature, the long-term roadmap includes a cryptographic abstraction layer to enable migration. A forward-looking design consideration, not a bolted-on afterthought.",
   },
   {
     title: "High Performance BFT",
@@ -163,11 +163,11 @@ const TERMINAL_LINES = [
   "INFO  Initializing BFT consensus engine",
   "INFO  AI copilot module: ACTIVE",
   "INFO  Sparse Merkle Tree state initialized",
-  "INFO  Connected to 4 peer validators",
-  "INFO  Block #2,500,001 finalized (14ms)",
-  "INFO  Block #2,500,002 finalized (12ms)",
+  "INFO  Connected to 3 peer validators",
+  "INFO  Block #2,500,001 finalized (130ms)",
+  "INFO  Block #2,500,002 finalized (115ms)",
   "INFO  Copilot advisory: no anomalies detected",
-  "INFO  Block #2,500,003 finalized (15ms)",
+  "INFO  Block #2,500,003 finalized (140ms)",
   "INFO  Network health: OPTIMAL",
 ];
 
