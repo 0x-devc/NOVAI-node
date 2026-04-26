@@ -294,13 +294,19 @@ OBJECT ID                                                           TYPE  SIZE  
 bfb962b13c6cf62ccaaa56f82e9efd24f259b684dce2598090f366c255f677b2     0     49    6689     6689
 ```
 
-**Signals published by the entity** (use any height range up to 10 000 wide):
+**Signals published by the entity** — query a 9 000-block window ending at the current height. The chain caps each query at 10 000 blocks, so a fixed range like `0–10000` will miss your signal as soon as the chain runs past block 10 000.
 
 ```bash
+LATEST=$(curl -s -X POST http://localhost:3030 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"novai_getLatestBlock","params":{},"id":1}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["height"])')
+START=$(( LATEST > 9000 ? LATEST - 9000 : 0 ))
+
 ./target/release/novai-cli signal by-issuer \
   --issuer "$ENTITY_ID" \
-  --start  0 \
-  --end    10000
+  --start  "$START" \
+  --end    "$LATEST"
 ```
 
 **Same query as raw JSON-RPC:**
