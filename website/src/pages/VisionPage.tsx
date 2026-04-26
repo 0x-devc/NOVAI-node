@@ -20,7 +20,7 @@ const PILLARS = [
   {
     title: "Post-Quantum Architecture",
     description:
-      "Core architecture designed with cryptographic abstraction layers for quantum-resistant migration. Not a bolted-on afterthought - a foundational design decision that ensures NOVAInetwork can adopt post-quantum primitives as standards mature.",
+      "Designed with future post-quantum migration in mind. The current implementation uses Ed25519 signatures and Blake3 hashing. As NIST standards for quantum-resistant primitives mature, the long-term roadmap includes a cryptographic abstraction layer to enable migration. A forward-looking design consideration, not a bolted-on afterthought.",
   },
   {
     title: "Ultra-Scalable",
