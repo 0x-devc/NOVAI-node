@@ -9,6 +9,7 @@ import {
   Code2,
   ChevronRight,
   Coins,
+  Github,
 } from "lucide-react";
 
 import GlowOrb from "@/components/novai/GlowOrb";
@@ -51,8 +52,8 @@ const FEATURES = [
 const STATS: { value?: number; suffix?: string; label: string; prefix?: string; textOnly?: string }[] = [
   { textOnly: "Active", label: "Private Testnet Running" },
   { value: 4, suffix: "", label: "Active Validators", prefix: "" },
-  { value: 1090, suffix: "+", label: "Tests Passing", prefix: "" },
-  { value: 50000, suffix: "+", label: "Mock Transactions", prefix: "" },
+  { value: 4000, suffix: "+", label: "Tests Passing", prefix: "" },
+  { value: 16, suffix: "M+", label: "Blocks Committed", prefix: "" },
 ];
 
 const ROADMAP = [
@@ -102,7 +103,7 @@ export default function HomePage() {
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
               </span>
-              Building the Future of Blockchain
+              Now Open Source
             </div>
 
             <h1 className="font-display font-bold leading-[1.1] tracking-tight mb-6">
@@ -122,9 +123,17 @@ export default function HomePage() {
 
             <div className="flex flex-wrap gap-4 mb-8">
               <Link to="/documents" className="btn-primary no-underline">Documentation <ArrowRight size={16} /></Link>
+              <a
+                href="https://github.com/0x-devc/NOVAI-node"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-ghost no-underline"
+              >
+                <Github size={16} /> View Source
+              </a>
               <Link to="/socials" className="btn-ghost no-underline">Join Community</Link>
             </div>
-            <p className="text-xs text-muted-foreground/60">Status: Pre-mainnet · Private testnet live · Public testnet coming soon · Built from scratch in Rust</p>
+            <p className="text-xs text-muted-foreground/60">Status: Pre-mainnet · Open source · Private testnet live · Public testnet coming soon · Built from scratch in Rust</p>
           </motion.div>
 
           <motion.div initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 1.2, delay: 0.3, ease: EASE }} className="relative flex-shrink-0 hidden lg:block">

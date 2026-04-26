@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { DiscordIcon, XIcon, TelegramIcon } from "./SocialIcons";
+import { DiscordIcon, XIcon, TelegramIcon, GitHubIcon } from "./SocialIcons";
 import NovaiLogo from "./NovaiLogo";
 
 export default function Footer() {
@@ -60,6 +60,7 @@ export default function Footer() {
                 { href: "https://x.com/NOVAInetwork", icon: <XIcon size={18} />, label: "X" },
                 { href: "https://discord.gg/NTWr6x2dbM", icon: <DiscordIcon size={18} />, label: "Discord" },
                 { href: "https://t.me/+QoacVmowWNRkZjNk", icon: <TelegramIcon size={18} />, label: "Telegram" },
+                { href: "https://github.com/0x-devc/NOVAI-node", icon: <GitHubIcon size={18} />, label: "GitHub" },
               ].map((s) => (
                 <a
                   key={s.label}
@@ -80,7 +81,7 @@ export default function Footer() {
 
         <div className="flex flex-col items-center justify-between gap-4 sm:flex-row">
           <p className="text-xs text-muted-foreground">
-            © 2025 NOVAInetwork. All rights reserved.
+            © 2025-2026 NOVAInetwork. All rights reserved.
           </p>
           <p className="text-xs text-muted-foreground">
             Built from scratch. No forks. No compromises.

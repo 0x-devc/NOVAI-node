@@ -1,13 +1,14 @@
 import { motion } from "framer-motion";
 import { ExternalLink, ArrowRight } from "lucide-react";
 import { Link } from "react-router-dom";
-import { XIcon, DiscordIcon, TelegramIcon } from "@/components/novai/SocialIcons";
+import { XIcon, DiscordIcon, TelegramIcon, GitHubIcon } from "@/components/novai/SocialIcons";
 import ScrollSection from "@/components/novai/ScrollSection";
 import Footer from "@/components/novai/Footer";
 
 const EASE = [0.25, 0.46, 0.45, 0.94] as const;
 
 const SOCIALS = [
+  { href: "https://github.com/0x-devc/NOVAI-node", title: "GitHub", description: "Full open source codebase — 65,000+ lines of Rust, 16 crates, Apache 2.0.", icon: GitHubIcon, followers: "Open Source", color: "210, 10%, 40%" },
   { href: "https://x.com/NOVAInetwork", title: "X (Twitter)", description: "Updates, announcements, and progress in public.", icon: XIcon, followers: "Growing", color: "228, 100%, 62%" },
   { href: "https://discord.gg/NTWr6x2dbM", title: "Discord", description: "Main community hub — ideas, feedback, and discussions.", icon: DiscordIcon, followers: "Active", color: "235, 86%, 65%" },
   { href: "https://t.me/+QoacVmowWNRkZjNk", title: "Telegram", description: "Updates and announcements.", icon: TelegramIcon, followers: "Live", color: "200, 90%, 55%" },
