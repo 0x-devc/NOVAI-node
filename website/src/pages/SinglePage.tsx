@@ -59,7 +59,7 @@ const STATS: { value?: number; suffix?: string; label: string; prefix?: string; 
   { textOnly: "Active", label: "Private Testnet Running" },
   { value: 4, suffix: "", label: "Active Validators", prefix: "" },
   { value: 4000, suffix: "+", label: "Tests Passing", prefix: "" },
-  { value: 16, suffix: "M+", label: "Blocks Committed", prefix: "" },
+  { value: 30, suffix: "M+", label: "Blocks Committed", prefix: "" },
 ];
 
 const ROADMAP = [
@@ -118,7 +118,7 @@ const PILLARS = [
 ];
 
 const SOCIALS = [
-  { href: "https://github.com/0x-devc/NOVAI-node", title: "GitHub", description: "Full open source codebase — 65,000+ lines of Rust, 16 crates, Apache 2.0.", icon: GitHubIcon, followers: "Open Source", color: "210, 10%, 40%" },
+  { href: "https://github.com/0x-devc/NOVAI-node", title: "GitHub", description: "Full open source codebase - 65,000+ lines of Rust, 16 crates, Apache 2.0.", icon: GitHubIcon, followers: "Open Source", color: "210, 10%, 40%" },
   { href: "https://x.com/NOVAInetwork", title: "X (Twitter)", description: "Updates, announcements, and progress in public.", icon: XIcon, followers: "Growing", color: "228, 100%, 62%" },
   { href: "https://discord.gg/NTWr6x2dbM", title: "Discord", description: "Main community hub for ideas, feedback, and discussions.", icon: DiscordIcon, followers: "Active", color: "235, 86%, 65%" },
   { href: "https://t.me/+QoacVmowWNRkZjNk", title: "Telegram", description: "Updates and announcements.", icon: TelegramIcon, followers: "Live", color: "200, 90%, 55%" },
@@ -128,7 +128,7 @@ const DOCUMENTS = [
   {
     href: "https://github.com/0x-devc/NOVAI-node/blob/main/docs/tutorials/FIRST_AI_ENTITY.md",
     title: "Quick Start Tutorial",
-    description: "Build your first AI entity in 10 minutes — keygen, faucet, register, publish a signal, query state.",
+    description: "Build your first AI entity in 10 minutes - keygen, faucet, register, publish a signal, query state.",
   },
   {
     href: "https://github.com/0x-devc/NOVAI-node/blob/main/docs/RPC_REFERENCE.md",
@@ -153,7 +153,7 @@ const DOCUMENTS = [
   {
     href: "https://dev.to/0xdevc/the-bug-that-silently-broke-my-entire-blockchain-how-a-single-function-rejected-trailing-bytes-4fij",
     title: "Blog: The Bug That Broke My Blockchain",
-    description: "How a single function rejecting trailing bytes silently killed every block — a debugging story.",
+    description: "How a single function rejecting trailing bytes silently killed every block - a debugging story.",
   },
 ];
 
@@ -313,7 +313,7 @@ function StickyRoadmap() {
             })}
           </div>
 
-          {/* Phase cards — only one visible at a time */}
+          {/* Phase cards - only one visible at a time */}
           <div className="max-w-2xl mx-auto relative h-[300px] sm:h-[320px]">
             {ROADMAP.map((phase, i) => {
               const start = i / total;
@@ -426,7 +426,7 @@ export default function SinglePage() {
   return (
     <div className="relative">
 
-      {/* Global backgrounds — fixed, uniform across entire page */}
+      {/* Global backgrounds - fixed, uniform across entire page */}
       <div className="fixed inset-0 pointer-events-none z-0">
         <div className="absolute inset-0 mesh-gradient opacity-70" />
         <div className="absolute inset-0 grid-bg-fine opacity-10" />
@@ -436,7 +436,7 @@ export default function SinglePage() {
         <FloatingPaths position={-1} />
       </div>
 
-      {/* ═══════════════ HOME — HERO ═══════════════ */}
+      {/* ═══════════════ HOME - HERO ═══════════════ */}
       <section id="home" className="relative min-h-screen flex items-center overflow-hidden">
 
         {/* Nebula glows */}
@@ -509,7 +509,7 @@ export default function SinglePage() {
       {/* ═══════════════ VISION ═══════════════ */}
       <section id="vision" className="relative min-h-[70vh] flex items-center overflow-hidden">
 
-        {/* FloatingPaths now global — removed from here */}
+        {/* FloatingPaths now global - removed from here */}
 
         <div className="section-container relative z-10 pt-28 pb-20">
           <motion.div
@@ -554,7 +554,7 @@ export default function SinglePage() {
         </div>
       </section>
 
-      {/* Vision — Pull Quote */}
+      {/* Vision - Pull Quote */}
       <section className="relative py-20">
         <div className="gradient-divider" />
         <div className="section-container py-20">
@@ -571,7 +571,7 @@ export default function SinglePage() {
         <div className="gradient-divider" />
       </section>
 
-      {/* Vision — Pillars (sticky scroll) */}
+      {/* Vision - Pillars (sticky scroll) */}
       <StickyPillars />
 
       {/* ═══════════════ WHAT IS NOVAI ═══════════════ */}
@@ -682,7 +682,7 @@ export default function SinglePage() {
           </div>
         </section>
 
-        {/* Testnet — What to expect */}
+        {/* Testnet - What to expect */}
         <section className="relative py-24">
           <div className="gradient-divider" />
           <div className="section-container py-20 relative z-10">
@@ -695,7 +695,7 @@ export default function SinglePage() {
           </div>
         </section>
 
-        {/* Testnet — CPU Architecture 3D Scroll */}
+        {/* Testnet - CPU Architecture 3D Scroll */}
         <ContainerScroll
           titleComponent={
             <>
@@ -729,7 +729,7 @@ export default function SinglePage() {
           </div>
         </div>
 
-        {/* Testnet — Email signup */}
+        {/* Testnet - Email signup */}
         <section className="relative py-24">
           <div className="gradient-divider" />
           <div className="section-container py-20 relative z-10">

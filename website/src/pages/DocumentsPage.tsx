@@ -8,7 +8,7 @@ const DOCUMENTS = [
   {
     href: "https://github.com/0x-devc/NOVAI-node/blob/main/docs/tutorials/FIRST_AI_ENTITY.md",
     title: "Quick Start Tutorial",
-    description: "Build your first AI entity in 10 minutes — keygen, faucet, register, publish a signal, query state.",
+    description: "Build your first AI entity in 10 minutes - keygen, faucet, register, publish a signal, query state.",
   },
   {
     href: "https://github.com/0x-devc/NOVAI-node/blob/main/docs/RPC_REFERENCE.md",
@@ -33,7 +33,7 @@ const DOCUMENTS = [
   {
     href: "https://dev.to/0xdevc/the-bug-that-silently-broke-my-entire-blockchain-how-a-single-function-rejected-trailing-bytes-4fij",
     title: "Blog: The Bug That Broke My Blockchain",
-    description: "How a single function rejecting trailing bytes silently killed every block — a debugging story.",
+    description: "How a single function rejecting trailing bytes silently killed every block - a debugging story.",
   },
 ];
 

@@ -27,7 +27,7 @@ const FEATURES = [
     icon: Brain,
     title: "AI-Aware Consensus",
     description:
-      "AI entity signals integrated directly into the consensus message format. The protocol carries intelligence as a first-class data type — enabling real-time monitoring, autonomous threat response, and adaptive network behavior.",
+      "AI entity signals integrated directly into the consensus message format. The protocol carries intelligence as a first-class data type - enabling real-time monitoring, autonomous threat response, and adaptive network behavior.",
   },
   {
     icon: Shield,
@@ -39,7 +39,7 @@ const FEATURES = [
     icon: Zap,
     title: "Self-Adjusting Protocol",
     description:
-      "The network autonomously responds to congestion, detects inefficiencies, and deprioritises suspicious transactions — all within governance-approved bounds. Real-time adaptation with built-in safety limits.",
+      "The network autonomously responds to congestion, detects inefficiencies, and deprioritises suspicious transactions - all within governance-approved bounds. Real-time adaptation with built-in safety limits.",
   },
   {
     icon: Layers,
@@ -53,7 +53,7 @@ const STATS: { value?: number; suffix?: string; label: string; prefix?: string; 
   { textOnly: "Active", label: "Private Testnet Running" },
   { value: 4, suffix: "", label: "Active Validators", prefix: "" },
   { value: 4000, suffix: "+", label: "Tests Passing", prefix: "" },
-  { value: 16, suffix: "M+", label: "Blocks Committed", prefix: "" },
+  { value: 30, suffix: "M+", label: "Blocks Committed", prefix: "" },
 ];
 
 const ROADMAP = [
@@ -118,7 +118,7 @@ export default function HomePage() {
               </motion.span>
             </h1>
 
-            <p className="text-lg text-muted-foreground leading-relaxed mb-4 max-w-xl">NOVAInetwork is a standalone Layer-1 blockchain with AI embedded directly into the protocol layer — not bolted on as an afterthought.</p>
+            <p className="text-lg text-muted-foreground leading-relaxed mb-4 max-w-xl">NOVAInetwork is a standalone Layer-1 blockchain with AI embedded directly into the protocol layer - not bolted on as an afterthought.</p>
             <p className="text-sm text-muted-foreground mb-8 max-w-lg">Built from scratch in Rust. HotStuff BFT consensus. Deterministic execution. AI agents as first-class protocol citizens.</p>
 
             <div className="flex flex-wrap gap-4 mb-8">
@@ -201,7 +201,7 @@ export default function HomePage() {
               <h2 className="font-display text-4xl font-bold sm:text-5xl mb-6">What is <span className="gradient-text">NOVAInetwork</span>?</h2>
               <p className="max-w-2xl mx-auto text-muted-foreground leading-relaxed">
                 A standalone Layer-1 blockchain built from first principles in Rust that integrates AI entities
-                as first-class protocol primitives — not wrappers, not sidecars, but native protocol primitives with autonomous capabilities.
+                as first-class protocol primitives - not wrappers, not sidecars, but native protocol primitives with autonomous capabilities.
               </p>
             </div>
           </ScrollSection>
