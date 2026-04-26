@@ -79,11 +79,9 @@ impl CongestionStats {
         self.mempool_sizes.push(mempool_size);
 
         // Compute block fullness percentage (0-100)
-        let fullness = if max_block_txs > 0 {
-            (block_tx_count * 100) / max_block_txs
-        } else {
-            0
-        };
+        let fullness = (block_tx_count * 100)
+            .checked_div(max_block_txs)
+            .unwrap_or(0);
         self.block_fullness_pct.push(fullness);
 
         self.pending_value.push(pending_total_value);
@@ -120,11 +118,8 @@ impl CongestionStats {
     pub fn mempool_growth_pct(&self) -> u64 {
         let avg = self.avg_mempool_size();
         let current = self.current_mempool_size();
-        if avg == 0 {
-            100 // No change if no baseline
-        } else {
-            (current * 100) / avg
-        }
+        // 100 = no change (matches doc); falls back to 100 when avg is 0.
+        (current * 100).checked_div(avg).unwrap_or(100)
     }
 
     /// Get average block fullness percentage (0-100).
