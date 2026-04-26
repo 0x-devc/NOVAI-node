@@ -20,7 +20,7 @@ export default function Footer() {
               <span className="font-display text-lg font-bold gradient-text">NOVAInetwork</span>
             </div>
             <p className="max-w-sm text-sm leading-relaxed text-muted-foreground">
-              NOVAI — The AI-Integrated Blockchain. The network that Learns, Protects and Evolves.
+              NOVAI: The AI-Integrated Blockchain. The network that learns, protects, and evolves.
             </p>
             <p className="max-w-sm text-sm leading-relaxed text-muted-foreground mt-2 italic">
               The intelligent network is awakening.

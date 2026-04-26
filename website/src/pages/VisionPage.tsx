@@ -1,6 +1,10 @@
 import { motion } from "framer-motion";
+import { Link } from "react-router-dom";
+import { ArrowRight } from "lucide-react";
 import ScrollSection from "@/components/novai/ScrollSection";
 import Footer from "@/components/novai/Footer";
+import { FloatingPaths } from "@/components/ui/floating-paths";
+import { TypewriterEffect } from "@/components/ui/typewriter-effect";
 
 const PILLARS = [
   {
@@ -38,6 +42,12 @@ export default function VisionPage() {
         <div className="absolute inset-0 mesh-gradient pointer-events-none" />
         <div className="absolute inset-0 grid-bg-fine opacity-15 pointer-events-none" />
 
+        {/* Animated floating paths background */}
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+          <FloatingPaths position={1} />
+          <FloatingPaths position={-1} />
+        </div>
+
         <div className="section-container relative z-10 pt-28 pb-20">
           <motion.div
             initial={{ opacity: 0, y: 30 }}
@@ -46,17 +56,35 @@ export default function VisionPage() {
             className="max-w-3xl"
           >
             <span className="pill-badge mb-8">Our Vision</span>
-            <h1 className="font-display text-5xl font-bold leading-[1.1] sm:text-6xl lg:text-7xl mb-8">
-              Intelligence is not a{" "}
-              <span className="gradient-text">feature.</span>
-              <br />
-              It&apos;s the <span className="gradient-text">foundation.</span>
-            </h1>
-            <p className="text-xl text-muted-foreground leading-relaxed max-w-2xl">
+
+            {/* Typewriter heading */}
+            <div className="mb-8">
+              <TypewriterEffect
+                className="font-display text-5xl font-bold leading-[1.1] sm:text-6xl lg:text-7xl text-left"
+                words={[
+                  { text: "Intelligence" },
+                  { text: "is" },
+                  { text: "not" },
+                  { text: "a" },
+                  { text: "feature.", className: "gradient-text" },
+                  { text: "It's" },
+                  { text: "the" },
+                  { text: "foundation.", className: "gradient-text" },
+                ]}
+                cursorClassName="bg-accent h-8 lg:h-12"
+              />
+            </div>
+
+            <motion.p
+              className="text-xl text-muted-foreground leading-relaxed max-w-2xl"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.6, delay: 1.2 }}
+            >
               NOVAInetwork is building toward a mainstream, AI-integrated Layer-1 blockchain.
               Designed for real-world scale, high performance, and a developer-first experience.
               AI entities operate as autonomous protocol primitives — monitoring, responding, and adapting within governance-approved bounds.
-            </p>
+            </motion.p>
           </motion.div>
         </div>
       </section>
@@ -112,6 +140,32 @@ export default function VisionPage() {
               </ScrollSection>
             ))}
           </div>
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section className="relative py-24">
+        <div className="gradient-divider" />
+        <div className="section-container py-20">
+          <ScrollSection>
+            <div className="glass-card rounded-3xl p-12 sm:p-16 text-center relative overflow-hidden">
+              <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse 60% 40% at 50% 50%, hsla(228, 100%, 62%, 0.06), transparent)" }} />
+              <h2 className="font-display text-3xl font-bold sm:text-4xl mb-6 relative z-10">
+                Ready to <span className="gradient-text">explore</span>?
+              </h2>
+              <p className="text-muted-foreground max-w-lg mx-auto mb-10 relative z-10">
+                Dive into the technical documentation and community discussions.
+              </p>
+              <div className="flex flex-wrap justify-center gap-4 relative z-10">
+                <Link to="/documents" className="btn-primary no-underline">
+                  Documentation <ArrowRight size={16} />
+                </Link>
+                <Link to="/socials" className="btn-ghost no-underline">
+                  Join Discord
+                </Link>
+              </div>
+            </div>
+          </ScrollSection>
         </div>
       </section>
 
