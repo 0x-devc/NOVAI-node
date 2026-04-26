@@ -116,7 +116,11 @@ fn signal_publish_lands_via_dispatcher() {
     dispatch_tx(&mut db, &signal_tx, 200).expect("signal dispatch should succeed");
 
     let signals = get_signals_by_issuer(&db, &entity_id, 0, 1_000).unwrap();
-    assert_eq!(signals.len(), 1, "signal must be queryable by canonical entity.id");
+    assert_eq!(
+        signals.len(),
+        1,
+        "signal must be queryable by canonical entity.id"
+    );
     assert_eq!(signals[0].issuer, entity_id);
     assert_eq!(signals[0].commitment_hash, [0xAAu8; 32]);
     assert_eq!(signals[0].signal_type, AiSignalType::Anomaly);
@@ -238,8 +242,7 @@ fn memory_delete_round_trip_via_dispatcher() {
         entity_pubkey,
         1,
         500,
-        encode_delete_memory_object_payload_v1(&DeleteMemoryObjectPayloadV1 { object_id })
-            .to_vec(),
+        encode_delete_memory_object_payload_v1(&DeleteMemoryObjectPayloadV1 { object_id }).to_vec(),
     );
     dispatch_tx(&mut db, &delete_tx, 101).expect("memory delete dispatch should succeed");
 
@@ -263,9 +266,18 @@ fn signal_from_non_entity_address_returns_issuer_not_found() {
     })
     .to_vec();
 
-    let tx = mk_tx(derive_addr(&stranger_pubkey), stranger_pubkey, 0, 1_000, payload);
+    let tx = mk_tx(
+        derive_addr(&stranger_pubkey),
+        stranger_pubkey,
+        0,
+        1_000,
+        payload,
+    );
     let result = dispatch_tx(&mut db, &tx, 100);
-    assert!(matches!(result, Err(ExecError::IssuerNotFound)), "got {result:?}");
+    assert!(
+        matches!(result, Err(ExecError::IssuerNotFound)),
+        "got {result:?}"
+    );
 }
 
 #[test]
@@ -293,7 +305,10 @@ fn signal_with_mismatched_payload_issuer_returns_mismatch() {
 
     let tx = mk_tx(entity_addr, entity_pubkey, 0, 1_000, payload);
     let result = dispatch_tx(&mut db, &tx, 100);
-    assert!(matches!(result, Err(ExecError::IssuerMismatch)), "got {result:?}");
+    assert!(
+        matches!(result, Err(ExecError::IssuerMismatch)),
+        "got {result:?}"
+    );
 }
 
 #[test]
@@ -306,7 +321,16 @@ fn memory_from_non_entity_address_returns_issuer_not_found() {
         data: b"unauthorized".to_vec(),
     });
 
-    let tx = mk_tx(derive_addr(&stranger_pubkey), stranger_pubkey, 0, 500, payload);
+    let tx = mk_tx(
+        derive_addr(&stranger_pubkey),
+        stranger_pubkey,
+        0,
+        500,
+        payload,
+    );
     let result = dispatch_tx(&mut db, &tx, 100);
-    assert!(matches!(result, Err(ExecError::IssuerNotFound)), "got {result:?}");
+    assert!(
+        matches!(result, Err(ExecError::IssuerNotFound)),
+        "got {result:?}"
+    );
 }

@@ -1770,8 +1770,7 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
     let primary_key = ai_signal_key(current_height, &entity.id);
     ops.push(WriteOp::Put(primary_key, commitment_bytes.clone()));
 
-    let type_key =
-        ai_signal_by_type_key(payload.signal_type.to_byte(), current_height, &entity.id);
+    let type_key = ai_signal_by_type_key(payload.signal_type.to_byte(), current_height, &entity.id);
     ops.push(WriteOp::Put(type_key, commitment_bytes.clone()));
 
     let issuer_key = ai_signal_by_issuer_key(&entity.id, current_height);
