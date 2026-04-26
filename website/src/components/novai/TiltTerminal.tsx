@@ -122,7 +122,7 @@ export default function TiltTerminal() {
                   />
                 </div>
                 <span className="text-[11px] text-muted-foreground ml-2 font-medium">
-                  novai-testnet — validator node
+                  novai-testnet - validator node
                 </span>
               </div>
 

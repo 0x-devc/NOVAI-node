@@ -10,17 +10,17 @@ const PILLARS = [
   {
     title: "Self-Adjusting",
     description:
-      "The protocol detects congestion patterns, identifies inefficiencies, and responds to emerging threats — autonomously adjusting parameters within governance-approved bounds to maintain peak performance. Not waiting for committee votes. Acting within safe limits.",
+      "The protocol detects congestion patterns, identifies inefficiencies, and responds to emerging threats - autonomously adjusting parameters within governance-approved bounds to maintain peak performance. Not waiting for committee votes. Acting within safe limits.",
   },
   {
     title: "AI-Driven Security",
     description:
-      "AI entities monitor the network in real time, scoring transaction patterns for anomalies. Suspicious activity is automatically deprioritised — not censored — with full transparency for validator operators. Proactive defense built into the protocol's DNA.",
+      "AI entities monitor the network in real time, scoring transaction patterns for anomalies. Suspicious activity is automatically deprioritised - not censored - with full transparency for validator operators. Proactive defense built into the protocol's DNA.",
   },
   {
     title: "Post-Quantum Architecture",
     description:
-      "Core architecture designed with cryptographic abstraction layers for quantum-resistant migration. Not a bolted-on afterthought — a foundational design decision that ensures NOVAInetwork can adopt post-quantum primitives as standards mature.",
+      "Core architecture designed with cryptographic abstraction layers for quantum-resistant migration. Not a bolted-on afterthought - a foundational design decision that ensures NOVAInetwork can adopt post-quantum primitives as standards mature.",
   },
   {
     title: "Ultra-Scalable",
@@ -83,7 +83,7 @@ export default function VisionPage() {
             >
               NOVAInetwork is building toward a mainstream, AI-integrated Layer-1 blockchain.
               Designed for real-world scale, high performance, and a developer-first experience.
-              AI entities operate as autonomous protocol primitives — monitoring, responding, and adapting within governance-approved bounds.
+              AI entities operate as autonomous protocol primitives - monitoring, responding, and adapting within governance-approved bounds.
             </motion.p>
           </motion.div>
         </div>

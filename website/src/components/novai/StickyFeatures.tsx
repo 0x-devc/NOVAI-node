@@ -8,7 +8,7 @@ const FEATURES = [
     icon: Brain,
     title: "AI-Aware Consensus",
     description:
-      "AI entity signals integrated directly into the consensus message format. The protocol carries intelligence as a first-class data type — enabling real-time monitoring, autonomous threat response, and adaptive network behavior.",
+      "AI entity signals integrated directly into the consensus message format. The protocol carries intelligence as a first-class data type - enabling real-time monitoring, autonomous threat response, and adaptive network behavior.",
     visual: "consensus",
   },
   {
@@ -22,7 +22,7 @@ const FEATURES = [
     icon: Zap,
     title: "Self-Adjusting Protocol",
     description:
-      "The network autonomously responds to congestion, detects inefficiencies, and deprioritises suspicious transactions — all within governance-approved bounds. Real-time adaptation with built-in safety limits.",
+      "The network autonomously responds to congestion, detects inefficiencies, and deprioritises suspicious transactions - all within governance-approved bounds. Real-time adaptation with built-in safety limits.",
     visual: "adaptive",
   },
   {
