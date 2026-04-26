@@ -1,0 +1,16 @@
+{
+  "name": "novai-sdk-ts-quick-start",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Quick-start example for @novai/sdk: connect, balance, transfer, register AI entity.",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@novai/sdk": "file:../.."
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}
