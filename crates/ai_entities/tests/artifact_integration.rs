@@ -114,7 +114,7 @@ fn acceptance_2_corrupted_content_detected_on_fetch() {
 
     // Corrupt the file directly (LocalFileStore uses {hash_hex}.bin format)
     let hash_hex = hex::encode(hash);
-    let file_path = temp_dir.path().join(format!("{}.bin", hash_hex));
+    let file_path = temp_dir.path().join(format!("{hash_hex}.bin"));
     fs::write(&file_path, b"Corrupted content!!!").unwrap();
 
     // Fetch should detect corruption
@@ -159,7 +159,7 @@ fn acceptance_2_verification_rejects_tampered_payload() {
     let correct_hash = artifact_hash(&encoded);
 
     // Tamper with the encoded data
-    let mut tampered = encoded.clone();
+    let mut tampered = encoded;
     tampered[10] ^= 0xFF; // Flip some bits
 
     let result = verify_payload_hash(&tampered, &correct_hash);

@@ -190,8 +190,7 @@ mod tests {
         let insert_result = mempool.insert(post_flag_tx, &nonce_provider);
         assert!(
             insert_result.is_ok(),
-            "CRITICAL: Transaction from flagged sender MUST be accepted. Got: {:?}",
-            insert_result
+            "CRITICAL: Transaction from flagged sender MUST be accepted. Got: {insert_result:?}"
         );
 
         // STEP 4: Verify transaction is includable in a block
@@ -522,8 +521,7 @@ mod tests {
         let flagged_ratio = flagged_sender_txs.len() as f64 / block_candidates.len() as f64;
         assert!(
             flagged_ratio >= 0.4,
-            "CRITICAL: Flagged sender's txs MUST NOT be filtered. Ratio: {}",
-            flagged_ratio
+            "CRITICAL: Flagged sender's txs MUST NOT be filtered. Ratio: {flagged_ratio}"
         );
 
         println!("✅ TEST PASSED: Block builder can include flagged sender's txs");
@@ -604,8 +602,7 @@ mod tests {
             let result = mempool.insert(tx, &nonce_provider);
             assert!(
                 result.is_ok(),
-                "CRITICAL: Mempool MUST still accept txs after signal. Got: {:?}",
-                result
+                "CRITICAL: Mempool MUST still accept txs after signal. Got: {result:?}"
             );
         }
 

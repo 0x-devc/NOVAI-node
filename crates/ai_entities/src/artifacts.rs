@@ -52,7 +52,7 @@ impl fmt::Display for ArtifactError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound(hash) => write!(f, "artifact not found: {}", hex::encode(hash)),
-            Self::IoError(msg) => write!(f, "I/O error: {}", msg),
+            Self::IoError(msg) => write!(f, "I/O error: {msg}"),
             Self::HashMismatch { expected, actual } => {
                 write!(
                     f,
@@ -61,10 +61,10 @@ impl fmt::Display for ArtifactError {
                     hex::encode(actual)
                 )
             }
-            Self::NetworkError(msg) => write!(f, "network error: {}", msg),
-            Self::InvalidHash(msg) => write!(f, "invalid hash: {}", msg),
+            Self::NetworkError(msg) => write!(f, "network error: {msg}"),
+            Self::InvalidHash(msg) => write!(f, "invalid hash: {msg}"),
             Self::TooLarge { size, max } => {
-                write!(f, "artifact too large: {} bytes (max {})", size, max)
+                write!(f, "artifact too large: {size} bytes (max {max})")
             }
             Self::InvalidUtf8 => write!(f, "invalid UTF-8 encoding"),
         }
@@ -145,9 +145,8 @@ impl LocalFileStore {
 
         // Create directory if it doesn't exist
         if !base_dir.exists() {
-            std::fs::create_dir_all(&base_dir).map_err(|e| {
-                ArtifactError::IoError(format!("failed to create directory: {}", e))
-            })?;
+            std::fs::create_dir_all(&base_dir)
+                .map_err(|e| ArtifactError::IoError(format!("failed to create directory: {e}")))?;
         }
 
         // Verify it's actually a directory
@@ -168,7 +167,7 @@ impl LocalFileStore {
         // Hash is always 32 bytes, hex encoding is always 64 chars
         // No risk of path traversal since we control the format
         let hash_hex = hex::encode(hash);
-        self.base_dir.join(format!("{}.bin", hash_hex))
+        self.base_dir.join(format!("{hash_hex}.bin"))
     }
 
     /// Validate that a filename is a valid artifact filename.
@@ -191,7 +190,7 @@ impl LocalFileStore {
 
         // Must be valid hex
         let bytes = hex::decode(hex_part)
-            .map_err(|e| ArtifactError::InvalidHash(format!("invalid hex: {}", e)))?;
+            .map_err(|e| ArtifactError::InvalidHash(format!("invalid hex: {e}")))?;
 
         // Convert to fixed array
         let mut hash = [0u8; 32];
@@ -218,10 +217,10 @@ impl ArtifactStore for LocalFileStore {
         let temp_path = self.base_dir.join(format!("{}.tmp", hex::encode(hash)));
 
         std::fs::write(&temp_path, content)
-            .map_err(|e| ArtifactError::IoError(format!("failed to write temp file: {}", e)))?;
+            .map_err(|e| ArtifactError::IoError(format!("failed to write temp file: {e}")))?;
 
         std::fs::rename(&temp_path, &path)
-            .map_err(|e| ArtifactError::IoError(format!("failed to rename temp file: {}", e)))?;
+            .map_err(|e| ArtifactError::IoError(format!("failed to rename temp file: {e}")))?;
 
         Ok(hash)
     }
@@ -234,7 +233,7 @@ impl ArtifactStore for LocalFileStore {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ArtifactError::NotFound(*hash)
             } else {
-                ArtifactError::IoError(format!("failed to read file: {}", e))
+                ArtifactError::IoError(format!("failed to read file: {e}"))
             }
         })?;
 
@@ -563,7 +562,7 @@ mod tests {
                 if i % 14 == 0 {
                     eprint!("    ");
                 }
-                eprint!("0x{:02x}, ", b);
+                eprint!("0x{b:02x}, ");
                 if (i + 1) % 14 == 0 {
                     eprintln!();
                 }

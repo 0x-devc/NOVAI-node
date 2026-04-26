@@ -67,11 +67,7 @@ fn test_block_request_response_roundtrip() {
     // Node1 handles the request (this would normally broadcast the response)
     // For this test, we'll just verify it doesn't error
     let result = node1.handle_block_request(request);
-    assert!(
-        result.is_ok(),
-        "Block request handling failed: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "Block request handling failed: {result:?}");
 
     println!("✅ Block request/response roundtrip succeeded");
 }
@@ -131,7 +127,7 @@ fn test_sync_from_peer_on_restart() {
     // Node2 is behind (committed_height = 0)
     // Node2 requests blocks from node1
     let result = node2.request_blocks_from_peer(1, 2);
-    assert!(result.is_ok(), "Block request failed: {:?}", result);
+    assert!(result.is_ok(), "Block request failed: {result:?}");
 
     // Set node2's SMT root to match the first synced block's state_root
     // (C-01 fix: synced blocks are now verified against local state root)
@@ -146,16 +142,12 @@ fn test_sync_from_peer_on_restart() {
         responder: addr1,
         request_start: 1,
         request_end: 2,
-        blocks: vec![block1.clone(), block2.clone()],
+        blocks: vec![block1, block2],
     };
 
     // Node2 handles the response
     let result = node2.handle_block_response(response);
-    assert!(
-        result.is_ok(),
-        "Block response handling failed: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "Block response handling failed: {result:?}");
 
     // Verify node2 has caught up
     {
@@ -225,7 +217,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
     let node = ConsensusNode::new(
         validator_keys[3].clone(),
         validator_set.clone(),
-        validator_pubkeys.clone(),
+        validator_pubkeys,
         1000,
     );
 
@@ -244,7 +236,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
     {
         let mut state = node.state.lock().unwrap();
         // Cache block 1 (as if we voted on it via handle_proposal)
-        state.cache_block(block1.clone()).unwrap();
+        state.cache_block(block1).unwrap();
         // Crucially: highest_qc is still None — the QC broadcast hasn't arrived
         assert!(state.highest_qc.is_none(), "Precondition: no QC yet");
     }
@@ -291,8 +283,8 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
     };
 
     let proposal = novai_consensus_types::Proposal {
-        block: block2.clone(),
-        justify_qc: justify_qc.clone(),
+        block: block2,
+        justify_qc,
     };
 
     // Sign proposal with validator 1's key (the leader for height 2)

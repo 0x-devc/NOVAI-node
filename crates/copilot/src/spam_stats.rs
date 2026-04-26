@@ -347,11 +347,11 @@ mod tests {
 
         // 10th percentile should be around 10-20
         let p10 = stats.fee_percentile(10);
-        assert!(p10 <= 20, "p10={}", p10);
+        assert!(p10 <= 20, "p10={p10}");
 
         // Median should be around 50-60
         let median = stats.median_fee();
-        assert!((40..=60).contains(&median), "median={}", median);
+        assert!((40..=60).contains(&median), "median={median}");
     }
 
     #[test]

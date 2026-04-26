@@ -259,9 +259,9 @@ fn commit_rule_3_chain() {
     let hash3 = hash_block_v1(&block3).unwrap();
 
     // Cache blocks
-    state.cache_block(block1.clone()).unwrap();
-    state.cache_block(block2.clone()).unwrap();
-    state.cache_block(block3.clone()).unwrap();
+    state.cache_block(block1).unwrap();
+    state.cache_block(block2).unwrap();
+    state.cache_block(block3).unwrap();
 
     // QC at height 1 - no commits yet (need height >= 2 for 3-chain)
     let qc1 = novai_consensus_types::QC {
@@ -410,7 +410,7 @@ fn highest_qc_updated() {
         block_hash: hash2,
         votes: vec![],
     };
-    let _ = state.cache_qc_and_check_commit(qc2.clone(), &db);
+    let _ = state.cache_qc_and_check_commit(qc2, &db);
     assert_eq!(state.highest_qc.as_ref().unwrap().height, 2);
 
     // Add QC at height 1 (lower) - should NOT update
@@ -551,7 +551,7 @@ fn persistence_roundtrip() {
     assert_eq!(loaded_height, 5);
 
     // Persist and load highest QC
-    state2.highest_qc = Some(qc.clone());
+    state2.highest_qc = Some(qc);
     state2.persist_highest_qc(&mut db).unwrap();
 
     let loaded_qc = ConsensusState::load_highest_qc(&db).unwrap();

@@ -312,8 +312,8 @@ fn test_excessive_byzantine_validators() {
     let byzantine = vec![0, 1];
     let honest = vec![2, 3, 4];
 
-    println!("Byzantine: {:?}", byzantine);
-    println!("Honest: {:?}", honest);
+    println!("Byzantine: {byzantine:?}");
+    println!("Honest: {honest:?}");
 
     // Verify counts
     assert_eq!(byzantine.len(), 2);
@@ -415,8 +415,7 @@ fn test_byzantine_safety_property() {
     for (height, blocks) in &committed_blocks {
         assert!(
             blocks.len() <= 1,
-            "Safety violation: multiple blocks at height {}",
-            height
+            "Safety violation: multiple blocks at height {height}"
         );
     }
 

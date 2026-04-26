@@ -111,7 +111,7 @@ fn test_restart_and_catchup() {
     println!("Phase 1: Validator 0 crashed");
 
     let crashed_height = controller.validators[0].committed_height();
-    println!("Crashed at height: {}", crashed_height);
+    println!("Crashed at height: {crashed_height}");
 
     // Simulate other validators progressing
     // (In real test, would run consensus loop and commit blocks)
@@ -167,8 +167,7 @@ fn test_multiple_crashes() {
     for i in 0..3 {
         assert!(
             *controller.validators[i].is_crashed.lock().unwrap(),
-            "Validator {} should be crashed",
-            i
+            "Validator {i} should be crashed"
         );
     }
 
@@ -280,7 +279,7 @@ fn test_persistent_state_recovery() {
     // Simulate: validator 0 has committed to height=5
     // (In real test, would run consensus and actually commit blocks)
     let initial_height = controller.validators[0].committed_height();
-    println!("Initial committed height: {}", initial_height);
+    println!("Initial committed height: {initial_height}");
 
     // Crash
     controller.crash_validator(0).unwrap();
@@ -341,8 +340,7 @@ fn test_cascading_crashes() {
     for i in 0..3 {
         assert!(
             *controller.validators[i].is_crashed.lock().unwrap(),
-            "Validator {} should be crashed",
-            i
+            "Validator {i} should be crashed"
         );
     }
 

@@ -539,7 +539,7 @@ fn comprehensive_timelock_boundary_test() {
         let mut db_copy = db.clone();
         let tx = create_tx(entity_id, 1, 100, execute_payload.clone());
         let result = apply_governance_execute_tx(&mut db_copy, &tx, h);
-        assert!(result.is_ok(), "Height {h}: Expected Ok, got {result:?}",);
+        assert!(result.is_ok(), "Height {h}: Expected Ok, got {result:?}");
     }
 
     // At and after expiry (sample points)

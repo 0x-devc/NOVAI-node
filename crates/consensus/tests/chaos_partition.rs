@@ -40,7 +40,7 @@ fn test_minority_partition_cannot_progress() {
     // (In real test, would run consensus loop here)
     let baseline_height = 0;
 
-    println!("Baseline height: {}", baseline_height);
+    println!("Baseline height: {baseline_height}");
 
     // Partition: 2 validators (minority) vs 3 validators (majority)
     controller
@@ -58,7 +58,7 @@ fn test_minority_partition_cannot_progress() {
         controller.validators[0].committed_height(),
         controller.validators[1].committed_height(),
     ];
-    println!("Minority heights: {:?}", minority_heights);
+    println!("Minority heights: {minority_heights:?}");
 
     // In a real scenario with active consensus:
     // assert_eq!(controller.validators[0].committed_height(), baseline_height);
@@ -299,9 +299,7 @@ fn test_three_way_partition() {
             if i != j {
                 assert!(
                     controller.network.can_communicate(i, j).unwrap(),
-                    "Validators {} and {} should communicate after heal",
-                    i,
-                    j
+                    "Validators {i} and {j} should communicate after heal"
                 );
             }
         }
@@ -452,7 +450,7 @@ fn test_safety_property_no_conflicting_commits() {
 
     for (partition, desc) in scenarios {
         let (controller, _, _) = setup_chaos_testnet(5, 11111);
-        println!("Testing partition: {}", desc);
+        println!("Testing partition: {desc}");
 
         controller.inject_partition(partition).unwrap();
 

@@ -144,7 +144,7 @@ fn verify_signal_anomaly() {
     write_or_compare_hash(&path, &commitment.commitment_hash, "Anomaly");
 
     // Step 5: Verify signature independence
-    let mut signal2 = signal.clone();
+    let mut signal2 = signal;
     signal2.signature = [0xFF; 64]; // Different signature
     let commitment2 = signal2.to_commitment();
     assert_eq!(
@@ -453,8 +453,8 @@ fn verify_commitment_determinism() {
         let hash2 = signal.compute_commitment_hash();
         let hash3 = signal.compute_commitment_hash();
 
-        assert_eq!(hash1, hash2, "{:?} hash not deterministic", signal_type);
-        assert_eq!(hash2, hash3, "{:?} hash not deterministic", signal_type);
+        assert_eq!(hash1, hash2, "{signal_type:?} hash not deterministic");
+        assert_eq!(hash2, hash3, "{signal_type:?} hash not deterministic");
     }
 }
 

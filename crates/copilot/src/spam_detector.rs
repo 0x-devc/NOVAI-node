@@ -146,10 +146,7 @@ impl SpamPatternKind {
                 current_size,
                 baseline_size,
             } => {
-                format!(
-                    "Mempool spike: {} txs (baseline: {})",
-                    current_size, baseline_size
-                )
+                format!("Mempool spike: {current_size} txs (baseline: {baseline_size})")
             }
             Self::LowFeeFlood {
                 sender,
@@ -662,7 +659,7 @@ mod tests {
 
         // At 60% rejection (10% above 50% threshold)
         let c1 = detector.compute_confidence(60, 50);
-        assert!((100..=120).contains(&c1), "c1={}", c1);
+        assert!((100..=120).contains(&c1), "c1={c1}");
 
         // At 90% rejection (40% above threshold)
         let c2 = detector.compute_confidence(90, 50);

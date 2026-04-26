@@ -257,10 +257,10 @@ impl ConsensusState {
         // Read current state root from DB
         let state_root = if let Some(bytes) = state_db
             .get(novai_state::KEY_SMT_ROOT)
-            .map_err(|e| ConsensusError::StateError(format!("{:?}", e)))?
+            .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
         {
             novai_state::decode_smt_root_v1(&bytes)
-                .map_err(|e| ConsensusError::StateError(format!("{:?}", e)))?
+                .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
         } else {
             [0u8; 32] // Genesis root
         };
@@ -360,10 +360,10 @@ impl ConsensusState {
         // Verify state root matches current state
         let current_root = if let Some(bytes) = state_db
             .get(novai_state::KEY_SMT_ROOT)
-            .map_err(|e| ConsensusError::StateError(format!("{:?}", e)))?
+            .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
         {
             novai_state::decode_smt_root_v1(&bytes)
-                .map_err(|e| ConsensusError::StateError(format!("{:?}", e)))?
+                .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
         } else {
             [0u8; 32]
         };
@@ -378,7 +378,7 @@ impl ConsensusState {
         for tx in &block.txs {
             // 1. Verify address matches pubkey
             let pubkey = novai_crypto::pubkey_from_bytes(&tx.pubkey)
-                .map_err(|e| ConsensusError::CryptoError(format!("{:?}", e)))?;
+                .map_err(|e| ConsensusError::CryptoError(format!("{e:?}")))?;
 
             let expected_addr = novai_crypto::address_from_pubkey(&pubkey);
             if tx.from != expected_addr {
@@ -390,7 +390,7 @@ impl ConsensusState {
 
             // 2. Verify signature
             if !novai_crypto::verify_tx_v1(&pubkey, tx)
-                .map_err(|e| ConsensusError::CryptoError(format!("{:?}", e)))?
+                .map_err(|e| ConsensusError::CryptoError(format!("{e:?}")))?
             {
                 return Err(ConsensusError::InvalidBlock(format!(
                     "Invalid transaction signature for tx from {:?}",
@@ -413,7 +413,7 @@ impl ConsensusState {
     ) -> Result<Vote, ConsensusError> {
         // Compute block hash
         let block_hash = novai_consensus_types::codec::hash_block_v1(block)
-            .map_err(|e| ConsensusError::CodecError(format!("{:?}", e)))?;
+            .map_err(|e| ConsensusError::CodecError(format!("{e:?}")))?;
 
         // Create unsigned vote struct
         let unsigned_vote = Vote {
@@ -728,7 +728,7 @@ impl ConsensusState {
         // Encode unsigned bytes
         let unsigned_bytes =
             novai_consensus_types::codec::encode_timeout_v1_unsigned(&unsigned_timeout)
-                .map_err(|e| ConsensusError::CodecError(format!("{:?}", e)))?;
+                .map_err(|e| ConsensusError::CodecError(format!("{e:?}")))?;
 
         // Sign with domain separation
         let domain_tag = b"NOVAI_TIMEOUT_V1";
@@ -808,7 +808,7 @@ impl ConsensusState {
 
         let unsigned_bytes =
             novai_consensus_types::codec::encode_timeout_v1_unsigned(&unsigned_timeout)
-                .map_err(|e| ConsensusError::CodecError(format!("{:?}", e)))?;
+                .map_err(|e| ConsensusError::CodecError(format!("{e:?}")))?;
 
         // Verify signature
         let domain_tag = b"NOVAI_TIMEOUT_V1";
@@ -905,7 +905,7 @@ impl ConsensusState {
 
         // H-01: Hard cap on pending_timeouts to prevent memory exhaustion.
         // 10,000 entries is ~2MB and far beyond normal operation.
-        let total_entries: usize = self.pending_timeouts.values().map(|v| v.len()).sum();
+        let total_entries: usize = self.pending_timeouts.values().map(std::vec::Vec::len).sum();
         if total_entries >= 10_000 {
             return Err(ConsensusError::InvalidVote(
                 "pending_timeouts at capacity".to_string(),
@@ -1039,7 +1039,7 @@ impl ConsensusState {
     /// Returns error if the block cannot be encoded for hashing.
     pub fn cache_block(&mut self, block: Block) -> Result<(), ConsensusError> {
         let hash = novai_consensus_types::codec::hash_block_v1(&block)
-            .map_err(|e| ConsensusError::CodecError(format!("block hash failed: {:?}", e)))?;
+            .map_err(|e| ConsensusError::CodecError(format!("block hash failed: {e:?}")))?;
         tracing::debug!(
             height = block.height,
             round = block.round,
@@ -1106,7 +1106,8 @@ impl ConsensusState {
             let new_view_height = qc.height;
 
             if new_view_height > old_view_height {
-                let pending_vote_count: usize = self.pending_votes.values().map(|v| v.len()).sum();
+                let pending_vote_count: usize =
+                    self.pending_votes.values().map(std::vec::Vec::len).sum();
                 tracing::debug!(
                     old_view_height,
                     new_view_height,
@@ -1173,22 +1174,19 @@ impl ConsensusState {
             let loaded = Self::load_block(db, qc_height)
                 .map_err(|e| {
                     ConsensusError::StateError(format!(
-                        "DB fallback failed for certified block at height {}: {:?}",
-                        qc_height, e
+                        "DB fallback failed for certified block at height {qc_height}: {e:?}"
                     ))
                 })?
                 .ok_or_else(|| {
                     ConsensusError::StateError(format!(
-                        "Missing certified block for QC at height {}",
-                        qc_height,
+                        "Missing certified block for QC at height {qc_height}",
                     ))
                 })?;
             let loaded_hash = novai_consensus_types::codec::hash_block_v1(&loaded)
-                .map_err(|e| ConsensusError::CodecError(format!("hash failed: {:?}", e)))?;
+                .map_err(|e| ConsensusError::CodecError(format!("hash failed: {e:?}")))?;
             if loaded_hash != qc.block_hash {
                 return Err(ConsensusError::StateError(format!(
-                    "DB block at height {} has wrong hash for QC",
-                    qc_height
+                    "DB block at height {qc_height} has wrong hash for QC"
                 )));
             }
             self.cache_block(loaded.clone())?;
@@ -1214,22 +1212,19 @@ impl ConsensusState {
                 let loaded = Self::load_block(db, expected_height)
                     .map_err(|e| {
                         ConsensusError::StateError(format!(
-                            "DB fallback at height {}: {:?}",
-                            expected_height, e
+                            "DB fallback at height {expected_height}: {e:?}"
                         ))
                     })?
                     .ok_or_else(|| {
                         ConsensusError::StateError(format!(
-                            "Missing block at height {} (chain broken)",
-                            expected_height
+                            "Missing block at height {expected_height} (chain broken)"
                         ))
                     })?;
                 let loaded_hash = novai_consensus_types::codec::hash_block_v1(&loaded)
-                    .map_err(|e| ConsensusError::CodecError(format!("hash failed: {:?}", e)))?;
+                    .map_err(|e| ConsensusError::CodecError(format!("hash failed: {e:?}")))?;
                 if loaded_hash != current_hash {
                     return Err(ConsensusError::StateError(format!(
-                        "DB block at height {} has wrong hash",
-                        expected_height
+                        "DB block at height {expected_height} has wrong hash"
                     )));
                 }
                 self.cache_block(loaded.clone())?;
@@ -1479,9 +1474,9 @@ impl ConsensusState {
     {
         let key = block_key(block.height);
         let value = encode_block_v1(block)
-            .map_err(|e| ConsensusError::CodecError(format!("Failed to encode block: {:?}", e)))?;
+            .map_err(|e| ConsensusError::CodecError(format!("Failed to encode block: {e:?}")))?;
         db.put(&key, &value)
-            .map_err(|e| ConsensusError::StateError(format!("Failed to persist block: {:?}", e)))
+            .map_err(|e| ConsensusError::StateError(format!("Failed to persist block: {e:?}")))
     }
 
     /// Persist a QC to the database.
@@ -1495,9 +1490,9 @@ impl ConsensusState {
     {
         let key = qc_key(qc.height);
         let value = encode_qc_v1(qc)
-            .map_err(|e| ConsensusError::CodecError(format!("Failed to encode QC: {:?}", e)))?;
+            .map_err(|e| ConsensusError::CodecError(format!("Failed to encode QC: {e:?}")))?;
         db.put(&key, &value)
-            .map_err(|e| ConsensusError::StateError(format!("Failed to persist QC: {:?}", e)))
+            .map_err(|e| ConsensusError::StateError(format!("Failed to persist QC: {e:?}")))
     }
 
     /// Persist committed height to the database.
@@ -1511,7 +1506,7 @@ impl ConsensusState {
     {
         let value = self.committed_height.to_be_bytes().to_vec();
         db.put(KEY_COMMITTED_HEIGHT, &value).map_err(|e| {
-            ConsensusError::StateError(format!("Failed to persist committed height: {:?}", e))
+            ConsensusError::StateError(format!("Failed to persist committed height: {e:?}"))
         })
     }
 
@@ -1526,10 +1521,10 @@ impl ConsensusState {
     {
         if let Some(ref qc) = self.highest_qc {
             let value = encode_qc_v1(qc).map_err(|e| {
-                ConsensusError::CodecError(format!("Failed to encode highest QC: {:?}", e))
+                ConsensusError::CodecError(format!("Failed to encode highest QC: {e:?}"))
             })?;
             db.put(KEY_HIGHEST_QC, &value).map_err(|e| {
-                ConsensusError::StateError(format!("Failed to persist highest QC: {:?}", e))
+                ConsensusError::StateError(format!("Failed to persist highest QC: {e:?}"))
             })?;
         }
         Ok(())
@@ -1561,7 +1556,7 @@ impl ConsensusState {
         for block in blocks {
             let key = block_key(block.height);
             let value = encode_block_v1(block).map_err(|e| {
-                ConsensusError::CodecError(format!("Failed to encode block: {:?}", e))
+                ConsensusError::CodecError(format!("Failed to encode block: {e:?}"))
             })?;
             ops.push(WriteOp::Put(key, value));
         }
@@ -1569,7 +1564,7 @@ impl ConsensusState {
         // 2. QC that triggered commit
         let qc_k = qc_key(qc.height);
         let qc_v = encode_qc_v1(qc)
-            .map_err(|e| ConsensusError::CodecError(format!("Failed to encode QC: {:?}", e)))?;
+            .map_err(|e| ConsensusError::CodecError(format!("Failed to encode QC: {e:?}")))?;
         ops.push(WriteOp::Put(qc_k, qc_v));
 
         // 3. Committed height
@@ -1579,7 +1574,7 @@ impl ConsensusState {
         // 4. Highest QC (if present)
         if let Some(ref hqc) = self.highest_qc {
             let hqc_v = encode_qc_v1(hqc).map_err(|e| {
-                ConsensusError::CodecError(format!("Failed to encode highest QC: {:?}", e))
+                ConsensusError::CodecError(format!("Failed to encode highest QC: {e:?}"))
             })?;
             ops.push(WriteOp::Put(KEY_HIGHEST_QC.to_vec(), hqc_v));
         }
@@ -1609,9 +1604,8 @@ impl ConsensusState {
         }
 
         // Apply all writes atomically
-        db.apply_batch(&ops).map_err(|e| {
-            ConsensusError::StateError(format!("Atomic batch write failed: {:?}", e))
-        })?;
+        db.apply_batch(&ops)
+            .map_err(|e| ConsensusError::StateError(format!("Atomic batch write failed: {e:?}")))?;
 
         Ok(())
     }
@@ -1637,8 +1631,7 @@ impl ConsensusState {
             }
             Ok(None) => Ok(0), // No committed height yet
             Err(e) => Err(ConsensusError::StateError(format!(
-                "Failed to load committed height: {:?}",
-                e
+                "Failed to load committed height: {e:?}"
             ))),
         }
     }
@@ -1655,14 +1648,13 @@ impl ConsensusState {
         match db.get(KEY_HIGHEST_QC) {
             Ok(Some(bytes)) => {
                 let qc = decode_qc_v1(&bytes).map_err(|e| {
-                    ConsensusError::CodecError(format!("Failed to decode highest QC: {:?}", e))
+                    ConsensusError::CodecError(format!("Failed to decode highest QC: {e:?}"))
                 })?;
                 Ok(Some(qc))
             }
             Ok(None) => Ok(None),
             Err(e) => Err(ConsensusError::StateError(format!(
-                "Failed to load highest QC: {:?}",
-                e
+                "Failed to load highest QC: {e:?}"
             ))),
         }
     }
@@ -1681,14 +1673,13 @@ impl ConsensusState {
             Ok(Some(bytes)) => {
                 let mut slice = bytes.as_slice();
                 let block = decode_block_v1(&mut slice).map_err(|e| {
-                    ConsensusError::CodecError(format!("Failed to decode block: {:?}", e))
+                    ConsensusError::CodecError(format!("Failed to decode block: {e:?}"))
                 })?;
                 Ok(Some(block))
             }
             Ok(None) => Ok(None),
             Err(e) => Err(ConsensusError::StateError(format!(
-                "Failed to load block: {:?}",
-                e
+                "Failed to load block: {e:?}"
             ))),
         }
     }
@@ -1717,7 +1708,7 @@ impl ConsensusState {
 
         for height in start_height..=end_height {
             let block = Self::load_block(db, height)?.ok_or_else(|| {
-                ConsensusError::StateError(format!("Missing block at height {}", height))
+                ConsensusError::StateError(format!("Missing block at height {height}"))
             })?;
             blocks.push(block);
         }
@@ -1767,7 +1758,7 @@ impl ConsensusState {
 
             // Parent hash must match previous block's hash
             let prev_hash = novai_consensus_types::codec::hash_block_v1(prev)
-                .map_err(|e| ConsensusError::CodecError(format!("{:?}", e)))?;
+                .map_err(|e| ConsensusError::CodecError(format!("{e:?}")))?;
 
             if curr.parent_hash != prev_hash {
                 return Err(ConsensusError::InvalidBlock(format!(
@@ -1826,7 +1817,7 @@ impl ConsensusState {
                 ))
             })?;
             novai_consensus_types::codec::hash_block_v1(&parent_block)
-                .map_err(|e| ConsensusError::CodecError(format!("{:?}", e)))?
+                .map_err(|e| ConsensusError::CodecError(format!("{e:?}")))?
         };
 
         // Verify chain integrity
@@ -2708,11 +2699,10 @@ mod tests {
         };
 
         let err = state.verify_block(&block, &db).unwrap_err();
-        let msg = format!("{:?}", err);
+        let msg = format!("{err:?}");
         assert!(
             msg.contains("tx encoded size") && msg.contains("exceeds limit"),
-            "expected oversized-tx error, got: {}",
-            msg
+            "expected oversized-tx error, got: {msg}"
         );
     }
 
@@ -2739,11 +2729,10 @@ mod tests {
         };
 
         let err = state.verify_block(&block, &db).unwrap_err();
-        let msg = format!("{:?}", err);
+        let msg = format!("{err:?}");
         assert!(
             msg.contains("txs") && msg.contains("exceeds limit"),
-            "expected too-many-txs error, got: {}",
-            msg
+            "expected too-many-txs error, got: {msg}"
         );
     }
 
@@ -2783,11 +2772,10 @@ mod tests {
         };
 
         let err = state.verify_block(&block, &db).unwrap_err();
-        let msg = format!("{:?}", err);
+        let msg = format!("{err:?}");
         assert!(
             msg.contains("block payload") && msg.contains("exceeds limit"),
-            "expected oversized-block error, got: {}",
-            msg
+            "expected oversized-block error, got: {msg}"
         );
     }
 
@@ -2817,11 +2805,10 @@ mod tests {
         match &result {
             Ok(()) => {} // surprisingly passed everything — fine
             Err(e) => {
-                let msg = format!("{:?}", e);
+                let msg = format!("{e:?}");
                 assert!(
                     !msg.contains("exceeds limit"),
-                    "block within limits should not trigger size error, got: {}",
-                    msg
+                    "block within limits should not trigger size error, got: {msg}"
                 );
             }
         }

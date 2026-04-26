@@ -396,10 +396,7 @@ async fn submit_with_retry(
                 mempool_full_retries += 1;
                 if mempool_full_retries >= MAX_MEMPOOL_FULL_RETRIES {
                     let latency = start_time.elapsed();
-                    let reason = format!(
-                        "MempoolFull after {} retries: {}",
-                        mempool_full_retries, msg
-                    );
+                    let reason = format!("MempoolFull after {mempool_full_retries} retries: {msg}");
                     let _ = metric_tx.send(MetricEvent::Failed {
                         txid,
                         error: reason.clone(),
@@ -494,7 +491,7 @@ async fn submit_once(
     tx: &TxV1,
 ) -> Result<TxId, SubmitError> {
     // Encode transaction
-    let tx_bytes = encode_tx_v1_signed(tx).map_err(|e| SubmitError::Codec(format!("{:?}", e)))?;
+    let tx_bytes = encode_tx_v1_signed(tx).map_err(|e| SubmitError::Codec(format!("{e:?}")))?;
     let tx_hex = hex::encode(&tx_bytes);
 
     // Build RPC request
@@ -543,7 +540,7 @@ async fn submit_once(
         .ok_or_else(|| SubmitError::Parse("Missing result field".to_string()))?;
 
     let txid_bytes = hex::decode(&result.txid)
-        .map_err(|e| SubmitError::Parse(format!("Invalid txid hex: {}", e)))?;
+        .map_err(|e| SubmitError::Parse(format!("Invalid txid hex: {e}")))?;
 
     if txid_bytes.len() != 32 {
         return Err(SubmitError::Parse(format!(
@@ -639,13 +636,13 @@ enum SubmitError {
 impl std::fmt::Display for SubmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SubmitError::Codec(s) => write!(f, "Codec error: {}", s),
-            SubmitError::Network(s) => write!(f, "Network error: {}", s),
-            SubmitError::Parse(s) => write!(f, "Parse error: {}", s),
-            SubmitError::Rpc(code, msg) => write!(f, "RPC error {}: {}", code, msg),
-            SubmitError::MempoolFull(msg) => write!(f, "Mempool full: {}", msg),
-            SubmitError::NonceTooLow(msg) => write!(f, "Nonce too low: {}", msg),
-            SubmitError::SenderLimitExceeded(msg) => write!(f, "Sender limit exceeded: {}", msg),
+            SubmitError::Codec(s) => write!(f, "Codec error: {s}"),
+            SubmitError::Network(s) => write!(f, "Network error: {s}"),
+            SubmitError::Parse(s) => write!(f, "Parse error: {s}"),
+            SubmitError::Rpc(code, msg) => write!(f, "RPC error {code}: {msg}"),
+            SubmitError::MempoolFull(msg) => write!(f, "Mempool full: {msg}"),
+            SubmitError::NonceTooLow(msg) => write!(f, "Nonce too low: {msg}"),
+            SubmitError::SenderLimitExceeded(msg) => write!(f, "Sender limit exceeded: {msg}"),
             SubmitError::RateLimited => write!(f, "Rate limited (HTTP 429)"),
         }
     }
@@ -754,13 +751,13 @@ mod tests {
     #[test]
     fn mempool_full_error_display() {
         let err = SubmitError::MempoolFull("at capacity".to_string());
-        assert_eq!(format!("{}", err), "Mempool full: at capacity");
+        assert_eq!(format!("{err}"), "Mempool full: at capacity");
     }
 
     #[test]
     fn rate_limited_error_display() {
         let err = SubmitError::RateLimited;
-        assert_eq!(format!("{}", err), "Rate limited (HTTP 429)");
+        assert_eq!(format!("{err}"), "Rate limited (HTTP 429)");
     }
 
     #[tokio::test]

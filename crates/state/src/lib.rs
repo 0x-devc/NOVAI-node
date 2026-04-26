@@ -792,7 +792,7 @@ mod tests {
             for chunk in final_root.chunks(8) {
                 eprint!("    ");
                 for b in chunk {
-                    eprint!("0x{:02x}, ", b);
+                    eprint!("0x{b:02x}, ");
                 }
                 eprintln!();
             }
@@ -863,7 +863,7 @@ mod tests {
         for count in [0u32, 1, 50, 100, 1000, u32::MAX] {
             let encoded = encode_memory_count(count);
             let decoded = decode_memory_count(&encoded);
-            assert_eq!(count, decoded, "Count {} roundtrip failed", count);
+            assert_eq!(count, decoded, "Count {count} roundtrip failed");
         }
     }
 

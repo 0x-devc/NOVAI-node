@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn memory_value_inline_encode_decode() {
         let data = vec![0x01, 0x02, 0x03];
-        let value = MemoryValue::Inline(data.clone());
+        let value = MemoryValue::Inline(data);
 
         let encoded = value.encode();
         let decoded = MemoryValue::decode(&encoded).unwrap();

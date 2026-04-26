@@ -361,7 +361,7 @@ pub fn start_rpc_server(
             // Per-IP rate limiting: sliding 1-second window
             let client_ip = request
                 .remote_addr()
-                .map(|a| a.ip())
+                .map(std::net::SocketAddr::ip)
                 .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
             if rpc_rate_limited(&mut per_ip_limits, client_ip, &mut last_cleanup) {
                 if let Err(e) = request.respond(
@@ -379,7 +379,7 @@ pub fn start_rpc_server(
                 .read_to_string(&mut body)
             {
                 if let Err(re) = request.respond(
-                    Response::from_string(format!("Failed to read request: {}", e))
+                    Response::from_string(format!("Failed to read request: {e}"))
                         .with_status_code(StatusCode(400)),
                 ) {
                     tracing::warn!(%re, "Failed to send 400 response");
@@ -404,7 +404,7 @@ pub fn start_rpc_server(
                         jsonrpc: "2.0",
                         error: RpcError {
                             code: -32700,
-                            message: format!("Parse error: {}", e),
+                            message: format!("Parse error: {e}"),
                         },
                         id: serde_json::Value::Null,
                     };
@@ -562,7 +562,7 @@ pub fn start_rpc_server_with_state(
             // Per-IP rate limiting: sliding 1-second window
             let client_ip = request
                 .remote_addr()
-                .map(|a| a.ip())
+                .map(std::net::SocketAddr::ip)
                 .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
             if rpc_rate_limited(&mut per_ip_limits, client_ip, &mut last_cleanup) {
                 if let Err(e) = request.respond(
@@ -580,7 +580,7 @@ pub fn start_rpc_server_with_state(
                 .read_to_string(&mut body)
             {
                 if let Err(re) = request.respond(
-                    Response::from_string(format!("Failed to read request: {}", e))
+                    Response::from_string(format!("Failed to read request: {e}"))
                         .with_status_code(StatusCode(400)),
                 ) {
                     tracing::warn!(%re, "Failed to send 400 response");
@@ -605,7 +605,7 @@ pub fn start_rpc_server_with_state(
                         jsonrpc: "2.0",
                         error: RpcError {
                             code: -32700,
-                            message: format!("Parse error: {}", e),
+                            message: format!("Parse error: {e}"),
                         },
                         id: serde_json::Value::Null,
                     };
@@ -913,7 +913,7 @@ fn handle_submit_tx(
     let params: SubmitTxParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     // Reject oversized hex strings before allocating for decode.
@@ -932,7 +932,7 @@ fn handle_submit_tx(
     // Decode hex transaction
     let tx_bytes = hex::decode(&params.tx).map_err(|e| RpcError {
         code: -32000,
-        message: format!("Invalid hex encoding: {}", e),
+        message: format!("Invalid hex encoding: {e}"),
     })?;
 
     // Decode transaction
@@ -1036,12 +1036,12 @@ fn handle_get_nonce(
     let params: GetNonceParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     let addr_bytes = hex::decode(&params.address).map_err(|e| RpcError {
         code: -32602,
-        message: format!("Invalid address hex: {}", e),
+        message: format!("Invalid address hex: {e}"),
     })?;
     if addr_bytes.len() != 32 {
         return Err(RpcError {
@@ -1068,7 +1068,7 @@ fn handle_get_signals_by_height(
     let params: GetSignalsByHeightParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     let db = db.lock_or_recover();
@@ -1093,15 +1093,14 @@ fn handle_get_signals_by_issuer(
     let params: GetSignalsByIssuerParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
         return Err(RpcError {
             code: -32602,
             message: format!(
-                "Height range too large: max {} heights per query",
-                MAX_SIGNAL_QUERY_RANGE
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
             ),
         });
     }
@@ -1109,7 +1108,7 @@ fn handle_get_signals_by_issuer(
     // Decode issuer hex
     let issuer_bytes = hex::decode(&params.issuer).map_err(|e| RpcError {
         code: -32602,
-        message: format!("Invalid issuer hex: {}", e),
+        message: format!("Invalid issuer hex: {e}"),
     })?;
     if issuer_bytes.len() != 32 {
         return Err(RpcError {
@@ -1143,15 +1142,14 @@ fn handle_get_signals_by_type(
     let params: GetSignalsByTypeParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
         return Err(RpcError {
             code: -32602,
             message: format!(
-                "Height range too large: max {} heights per query",
-                MAX_SIGNAL_QUERY_RANGE
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
             ),
         });
     }
@@ -1189,7 +1187,7 @@ fn handle_get_signals_by_type(
 fn parse_hex32(hex_str: &str, field_name: &str) -> Result<[u8; 32], RpcError> {
     let bytes = hex::decode(hex_str).map_err(|e| RpcError {
         code: -32602,
-        message: format!("Invalid {} hex: {}", field_name, e),
+        message: format!("Invalid {field_name} hex: {e}"),
     })?;
     if bytes.len() != 32 {
         return Err(RpcError {
@@ -1210,7 +1208,7 @@ fn handle_get_balance(
     let params: GetBalanceParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     let address = parse_hex32(&params.address, "address")?;
@@ -1234,7 +1232,7 @@ fn handle_get_ai_entity(
     let params: GetAiEntityParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
@@ -1271,7 +1269,7 @@ fn handle_get_memory_objects(
     let params: GetMemoryObjectsParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
@@ -1342,7 +1340,7 @@ fn handle_faucet(
     let params: FaucetParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     let to_address = parse_hex32(&params.address, "address")?;
@@ -1355,7 +1353,7 @@ fn handle_faucet(
             let remaining = FAUCET_GLOBAL_COOLDOWN_SECS - elapsed.as_secs();
             return Err(RpcError {
                 code: -32000,
-                message: format!("Faucet global cooldown: try again in {} seconds", remaining),
+                message: format!("Faucet global cooldown: try again in {remaining} seconds"),
             });
         }
     }
@@ -1368,8 +1366,7 @@ fn handle_faucet(
             return Err(RpcError {
                 code: -32000,
                 message: format!(
-                    "Faucet rate limit: address already received tokens. Try again in {} seconds",
-                    remaining
+                    "Faucet rate limit: address already received tokens. Try again in {remaining} seconds"
                 ),
             });
         }
@@ -1450,7 +1447,7 @@ fn handle_get_transaction(
     let params: GetTxParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     let txid = parse_hex32(&params.txid, "txid")?;
@@ -1469,13 +1466,13 @@ fn handle_get_transaction(
         })?
         .ok_or_else(|| RpcError {
             code: -32002,
-            message: format!("Block at height {} not found (pruned?)", height),
+            message: format!("Block at height {height} not found (pruned?)"),
         })?;
     drop(db_guard);
 
     let tx = block.txs.get(tx_index).ok_or_else(|| RpcError {
         code: -32002,
-        message: format!("Tx index {} out of range in block {}", tx_index, height),
+        message: format!("Tx index {tx_index} out of range in block {height}"),
     })?;
 
     Ok(serde_json::to_value(GetTxResult {
@@ -1498,7 +1495,7 @@ fn handle_get_block_by_height(
     let params: GetBlockByHeightParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     // M-03: Reject queries beyond committed height to avoid expensive failed lookups
@@ -1552,7 +1549,7 @@ fn handle_get_block_by_hash(
     let params: GetBlockByHashParams =
         serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
             code: -32602,
-            message: format!("Invalid params: {}", e),
+            message: format!("Invalid params: {e}"),
         })?;
 
     let hash = parse_hex32(&params.hash, "hash")?;

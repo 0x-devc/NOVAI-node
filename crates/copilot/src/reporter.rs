@@ -105,8 +105,7 @@ impl AnomalyReporter {
                 "Vote latency monitoring".to_string(),
                 encode_vote_delay_data(*delay_ms, *p95_delay_ms),
                 format!(
-                    "Vote delay of {}ms detected, exceeds p95 baseline of {}ms",
-                    delay_ms, p95_delay_ms
+                    "Vote delay of {delay_ms}ms detected, exceeds p95 baseline of {p95_delay_ms}ms"
                 ),
             ),
 
@@ -117,10 +116,7 @@ impl AnomalyReporter {
                 "novai-copilot-peer-churn".to_string(),
                 "Network peer connectivity monitoring".to_string(),
                 encode_peer_churn_data(*current_peers, *baseline_peers),
-                format!(
-                    "Peer count changed to {} from baseline of {}",
-                    current_peers, baseline_peers
-                ),
+                format!("Peer count changed to {current_peers} from baseline of {baseline_peers}"),
             ),
 
             AnomalyKind::MempoolCongestion {
@@ -131,8 +127,7 @@ impl AnomalyReporter {
                 "Mempool size monitoring".to_string(),
                 encode_mempool_data(*current_size, *baseline_size),
                 format!(
-                    "Mempool size {} significantly exceeds baseline of {}",
-                    current_size, baseline_size
+                    "Mempool size {current_size} significantly exceeds baseline of {baseline_size}"
                 ),
             ),
         };

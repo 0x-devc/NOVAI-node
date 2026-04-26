@@ -49,8 +49,7 @@ fn test_uniform_high_latency() {
         assert_eq!(
             latency,
             Duration::from_millis(1000),
-            "Validator {} should have 1000ms latency",
-            i
+            "Validator {i} should have 1000ms latency"
         );
     }
 
@@ -427,7 +426,7 @@ fn test_network_jitter() {
     let latencies = [50, 500, 100, 2000, 200, 1000, 150];
 
     for (idx, latency_ms) in latencies.iter().enumerate() {
-        println!("Iteration {}: {}ms latency", idx, latency_ms);
+        println!("Iteration {idx}: {latency_ms}ms latency");
 
         for i in 0..5 {
             controller

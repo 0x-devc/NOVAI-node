@@ -465,7 +465,7 @@ mod tests {
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
-            assert_eq!(t, decoded, "Type {:?} roundtrip failed", t);
+            assert_eq!(t, decoded, "Type {t:?} roundtrip failed");
         }
     }
 
@@ -690,8 +690,7 @@ mod tests {
 
             assert_eq!(
                 obj.object_type, decoded.object_type,
-                "Type {:?} failed",
-                object_type
+                "Type {object_type:?} failed"
             );
         }
     }

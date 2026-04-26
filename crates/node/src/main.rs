@@ -89,7 +89,10 @@ impl InMemoryNonceProvider {
     /// commits).
     fn seed_dev_accounts(&self, storage: &Storage) {
         const FUNDED_ACCOUNTS: usize = 100;
-        let mut map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
+        let mut map = self
+            .expected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for index in 0..FUNDED_ACCOUNTS {
             // Same key derivation as apply_dev_genesis / SenderAccount::from_index
             let seed_byte = (index % 256) as u8;
@@ -118,14 +121,20 @@ impl InMemoryNonceProvider {
 
     /// Set a specific expected nonce (used by CLI commands).
     fn set(&self, from: Address, nonce: u64) {
-        let mut map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
+        let mut map = self
+            .expected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.insert(from, nonce);
     }
 }
 
 impl NonceProvider for InMemoryNonceProvider {
     fn expected_nonce(&self, from: &Address) -> u64 {
-        let map = self.expected.lock().unwrap_or_else(|p| p.into_inner());
+        let map = self
+            .expected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.get(from).copied().unwrap_or(0)
     }
 }
@@ -175,7 +184,7 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                 .nonce_provider
                 .expected
                 .lock()
-                .unwrap_or_else(|p| p.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for block in blocks {
                 for tx in &block.txs {
                     let entry = map.entry(tx.from).or_insert(tx.nonce);
@@ -403,7 +412,7 @@ fn short_id(id: &TxId) -> String {
     // print first 8 bytes as hex for readability
     let mut s = String::new();
     for b in &id[..8] {
-        s.push_str(&format!("{:02x}", b));
+        s.push_str(&format!("{b:02x}"));
     }
     s
 }
@@ -411,7 +420,7 @@ fn short_id(id: &TxId) -> String {
 /// Load an Ed25519 signing key from a 32-byte seed file.
 fn load_key_file(path: &str) -> ed25519_dalek::SigningKey {
     let bytes = std::fs::read(path)
-        .unwrap_or_else(|e| fatal(format!("Failed to read key file {}: {}", path, e)));
+        .unwrap_or_else(|e| fatal(format!("Failed to read key file {path}: {e}")));
     if bytes.len() != 32 {
         fatal(format!(
             "Key file {} must be exactly 32 bytes (got {} bytes)",
@@ -438,7 +447,7 @@ fn save_key_file(path: &str, seed: &[u8; 32]) {
     }
 
     let mut file = std::fs::File::create(path)
-        .unwrap_or_else(|e| fatal(format!("Failed to create key file {}: {}", path, e)));
+        .unwrap_or_else(|e| fatal(format!("Failed to create key file {path}: {e}")));
 
     // Set 0600 permissions before writing
     #[cfg(unix)]
@@ -446,29 +455,21 @@ fn save_key_file(path: &str, seed: &[u8; 32]) {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
         file.set_permissions(perms)
-            .unwrap_or_else(|e| fatal(format!("Failed to set permissions on {}: {}", path, e)));
+            .unwrap_or_else(|e| fatal(format!("Failed to set permissions on {path}: {e}")));
     }
 
     file.write_all(seed)
-        .unwrap_or_else(|e| fatal(format!("Failed to write key file {}: {}", path, e)));
+        .unwrap_or_else(|e| fatal(format!("Failed to write key file {path}: {e}")));
 }
 
 /// Parse genesis.json and extract validator set (pubkeys + addresses).
 fn parse_genesis_validator_set(
     genesis_path: &str,
 ) -> (Vec<Address>, HashMap<Address, ed25519_dalek::VerifyingKey>) {
-    let json = std::fs::read_to_string(genesis_path).unwrap_or_else(|e| {
-        fatal(format!(
-            "Failed to read genesis file {}: {}",
-            genesis_path, e
-        ))
-    });
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| {
-        fatal(format!(
-            "Failed to parse genesis JSON {}: {}",
-            genesis_path, e
-        ))
-    });
+    let json = std::fs::read_to_string(genesis_path)
+        .unwrap_or_else(|e| fatal(format!("Failed to read genesis file {genesis_path}: {e}")));
+    let parsed: serde_json::Value = serde_json::from_str(&json)
+        .unwrap_or_else(|e| fatal(format!("Failed to parse genesis JSON {genesis_path}: {e}")));
 
     let validators = parsed["validators"]
         .as_array()
@@ -480,10 +481,10 @@ fn parse_genesis_validator_set(
     for (i, v) in validators.iter().enumerate() {
         let pubkey_hex = v["pubkey"]
             .as_str()
-            .unwrap_or_else(|| fatal(format!("Validator {} missing 'pubkey' field", i)));
+            .unwrap_or_else(|| fatal(format!("Validator {i} missing 'pubkey' field")));
 
         let pubkey_bytes = hex::decode(pubkey_hex)
-            .unwrap_or_else(|e| fatal(format!("Validator {} pubkey invalid hex: {}", i, e)));
+            .unwrap_or_else(|e| fatal(format!("Validator {i} pubkey invalid hex: {e}")));
 
         if pubkey_bytes.len() != 32 {
             fatal(format!(
@@ -497,7 +498,7 @@ fn parse_genesis_validator_set(
         pk_array.copy_from_slice(&pubkey_bytes);
 
         let vk = novai_crypto::pubkey_from_bytes(&pk_array)
-            .unwrap_or_else(|e| fatal(format!("Validator {} pubkey invalid Ed25519: {:?}", i, e)));
+            .unwrap_or_else(|e| fatal(format!("Validator {i} pubkey invalid Ed25519: {e:?}")));
 
         let addr = address_from_pubkey(&vk);
         validator_set.push(addr);
@@ -722,7 +723,7 @@ fn main() {
             }
 
             let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            let path = output_path.unwrap_or_else(|| format!("{}/.novai/data/validator.key", home));
+            let path = output_path.unwrap_or_else(|| format!("{home}/.novai/data/validator.key"));
 
             // Check if file already exists to avoid accidental overwrite
             if std::path::Path::new(&path).exists() {
@@ -738,7 +739,7 @@ fn main() {
             let addr = address_from_pubkey(&pk);
             let addr_hex = hex::encode(addr);
 
-            println!("{}", pubkey_hex);
+            println!("{pubkey_hex}");
             tracing::info!(path = %path, pubkey = %pubkey_hex, address = %addr_hex, "Key generated");
         }
 
@@ -950,9 +951,9 @@ fn main() {
                 let base = data_dir
                     .as_deref()
                     .map(String::from)
-                    .unwrap_or_else(|| format!("{}/.novai/data", home));
+                    .unwrap_or_else(|| format!("{home}/.novai/data"));
 
-                let kf = key_file.unwrap_or_else(|| format!("{}/validator.key", base));
+                let kf = key_file.unwrap_or_else(|| format!("{base}/validator.key"));
 
                 let our_key = load_key_file(&kf);
                 let seed = our_key.to_bytes();
@@ -964,8 +965,7 @@ fn main() {
                 if !vs.contains(&our_addr) {
                     let our_pubkey_hex = hex::encode(our_pk.as_bytes());
                     fatal(format!(
-                        "Our public key {} is not in the genesis validator set at {}",
-                        our_pubkey_hex, gp
+                        "Our public key {our_pubkey_hex} is not in the genesis validator set at {gp}"
                     ));
                 }
 
@@ -984,7 +984,7 @@ fn main() {
                     let base = data_dir
                         .as_deref()
                         .map(String::from)
-                        .unwrap_or_else(|| format!("{}/.novai/data", home));
+                        .unwrap_or_else(|| format!("{home}/.novai/data"));
                     // Use validator index for dev-keys, address prefix for production
                     let db_subdir = if dev_keys {
                         format!(
@@ -994,16 +994,16 @@ fn main() {
                     } else {
                         format!("validator-{}", &hex::encode(our_addr)[..16])
                     };
-                    let db_path = format!("{}/{}", base, db_subdir);
+                    let db_path = format!("{base}/{db_subdir}");
 
                     std::fs::create_dir_all(&db_path).unwrap_or_else(|e| {
-                        fatal(format!("Failed to create data dir {}: {}", db_path, e))
+                        fatal(format!("Failed to create data dir {db_path}: {e}"))
                     });
 
                     tracing::info!(backend = "RocksDB", path = %db_path, "Storage initialized");
 
                     let rocks = RocksKv::open(&db_path).unwrap_or_else(|e| {
-                        fatal(format!("Failed to open RocksDB at {}: {}", db_path, e))
+                        fatal(format!("Failed to open RocksDB at {db_path}: {e}"))
                     });
                     Storage::Rocks(rocks)
                 }
@@ -1013,8 +1013,7 @@ fn main() {
                 }
                 other => {
                     fatal(format!(
-                        "unknown --storage value: {} (expected: rocksdb | memory)",
-                        other
+                        "unknown --storage value: {other} (expected: rocksdb | memory)"
                     ));
                 }
             };
@@ -1090,7 +1089,10 @@ fn main() {
             // Create nonce provider and seed from DB (lock held briefly, single-threaded)
             let nonce_provider = Arc::new(InMemoryNonceProvider::new());
             {
-                let db_guard = node.db.lock().unwrap_or_else(|p| p.into_inner());
+                let db_guard = node
+                    .db
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 nonce_provider.seed_dev_accounts(&db_guard);
             }
 
@@ -1116,7 +1118,7 @@ fn main() {
             let node = Arc::new(node);
 
             // Start listener
-            let bind_addr = format!("127.0.0.1:{}", port)
+            let bind_addr = format!("127.0.0.1:{port}")
                 .parse()
                 .expect("parse bind addr");
             node.start_listener(bind_addr).expect("start listener");
@@ -1139,7 +1141,10 @@ fn main() {
                     Ok(addrs) => {
                         let resolved: Vec<_> = addrs.collect();
                         // Log ALL resolved addresses for operator auditing
-                        let ip_list: Vec<String> = resolved.iter().map(|a| a.to_string()).collect();
+                        let ip_list: Vec<String> = resolved
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect();
                         tracing::info!(
                             seed = %seed,
                             resolved_ips = ?ip_list,
@@ -1378,7 +1383,7 @@ fn main() {
                 }
             };
 
-            let metrics_addr = format!("0.0.0.0:{}", metrics_port);
+            let metrics_addr = format!("0.0.0.0:{metrics_port}");
             if let Err(e) = metrics::start_metrics_server(&metrics_addr, metrics_collect) {
                 tracing::error!(%e, "Failed to start metrics server");
             }
@@ -1391,7 +1396,7 @@ fn main() {
                      Use --rpc-bind 127.0.0.1 for local-only access."
                 );
             }
-            let rpc_addr = format!("{}:{}", rpc_host, rpc_port);
+            let rpc_addr = format!("{rpc_host}:{rpc_port}");
 
             // C-04: Load faucet key from file if provided, else use deterministic
             // dev key (acceptable for local dev), else disable faucet.
@@ -1525,7 +1530,7 @@ fn main() {
                     let nonce_map = nonce_provider
                         .expected
                         .lock()
-                        .unwrap_or_else(|p| p.into_inner());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     tracing::info!(
                         committed_height = state.committed_height,
                         round = state.round,

@@ -43,7 +43,7 @@ fn golden_ai_entity_v1() {
     if should_update_vectors() {
         fs::create_dir_all(vectors_dir()).expect("failed to create vectors dir");
         fs::write(&path, &bytes).expect("failed to write golden vector");
-        println!("Updated golden vector: {:?}", path);
+        println!("Updated golden vector: {path:?}");
         println!("Vector length: {} bytes", bytes.len());
         println!("First 16 bytes: {:02x?}", &bytes[..16]);
     } else {
@@ -103,7 +103,7 @@ fn golden_ai_entity_v2() {
     if should_update_vectors() {
         fs::create_dir_all(vectors_dir()).expect("failed to create vectors dir");
         fs::write(&path, &bytes).expect("failed to write golden vector");
-        println!("Updated golden vector: {:?}", path);
+        println!("Updated golden vector: {path:?}");
         println!("Vector length: {} bytes", bytes.len());
         println!("First 16 bytes: {:02x?}", &bytes[..16]);
     } else {
@@ -172,7 +172,7 @@ fn golden_ai_entity_v3_zero_pubkey() {
     if should_update_vectors() {
         fs::create_dir_all(vectors_dir()).expect("failed to create vectors dir");
         fs::write(&path, &bytes).expect("failed to write golden vector");
-        println!("Updated golden vector: {:?}", path);
+        println!("Updated golden vector: {path:?}");
         println!("Vector length: {} bytes", bytes.len());
     } else {
         let expected = fs::read(&path)
@@ -215,7 +215,7 @@ fn golden_ai_entity_v3_with_pubkey() {
     if should_update_vectors() {
         fs::create_dir_all(vectors_dir()).expect("failed to create vectors dir");
         fs::write(&path, &bytes).expect("failed to write golden vector");
-        println!("Updated golden vector: {:?}", path);
+        println!("Updated golden vector: {path:?}");
     } else {
         let expected = fs::read(&path)
             .expect("Golden vector file missing. Run with UPDATE_VECTORS=1 to generate.");

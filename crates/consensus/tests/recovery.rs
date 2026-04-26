@@ -190,8 +190,7 @@ fn restart_catches_up_to_committed_height() {
     for h in 1..=5 {
         assert!(
             state.block_cache.contains_key(&h),
-            "Block {} should be in cache",
-            h
+            "Block {h} should be in cache"
         );
     }
 
@@ -377,7 +376,7 @@ fn multiple_round_advances() {
         }
 
         let advanced = state.try_advance_round(&validator_set);
-        assert!(advanced, "Round {} should advance", expected_round);
+        assert!(advanced, "Round {expected_round} should advance");
         assert_eq!(state.round, expected_round);
     }
 

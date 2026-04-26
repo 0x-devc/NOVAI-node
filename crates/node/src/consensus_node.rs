@@ -407,7 +407,7 @@ impl ConsensusNode {
                 }
             });
         })
-        .map_err(|e| format!("Failed to start listener: {:?}", e))
+        .map_err(|e| format!("Failed to start listener: {e:?}"))
     }
 
     /// Connect to a peer and start reader thread.
@@ -416,12 +416,12 @@ impl ConsensusNode {
     /// and verifies the remote peer's identity.
     pub fn connect_to_peer(self: &Arc<Self>, addr: SocketAddr) -> Result<(), String> {
         let mut stream =
-            connect_to_peer(addr).map_err(|e| format!("Failed to connect to peer: {:?}", e))?;
+            connect_to_peer(addr).map_err(|e| format!("Failed to connect to peer: {e:?}"))?;
 
         if let Some(key) = self.encryption_key {
             // Encrypted mode: Noise XX initiator handshake
             let result = handshake_initiator(&mut stream, &key)
-                .map_err(|e| format!("Noise handshake failed (initiator): {:?}", e))?;
+                .map_err(|e| format!("Noise handshake failed (initiator): {e:?}"))?;
 
             if !self.verify_peer_identity(&result.remote_static_key) {
                 return Err("Rejected: remote peer not in validator set".into());
@@ -440,7 +440,7 @@ impl ConsensusNode {
             // Plaintext mode
             let write_stream = stream
                 .try_clone()
-                .map_err(|e| format!("Failed to clone stream: {:?}", e))?;
+                .map_err(|e| format!("Failed to clone stream: {e:?}"))?;
             if !self.peer_manager.add_peer(Box::new(write_stream)) {
                 return Err("Peer rejected: connection limit reached".into());
             }
@@ -486,7 +486,7 @@ impl ConsensusNode {
     pub fn broadcast(&self, msg: NetworkMessage) -> Result<(), String> {
         self.peer_manager
             .broadcast(&msg)
-            .map_err(|e| format!("Broadcast failed: {:?}", e))
+            .map_err(|e| format!("Broadcast failed: {e:?}"))
     }
 
     /// Prune the QC broadcast dedup cache, removing entries below the retention window.
@@ -605,7 +605,7 @@ impl ConsensusNode {
             {
                 return Ok(false);
             }
-            Err(e) => return Err(format!("Add timeout failed: {:?}", e)),
+            Err(e) => return Err(format!("Add timeout failed: {e:?}")),
         }
 
         // If add_timeout performed round sync (fast-forwarded our round),
@@ -830,7 +830,7 @@ impl ConsensusNode {
         // verified by the BFT network.
         let anchor_parent = blocks[0].parent_hash;
         if let Err(e) = ConsensusState::verify_block_chain(&blocks, anchor_parent) {
-            return Err(format!("Block chain verification failed: {:?}", e));
+            return Err(format!("Block chain verification failed: {e:?}"));
         }
 
         // C-01: Reject sync response if peer's chain doesn't connect to our
@@ -857,7 +857,7 @@ impl ConsensusNode {
         {
             let current_root = if let Ok(Some(bytes)) = db.get(novai_state::KEY_SMT_ROOT) {
                 novai_state::decode_smt_root_v1(&bytes)
-                    .map_err(|e| format!("Failed to decode SMT root: {:?}", e))?
+                    .map_err(|e| format!("Failed to decode SMT root: {e:?}"))?
             } else {
                 [0u8; 32] // Genesis state (no commits yet)
             };
@@ -885,14 +885,14 @@ impl ConsensusNode {
         for block in &blocks {
             let key = novai_state::block_key(block.height);
             let value = novai_consensus_types::codec::encode_block_v1(block)
-                .map_err(|e| format!("Failed to encode block: {:?}", e))?;
+                .map_err(|e| format!("Failed to encode block: {e:?}"))?;
             db.put(&key, &value)
-                .map_err(|e| format!("Failed to store block: {:?}", e))?;
+                .map_err(|e| format!("Failed to store block: {e:?}"))?;
 
             // Cache in memory so commit rule can find them via block_by_hash
             state
                 .cache_block(block.clone())
-                .map_err(|e| format!("Cache block failed: {:?}", e))?;
+                .map_err(|e| format!("Cache block failed: {e:?}"))?;
         }
 
         tracing::info!(
@@ -918,10 +918,10 @@ impl ConsensusNode {
                             new_committed_height,
                             None,
                         )
-                        .map_err(|e| format!("Sync commit persist failed: {:?}", e))?;
+                        .map_err(|e| format!("Sync commit persist failed: {e:?}"))?;
                     state
                         .apply_commits(&to_commit)
-                        .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during sync: {:?}", e))?;
+                        .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during sync: {e:?}"))?;
                     self.execute_committed_blocks(&mut db, &to_commit);
                     tracing::info!(
                         committed_height = new_committed_height,
@@ -956,7 +956,7 @@ impl ConsensusNode {
                 novai_state::KEY_COMMITTED_HEIGHT,
                 &last_received_height.to_be_bytes(),
             )
-            .map_err(|e| format!("Failed to persist committed_height: {:?}", e))?;
+            .map_err(|e| format!("Failed to persist committed_height: {e:?}"))?;
             tracing::info!(
                 committed_height = last_received_height,
                 "Sync: advanced committed_height (chunk complete)"
@@ -1014,12 +1014,12 @@ impl ConsensusNode {
 
         let block = state
             .propose_block(mempool, nonce_provider, &*db, &self.validator_set)
-            .map_err(|e| format!("Propose block failed: {:?}", e))?;
+            .map_err(|e| format!("Propose block failed: {e:?}"))?;
 
         // CRITICAL: Cache our own proposed block so we can form QC when votes arrive
         state
             .cache_block(block.clone())
-            .map_err(|e| format!("Cache block failed: {:?}", e))?;
+            .map_err(|e| format!("Cache block failed: {e:?}"))?;
 
         // justify_qc should certify the parent block (height - 1)
         // For height 1: use GenesisQC (height=0)
@@ -1043,7 +1043,7 @@ impl ConsensusNode {
         };
 
         let unsigned_bytes = novai_consensus_types::codec::encode_proposal_v1_unsigned(&proposal)
-            .map_err(|e| format!("Encode proposal failed: {:?}", e))?;
+            .map_err(|e| format!("Encode proposal failed: {e:?}"))?;
 
         let signature = sign_bytes(&self.signing_key, &unsigned_bytes);
 
@@ -1087,22 +1087,22 @@ impl ConsensusNode {
             Ok(block) => block,
             Err(ConsensusError::NotLeader) => return Ok(false),
             Err(ConsensusError::AlreadyProposed) => return Ok(false),
-            Err(e) => return Err(format!("Propose block failed: {:?}", e)),
+            Err(e) => return Err(format!("Propose block failed: {e:?}")),
         };
 
         // Cache our own proposed block so we can form QC when votes arrive
         state
             .cache_block(block.clone())
-            .map_err(|e| format!("Cache block failed: {:?}", e))?;
+            .map_err(|e| format!("Cache block failed: {e:?}"))?;
 
         // Leader self-vote: add our own vote so we only need (quorum - 1) external votes.
         // With 4 validators and quorum=3, this means we need 2 of 3 peers instead of all 3.
         let self_vote = state
             .create_vote(&block, &self.signing_key)
-            .map_err(|e| format!("Leader self-vote creation failed: {:?}", e))?;
+            .map_err(|e| format!("Leader self-vote creation failed: {e:?}"))?;
         state
             .add_vote(self_vote, &self.validator_pubkeys_vec)
-            .map_err(|e| format!("Leader self-vote add failed: {:?}", e))?;
+            .map_err(|e| format!("Leader self-vote add failed: {e:?}"))?;
 
         // Build justify_qc for the proposal
         let justify_qc = if block.height == 1 {
@@ -1124,7 +1124,7 @@ impl ConsensusNode {
         };
 
         let unsigned_bytes = novai_consensus_types::codec::encode_proposal_v1_unsigned(&proposal)
-            .map_err(|e| format!("Encode proposal failed: {:?}", e))?;
+            .map_err(|e| format!("Encode proposal failed: {e:?}"))?;
 
         let signature = sign_bytes(&self.signing_key, &unsigned_bytes);
 
@@ -1145,7 +1145,7 @@ impl ConsensusNode {
         drop(db);
 
         let block_hash = novai_consensus_types::codec::hash_block_v1(&block)
-            .map_err(|e| format!("Hash block failed: {:?}", e))?;
+            .map_err(|e| format!("Hash block failed: {e:?}"))?;
         tracing::debug!(
             height = block.height,
             round = block.round,
@@ -1169,7 +1169,7 @@ impl ConsensusNode {
         let view_height = block.height.saturating_sub(1);
         let expected_leader =
             ConsensusState::compute_leader_for_view(view_height, block.round, &self.validator_set)
-                .map_err(|e| format!("Failed to compute leader: {:?}", e))?;
+                .map_err(|e| format!("Failed to compute leader: {e:?}"))?;
 
         if signed_proposal.proposer != expected_leader {
             return Err(format!(
@@ -1192,7 +1192,7 @@ impl ConsensusNode {
 
         let unsigned_bytes =
             novai_consensus_types::codec::encode_proposal_v1_unsigned(&signed_proposal.proposal)
-                .map_err(|e| format!("Encode proposal failed: {:?}", e))?;
+                .map_err(|e| format!("Encode proposal failed: {e:?}"))?;
 
         if !novai_crypto::verify_bytes(proposer_pubkey, &unsigned_bytes, &signed_proposal.signature)
         {
@@ -1323,9 +1323,9 @@ impl ConsensusNode {
                                 new_committed_height,
                                 None,
                             )
-                            .map_err(|e| format!("QC catch-up atomic persist failed: {:?}", e))?;
+                            .map_err(|e| format!("QC catch-up atomic persist failed: {e:?}"))?;
                         state.apply_commits(&to_commit).map_err(|e| {
-                            format!("CONSENSUS SAFETY VIOLATION during QC catch-up: {:?}", e)
+                            format!("CONSENSUS SAFETY VIOLATION during QC catch-up: {e:?}")
                         })?;
                         self.execute_committed_blocks(&mut db, &to_commit);
                         committed_height_for_prune = Some(new_committed_height);
@@ -1335,9 +1335,9 @@ impl ConsensusNode {
                         );
                     }
                     Ok(_) => {
-                        state.persist_highest_qc(&mut *db).map_err(|e| {
-                            format!("QC catch-up persist highest QC failed: {:?}", e)
-                        })?;
+                        state
+                            .persist_highest_qc(&mut *db)
+                            .map_err(|e| format!("QC catch-up persist highest QC failed: {e:?}"))?;
                     }
                     Err(e) => {
                         // Commit chain incomplete — blocks missing from cache.
@@ -1346,9 +1346,9 @@ impl ConsensusNode {
                         // locks are dropped.
                         tracing::warn!(?e, "QC catch-up commit chain incomplete");
                         needs_sync = true;
-                        state.persist_highest_qc(&mut *db).map_err(|e| {
-                            format!("QC catch-up persist highest QC failed: {:?}", e)
-                        })?;
+                        state
+                            .persist_highest_qc(&mut *db)
+                            .map_err(|e| format!("QC catch-up persist highest QC failed: {e:?}"))?;
                     }
                 }
             }
@@ -1385,7 +1385,7 @@ impl ConsensusNode {
                 );
                 state
                     .cache_block(block.clone())
-                    .map_err(|e| format!("Cache block failed: {:?}", e))?;
+                    .map_err(|e| format!("Cache block failed: {e:?}"))?;
 
                 // Persist to DB so chain walk DB fallback can find this block
                 // after in-memory cache eviction. Only write if no block exists
@@ -1394,9 +1394,9 @@ impl ConsensusNode {
                 let key = novai_state::block_key(block.height);
                 if db.get(&key).ok().flatten().is_none() {
                     let value = novai_consensus_types::codec::encode_block_v1(block)
-                        .map_err(|e| format!("Failed to encode block: {:?}", e))?;
+                        .map_err(|e| format!("Failed to encode block: {e:?}"))?;
                     db.put(&key, &value)
-                        .map_err(|e| format!("Failed to store block: {:?}", e))?;
+                        .map_err(|e| format!("Failed to store block: {e:?}"))?;
                 }
 
                 drop(db);
@@ -1413,11 +1413,11 @@ impl ConsensusNode {
                     error = %format!("{:?}", e),
                     "VERIFY_DIAG: block verification FAILED"
                 );
-                return Err(format!("Block verification failed: {:?}", e));
+                return Err(format!("Block verification failed: {e:?}"));
             }
 
             let recv_block_hash = novai_consensus_types::codec::hash_block_v1(block)
-                .map_err(|e| format!("Hash block failed: {:?}", e))?;
+                .map_err(|e| format!("Hash block failed: {e:?}"))?;
             tracing::debug!(
                 height = block.height,
                 round = block.round,
@@ -1429,10 +1429,10 @@ impl ConsensusNode {
             // 6. Cache block for commit rule (combined to avoid re-acquiring lock)
             state
                 .check_no_fork(block)
-                .map_err(|e| format!("Fork detection failed: {:?}", e))?;
+                .map_err(|e| format!("Fork detection failed: {e:?}"))?;
             state
                 .cache_block(block.clone())
-                .map_err(|e| format!("Cache block failed: {:?}", e))?;
+                .map_err(|e| format!("Cache block failed: {e:?}"))?;
 
             // Persist block to DB so the commit chain walk DB fallback can
             // recover it after in-memory cache eviction. Only write if no
@@ -1443,9 +1443,9 @@ impl ConsensusNode {
             let key = novai_state::block_key(block.height);
             if db.get(&key).ok().flatten().is_none() {
                 let value = novai_consensus_types::codec::encode_block_v1(block)
-                    .map_err(|e| format!("Failed to encode block: {:?}", e))?;
+                    .map_err(|e| format!("Failed to encode block: {e:?}"))?;
                 db.put(&key, &value)
-                    .map_err(|e| format!("Failed to store block: {:?}", e))?;
+                    .map_err(|e| format!("Failed to store block: {e:?}"))?;
             }
 
             // 5. Create vote (skip if we already voted in this round — dedup
@@ -1462,7 +1462,7 @@ impl ConsensusNode {
 
             let vote = state
                 .create_vote(block, &self.signing_key)
-                .map_err(|e| format!("Vote creation failed: {:?}", e))?;
+                .map_err(|e| format!("Vote creation failed: {e:?}"))?;
 
             // Mark ourselves as voted so duplicate proposals are rejected
             state.voted_in_round.insert(self.our_address);
@@ -1530,7 +1530,7 @@ impl ConsensusNode {
             {
                 return Ok(());
             }
-            Err(e) => return Err(format!("Add vote failed: {:?}", e)),
+            Err(e) => return Err(format!("Add vote failed: {e:?}")),
         }
 
         // Log AI signal if present (advisory only)
@@ -1554,7 +1554,7 @@ impl ConsensusNode {
 
         if let Some(qc) = state
             .try_form_qc(&vote.block_hash, &self.validator_set)
-            .map_err(|e| format!("QC formation failed: {:?}", e))?
+            .map_err(|e| format!("QC formation failed: {e:?}"))?
         {
             let key = (qc.height, qc.round, qc.block_hash);
 
@@ -1596,9 +1596,9 @@ impl ConsensusNode {
                             new_committed_height,
                             None,
                         )
-                        .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
+                        .map_err(|e| format!("Atomic persist failed: {e:?}"))?;
                     state.apply_commits(&to_commit).map_err(|e| {
-                        format!("CONSENSUS SAFETY VIOLATION during vote commit: {:?}", e)
+                        format!("CONSENSUS SAFETY VIOLATION during vote commit: {e:?}")
                     })?;
                     vote_committed_height = Some(new_committed_height);
                     committed_blocks = to_commit;
@@ -1610,7 +1610,7 @@ impl ConsensusNode {
                 Ok(_) => {
                     state
                         .persist_highest_qc(&mut *db)
-                        .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
+                        .map_err(|e| format!("Failed to persist highest QC: {e:?}"))?;
                     tracing::debug!(
                         qc_height = qc.height,
                         "Persisted highest_qc (formed locally)"
@@ -1623,7 +1623,7 @@ impl ConsensusNode {
                     tracing::warn!(?e, "Commit chain incomplete (will sync)");
                     state
                         .persist_highest_qc(&mut *db)
-                        .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
+                        .map_err(|e| format!("Failed to persist highest QC: {e:?}"))?;
                 }
             }
 
@@ -1685,10 +1685,10 @@ impl ConsensusNode {
                 let new_committed_height = to_commit.last().unwrap().height;
                 state
                     .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
-                    .map_err(|e| format!("Atomic persist failed: {:?}", e))?;
+                    .map_err(|e| format!("Atomic persist failed: {e:?}"))?;
                 state
                     .apply_commits(&to_commit)
-                    .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during QC commit: {:?}", e))?;
+                    .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during QC commit: {e:?}"))?;
                 committed = true;
                 qc_committed_height = Some(new_committed_height);
                 committed_blocks = to_commit;
@@ -1702,7 +1702,7 @@ impl ConsensusNode {
                 if state.highest_qc.as_ref().map(|q| q.height) == Some(qc.height) {
                     state
                         .persist_highest_qc(&mut *db)
-                        .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
+                        .map_err(|e| format!("Failed to persist highest QC: {e:?}"))?;
                     tracing::debug!(
                         qc_height = qc.height,
                         "Persisted highest_qc (no commit triggered)"
@@ -1715,7 +1715,7 @@ impl ConsensusNode {
                 tracing::warn!(?e, "Commit chain incomplete (will sync)");
                 state
                     .persist_highest_qc(&mut *db)
-                    .map_err(|e| format!("Failed to persist highest QC: {:?}", e))?;
+                    .map_err(|e| format!("Failed to persist highest QC: {e:?}"))?;
             }
         }
 
@@ -1886,7 +1886,7 @@ impl ConsensusNode {
         };
 
         let tx = novai_codec::decode_tx_v1_signed(&bytes)
-            .map_err(|e| format!("Invalid gossipped tx: {:?}", e))?;
+            .map_err(|e| format!("Invalid gossipped tx: {e:?}"))?;
 
         let nonce_wrapper = GossipNonceProvider(Arc::clone(nonce));
         let mut mp = mempool.lock_or_recover();

@@ -87,9 +87,9 @@ fn week2_drain_mempool_is_fee_priority_deterministic() {
     let tx_mid = make_signed_tx(&sk, &vk, 0, 2, b"b");
     let tx_high = make_signed_tx(&sk, &vk, 0, 3, b"c");
 
-    let id_low = mp.insert(tx_low.clone(), &np).expect("insert low");
-    let id_mid = mp.insert(tx_mid.clone(), &np).expect("insert mid");
-    let id_high = mp.insert(tx_high.clone(), &np).expect("insert high");
+    let id_low = mp.insert(tx_low, &np).expect("insert low");
+    let id_mid = mp.insert(tx_mid, &np).expect("insert mid");
+    let id_high = mp.insert(tx_high, &np).expect("insert high");
 
     let drained = mp.drain_ready(10, &np);
     assert_eq!(drained.len(), 3);

@@ -107,7 +107,7 @@ impl ChaosNetwork {
     ) -> Result<(), String> {
         // Validate validator IDs
         if from >= self.num_validators || to >= self.num_validators {
-            return Err(format!("Invalid validator ID: from={}, to={}", from, to));
+            return Err(format!("Invalid validator ID: from={from}, to={to}"));
         }
 
         // Check partition: can from and to communicate?
@@ -138,7 +138,7 @@ impl ChaosNetwork {
             .lock()
             .unwrap()
             .get_mut(&to)
-            .ok_or_else(|| format!("Validator {} not found", to))?
+            .ok_or_else(|| format!("Validator {to} not found"))?
             .push_back(delayed_msg);
 
         Ok(())
@@ -188,7 +188,7 @@ impl ChaosNetwork {
     /// Get count of pending messages across all queues.
     pub fn pending_message_count(&self) -> usize {
         let queues = self.message_queues.lock().unwrap();
-        queues.values().map(|q| q.len()).sum()
+        queues.values().map(std::collections::VecDeque::len).sum()
     }
 
     // -------------------------------------------------------------------------
@@ -289,7 +289,7 @@ impl ValidatorHandle {
         // Recover consensus state from database
         let db = self.db.lock().unwrap();
         let recovered_state =
-            ConsensusState::recover(self.address, &*db).map_err(|e| format!("{:?}", e))?;
+            ConsensusState::recover(self.address, &*db).map_err(|e| format!("{e:?}"))?;
 
         *self.state.lock().unwrap() = recovered_state;
         *self.is_crashed.lock().unwrap() = false;
@@ -341,7 +341,7 @@ impl ValidatorHandle {
             .lock()
             .unwrap()
             .add_vote(vote, validator_pubkeys)
-            .map_err(|e| format!("{:?}", e))
+            .map_err(|e| format!("{e:?}"))
     }
 
     /// Try to form QC for a block hash.
@@ -359,7 +359,7 @@ impl ValidatorHandle {
             .lock()
             .unwrap()
             .try_form_qc(block_hash, validator_set)
-            .map_err(|e| format!("{:?}", e))
+            .map_err(|e| format!("{e:?}"))
     }
 }
 
@@ -400,10 +400,10 @@ impl ChaosController {
         for group in &groups {
             for &v in group {
                 if v >= self.validators.len() {
-                    return Err(format!("Invalid validator ID: {}", v));
+                    return Err(format!("Invalid validator ID: {v}"));
                 }
                 if !seen.insert(v) {
-                    return Err(format!("Validator {} appears in multiple groups", v));
+                    return Err(format!("Validator {v} appears in multiple groups"));
                 }
             }
         }
@@ -433,7 +433,7 @@ impl ChaosController {
     /// Inject latency for a specific validator (all messages TO this validator delayed).
     pub fn inject_latency(&self, validator: usize, delay: Duration) -> Result<(), String> {
         if validator >= self.validators.len() {
-            return Err(format!("Invalid validator ID: {}", validator));
+            return Err(format!("Invalid validator ID: {validator}"));
         }
 
         self.network
@@ -465,11 +465,11 @@ impl ChaosController {
     /// Inject message drop rate for a specific validator (0.0 to 1.0).
     pub fn inject_message_drop(&self, validator: usize, drop_rate: f64) -> Result<(), String> {
         if validator >= self.validators.len() {
-            return Err(format!("Invalid validator ID: {}", validator));
+            return Err(format!("Invalid validator ID: {validator}"));
         }
 
         if !(0.0..=1.0).contains(&drop_rate) {
-            return Err(format!("Invalid drop rate: {}", drop_rate));
+            return Err(format!("Invalid drop rate: {drop_rate}"));
         }
 
         self.network
@@ -489,7 +489,7 @@ impl ChaosController {
     /// Crash a validator (stops processing messages, simulates sudden failure).
     pub fn crash_validator(&self, validator: usize) -> Result<(), String> {
         if validator >= self.validators.len() {
-            return Err(format!("Validator {} out of range", validator));
+            return Err(format!("Validator {validator} out of range"));
         }
 
         self.validators[validator].crash()?;
@@ -499,7 +499,7 @@ impl ChaosController {
     /// Restart a crashed validator (loads from persistent state).
     pub fn restart_validator(&self, validator: usize) -> Result<(), String> {
         if validator >= self.validators.len() {
-            return Err(format!("Validator {} out of range", validator));
+            return Err(format!("Validator {validator} out of range"));
         }
 
         self.validators[validator].restart()?;
@@ -557,7 +557,7 @@ impl ChaosController {
                     min_height,
                     self.validators
                         .iter()
-                        .map(|v| v.committed_height())
+                        .map(ValidatorHandle::committed_height)
                         .collect::<Vec<_>>()
                 ));
             }

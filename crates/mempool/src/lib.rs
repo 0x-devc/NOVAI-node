@@ -801,8 +801,7 @@ mod tests {
         let err = mp.insert(tx, &np).unwrap_err();
         assert!(
             matches!(err, TxMempoolError::TxTooLarge { .. }),
-            "expected TxTooLarge, got {:?}",
-            err
+            "expected TxTooLarge, got {err:?}"
         );
     }
 
@@ -845,8 +844,7 @@ mod tests {
         let err = mp.insert(tx, &np).unwrap_err();
         assert!(
             matches!(err, TxMempoolError::MempoolFull { .. }),
-            "expected MempoolFull, got {:?}",
-            err
+            "expected MempoolFull, got {err:?}"
         );
     }
 

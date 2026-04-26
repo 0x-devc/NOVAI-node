@@ -292,7 +292,7 @@ mod tests {
         ] {
             let byte = tier.to_byte();
             let decoded = ActionTier::from_byte(byte);
-            assert_eq!(decoded, Some(tier), "Tier {:?} roundtrip failed", tier);
+            assert_eq!(decoded, Some(tier), "Tier {tier:?} roundtrip failed");
         }
     }
 
@@ -310,8 +310,7 @@ mod tests {
             assert_eq!(
                 decoded,
                 Some(*action),
-                "ActionType {:?} roundtrip failed",
-                action
+                "ActionType {action:?} roundtrip failed"
             );
         }
     }
@@ -339,13 +338,11 @@ mod tests {
             assert_eq!(
                 tier,
                 ActionTier::Tier0Never,
-                "{:?} should be Tier0Never",
-                action
+                "{action:?} should be Tier0Never"
             );
             assert!(
                 !is_ai_executable(&action),
-                "{:?} should not be AI executable",
-                action
+                "{action:?} should not be AI executable"
             );
         }
     }
@@ -363,13 +360,11 @@ mod tests {
             assert_eq!(
                 tier,
                 ActionTier::Tier1High,
-                "{:?} should be Tier1High",
-                action
+                "{action:?} should be Tier1High"
             );
             assert!(
                 is_ai_executable(&action),
-                "{:?} should be AI executable",
-                action
+                "{action:?} should be AI executable"
             );
         }
     }
@@ -387,13 +382,11 @@ mod tests {
             assert_eq!(
                 tier,
                 ActionTier::Tier2Medium,
-                "{:?} should be Tier2Medium",
-                action
+                "{action:?} should be Tier2Medium"
             );
             assert!(
                 is_ai_executable(&action),
-                "{:?} should be AI executable",
-                action
+                "{action:?} should be AI executable"
             );
         }
     }
@@ -412,9 +405,7 @@ mod tests {
                         | ActionTier::Tier2Medium
                         | ActionTier::Tier3Low
                 ),
-                "{:?} has unknown tier {:?}",
-                action,
-                tier
+                "{action:?} has unknown tier {tier:?}"
             );
         }
     }

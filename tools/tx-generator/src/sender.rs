@@ -260,7 +260,7 @@ mod tests {
         for handle in handles {
             let nonces = handle.join().unwrap();
             for n in nonces {
-                assert!(all_nonces.insert(n), "Duplicate nonce: {}", n);
+                assert!(all_nonces.insert(n), "Duplicate nonce: {n}");
             }
         }
 

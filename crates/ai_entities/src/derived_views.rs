@@ -719,7 +719,7 @@ mod tests {
         ] {
             let byte = t.to_byte();
             let decoded = DerivedSourceType::from_byte(byte).unwrap();
-            assert_eq!(t, decoded, "Source type {:?} roundtrip failed", t);
+            assert_eq!(t, decoded, "Source type {t:?} roundtrip failed");
         }
     }
 
@@ -752,7 +752,7 @@ mod tests {
         ] {
             let id = s.to_id();
             let decoded = DerivedViewSchema::from_id(id).unwrap();
-            assert_eq!(s, decoded, "Schema {:?} roundtrip failed", s);
+            assert_eq!(s, decoded, "Schema {s:?} roundtrip failed");
         }
     }
 

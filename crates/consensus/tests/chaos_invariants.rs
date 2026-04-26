@@ -49,8 +49,7 @@ impl<'a> InvariantChecker<'a> {
             if let Some(blocks) = height_blocks.get(&height) {
                 if blocks.len() > 1 {
                     return Err(format!(
-                        "SAFETY VIOLATION: Validator {} committed different block at height {}",
-                        idx, height
+                        "SAFETY VIOLATION: Validator {idx} committed different block at height {height}"
                     ));
                 }
             }
@@ -98,8 +97,7 @@ impl<'a> InvariantChecker<'a> {
             if let Some(&prev_height) = previous_heights.get(&idx) {
                 if current_height < prev_height {
                     return Err(format!(
-                        "MONOTONICITY VIOLATION: Validator {} height decreased {} → {}",
-                        idx, prev_height, current_height
+                        "MONOTONICITY VIOLATION: Validator {idx} height decreased {prev_height} → {current_height}"
                     ));
                 }
             }
@@ -120,14 +118,12 @@ impl<'a> InvariantChecker<'a> {
         let intersection_size = 2 * quorum_size - n;
         if intersection_size < 1 {
             return Err(format!(
-                "QUORUM VIOLATION: Quorums may not intersect (n={}, quorum={})",
-                n, quorum_size
+                "QUORUM VIOLATION: Quorums may not intersect (n={n}, quorum={quorum_size})"
             ));
         }
 
         println!(
-            "✓ Quorum intersection guaranteed: any 2 quorums of {} intersect by {} validators",
-            quorum_size, intersection_size
+            "✓ Quorum intersection guaranteed: any 2 quorums of {quorum_size} intersect by {intersection_size} validators"
         );
         Ok(())
     }
@@ -144,8 +140,7 @@ impl<'a> InvariantChecker<'a> {
             // For now, just verify height is reasonable
             if height > 1000 {
                 return Err(format!(
-                    "Suspicious committed height {} on validator {}",
-                    height, idx
+                    "Suspicious committed height {height} on validator {idx}"
                 ));
             }
         }
@@ -480,24 +475,17 @@ fn test_quorum_intersection_property() {
         let quorum = 2 * f + 1;
         let intersection = 2 * quorum - n;
 
-        println!(
-            "n={:2}, f={:2}, quorum={:2}, intersection={}",
-            n, f, quorum, intersection
-        );
+        println!("n={n:2}, f={f:2}, quorum={quorum:2}, intersection={intersection}");
 
         assert!(
             intersection >= 1,
-            "Quorum intersection must be at least 1 (n={}, quorum={})",
-            n,
-            quorum
+            "Quorum intersection must be at least 1 (n={n}, quorum={quorum})"
         );
 
         // Verify quorum > n/2 (BFT requirement)
         assert!(
             quorum > n / 2,
-            "Quorum must be > n/2 for BFT (n={}, quorum={})",
-            n,
-            quorum
+            "Quorum must be > n/2 for BFT (n={n}, quorum={quorum})"
         );
     }
 
@@ -519,7 +507,7 @@ fn test_safety_under_max_byzantine() {
 
     let n = 5;
     let f = 1; // Maximum tolerable: f < n/3, so f=1 for n=5
-    println!("n={}, max Byzantine faults: f={}", n, f);
+    println!("n={n}, max Byzantine faults: f={f}");
 
     // Simulate Byzantine validator (validator 0)
     // In real implementation, would inject Byzantine behavior
@@ -536,5 +524,5 @@ fn test_safety_under_max_byzantine() {
     checker.check_safety().unwrap();
     checker.check_agreement().unwrap();
 
-    println!("✅ Safety holds under f={} Byzantine faults (f < n/3)", f);
+    println!("✅ Safety holds under f={f} Byzantine faults (f < n/3)");
 }

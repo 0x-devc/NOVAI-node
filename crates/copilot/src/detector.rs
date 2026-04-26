@@ -133,25 +133,19 @@ impl AnomalyKind {
                 delay_ms,
                 p95_delay_ms,
             } => {
-                format!("Vote delay {}ms exceeds p95 {}ms", delay_ms, p95_delay_ms)
+                format!("Vote delay {delay_ms}ms exceeds p95 {p95_delay_ms}ms")
             }
             Self::PeerChurn {
                 current_peers,
                 baseline_peers,
             } => {
-                format!(
-                    "Peer count {} differs from baseline {}",
-                    current_peers, baseline_peers
-                )
+                format!("Peer count {current_peers} differs from baseline {baseline_peers}")
             }
             Self::MempoolCongestion {
                 current_size,
                 baseline_size,
             } => {
-                format!(
-                    "Mempool size {} exceeds baseline {}",
-                    current_size, baseline_size
-                )
+                format!("Mempool size {current_size} exceeds baseline {baseline_size}")
             }
         }
     }
@@ -711,7 +705,7 @@ mod tests {
 
         // At exactly 3x threshold (300%), confidence should be ~100
         let c1 = detector.compute_confidence(300, 100, 300);
-        assert!((90..=110).contains(&c1), "At threshold: confidence={}", c1);
+        assert!((90..=110).contains(&c1), "At threshold: confidence={c1}");
 
         // At 6x (600%), confidence should be higher
         let c2 = detector.compute_confidence(600, 100, 300);

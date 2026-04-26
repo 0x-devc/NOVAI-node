@@ -69,26 +69,22 @@ impl std::fmt::Display for GateCodecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GateCodecError::BufferTooShort { expected, actual } => {
-                write!(
-                    f,
-                    "buffer too short: need {} bytes, got {}",
-                    expected, actual
-                )
+                write!(f, "buffer too short: need {expected} bytes, got {actual}")
             }
             GateCodecError::InvalidVersion(v) => {
-                write!(f, "invalid version byte: 0x{:02x}", v)
+                write!(f, "invalid version byte: 0x{v:02x}")
             }
             GateCodecError::InvalidGateType(t) => {
-                write!(f, "invalid gate type: {}", t)
+                write!(f, "invalid gate type: {t}")
             }
             GateCodecError::TooManyApprovers { count, max } => {
-                write!(f, "too many approvers: {} exceeds max {}", count, max)
+                write!(f, "too many approvers: {count} exceeds max {max}")
             }
             GateCodecError::TrailingBytes { count } => {
-                write!(f, "trailing bytes: {} unexpected bytes", count)
+                write!(f, "trailing bytes: {count} unexpected bytes")
             }
             GateCodecError::ValidationFailed(msg) => {
-                write!(f, "gate validation failed: {}", msg)
+                write!(f, "gate validation failed: {msg}")
             }
         }
     }
@@ -583,8 +579,7 @@ mod tests {
         let result = decode_approval_gate_v1(&buf);
         assert!(
             matches!(result, Err(GateCodecError::TooManyApprovers { .. })),
-            "Expected TooManyApprovers error, got {:?}",
-            result
+            "Expected TooManyApprovers error, got {result:?}"
         );
     }
 
@@ -609,13 +604,11 @@ mod tests {
 
                 assert_eq!(
                     veto, decoded.veto_enabled,
-                    "veto flag not preserved for veto={}, freeze={}",
-                    veto, freeze
+                    "veto flag not preserved for veto={veto}, freeze={freeze}"
                 );
                 assert_eq!(
                     freeze, decoded.freeze_enabled,
-                    "freeze flag not preserved for veto={}, freeze={}",
-                    veto, freeze
+                    "freeze flag not preserved for veto={veto}, freeze={freeze}"
                 );
             }
         }
@@ -652,8 +645,7 @@ mod tests {
 
             assert_eq!(
                 predicted, actual,
-                "Size mismatch for {} approvers",
-                approver_count
+                "Size mismatch for {approver_count} approvers"
             );
         }
     }

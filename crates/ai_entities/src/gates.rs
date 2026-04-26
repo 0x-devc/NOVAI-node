@@ -149,8 +149,7 @@ impl std::fmt::Display for GateValidationError {
             } => {
                 write!(
                     f,
-                    "threshold {} exceeds approver count {}",
-                    threshold, approver_count
+                    "threshold {threshold} exceeds approver count {approver_count}"
                 )
             }
             GateValidationError::ExpiryBeforeTimelock {
@@ -159,8 +158,7 @@ impl std::fmt::Display for GateValidationError {
             } => {
                 write!(
                     f,
-                    "expiry_blocks {} must be greater than timelock_blocks {}",
-                    expiry_blocks, timelock_blocks
+                    "expiry_blocks {expiry_blocks} must be greater than timelock_blocks {timelock_blocks}"
                 )
             }
             GateValidationError::DuplicateApprover { address } => {
@@ -170,13 +168,12 @@ impl std::fmt::Display for GateValidationError {
                 write!(f, "threshold must be > 0 for Multisig/Threshold gates")
             }
             GateValidationError::TooManyApprovers { count, max } => {
-                write!(f, "too many approvers: {} exceeds max {}", count, max)
+                write!(f, "too many approvers: {count} exceeds max {max}")
             }
             GateValidationError::TimelockOnlyWithApprovers { count } => {
                 write!(
                     f,
-                    "TimelockOnly gate should have 0 approvers, found {}",
-                    count
+                    "TimelockOnly gate should have 0 approvers, found {count}"
                 )
             }
         }
@@ -498,7 +495,7 @@ mod tests {
         ] {
             let byte = gt.to_byte();
             let decoded = GateType::from_byte(byte);
-            assert_eq!(decoded, Some(gt), "GateType {:?} roundtrip failed", gt);
+            assert_eq!(decoded, Some(gt), "GateType {gt:?} roundtrip failed");
         }
     }
 
@@ -523,16 +520,8 @@ mod tests {
     #[test]
     fn valid_multisig_gate() {
         let approvers = test_approvers(3);
-        let gate = ApprovalGate::new(
-            GateType::Multisig,
-            approvers.clone(),
-            2,
-            100,
-            1000,
-            false,
-            false,
-        )
-        .expect("should be valid");
+        let gate = ApprovalGate::new(GateType::Multisig, approvers, 2, 100, 1000, false, false)
+            .expect("should be valid");
 
         assert_eq!(gate.gate_type, GateType::Multisig);
         assert_eq!(gate.threshold, 2);

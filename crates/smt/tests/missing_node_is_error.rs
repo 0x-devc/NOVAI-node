@@ -16,6 +16,6 @@ fn missing_internal_node_is_hard_error() {
 
     match err {
         SmtError::MissingNode { hash } => assert_eq!(hash, root),
-        other => panic!("expected MissingNode, got: {:?}", other),
+        other => panic!("expected MissingNode, got: {other:?}"),
     }
 }

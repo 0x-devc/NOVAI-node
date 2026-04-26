@@ -18,7 +18,7 @@ fn smt_root_decode_rejects_wrong_length() {
             assert_eq!(expected, 33);
             assert_eq!(got, 4);
         }
-        other => panic!("unexpected error: {:?}", other),
+        other => panic!("unexpected error: {other:?}"),
     }
 }
 
@@ -32,6 +32,6 @@ fn smt_root_decode_rejects_wrong_version() {
             assert_eq!(expected, SMT_ROOT_CODEC_V1);
             assert_eq!(got, 99);
         }
-        other => panic!("unexpected error: {:?}", other),
+        other => panic!("unexpected error: {other:?}"),
     }
 }

@@ -138,7 +138,7 @@ fn test_fault_cycles() {
     println!("\n=== Test: Fault Injection Cycles ===");
 
     for cycle in 0..10 {
-        println!("\nCycle {}:", cycle);
+        println!("\nCycle {cycle}:");
 
         // Inject partition (alternate patterns)
         let partition = if cycle % 2 == 0 {
@@ -279,7 +279,7 @@ fn test_random_faults() {
                     vec![vec![0, 1, 2], vec![3, 4]]
                 };
                 controller.inject_partition(partition).unwrap();
-                println!("Round {}: Partition", round);
+                println!("Round {round}: Partition");
             }
             1 => {
                 // Random latency
@@ -288,10 +288,7 @@ fn test_random_faults() {
                 controller
                     .inject_latency(validator, Duration::from_millis(latency_ms))
                     .unwrap();
-                println!(
-                    "Round {}: Latency {}ms on validator {}",
-                    round, latency_ms, validator
-                );
+                println!("Round {round}: Latency {latency_ms}ms on validator {validator}");
             }
             2 => {
                 // Random drops
@@ -312,7 +309,7 @@ fn test_random_faults() {
                 let validator = rng.gen_range(0..5);
                 if !controller.validators[validator].is_crashed() {
                     controller.crash_validator(validator).unwrap();
-                    println!("Round {}: Crash validator {}", round, validator);
+                    println!("Round {round}: Crash validator {validator}");
                 }
             }
             4 => {
@@ -324,7 +321,7 @@ fn test_random_faults() {
                         controller.restart_validator(i).unwrap();
                     }
                 }
-                println!("Round {}: Heal all", round);
+                println!("Round {round}: Heal all");
             }
             _ => unreachable!(),
         }
@@ -486,7 +483,7 @@ fn test_chaos_monkey() {
                 let pattern = &patterns[rng.gen_range(0..patterns.len())];
                 controller.inject_partition(pattern.clone()).unwrap();
                 if iteration % 10 == 0 {
-                    println!("Iteration {}: Partition", iteration);
+                    println!("Iteration {iteration}: Partition");
                 }
             }
             3..=5 => {
@@ -497,7 +494,7 @@ fn test_chaos_monkey() {
                     .inject_latency(validator, Duration::from_millis(latency_ms))
                     .unwrap();
                 if iteration % 10 == 0 {
-                    println!("Iteration {}: Latency", iteration);
+                    println!("Iteration {iteration}: Latency");
                 }
             }
             6..=7 => {
@@ -509,14 +506,14 @@ fn test_chaos_monkey() {
                     controller.crash_validator(validator).unwrap();
                 }
                 if iteration % 10 == 0 {
-                    println!("Iteration {}: Crash/restart", iteration);
+                    println!("Iteration {iteration}: Crash/restart");
                 }
             }
             8..=9 => {
                 // 20%: Heal
                 controller.heal_network().unwrap();
                 if iteration % 10 == 0 {
-                    println!("Iteration {}: Heal", iteration);
+                    println!("Iteration {iteration}: Heal");
                 }
             }
             _ => unreachable!(),

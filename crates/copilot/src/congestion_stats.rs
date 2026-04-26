@@ -215,7 +215,7 @@ mod tests {
 
         // Growth should be 200% (doubled)
         let growth = stats.mempool_growth_pct();
-        assert!((150..=250).contains(&growth), "growth={}", growth);
+        assert!((150..=250).contains(&growth), "growth={growth}");
     }
 
     #[test]

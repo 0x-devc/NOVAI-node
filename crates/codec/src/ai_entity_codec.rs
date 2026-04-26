@@ -43,9 +43,9 @@ impl std::fmt::Display for AiEntityCodecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AiEntityCodecError::BufferTooShort => write!(f, "buffer too short"),
-            AiEntityCodecError::InvalidVersion(v) => write!(f, "invalid version: {}", v),
+            AiEntityCodecError::InvalidVersion(v) => write!(f, "invalid version: {v}"),
             AiEntityCodecError::InvalidAutonomyMode(m) => {
-                write!(f, "invalid autonomy mode: {}", m)
+                write!(f, "invalid autonomy mode: {m}")
             }
         }
     }
