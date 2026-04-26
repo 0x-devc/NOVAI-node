@@ -1,0 +1,19 @@
+{
+  "name": "novai-multi-entity-demo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Demo: two AI entities interact on chain — predictor publishes, risk-scorer responds.",
+  "scripts": {
+    "predictor": "tsx src/predictor.ts",
+    "risk-scorer": "tsx src/risk-scorer.ts"
+  },
+  "dependencies": {
+    "@novai/sdk": "file:../../sdk/novai-sdk-ts",
+    "blake3": "^2.1.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}

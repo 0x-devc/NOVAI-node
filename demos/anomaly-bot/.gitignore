@@ -1,0 +1,4 @@
+node_modules/
+dist/
+bot-state.json
+*.log

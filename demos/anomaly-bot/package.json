@@ -1,0 +1,18 @@
+{
+  "name": "novai-anomaly-bot",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Demo: an AI entity that watches chain activity and publishes anomaly signals.",
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@novai/sdk": "file:../../sdk/novai-sdk-ts",
+    "blake3": "^2.1.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}
