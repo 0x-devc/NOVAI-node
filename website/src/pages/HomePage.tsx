@@ -52,7 +52,7 @@ const FEATURES = [
 const STATS: { value?: number; suffix?: string; label: string; prefix?: string; textOnly?: string }[] = [
   { textOnly: "Active", label: "Private Testnet Running" },
   { value: 4, suffix: "", label: "Active Validators", prefix: "" },
-  { value: 4000, suffix: "+", label: "Tests Passing", prefix: "" },
+  { value: 1100, suffix: "+", label: "Tests Passing", prefix: "" },
   { value: 30, suffix: "M+", label: "Blocks Committed", prefix: "" },
 ];
 
