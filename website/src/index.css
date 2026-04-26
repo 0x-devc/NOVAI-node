@@ -1,0 +1,272 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+@layer base {
+  :root {
+    --background: 228 30% 4%;
+    --foreground: 210 40% 96%;
+
+    --card: 228 28% 8%;
+    --card-foreground: 210 40% 96%;
+
+    --popover: 228 28% 8%;
+    --popover-foreground: 210 40% 96%;
+
+    --primary: 228 100% 62%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 224 30% 14%;
+    --secondary-foreground: 210 40% 96%;
+
+    --muted: 224 25% 12%;
+    --muted-foreground: 215 20% 55%;
+
+    --accent: 192 95% 68%;
+    --accent-foreground: 228 30% 4%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 224 20% 18%;
+    --input: 224 20% 18%;
+    --ring: 228 100% 62%;
+
+    --radius: 0.75rem;
+
+    /* Extended NOVAI tokens */
+    --novai-glow: 228 100% 62%;
+    --novai-cyan: 192 95% 68%;
+    --novai-deep: 228 40% 6%;
+    --novai-surface: 224 28% 10%;
+    --novai-surface-hover: 224 28% 14%;
+    --novai-border-glow: 228 100% 62%;
+    --novai-gradient-1: linear-gradient(135deg, hsl(228, 100%, 62%), hsl(192, 95%, 68%));
+    --novai-text-gradient: linear-gradient(90deg, hsl(228, 100%, 70%) 0%, hsl(192, 95%, 68%) 50%, hsl(270, 80%, 75%) 100%);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  html, body, #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Space Grotesk', 'Inter', sans-serif;
+  }
+}
+
+@layer components {
+  /* Gradient text */
+  .gradient-text {
+    background: linear-gradient(90deg, hsl(228, 100%, 70%) 0%, hsl(192, 95%, 68%) 50%, hsl(270, 80%, 75%) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .gradient-text-subtle {
+    background: linear-gradient(90deg, hsl(210, 40%, 96%) 0%, hsl(192, 95%, 68%) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Glass card */
+  .glass-card {
+    background: hsla(224, 28%, 10%, 0.6);
+    border: 1px solid hsla(224, 20%, 25%, 0.4);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+  }
+
+  .glass-card-hover {
+    @apply glass-card transition-all duration-300;
+  }
+
+  .glass-card-hover:hover {
+    border-color: hsla(224, 20%, 25%, 0.5);
+    background: hsla(224, 28%, 12%, 0.7);
+    box-shadow:
+      0 0 20px rgba(76, 111, 255, 0.3),
+      0 0 60px rgba(76, 111, 255, 0.15),
+      0 0 100px rgba(125, 211, 252, 0.08);
+  }
+
+  /* Animated grid background */
+  .grid-bg {
+    background-image:
+      linear-gradient(hsla(224, 20%, 18%, 0.3) 1px, transparent 1px),
+      linear-gradient(90deg, hsla(224, 20%, 18%, 0.3) 1px, transparent 1px);
+    background-size: 60px 60px;
+  }
+
+  .grid-bg-fine {
+    background-image:
+      linear-gradient(hsla(224, 20%, 18%, 0.15) 1px, transparent 1px),
+      linear-gradient(90deg, hsla(224, 20%, 18%, 0.15) 1px, transparent 1px);
+    background-size: 30px 30px;
+  }
+
+  /* Mesh gradient */
+  .mesh-gradient {
+    background:
+      radial-gradient(ellipse 80% 50% at 20% 40%, hsla(228, 100%, 62%, 0.12), transparent),
+      radial-gradient(ellipse 60% 40% at 80% 20%, hsla(192, 95%, 68%, 0.08), transparent),
+      radial-gradient(ellipse 50% 60% at 60% 80%, hsla(270, 80%, 65%, 0.06), transparent);
+  }
+
+  /* Glow border on hover */
+  .glow-border {
+    position: relative;
+  }
+
+  .glow-border::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    transition: box-shadow 0.3s;
+  }
+
+  .glow-border:hover::before {
+    box-shadow:
+      0 0 20px rgba(76, 111, 255, 0.3),
+      0 0 60px rgba(76, 111, 255, 0.15),
+      0 0 100px rgba(125, 211, 252, 0.08);
+  }
+
+  /* Primary button */
+  .btn-primary {
+    @apply inline-flex items-center gap-2 rounded-xl px-6 py-3 text-sm font-semibold transition-all duration-300;
+    background: linear-gradient(135deg, hsl(228, 100%, 62%), hsl(228, 80%, 55%));
+    color: hsl(0, 0%, 100%);
+    box-shadow: 0 0 20px -5px hsla(228, 100%, 62%, 0.4);
+  }
+
+  .btn-primary:hover {
+    box-shadow: 0 0 30px -5px hsla(228, 100%, 62%, 0.6);
+    transform: translateY(-1px);
+  }
+
+  /* Ghost button */
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 rounded-xl border px-6 py-3 text-sm font-semibold transition-all duration-300;
+    border-color: hsla(224, 20%, 25%, 0.6);
+    color: hsl(210, 40%, 96%);
+  }
+
+  .btn-ghost:hover {
+    border-color: hsla(228, 100%, 62%, 0.4);
+    background: hsla(228, 100%, 62%, 0.05);
+  }
+
+  /* Section wrapper */
+  .section-container {
+    @apply mx-auto max-w-7xl px-6 sm:px-8;
+  }
+
+  /* Pill badge */
+  .pill-badge {
+    @apply inline-flex items-center gap-2 rounded-full border px-4 py-1.5 text-xs font-medium uppercase tracking-wider;
+    border-color: hsla(224, 20%, 25%, 0.6);
+    color: hsl(192, 95%, 68%);
+    background: hsla(224, 28%, 10%, 0.6);
+  }
+
+  /* Divider with gradient */
+  .gradient-divider {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsla(224, 20%, 25%, 0.6), transparent);
+  }
+}
+
+/* Animated background pulse */
+@keyframes pulseGlow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-20px); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+@keyframes gridMove {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(60px); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.animate-pulse-glow {
+  animation: pulseGlow 4s ease-in-out infinite;
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+.animate-shimmer {
+  background-size: 200% auto;
+  animation: shimmer 3s linear infinite;
+}
+
+.animate-grid-move {
+  animation: gridMove 4s linear infinite;
+}
+
+.animate-blink {
+  animation: blink 1s step-end infinite;
+}
+
+/* Focus styles */
+a:focus-visible {
+  outline: 2px solid hsla(228, 100%, 62%, 0.7);
+  outline-offset: 3px;
+  border-radius: 8px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: hsl(228, 30%, 4%);
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsla(224, 20%, 25%, 0.6);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsla(228, 100%, 62%, 0.4);
+}
