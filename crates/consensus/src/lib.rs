@@ -30,9 +30,12 @@ pub const MAX_TIMEOUT_MS: u64 = 60_000; // 60 seconds
 
 /// Number of committed blocks to retain in memory caches.
 /// Provides safety margin for the 3-chain commit rule and sync requests.
+/// The 3-chain commit rule strictly only needs the last 3 blocks; this
+/// margin keeps a small buffer for in-flight work without retaining
+/// excess state on memory-constrained deployments.
 /// Blocks older than `committed_height - CACHE_RETAIN_DEPTH` are evicted
 /// from in-memory caches only (DB is never touched).
-pub const CACHE_RETAIN_DEPTH: u64 = 10;
+pub const CACHE_RETAIN_DEPTH: u64 = 5;
 
 /// Number of committed blocks to retain on disk (RocksDB).
 /// When a new block is committed, blocks and QCs older than
@@ -968,8 +971,10 @@ impl ConsensusState {
         self.last_proposed = None;
 
         // H-01: Prune old pending_timeouts to prevent unbounded memory growth.
-        // Keep timeouts for recent rounds only (current_round - 10 as margin).
-        let prune_below_round = self.round.saturating_sub(10);
+        // Keep timeouts for recent rounds only (current_round - 5 as margin).
+        // The same prune_below_round is reused for block_by_hash and
+        // pending_votes pruning below.
+        let prune_below_round = self.round.saturating_sub(5);
         let before = self.pending_timeouts.len();
         self.pending_timeouts
             .retain(|&(_, r), _| r >= prune_below_round);
@@ -1375,9 +1380,9 @@ impl ConsensusState {
         // internal capacity grows far beyond the number of live entries. The
         // allocator keeps the old backing array allocated even after retain()
         // removes entries. shrink_to_fit() releases that excess capacity.
-        // Shrink every 256 heights (was 1000 — more aggressive to keep
-        // RSS bounded over multi-million block runs).
-        if self.committed_height & 0xFF == 0 {
+        // Shrink every 64 heights (originally 1000, then 256) to release
+        // excess capacity sooner on memory-constrained deployments.
+        if self.committed_height & 0x3F == 0 {
             self.block_cache.shrink_to_fit();
             self.qc_cache.shrink_to_fit();
             self.block_by_hash.shrink_to_fit();
