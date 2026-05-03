@@ -39,10 +39,10 @@ pub const CACHE_RETAIN_DEPTH: u64 = 10;
 /// `committed_height - PRUNE_RETAIN_BLOCKS` are deleted from disk
 /// as part of the atomic commit batch.
 ///
-/// 100,000 blocks at ~56 blocks/sec ≈ 30 minutes of history.
-/// The 3-chain commit rule only needs the last 3 blocks; catch-up sync
-/// needs more — 100K is generous.
-pub const PRUNE_RETAIN_BLOCKS: u64 = 100_000;
+/// The 3-chain commit rule only requires the last 3 blocks; this depth
+/// gives headroom for catch-up sync while bounding disk and compaction
+/// cost. Late-joining nodes outside this window must use chunked sync.
+pub const PRUNE_RETAIN_BLOCKS: u64 = 50_000;
 
 /// Calculate timeout duration for a given round using the default base timeout.
 ///

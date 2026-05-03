@@ -261,7 +261,7 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
             // underlying SST bytes when a compaction visits the range. Without this,
             // disk usage grows far beyond the retention window (observed: 6.3GB per
             // node at 4M blocks, expected ~88MB).
-            const COMPACT_INTERVAL: u64 = 10_000;
+            const COMPACT_INTERVAL: u64 = 5_000;
             const SAFETY_MARGIN: u64 = 100; // never compact too close to the live tail
             if last_block.height % COMPACT_INTERVAL == 0
                 && last_block.height > novai_consensus::PRUNE_RETAIN_BLOCKS + SAFETY_MARGIN
