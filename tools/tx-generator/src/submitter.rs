@@ -681,6 +681,126 @@ struct SubmitTxResponse {
     txid: String, // Hex-encoded
 }
 
+/// Response from novai_getLatestBlock (subset of fields needed for monitoring).
+#[derive(serde::Deserialize)]
+struct LatestBlockResponse {
+    height: u64,
+}
+
+/// Monitors chain progress and engages the shared pause flag when the
+/// chain height stops advancing for a configurable threshold.
+///
+/// Complementary to the MempoolFull-driven pause: the submitter pauses
+/// when the node refuses transactions; the chain monitor pauses when
+/// the node accepts transactions but consensus has stopped making
+/// progress (e.g., during a leader stall, partition, or resource
+/// exhaustion event). Both writers share a single AtomicBool; either
+/// can re-engage pause on the next observation if the other clears it
+/// while the underlying condition still holds.
+pub struct ChainMonitor {
+    endpoint: String,
+    poll_interval: Duration,
+    stall_threshold: Duration,
+    paused: Arc<AtomicBool>,
+    http_client: reqwest::Client,
+}
+
+impl ChainMonitor {
+    /// Create a new chain monitor that polls `endpoint` every
+    /// `poll_interval` and engages `paused` after `stall_threshold`
+    /// of no height advance.
+    pub fn new(
+        endpoint: String,
+        poll_interval: Duration,
+        stall_threshold: Duration,
+        paused: Arc<AtomicBool>,
+    ) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("Failed to create HTTP client for ChainMonitor");
+        Self {
+            endpoint,
+            poll_interval,
+            stall_threshold,
+            paused,
+            http_client,
+        }
+    }
+
+    /// Spawn the monitor task. Returns a handle that can be aborted on
+    /// shutdown. The task runs forever until aborted.
+    pub fn start(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(self.run())
+    }
+
+    async fn run(self) {
+        info!(
+            "Chain monitor started: poll_interval={:?}, stall_threshold={:?}",
+            self.poll_interval, self.stall_threshold
+        );
+        let mut last_height: Option<u64> = None;
+        let mut last_advance = Instant::now();
+        let mut stalled = false;
+
+        loop {
+            tokio::time::sleep(self.poll_interval).await;
+            match self.fetch_height().await {
+                Ok(Some(h)) => {
+                    if Some(h) != last_height {
+                        last_height = Some(h);
+                        last_advance = Instant::now();
+                        if stalled {
+                            info!(
+                                height = h,
+                                "Chain progress resumed, releasing generator pause"
+                            );
+                            self.paused.store(false, Ordering::Relaxed);
+                            stalled = false;
+                        }
+                    } else if !stalled && last_advance.elapsed() >= self.stall_threshold {
+                        warn!(
+                            height = h,
+                            elapsed_ms = last_advance.elapsed().as_millis() as u64,
+                            "Chain stalled, engaging generator pause"
+                        );
+                        self.paused.store(true, Ordering::Relaxed);
+                        stalled = true;
+                    }
+                }
+                Ok(None) => {
+                    last_advance = Instant::now();
+                }
+                Err(e) => {
+                    debug!("Chain monitor RPC error: {}", e);
+                }
+            }
+        }
+    }
+
+    async fn fetch_height(&self) -> Result<Option<u64>, String> {
+        let rpc_request = RpcRequest {
+            jsonrpc: "2.0",
+            method: "novai_getLatestBlock",
+            params: serde_json::json!([]),
+            id: 1,
+        };
+        let response = self
+            .http_client
+            .post(&self.endpoint)
+            .json(&rpc_request)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let rpc_response: RpcResponse<LatestBlockResponse> =
+            response.json().await.map_err(|e| e.to_string())?;
+        if let Some(err) = rpc_response.error {
+            return Err(format!("RPC error {}: {}", err.code, err.message));
+        }
+        Ok(rpc_response.result.map(|r| r.height))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

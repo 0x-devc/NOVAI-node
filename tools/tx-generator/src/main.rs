@@ -67,6 +67,20 @@ struct Args {
     /// Run continuously (equivalent to --duration 0). Overrides --duration.
     #[arg(long)]
     continuous: bool,
+
+    /// Chain stall threshold in seconds. If chain height does not advance
+    /// for this duration, engage the generator pause (complements the
+    /// MempoolFull-driven pause).
+    #[arg(long, default_value_t = 30)]
+    stall_threshold_secs: u64,
+
+    /// Chain monitor poll interval in seconds.
+    #[arg(long, default_value_t = 5)]
+    stall_poll_interval_secs: u64,
+
+    /// Disable the chain progress monitor (pause only on MempoolFull).
+    #[arg(long)]
+    no_stall_monitor: bool,
 }
 
 #[tokio::main]
@@ -130,6 +144,22 @@ async fn main() -> Result<()> {
     let submitter_handle = submitter.start(tx_receiver, metric_tx);
     info!("Started {} submitter workers", args.workers);
 
+    // 5b. Optionally start the chain progress monitor. It polls the
+    // endpoint for chain height and engages the shared pause flag if
+    // the chain stops advancing for `stall_threshold_secs`.
+    let chain_monitor_handle = if args.no_stall_monitor {
+        info!("Chain monitor disabled (--no-stall-monitor)");
+        None
+    } else {
+        let monitor = submitter::ChainMonitor::new(
+            args.endpoint.clone(),
+            Duration::from_secs(args.stall_poll_interval_secs),
+            Duration::from_secs(args.stall_threshold_secs),
+            Arc::clone(&paused),
+        );
+        Some(monitor.start())
+    };
+
     // 6. Start generator (produces unsigned templates)
     let generator_config = generator::GeneratorConfig {
         target_tps: args.tps,
@@ -191,6 +221,11 @@ async fn main() -> Result<()> {
 
     // Stop periodic stats logger
     if let Some(handle) = stats_logger {
+        handle.abort();
+    }
+
+    // Stop chain monitor
+    if let Some(handle) = chain_monitor_handle {
         handle.abort();
     }
 
@@ -285,6 +320,9 @@ mod tests {
             workers: 4,
             track_confirmations: false,
             continuous: false,
+            stall_threshold_secs: 30,
+            stall_poll_interval_secs: 5,
+            no_stall_monitor: false,
         };
         assert!(validate_args(&args).is_ok());
     }
@@ -303,6 +341,9 @@ mod tests {
             workers: 4,
             track_confirmations: false,
             continuous: false,
+            stall_threshold_secs: 30,
+            stall_poll_interval_secs: 5,
+            no_stall_monitor: false,
         };
         assert!(validate_args(&args).is_err());
     }
@@ -321,6 +362,9 @@ mod tests {
             workers: 4,
             track_confirmations: false,
             continuous: false,
+            stall_threshold_secs: 30,
+            stall_poll_interval_secs: 5,
+            no_stall_monitor: false,
         };
         assert!(validate_args(&args).is_err());
     }
