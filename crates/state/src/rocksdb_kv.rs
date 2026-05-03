@@ -60,32 +60,33 @@ impl RocksKv {
 
         // Explicit LRU block cache shared across all CFs.
         // Without this, RocksDB allocates an unbounded default block cache
-        // that grows with the working set. 8MB is sufficient for our access
+        // that grows with the working set. 4MB is sufficient for our access
         // pattern (sequential block reads, small QC lookups).
-        let block_cache = Cache::new_lru_cache(8 * 1024 * 1024);
+        let block_cache = Cache::new_lru_cache(4 * 1024 * 1024);
         let mut table_opts = BlockBasedOptions::default();
         table_opts.set_block_cache(&block_cache);
 
         // Write-heavy blockchain workload tuning (memory-bounded):
-        // - 16MB write buffer (down from 64MB) → bounds memory at
-        //   16MB × 2 memtables × 2 CFs = 64MB max for write buffers.
-        //   At our ~100KB/sec write rate, each buffer fills in ~160s —
-        //   still 100x over-provisioned vs flush latency.
-        // - 2 memtables (down from 3) → caps write buffer memory
-        // - 32MB L0 target file size → smaller SST files, faster compaction
-        // - Dynamic level sizing → optimizes LSM tree shape automatically
-        // - 4 background jobs → parallel flush + compaction
-        // - LZ4 compression → ~50% size reduction, fast enough for hot path
-        // - Zstd for bottommost level → best compression ratio for cold data
-        // - Relaxed L0 write stall thresholds → prevent stalls at scale
-        opts.set_write_buffer_size(16 * 1024 * 1024);
+        // - 8MB write buffer × 2 memtables × 2 CFs = 32MB max write buffer mem.
+        // - 32MB L0 target file size keeps SST files small for fast compaction.
+        // - Dynamic level sizing optimizes LSM tree shape automatically.
+        // - 2 background jobs balances flush + compaction parallelism with
+        //   CPU contention on resource-shared hosts.
+        // - LZ4 compression on hot levels (fast), Zstd on bottommost (best
+        //   ratio for cold data).
+        // - Relaxed L0 write stall thresholds prevent stalls at scale.
+        // - bytes_per_sync = 1MB smooths SST and WAL fsyncs into chunks
+        //   instead of bursty per-write fsyncs, reducing IO spike latency.
+        opts.set_write_buffer_size(8 * 1024 * 1024);
         opts.set_max_write_buffer_number(2);
         opts.set_target_file_size_base(32 * 1024 * 1024);
         opts.set_level_compaction_dynamic_level_bytes(true);
-        opts.set_max_background_jobs(4);
+        opts.set_max_background_jobs(2);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
         opts.set_block_based_table_factory(&table_opts);
+        opts.set_bytes_per_sync(1024 * 1024);
+        opts.set_wal_bytes_per_sync(1024 * 1024);
         // Prevent write stalls under compaction pressure at scale.
         // Defaults (slowdown=20, stop=36) can trigger on long-running
         // chains with continuous insert/delete cycles. Raising these
@@ -99,7 +100,7 @@ impl RocksKv {
         // replicate the tuning on each CF descriptor.
         let cf_opts = || {
             let mut o = Options::default();
-            o.set_write_buffer_size(16 * 1024 * 1024);
+            o.set_write_buffer_size(8 * 1024 * 1024);
             o.set_max_write_buffer_number(2);
             o.set_target_file_size_base(32 * 1024 * 1024);
             o.set_level_compaction_dynamic_level_bytes(true);
