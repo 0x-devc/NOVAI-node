@@ -87,11 +87,23 @@ The arrows show "Layer N may depend on Layer N−1 or below". Within a layer, cr
 
 **Purpose.** First-class on-chain types for AI entities, signals, memory objects, approval gates, action tiers, and NNPX privacy commitments. Pure type definitions plus the deterministic id derivations and capability bitfields.
 
-**Key items.** `AiEntity`, `AiEntityId`, `CodeHash`, `AutonomyMode` (Advisory / Gated / Autonomous-reserved), `Capabilities` (bitfield), `MemoryObject`, `MemoryObjectType`, `AiSignalType` (7 variants), `SignalCommitment`, `ApprovalGate`, `GateType` (Multisig / Threshold / TimelockOnly), `DerivedView`. The `AiEntity::compute_id(code_hash, creator)` function is the canonical entity-id derivation: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator)`.
+**Key items.** `AiEntity`, `AiEntityId`, `CodeHash`, `AutonomyMode` (Advisory / Gated / Autonomous-reserved), `Capabilities` (bitfield), `MemoryObject`, `MemoryObjectType` (7 variants: ChainSummary, LabelIndex, EmbeddingCommitment, AnomalyLog, StatisticsSnapshot, ReputationEvent, Rating), `AiSignalType` (8 variants: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast, ReputationUpdate), `SignalCommitment`, `ApprovalGate`, `GateType` (Multisig / Threshold / TimelockOnly), `DerivedView`. The `AiEntity::compute_id(code_hash, creator)` function is the canonical entity-id derivation: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator)`.
+
+**Reputation fields on `AiEntity`.** `reputation_score: u16` (clamped to `[0, 100]`, defaults to `DEFAULT_REPUTATION_SCORE = 50` for new entities), `total_transactions: u32` (incremented only on `REP_EVENT_JOB_COMPLETED`), `reputation_events_count: u32` (incremented on every applied reputation event). The fields are part of the canonical `AiEntity` v4 encoding (246 bytes); old V1/V2/V3 records decode with the defaults filled in.
+
+**Capability bits** (`u8` bitfield, LSB→MSB): bit 0 `read_public_chain`, bit 1 `read_memory_objects`, bit 2 `emit_proposals`, bit 3 `request_execution`, bit 4 `read_nnpx_derived`, bit 5 `submit_reputation_updates` (oracle entities only), bits 6–7 reserved.
 
 **Workspace deps.** `types`.
 
 **Where to read.** `crates/ai_entities/src/lib.rs:1–50` for the module overview, then `signals.rs`, `gates.rs`, `memory.rs`, `privacy.rs`, `derived_views.rs` for each subsystem.
+
+#### Oracle entities and the reputation system
+
+Reputation updates are not a new transaction type — they ride on `SignalCommitment` (tx type 2) with `signal_type == ReputationUpdate`. An entity may emit such a signal only if it carries the `submit_reputation_updates` capability bit, marking it an *oracle*. Oracle entities are typically registered by governance and are the only mutators of other entities' reputation state.
+
+The `ReputationUpdate` signal payload extends the base 66-byte `SignalCommitmentPayloadV1` with a 35-byte tail: `target_entity_id:32 | event_type:1 | points_delta_be:2`, total 101 bytes. `event_type` is one of `REP_EVENT_JOB_COMPLETED`, `REP_EVENT_DISPUTE_WON_DELIVERER`, `REP_EVENT_DISPUTE_WON_CUSTOMER`, `REP_EVENT_FRAUD_DETECTED`, `REP_EVENT_AUTO_RELEASE_PENALTY`, `REP_EVENT_DECAY` (constants in `novai_execution`). When `apply_signal_commitment_tx_inner` decodes a `ReputationUpdate`, it: (1) requires `submit_reputation_updates`, (2) rejects self-updates, (3) requires the target entity to exist, (4) widens to `i32`, applies the delta, clamps to `[0, 100]`, and writes back, (5) bumps `total_transactions` only on `REP_EVENT_JOB_COMPLETED`, and always increments `reputation_events_count`. All writes (issuer fee deduction, signal indexing, target reputation) land in a single atomic `KvBatch::apply_batch` call.
+
+`MemoryObjectType::ReputationEvent` and `MemoryObjectType::Rating` exist for off-chain audit-trail use: oracles can pin the supporting evidence (rating data, dispute reasons) as a memory object whose blake3 hash is what `signal_hash` commits to.
 
 ---
 
@@ -101,7 +113,7 @@ The arrows show "Layer N may depend on Layer N−1 or below". Within a layer, cr
 
 **Purpose.** Canonical binary encoding/decoding for every type that touches consensus or storage — transactions, blocks, governance proposals, AI entities, signal commitments, approval gates. Every encoding has a golden-vector test in `tests/golden_vectors/`.
 
-**Key items.** `CodecError`, `encode_tx_v1_unsigned` / `encode_tx_v1_signed`, `txid_v1`, `decode_block_v1`, `encode_proposal_v1`, `encode_ai_entity_v3`, `encode_signal_commitment_v1`, `encode_approval_gate_v1`. The `txid_v1` function is `blake3(unsigned_tx_bytes)` — also used as the signing pre-image when prefixed with `"NOVAI_TX_V1"`.
+**Key items.** `CodecError`, `encode_tx_v1_unsigned` / `encode_tx_v1_signed`, `txid_v1`, `decode_block_v1`, `encode_proposal_v1`, `encode_ai_entity_v4` (current; V1/V2/V3 still decoded for backward compatibility), `encode_signal_commitment_v1`, `encode_approval_gate_v1`. The `txid_v1` function is `blake3(unsigned_tx_bytes)` — also used as the signing pre-image when prefixed with `"NOVAI_TX_V1"`.
 
 **Workspace deps.** `types`, `ai_entities`.
 
