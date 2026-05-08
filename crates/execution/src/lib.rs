@@ -269,7 +269,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 6, // max valid signal type
+            expected: 7, // max valid signal type
             got: payload[33],
         },
     )?;

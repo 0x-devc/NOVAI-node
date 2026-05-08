@@ -40,6 +40,8 @@ pub const MAX_MEMORY_OBJECTS_PER_ENTITY: u32 = 100;
 /// - `EmbeddingCommitment`: Hash of embedding vector (vector stored off-chain)
 /// - `AnomalyLog`: Historical anomaly records
 /// - `StatisticsSnapshot`: Periodic chain statistics
+/// - `ReputationEvent`: Audit record of a reputation change applied to an entity
+/// - `Rating`: A counterparty rating event feeding reputation
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MemoryObjectType {
@@ -54,6 +56,10 @@ pub enum MemoryObjectType {
     AnomalyLog = 3,
     /// Periodic snapshot of chain statistics.
     StatisticsSnapshot = 4,
+    /// Audit record of a reputation change applied to an entity.
+    ReputationEvent = 5,
+    /// Counterparty rating (score, optional comment hash) feeding reputation.
+    Rating = 6,
 }
 
 impl MemoryObjectType {
@@ -72,6 +78,8 @@ impl MemoryObjectType {
             2 => Some(Self::EmbeddingCommitment),
             3 => Some(Self::AnomalyLog),
             4 => Some(Self::StatisticsSnapshot),
+            5 => Some(Self::ReputationEvent),
+            6 => Some(Self::Rating),
             _ => None,
         }
     }
@@ -85,6 +93,8 @@ impl MemoryObjectType {
             Self::EmbeddingCommitment => "EmbeddingCommitment",
             Self::AnomalyLog => "AnomalyLog",
             Self::StatisticsSnapshot => "StatisticsSnapshot",
+            Self::ReputationEvent => "ReputationEvent",
+            Self::Rating => "Rating",
         }
     }
 }
@@ -462,6 +472,8 @@ mod tests {
             MemoryObjectType::EmbeddingCommitment,
             MemoryObjectType::AnomalyLog,
             MemoryObjectType::StatisticsSnapshot,
+            MemoryObjectType::ReputationEvent,
+            MemoryObjectType::Rating,
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
@@ -471,7 +483,7 @@ mod tests {
 
     #[test]
     fn memory_object_type_invalid_returns_none() {
-        assert!(MemoryObjectType::from_byte(5).is_none());
+        assert!(MemoryObjectType::from_byte(7).is_none());
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
 
@@ -488,6 +500,11 @@ mod tests {
             MemoryObjectType::StatisticsSnapshot.name(),
             "StatisticsSnapshot"
         );
+        assert_eq!(
+            MemoryObjectType::ReputationEvent.name(),
+            "ReputationEvent"
+        );
+        assert_eq!(MemoryObjectType::Rating.name(), "Rating");
     }
 
     #[test]

@@ -502,17 +502,18 @@ fn verify_signal_type_encoding() {
     assert_eq!(AiSignalType::AuditReport.to_byte(), 4);
     assert_eq!(AiSignalType::SpamRisk.to_byte(), 5);
     assert_eq!(AiSignalType::CongestionForecast.to_byte(), 6);
+    assert_eq!(AiSignalType::ReputationUpdate.to_byte(), 7);
 }
 
 /// Verify signal type roundtrip from byte.
 #[test]
 fn verify_signal_type_roundtrip() {
-    for i in 0u8..=6 {
+    for i in 0u8..=7 {
         let signal_type = AiSignalType::from_byte(i).expect("valid type");
         assert_eq!(signal_type.to_byte(), i);
     }
 
     // Invalid bytes should return None
-    assert!(AiSignalType::from_byte(7).is_none());
+    assert!(AiSignalType::from_byte(8).is_none());
     assert!(AiSignalType::from_byte(255).is_none());
 }

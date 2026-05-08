@@ -18,6 +18,9 @@ pub enum AiSignalType {
     AuditReport = 4,
     SpamRisk = 5,
     CongestionForecast = 6,
+    /// Reputation update emitted by an oracle entity (requires
+    /// `submit_reputation_updates` capability).
+    ReputationUpdate = 7,
 }
 
 impl AiSignalType {
@@ -36,6 +39,7 @@ impl AiSignalType {
             4 => Some(AiSignalType::AuditReport),
             5 => Some(AiSignalType::SpamRisk),
             6 => Some(AiSignalType::CongestionForecast),
+            7 => Some(AiSignalType::ReputationUpdate),
             _ => None,
         }
     }
