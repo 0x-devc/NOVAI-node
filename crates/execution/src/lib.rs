@@ -163,6 +163,14 @@ pub enum ExecError<E> {
         minimum: u64,
         provided: u64,
     },
+    /// Reputation update targeted the issuer's own entity (self-update prohibited).
+    SelfReputationUpdate,
+    /// Reputation update target entity does not exist in state.
+    TargetEntityNotFound,
+    /// Reputation `event_type` discriminant is outside the valid range.
+    InvalidReputationEventType {
+        byte: u8,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -1314,7 +1322,7 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
 // AI STORAGE OPERATIONS (Retrofit Week 3)
 // ============================================================================
 
-use novai_ai_entities::{AiEntity, SignalCommitment};
+use novai_ai_entities::{AiEntity, AiSignalType, SignalCommitment, MAX_REPUTATION_SCORE};
 use novai_codec::{decode_ai_entity, encode_ai_entity_v4, encode_signal_commitment_v1};
 use novai_state::{
     ai_entity_key, ai_memory_key, ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
@@ -1882,6 +1890,43 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
 
     let issuer_key = ai_signal_by_issuer_key(&entity.id, current_height);
     ops.push(WriteOp::Put(issuer_key, commitment_bytes));
+
+    // Reputation update branch: only oracle entities, target lookup + clamp + write.
+    // Runs BEFORE the issuer write so a single atomic batch covers both records.
+    if payload.signal_type == AiSignalType::ReputationUpdate {
+        if !entity.capabilities.submit_reputation_updates {
+            return Err(ExecError::IssuerMissingCapability);
+        }
+        let extra = payload
+            .reputation
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("ReputationUpdate missing extra".into()))?;
+        if extra.event_type > REP_EVENT_MAX {
+            return Err(ExecError::InvalidReputationEventType {
+                byte: extra.event_type,
+            });
+        }
+        if extra.target_entity_id == entity.id {
+            return Err(ExecError::SelfReputationUpdate);
+        }
+
+        let mut target = read_ai_entity(db, &extra.target_entity_id)?
+            .ok_or(ExecError::TargetEntityNotFound)?;
+
+        // Clamped i32 arithmetic so u16 underflow is impossible.
+        let new_score: u16 = (i32::from(target.reputation_score) + i32::from(extra.points_delta))
+            .clamp(0, i32::from(MAX_REPUTATION_SCORE))
+            .try_into()
+            .map_err(|_| ExecError::Overflow)?;
+        target.reputation_score = new_score;
+
+        if extra.event_type == REP_EVENT_JOB_COMPLETED {
+            target.total_transactions = target.total_transactions.saturating_add(1);
+        }
+        target.reputation_events_count = target.reputation_events_count.saturating_add(1);
+
+        ops.push(write_ai_entity_op(&target));
+    }
 
     ops.push(write_ai_entity_op(&entity));
 
