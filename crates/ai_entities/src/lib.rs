@@ -122,8 +122,10 @@ pub struct Capabilities {
     pub request_execution: bool,
     /// Can read NNPX derived views (bounded, schema-validated).
     pub read_nnpx_derived: bool,
+    /// Can submit ReputationUpdate signals (oracle entities).
+    pub submit_reputation_updates: bool,
     /// Reserved for future capabilities.
-    pub _reserved: [bool; 3],
+    pub _reserved: [bool; 2],
 }
 
 impl Capabilities {
@@ -145,6 +147,9 @@ impl Capabilities {
         if self.read_nnpx_derived {
             flags |= 1 << 4;
         }
+        if self.submit_reputation_updates {
+            flags |= 1 << 5;
+        }
         flags
     }
 
@@ -156,7 +161,8 @@ impl Capabilities {
             emit_proposals: (byte & (1 << 2)) != 0,
             request_execution: (byte & (1 << 3)) != 0,
             read_nnpx_derived: (byte & (1 << 4)) != 0,
-            _reserved: [false; 3],
+            submit_reputation_updates: (byte & (1 << 5)) != 0,
+            _reserved: [false; 2],
         }
     }
 
@@ -168,7 +174,8 @@ impl Capabilities {
             emit_proposals: false,
             request_execution: false,
             read_nnpx_derived: false,
-            _reserved: [false; 3],
+            submit_reputation_updates: false,
+            _reserved: [false; 2],
         }
     }
 
@@ -180,7 +187,8 @@ impl Capabilities {
             emit_proposals: true,
             request_execution: false,
             read_nnpx_derived: false,
-            _reserved: [false; 3],
+            submit_reputation_updates: false,
+            _reserved: [false; 2],
         }
     }
 
@@ -192,7 +200,8 @@ impl Capabilities {
             emit_proposals: true,
             request_execution: true,
             read_nnpx_derived: false,
-            _reserved: [false; 3],
+            submit_reputation_updates: false,
+            _reserved: [false; 2],
         }
     }
 }
@@ -234,7 +243,19 @@ pub struct AiEntity {
     /// Whether this entity is currently active (can execute).
     /// Set via ModuleActivation/ModuleRollback governance proposals.
     pub is_active: bool,
+    /// Reputation score in [0, 100]. Defaults to 50 for new entities (neutral).
+    pub reputation_score: u16,
+    /// Total transactions counted toward reputation (e.g., job completions).
+    pub total_transactions: u32,
+    /// Number of reputation events applied to this entity.
+    pub reputation_events_count: u32,
 }
+
+/// Default reputation score for newly registered entities (neutral midpoint).
+pub const DEFAULT_REPUTATION_SCORE: u16 = 50;
+
+/// Maximum reputation score (clamp ceiling).
+pub const MAX_REPUTATION_SCORE: u16 = 100;
 
 impl AiEntity {
     /// Compute the canonical entity ID from code hash and creator.
@@ -269,6 +290,9 @@ impl AiEntity {
             registered_at,
             last_active_at: registered_at,
             is_active: true,
+            reputation_score: DEFAULT_REPUTATION_SCORE,
+            total_transactions: 0,
+            reputation_events_count: 0,
         }
     }
 
@@ -296,6 +320,9 @@ impl AiEntity {
             registered_at,
             last_active_at: registered_at,
             is_active: true,
+            reputation_score: DEFAULT_REPUTATION_SCORE,
+            total_transactions: 0,
+            reputation_events_count: 0,
         }
     }
 
@@ -312,6 +339,7 @@ impl AiEntity {
             "emit_proposals" => self.capabilities.emit_proposals,
             "request_execution" => self.capabilities.request_execution,
             "read_nnpx_derived" => self.capabilities.read_nnpx_derived,
+            "submit_reputation_updates" => self.capabilities.submit_reputation_updates,
             _ => false,
         }
     }
@@ -443,6 +471,23 @@ mod tests {
         assert_eq!(caps.emit_proposals, decoded.emit_proposals);
         assert_eq!(caps.request_execution, decoded.request_execution);
         assert_eq!(caps.read_nnpx_derived, decoded.read_nnpx_derived);
+        assert_eq!(
+            caps.submit_reputation_updates,
+            decoded.submit_reputation_updates
+        );
+    }
+
+    #[test]
+    fn capabilities_bit5_is_submit_reputation_updates() {
+        let caps = Capabilities {
+            submit_reputation_updates: true,
+            ..Capabilities::default()
+        };
+        let byte = caps.to_byte();
+        assert_eq!(byte, 1 << 5, "submit_reputation_updates must occupy bit 5");
+        let decoded = Capabilities::from_byte(byte);
+        assert!(decoded.submit_reputation_updates);
+        assert!(!decoded.read_public_chain);
     }
 
     #[test]
@@ -463,14 +508,17 @@ mod tests {
         assert!(read_only.read_memory_objects);
         assert!(!read_only.emit_proposals);
         assert!(!read_only.request_execution);
+        assert!(!read_only.submit_reputation_updates);
 
         let advisory = Capabilities::advisory();
         assert!(advisory.emit_proposals);
         assert!(!advisory.request_execution);
+        assert!(!advisory.submit_reputation_updates);
 
         let gated = Capabilities::gated();
         assert!(gated.emit_proposals);
         assert!(gated.request_execution);
+        assert!(!gated.submit_reputation_updates);
     }
 
     #[test]
@@ -492,6 +540,9 @@ mod tests {
         assert_eq!(entity.nonce, 0);
         assert_eq!(entity.registered_at, 1000);
         assert_eq!(entity.last_active_at, 1000);
+        assert_eq!(entity.reputation_score, DEFAULT_REPUTATION_SCORE);
+        assert_eq!(entity.total_transactions, 0);
+        assert_eq!(entity.reputation_events_count, 0);
     }
 
     #[test]

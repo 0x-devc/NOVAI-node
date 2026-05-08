@@ -50,7 +50,8 @@ fn max_capability_entity() -> AiEntity {
         emit_proposals: true,
         request_execution: true,
         read_nnpx_derived: true,
-        _reserved: [false; 3],
+        submit_reputation_updates: false,
+        _reserved: [false; 2],
     };
     AiEntity::new(
         [0xAAu8; 32],
@@ -310,7 +311,8 @@ fn test_malicious_module_cannot_access_other_module_state() {
             read_memory_objects: false,
             emit_proposals: false,
             request_execution: false,
-            _reserved: [false; 3],
+            submit_reputation_updates: false,
+            _reserved: [false; 2],
         },
         1000,
     );
@@ -421,7 +423,8 @@ fn test_malicious_module_cannot_emit_invalid_write_ops() {
         read_memory_objects: true,
         emit_proposals: true,
         request_execution: true,
-        _reserved: [false; 3],
+        submit_reputation_updates: false,
+        _reserved: [false; 2],
     };
     let result: Result<(), ExecError<()>> = validate_ai_entity_no_nnpx_capability(&malicious_caps);
     assert!(

@@ -299,6 +299,10 @@ fn decode_ai_entity_v1_impl(input: &[u8]) -> Result<AiEntity, AiEntityCodecError
         registered_at,
         last_active_at,
         is_active: true, // V1 backward compat: default to active
+        // V1→V4 promotion: reputation defaults
+        reputation_score: novai_ai_entities::DEFAULT_REPUTATION_SCORE,
+        total_transactions: 0,
+        reputation_events_count: 0,
     })
 }
 
@@ -394,6 +398,10 @@ fn decode_ai_entity_v2_impl(input: &[u8]) -> Result<AiEntity, AiEntityCodecError
         registered_at,
         last_active_at,
         is_active,
+        // V2→V4 promotion: reputation defaults
+        reputation_score: novai_ai_entities::DEFAULT_REPUTATION_SCORE,
+        total_transactions: 0,
+        reputation_events_count: 0,
     })
 }
 
@@ -482,6 +490,10 @@ fn decode_ai_entity_v3_impl(input: &[u8]) -> Result<AiEntity, AiEntityCodecError
         registered_at,
         last_active_at,
         is_active,
+        // V3→V4 promotion: reputation defaults
+        reputation_score: novai_ai_entities::DEFAULT_REPUTATION_SCORE,
+        total_transactions: 0,
+        reputation_events_count: 0,
     })
 }
 

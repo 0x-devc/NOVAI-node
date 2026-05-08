@@ -307,7 +307,8 @@ fn entity_without_read_memory_cannot_create_memory() {
         emit_proposals: true,
         request_execution: false,
         read_nnpx_derived: false,
-        _reserved: [false; 3],
+        submit_reputation_updates: false,
+        _reserved: [false; 2],
     };
     let entity = create_entity(b"no_memory_entity", 100_000, true, caps);
     store_entity(&mut db, &entity);

@@ -111,6 +111,8 @@ pub struct GenesisCapabilities {
     pub request_execution: bool,
     #[serde(default)]
     pub read_nnpx_derived: bool,
+    #[serde(default)]
+    pub submit_reputation_updates: bool,
 }
 
 /// Genesis approval gate configuration.
@@ -405,7 +407,8 @@ impl GenesisGenerator {
                     emit_proposals: caps.emit_proposals,
                     request_execution: caps.request_execution,
                     read_nnpx_derived: caps.read_nnpx_derived,
-                    _reserved: [false; 3],
+                    submit_reputation_updates: caps.submit_reputation_updates,
+                    _reserved: [false; 2],
                 },
             );
 
