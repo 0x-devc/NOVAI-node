@@ -5,9 +5,12 @@
 //! UPDATE_VECTORS=1 cargo test -p novai-ai-entities --test golden_vectors
 //! ```
 
-use novai_ai_entities::{AiEntity, AutonomyMode, Capabilities};
+use novai_ai_entities::{AiEntity, AutonomyMode, Capabilities, DEFAULT_REPUTATION_SCORE};
 // Golden vector tests intentionally use v1 codec to verify backward compatibility
-use novai_codec::ai_entity_codec::{decode_ai_entity, encode_ai_entity_v2, encode_ai_entity_v3};
+use novai_codec::ai_entity_codec::{
+    decode_ai_entity, encode_ai_entity_v2, encode_ai_entity_v3, encode_ai_entity_v4,
+    AI_ENTITY_V4_SIZE,
+};
 #[allow(deprecated)]
 use novai_codec::ai_entity_codec::{decode_ai_entity_v1, encode_ai_entity_v1};
 use std::fs;
@@ -259,4 +262,75 @@ fn v2_backward_compat_decodes_with_zero_pubkey() {
         decoded.pubkey, [0u8; 32],
         "V2 entities must decode with pubkey = [0u8; 32]"
     );
+}
+
+// ============================================================================
+// V4 Golden Vector Tests (includes reputation tail)
+// ============================================================================
+
+#[test]
+fn golden_ai_entity_v4() {
+    let mut entity = golden_test_entity();
+    entity.pubkey = [0xAB; 32];
+    entity.reputation_score = 73;
+    entity.total_transactions = 12;
+    entity.reputation_events_count = 4;
+
+    let bytes = encode_ai_entity_v4(&entity);
+    let path = vectors_dir().join("ai_entity_v4.bin");
+
+    if should_update_vectors() {
+        fs::create_dir_all(vectors_dir()).expect("failed to create vectors dir");
+        fs::write(&path, &bytes).expect("failed to write golden vector");
+        println!("Updated golden vector: {path:?}");
+        println!("Vector length: {} bytes", bytes.len());
+    } else {
+        let expected = fs::read(&path)
+            .expect("Golden vector file missing. Run with UPDATE_VECTORS=1 to generate.");
+        assert_eq!(
+            bytes, expected,
+            "AI entity v4 encoding drifted from golden vector!"
+        );
+    }
+
+    assert_eq!(bytes.len(), AI_ENTITY_V4_SIZE);
+    assert_eq!(bytes.len(), 246);
+    assert_eq!(bytes[0], 0x04, "V4 must start with version byte 0x04");
+
+    // reputation tail at offsets 236, 238, 242
+    assert_eq!(&bytes[236..238], &73u16.to_le_bytes());
+    assert_eq!(&bytes[238..242], &12u32.to_le_bytes());
+    assert_eq!(&bytes[242..246], &4u32.to_le_bytes());
+
+    let decoded = decode_ai_entity(&bytes).expect("v4 decode failed");
+    assert_eq!(entity.id, decoded.id);
+    assert_eq!(entity.pubkey, decoded.pubkey);
+    assert_eq!(decoded.reputation_score, 73);
+    assert_eq!(decoded.total_transactions, 12);
+    assert_eq!(decoded.reputation_events_count, 4);
+}
+
+#[test]
+fn v3_backward_compat_promotes_reputation_defaults() {
+    let entity = golden_test_entity();
+    let v3_bytes = encode_ai_entity_v3(&entity);
+    let decoded = decode_ai_entity(&v3_bytes).expect("v3 decode failed");
+    assert_eq!(
+        decoded.reputation_score, DEFAULT_REPUTATION_SCORE,
+        "V3 entities must decode with reputation_score = DEFAULT_REPUTATION_SCORE"
+    );
+    assert_eq!(decoded.total_transactions, 0);
+    assert_eq!(decoded.reputation_events_count, 0);
+}
+
+#[test]
+fn golden_ai_entity_v4_is_stable_across_runs() {
+    let mut entity = golden_test_entity();
+    entity.reputation_score = 88;
+    entity.total_transactions = 999;
+    entity.reputation_events_count = 7;
+
+    let bytes1 = encode_ai_entity_v4(&entity);
+    let bytes2 = encode_ai_entity_v4(&entity);
+    assert_eq!(bytes1, bytes2, "V4 encoding must be deterministic");
 }
