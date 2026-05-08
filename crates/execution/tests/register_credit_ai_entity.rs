@@ -546,8 +546,8 @@ fn register_then_signal() {
         signal_hash,
         signal_type: AiSignalType::Prediction,
         issuer_entity_id: entity_id,
-    })
-    .to_vec();
+        reputation: None,
+    });
 
     // Signal tx is from the entity itself (entity pays fee from its balance)
     let signal_tx = create_test_tx(entity_id, 0, 20, signal_payload);

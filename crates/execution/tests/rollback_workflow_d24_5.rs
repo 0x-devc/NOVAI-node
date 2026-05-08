@@ -171,6 +171,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
             signal_hash: prediction_hash,
             signal_type: AiSignalType::Prediction,
             issuer_entity_id: module_id,
+            reputation: None,
         };
         let signal_tx = TxV1 {
             version: TxVersion::V1,
@@ -178,7 +179,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
             pubkey: module_id,
             nonce: i,
             fee: 100,
-            payload: encode_signal_commitment_payload_v1(&signal_payload).to_vec(),
+            payload: encode_signal_commitment_payload_v1(&signal_payload),
             sig: [0u8; 64],
         };
         apply_signal_commitment_tx(&mut db, &signal_tx, 200 + i).unwrap();
@@ -207,6 +208,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
         signal_hash: anomaly_hash,
         signal_type: AiSignalType::Anomaly,
         issuer_entity_id: module_id,
+        reputation: None,
     };
     let anomaly_tx = TxV1 {
         version: TxVersion::V1,
@@ -214,7 +216,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
         pubkey: module_id,
         nonce: 3, // After the 3 predictions
         fee: 100,
-        payload: encode_signal_commitment_payload_v1(&anomaly_payload).to_vec(),
+        payload: encode_signal_commitment_payload_v1(&anomaly_payload),
         sig: [0u8; 64],
     };
     apply_signal_commitment_tx(&mut db, &anomaly_tx, 300).unwrap();

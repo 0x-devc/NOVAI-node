@@ -104,8 +104,8 @@ fn mk_signal_commitment(
         signal_hash,
         signal_type,
         issuer_entity_id,
-    })
-    .to_vec();
+        reputation: None,
+    });
     TxV1 {
         version: TxVersion::V1,
         from: issuer_entity_id,

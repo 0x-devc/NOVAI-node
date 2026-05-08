@@ -217,42 +217,118 @@ pub fn encode_transfer_payload_v1(p: &TransferPayloadV1) -> [u8; 1 + 32 + 8] {
 /// Signal commitment payload version.
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1: u8 = 2;
 
+/// Base size of a signal commitment payload (signal types 0..=6).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN: usize = 66;
+
+/// Inline-extra size for a `ReputationUpdate` signal payload.
+/// `target_entity_id:32 | event_type:1 | points_delta_be:2`
+pub const REPUTATION_UPDATE_EXTRA_LEN: usize = 35;
+
+/// Total size of a `ReputationUpdate` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + REPUTATION_UPDATE_EXTRA_LEN;
+
+// Reputation event_type discriminants (carried inline in the signal payload).
+/// Job/transaction successfully completed by the target entity.
+pub const REP_EVENT_JOB_COMPLETED: u8 = 0;
+/// Dispute resolved in favour of the deliverer.
+pub const REP_EVENT_DISPUTE_WON_DELIVERER: u8 = 1;
+/// Dispute resolved in favour of the customer.
+pub const REP_EVENT_DISPUTE_WON_CUSTOMER: u8 = 2;
+/// Fraud detected; oracle is asserting a strong negative judgement.
+pub const REP_EVENT_FRAUD_DETECTED: u8 = 3;
+/// Auto-release applied because the customer did not respond in time.
+pub const REP_EVENT_AUTO_RELEASE_PENALTY: u8 = 4;
+/// Reputation decay applied for inactivity.
+pub const REP_EVENT_DECAY: u8 = 5;
+/// Maximum valid reputation `event_type` discriminant.
+pub const REP_EVENT_MAX: u8 = REP_EVENT_DECAY;
+
+/// Inline reputation-update tail carried in `ReputationUpdate` signal payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReputationUpdateExtraV1 {
+    /// Entity whose reputation should be mutated.
+    pub target_entity_id: [u8; 32],
+    /// Reputation `event_type` discriminant (see `REP_EVENT_*` constants).
+    pub event_type: u8,
+    /// Signed delta to apply (i16 big-endian on the wire). Final score is
+    /// clamped to [0, 100] in the execution handler.
+    pub points_delta: i16,
+}
+
 /// Canonical Signal Commitment payload (D14.1):
-/// `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
-///
-/// Total size: 66 bytes
+/// - Base (signal types 0..=6): 66 bytes
+///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
+/// - `ReputationUpdate` (signal type 7): 101 bytes (base + 35-byte tail)
+///   `... [target_entity_id:32][event_type:1][points_delta_be:2]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalCommitmentPayloadV1 {
     /// Commitment hash of the full signal.
     pub signal_hash: [u8; 32],
-    /// Signal type (0-6).
+    /// Signal type (0..=7).
     pub signal_type: novai_ai_entities::AiSignalType,
     /// AI entity ID that issued this signal.
     pub issuer_entity_id: [u8; 32],
+    /// Inline reputation tail. MUST be `Some` iff `signal_type == ReputationUpdate`.
+    pub reputation: Option<ReputationUpdateExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
+///
+/// Returns 66 bytes for non-reputation signals and 101 bytes for
+/// `ReputationUpdate`. Panics in debug if `reputation` is set inconsistently
+/// with `signal_type`; in release builds the inconsistency is silently fixed
+/// by ignoring the unused `reputation` field.
 #[must_use]
-pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> [u8; 66] {
-    let mut out = [0u8; 66];
-    out[0] = SIGNAL_COMMITMENT_PAYLOAD_V1;
-    out[1..33].copy_from_slice(&p.signal_hash);
-    out[33] = p.signal_type.to_byte();
-    out[34..66].copy_from_slice(&p.issuer_entity_id);
+pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec<u8> {
+    let is_reputation = p.signal_type == novai_ai_entities::AiSignalType::ReputationUpdate;
+    debug_assert_eq!(
+        is_reputation,
+        p.reputation.is_some(),
+        "reputation tail presence must match signal_type"
+    );
+
+    let total = if is_reputation {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN
+    } else {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
+    };
+    let mut out = Vec::with_capacity(total);
+    out.push(SIGNAL_COMMITMENT_PAYLOAD_V1);
+    out.extend_from_slice(&p.signal_hash);
+    out.push(p.signal_type.to_byte());
+    out.extend_from_slice(&p.issuer_entity_id);
+
+    if is_reputation {
+        if let Some(extra) = &p.reputation {
+            out.extend_from_slice(&extra.target_entity_id);
+            out.push(extra.event_type);
+            out.extend_from_slice(&extra.points_delta.to_be_bytes());
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; REPUTATION_UPDATE_EXTRA_LEN]);
+        }
+    }
+
+    debug_assert_eq!(out.len(), total);
     out
 }
 
 /// Deterministically decode a signal commitment payload from `tx.payload`.
 ///
+/// Accepts 66 bytes for non-reputation signals and 101 bytes for
+/// `ReputationUpdate`. Mismatched length-vs-signal-type is rejected.
+///
 /// # Errors
-/// Returns error if payload length or version is invalid.
+/// Returns error if payload length, version, or signal type is invalid.
 pub fn decode_signal_commitment_payload_v1(
     payload: &[u8],
 ) -> Result<SignalCommitmentPayloadV1, ExecError<()>> {
-    const LEN: usize = 66;
-    if payload.len() != LEN {
+    if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
+        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN
+    {
         return Err(ExecError::BadPayloadLength {
-            expected: LEN,
+            expected: SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN,
             got: payload.len(),
         });
     }
@@ -277,10 +353,38 @@ pub fn decode_signal_commitment_payload_v1(
     let mut issuer_entity_id = [0u8; 32];
     issuer_entity_id.copy_from_slice(&payload[34..66]);
 
+    let is_reputation = signal_type == novai_ai_entities::AiSignalType::ReputationUpdate;
+    let reputation = if is_reputation {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut target_entity_id = [0u8; 32];
+        target_entity_id.copy_from_slice(&payload[66..98]);
+        let event_type = payload[98];
+        let points_delta = i16::from_be_bytes([payload[99], payload[100]]);
+        Some(ReputationUpdateExtraV1 {
+            target_entity_id,
+            event_type,
+            points_delta,
+        })
+    } else {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN,
+                got: payload.len(),
+            });
+        }
+        None
+    };
+
     Ok(SignalCommitmentPayloadV1 {
         signal_hash,
         signal_type,
         issuer_entity_id,
+        reputation,
     })
 }
 

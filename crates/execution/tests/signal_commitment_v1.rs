@@ -45,8 +45,9 @@ fn create_signal_payload(
         signal_hash,
         signal_type,
         issuer_entity_id: issuer,
+        reputation: None,
     };
-    encode_signal_commitment_payload_v1(&payload).to_vec()
+    encode_signal_commitment_payload_v1(&payload)
 }
 
 /// Create a test transaction.

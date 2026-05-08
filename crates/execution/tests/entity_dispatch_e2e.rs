@@ -109,8 +109,8 @@ fn signal_publish_lands_via_dispatcher() {
         signal_hash: [0xAAu8; 32],
         signal_type: AiSignalType::Anomaly,
         issuer_entity_id: entity_id,
-    })
-    .to_vec();
+        reputation: None,
+    });
 
     let signal_tx = mk_tx(entity_addr, entity_pubkey, 0, 1_000, signal_payload);
     dispatch_tx(&mut db, &signal_tx, 200).expect("signal dispatch should succeed");
@@ -263,8 +263,8 @@ fn signal_from_non_entity_address_returns_issuer_not_found() {
         signal_hash: [0xAAu8; 32],
         signal_type: AiSignalType::Anomaly,
         issuer_entity_id: [0xDEu8; 32],
-    })
-    .to_vec();
+        reputation: None,
+    });
 
     let tx = mk_tx(
         derive_addr(&stranger_pubkey),
@@ -300,8 +300,8 @@ fn signal_with_mismatched_payload_issuer_returns_mismatch() {
         signal_hash: [0xAAu8; 32],
         signal_type: AiSignalType::Anomaly,
         issuer_entity_id: [0xCCu8; 32], // wrong issuer claimed
-    })
-    .to_vec();
+        reputation: None,
+    });
 
     let tx = mk_tx(entity_addr, entity_pubkey, 0, 1_000, payload);
     let result = dispatch_tx(&mut db, &tx, 100);

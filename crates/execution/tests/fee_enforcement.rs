@@ -174,8 +174,8 @@ fn signal_below_minimum_rejected() {
         signal_hash: [0xAAu8; 32],
         signal_type: novai_ai_entities::AiSignalType::Prediction,
         issuer_entity_id: entity_id,
-    })
-    .to_vec();
+        reputation: None,
+    });
 
     // Fee 500 is below minimum of 1000 for signals
     let tx = create_test_tx(entity_id, 0, 500, payload);
@@ -221,8 +221,8 @@ fn signal_at_minimum_accepted() {
         signal_hash: [0xAAu8; 32],
         signal_type: novai_ai_entities::AiSignalType::Prediction,
         issuer_entity_id: entity_id,
-    })
-    .to_vec();
+        reputation: None,
+    });
 
     let tx = create_test_tx(entity_id, 0, MIN_FEE_SIGNAL_COMMITMENT, payload);
     let result = dispatch_tx(&mut db, &tx, 100);
@@ -417,8 +417,8 @@ fn distribute_fee_splits_ai_signal() {
         signal_hash: [0xAAu8; 32],
         signal_type: novai_ai_entities::AiSignalType::Prediction,
         issuer_entity_id: entity_id,
-    })
-    .to_vec();
+        reputation: None,
+    });
 
     let fee = 1_000u64;
     let tx = create_test_tx(entity_id, 0, fee, payload);

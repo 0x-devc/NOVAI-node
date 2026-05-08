@@ -107,8 +107,9 @@ fn create_signal_payload(issuer: [u8; 32]) -> Vec<u8> {
         signal_hash: [0xAAu8; 32],
         signal_type: AiSignalType::Anomaly,
         issuer_entity_id: issuer,
+        reputation: None,
     };
-    encode_signal_commitment_payload_v1(&payload).to_vec()
+    encode_signal_commitment_payload_v1(&payload)
 }
 
 /// Create a memory object payload.
