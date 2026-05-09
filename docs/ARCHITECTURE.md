@@ -87,9 +87,11 @@ The arrows show "Layer N may depend on Layer N−1 or below". Within a layer, cr
 
 **Purpose.** First-class on-chain types for AI entities, signals, memory objects, approval gates, action tiers, and NNPX privacy commitments. Pure type definitions plus the deterministic id derivations and capability bitfields.
 
-**Key items.** `AiEntity`, `AiEntityId`, `CodeHash`, `AutonomyMode` (Advisory / Gated / Autonomous-reserved), `Capabilities` (bitfield), `MemoryObject`, `MemoryObjectType` (8 variants: ChainSummary, LabelIndex, EmbeddingCommitment, AnomalyLog, StatisticsSnapshot, ReputationEvent, Rating, SignalCatalog), `AiSignalType` (9 variants: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast, ReputationUpdate, SignalPurchase), `SignalCommitment`, `SignalCatalogData`, `ApprovalGate`, `GateType` (Multisig / Threshold / TimelockOnly), `DerivedView`. The `AiEntity::compute_id(code_hash, creator)` function is the canonical entity-id derivation: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator)`.
+**Key items.** `AiEntity`, `AiEntityId`, `CodeHash`, `AutonomyMode` (Advisory / Gated / Autonomous-reserved), `Capabilities` (bitfield), `MemoryObject`, `MemoryObjectType` (8 variants: ChainSummary, LabelIndex, EmbeddingCommitment, AnomalyLog, StatisticsSnapshot, ReputationEvent, Rating, SignalCatalog), `AiSignalType` (12 variants: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast, ReputationUpdate, SignalPurchase, StakeDeposit, StakeWithdraw, StakeSlash), `SignalCommitment`, `SignalCatalogData`, `ApprovalGate`, `GateType` (Multisig / Threshold / TimelockOnly), `DerivedView`. The `AiEntity::compute_id(code_hash, creator)` function is the canonical entity-id derivation: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator)`.
 
-**Reputation fields on `AiEntity`.** `reputation_score: u16` (clamped to `[0, 100]`, defaults to `DEFAULT_REPUTATION_SCORE = 50` for new entities), `total_transactions: u32` (incremented only on `REP_EVENT_JOB_COMPLETED`), `reputation_events_count: u32` (incremented on every applied reputation event). The fields are part of the canonical `AiEntity` v4 encoding (246 bytes); old V1/V2/V3 records decode with the defaults filled in.
+**Reputation fields on `AiEntity`.** `reputation_score: u16` (clamped to `[0, 100]`, defaults to `DEFAULT_REPUTATION_SCORE = 50` for new entities), `total_transactions: u32` (incremented only on `REP_EVENT_JOB_COMPLETED`), `reputation_events_count: u32` (incremented on every applied reputation event).
+
+**Stake fields on `AiEntity`.** `stake_balance: u128` (collateral the entity has staked, in the same unit as `economic_balance`; defaults to 0 for new entities), `stake_locked_until: u64` (block height under which `StakeWithdraw` is rejected; 0 means unlocked). The reputation and stake fields together form the canonical `AiEntity` V5 encoding (270 bytes). Older records (V1/V2/V3/V4) decode with the missing tail fields defaulted: V1/V2/V3 promote to reputation defaults, V1/V2/V3/V4 promote to `stake_balance = 0` and `stake_locked_until = 0`. Entities are rewritten in V5 on the next mutating transaction.
 
 **Capability bits** (`u8` bitfield, LSB→MSB): bit 0 `read_public_chain`, bit 1 `read_memory_objects`, bit 2 `emit_proposals`, bit 3 `request_execution`, bit 4 `read_nnpx_derived`, bit 5 `submit_reputation_updates` (oracle entities only), bits 6–7 reserved.
 
@@ -119,6 +121,28 @@ The marketplace lets entities price the signals they emit and lets other entitie
 
 **Free signals.** A purchase against a `price = 0` offering still records the transaction (both parties' `total_transactions` are bumped) but performs no balance transfer and never writes the treasury record. This keeps zero-fee social-proof flows in the same code path as priced ones without polluting the treasury history.
 
+#### Entity staking and bonding
+
+Staking lets an entity post collateral against its on-chain behavior. Staked funds are locked for a cooldown period and can be slashed by an oracle when bad behavior is detected. Higher stake means more skin in the game, which feeds into reputation- and marketplace-driven trust signals. Like reputation and the marketplace, staking adds no new transaction type — it rides on `SignalCommitment` (tx type 2) with three new `signal_type` values. NOVAI stays at 10 transaction types.
+
+**State.** Staking fields live directly on `AiEntity` (V5 codec): `stake_balance: u128` and `stake_locked_until: u64`. A non-zero stake is just a u128 value with a u64 lock height; entities with zero stake operate normally and are not gated out of any other flow.
+
+**Lifecycle.** A staking entity moves funds between `economic_balance` and `stake_balance` via two signals it issues itself, and a third signal an oracle issues against it:
+
+- `StakeDeposit` (signal type 9, 82-byte payload, 16-byte amount tail) debits `economic_balance` by `amount`, credits `stake_balance` by the same, and sets `stake_locked_until = current_height + STAKE_LOCK_PERIOD`. Each fresh deposit refreshes the lock to cover the whole new balance — there is no per-deposit lock accounting.
+- `StakeWithdraw` (signal type 10, 82-byte payload, 16-byte amount tail) requires `stake_locked_until <= current_height`, then moves `amount` from `stake_balance` back to `economic_balance`. Partial withdrawals leave the remaining `stake_balance` unlocked; the lock is *not* refreshed on the leftover. A re-deposit is what re-locks the position.
+- `StakeSlash` (signal type 11, 117-byte payload, 51-byte tail: `target_id:32 | slash_amount:16 | rep_event_type:1 | points_delta:2`) is emitted by an oracle entity (must hold the `submit_reputation_updates` capability — same gate as `ReputationUpdate`). It deducts from `target.stake_balance`, credits the slashed amount to `KEY_SLASH_TREASURY`, and applies a reputation update on the target in the same atomic batch.
+
+**Saturating slash.** When `slash_amount` exceeds the target's `stake_balance`, the handler takes everything available and credits *that* lower amount to the treasury. This avoids over-slashing into negative balances and keeps the treasury accounting honest.
+
+**Atomicity.** Every staking signal lands in the same `KvBatch::apply_batch` as the issuer fee deduction and the signal-commitment index writes. A `StakeSlash` therefore atomically (1) deducts the target's `stake_balance`, (2) credits `KEY_SLASH_TREASURY`, (3) clamp-applies `points_delta` to `target.reputation_score`, (4) bumps `target.reputation_events_count`. There is no observable intermediate state.
+
+**Errors.** New `ExecError` variants for staking: `StakeStillLocked { unlocks_at, current }`, `InsufficientStakeBalance { required, available }`, `SelfSlash`. Reuses `InsufficientEntityBalance` (deposit), `IssuerMissingCapability` (slash without oracle bit), `TargetEntityNotFound` (slash unknown target), `InvalidReputationEventType` (slash with `rep_event_type > REP_EVENT_MAX`).
+
+**Slash treasury.** Slashed funds accumulate at the canonical state key `KEY_SLASH_TREASURY = b"treasury/slash"`, encoded with the same `FeePoolV1` codec as the marketplace and AI treasuries. The slash treasury is kept separate from the marketplace treasury so future governance can drain or burn slashed funds independently of marketplace revenue.
+
+**Constants.** `STAKE_LOCK_PERIOD = 1000` blocks (placeholder; tunable). `MIN_STAKE_FOR_CATALOG = 0` (gate disabled; constant defined for future governance activation that would require non-zero stake to publish a `SignalCatalog` memory object). A new reputation event discriminant `REP_EVENT_STAKE_SLASH = 6` lets the slash-companion rep update tag itself; `REP_EVENT_MAX` advances to 6 accordingly.
+
 ---
 
 ## Layer 2 — encoding · storage · governance
@@ -127,7 +151,7 @@ The marketplace lets entities price the signals they emit and lets other entitie
 
 **Purpose.** Canonical binary encoding/decoding for every type that touches consensus or storage — transactions, blocks, governance proposals, AI entities, signal commitments, approval gates. Every encoding has a golden-vector test in `tests/golden_vectors/`.
 
-**Key items.** `CodecError`, `encode_tx_v1_unsigned` / `encode_tx_v1_signed`, `txid_v1`, `decode_block_v1`, `encode_proposal_v1`, `encode_ai_entity_v4` (current; V1/V2/V3 still decoded for backward compatibility), `encode_signal_commitment_v1`, `encode_approval_gate_v1`. The `txid_v1` function is `blake3(unsigned_tx_bytes)` — also used as the signing pre-image when prefixed with `"NOVAI_TX_V1"`.
+**Key items.** `CodecError`, `encode_tx_v1_unsigned` / `encode_tx_v1_signed`, `txid_v1`, `decode_block_v1`, `encode_proposal_v1`, `encode_ai_entity_v5` (current at 270 bytes; V1/V2/V3/V4 still decoded for backward compatibility and promoted to the V5 layout on next write), `encode_signal_commitment_v1`, `encode_approval_gate_v1`. The `txid_v1` function is `blake3(unsigned_tx_bytes)` — also used as the signing pre-image when prefixed with `"NOVAI_TX_V1"`.
 
 **Workspace deps.** `types`, `ai_entities`.
 
