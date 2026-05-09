@@ -551,6 +551,7 @@ fn register_then_signal() {
         stake_deposit: None,
         stake_withdraw: None,
         stake_slash: None,
+        composition_check: None,
     });
 
     // Signal tx is from the entity itself (entity pays fee from its balance)

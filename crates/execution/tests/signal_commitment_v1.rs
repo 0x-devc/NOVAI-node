@@ -50,6 +50,7 @@ fn create_signal_payload(
         stake_deposit: None,
         stake_withdraw: None,
         stake_slash: None,
+        composition_check: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }

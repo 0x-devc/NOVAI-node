@@ -207,6 +207,11 @@ pub enum ExecError<E> {
     },
     /// `StakeSlash` issuer attempted to slash itself (prohibited).
     SelfSlash,
+    /// `CompositionCheck` payload carried a `failure_reason` byte outside
+    /// the valid range `[0, COMPOSITION_FAILURE_REASON_MAX]`.
+    InvalidCompositionFailureReason {
+        byte: u8,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -304,6 +309,14 @@ pub const STAKE_SLASH_EXTRA_LEN: usize = 51;
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + STAKE_SLASH_EXTRA_LEN;
 
+/// Inline-extra size for a `CompositionCheck` signal payload.
+/// `target_entity_id:32 | failed_dependency_idx:1 | failure_reason:1`
+pub const COMPOSITION_CHECK_EXTRA_LEN: usize = 34;
+
+/// Total size of a `CompositionCheck` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + COMPOSITION_CHECK_EXTRA_LEN;
+
 /// Block-count duration that newly deposited stake is locked for.
 /// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
 pub const STAKE_LOCK_PERIOD: u64 = 1000;
@@ -327,8 +340,28 @@ pub const REP_EVENT_AUTO_RELEASE_PENALTY: u8 = 4;
 pub const REP_EVENT_DECAY: u8 = 5;
 /// Stake slash applied; oracle is slashing the target's `stake_balance`.
 pub const REP_EVENT_STAKE_SLASH: u8 = 6;
+/// Composition dependency failure detected; oracle is auto-pausing the target
+/// owner of a `CompositionGraph` whose required dependency has failed.
+pub const REP_EVENT_COMPOSITION_FAILURE: u8 = 7;
 /// Maximum valid reputation `event_type` discriminant.
-pub const REP_EVENT_MAX: u8 = REP_EVENT_STAKE_SLASH;
+pub const REP_EVENT_MAX: u8 = REP_EVENT_COMPOSITION_FAILURE;
+
+// CompositionCheck failure_reason discriminants (carried inline in the
+// signal payload). The handler verifies the reported reason against the
+// source entity's current chain state and rejects mismatches with
+// `DependencyFailureNotVerified`.
+/// Source entity exists but `is_active == false`.
+pub const COMPOSITION_FAILURE_SOURCE_INACTIVE: u8 = 0;
+/// Source entity exists, is active, but its `reputation_score` is below
+/// the dependency's declared `min_reputation`.
+pub const COMPOSITION_FAILURE_REPUTATION_BELOW_MIN: u8 = 1;
+/// Source entity exists, is active, but its `stake_balance` is below
+/// the dependency's declared `min_stake`.
+pub const COMPOSITION_FAILURE_STAKE_BELOW_MIN: u8 = 2;
+/// Source entity does not exist in state.
+pub const COMPOSITION_FAILURE_SOURCE_NOT_FOUND: u8 = 3;
+/// Maximum valid `failure_reason` discriminant.
+pub const COMPOSITION_FAILURE_REASON_MAX: u8 = COMPOSITION_FAILURE_SOURCE_NOT_FOUND;
 
 /// Inline reputation-update tail carried in `ReputationUpdate` signal payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -400,6 +433,27 @@ pub struct StakeSlashExtraV1 {
     pub points_delta: i16,
 }
 
+/// Inline composition-check tail carried in `CompositionCheck` signal payloads.
+///
+/// Wire layout (34 bytes): `target_entity_id:32 | failed_dependency_idx:1 |
+/// failure_reason:1`. The handler reads the target's latest
+/// `CompositionGraph` memory object, looks up the dependency at
+/// `failed_dependency_idx`, then independently verifies the claimed
+/// `failure_reason` against the source entity's current state. Verified
+/// failures with `is_required = true` set `target.is_active = false` and
+/// always emit a `REP_EVENT_COMPOSITION_FAILURE` event with delta -1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositionCheckExtraV1 {
+    /// Entity whose composition graph is being checked.
+    pub target_entity_id: [u8; 32],
+    /// Index into the target's `CompositionGraphData.dependencies` vec.
+    pub failed_dependency_idx: u8,
+    /// Failure mode the oracle is reporting. Must be one of the
+    /// `COMPOSITION_FAILURE_*` constants (validated at decode time
+    /// against `COMPOSITION_FAILURE_REASON_MAX`).
+    pub failure_reason: u8,
+}
+
 /// Canonical Signal Commitment payload (D14.1):
 /// - Base (signal types 0..=6): 66 bytes
 ///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
@@ -413,13 +467,15 @@ pub struct StakeSlashExtraV1 {
 ///   `... [amount_be:16]`
 /// - `StakeSlash` (signal type 11): 117 bytes (base + 51-byte tail)
 ///   `... [target_id:32][slash_amount_be:16][rep_event_type:1][points_delta_be:2]`
+/// - `CompositionCheck` (signal type 12): 100 bytes (base + 34-byte tail)
+///   `... [target_id:32][failed_dependency_idx:1][failure_reason:1]`
 ///
 /// At most one tail is populated; the active tail is determined by `signal_type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalCommitmentPayloadV1 {
     /// Commitment hash of the full signal.
     pub signal_hash: [u8; 32],
-    /// Signal type (0..=11).
+    /// Signal type (0..=12).
     pub signal_type: novai_ai_entities::AiSignalType,
     /// AI entity ID that issued this signal.
     pub issuer_entity_id: [u8; 32],
@@ -433,6 +489,9 @@ pub struct SignalCommitmentPayloadV1 {
     pub stake_withdraw: Option<StakeWithdrawExtraV1>,
     /// Inline slash tail. MUST be `Some` iff `signal_type == StakeSlash`.
     pub stake_slash: Option<StakeSlashExtraV1>,
+    /// Inline composition-check tail. MUST be `Some` iff
+    /// `signal_type == CompositionCheck`.
+    pub composition_check: Option<CompositionCheckExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
@@ -450,6 +509,8 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
     let is_stake_deposit = p.signal_type == novai_ai_entities::AiSignalType::StakeDeposit;
     let is_stake_withdraw = p.signal_type == novai_ai_entities::AiSignalType::StakeWithdraw;
     let is_stake_slash = p.signal_type == novai_ai_entities::AiSignalType::StakeSlash;
+    let is_composition_check =
+        p.signal_type == novai_ai_entities::AiSignalType::CompositionCheck;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
@@ -475,12 +536,18 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.stake_slash.is_some(),
         "stake_slash tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_composition_check,
+        p.composition_check.is_some(),
+        "composition_check tail presence must match signal_type"
+    );
     debug_assert!(
         u8::from(is_reputation)
             + u8::from(is_purchase)
             + u8::from(is_stake_deposit)
             + u8::from(is_stake_withdraw)
             + u8::from(is_stake_slash)
+            + u8::from(is_composition_check)
             <= 1,
         "tails are mutually exclusive"
     );
@@ -495,6 +562,8 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_WITHDRAW_LEN
     } else if is_stake_slash {
         SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN
+    } else if is_composition_check {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -546,6 +615,15 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; STAKE_SLASH_EXTRA_LEN]);
         }
+    } else if is_composition_check {
+        if let Some(extra) = &p.composition_check {
+            out.extend_from_slice(&extra.target_entity_id);
+            out.push(extra.failed_dependency_idx);
+            out.push(extra.failure_reason);
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; COMPOSITION_CHECK_EXTRA_LEN]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -571,6 +649,7 @@ pub fn decode_signal_commitment_payload_v1(
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_WITHDRAW_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN
+        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN
     {
         return Err(ExecError::BadPayloadLength {
             expected: SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN,
@@ -590,7 +669,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 11, // max valid signal type
+            expected: 12, // max valid signal type
             got: payload[33],
         },
     )?;
@@ -603,7 +682,9 @@ pub fn decode_signal_commitment_payload_v1(
     let is_stake_deposit = signal_type == novai_ai_entities::AiSignalType::StakeDeposit;
     let is_stake_withdraw = signal_type == novai_ai_entities::AiSignalType::StakeWithdraw;
     let is_stake_slash = signal_type == novai_ai_entities::AiSignalType::StakeSlash;
-    let (reputation, purchase, stake_deposit, stake_withdraw, stake_slash) = if is_reputation {
+    let is_composition_check =
+        signal_type == novai_ai_entities::AiSignalType::CompositionCheck;
+    let (reputation, purchase, stake_deposit, stake_withdraw, stake_slash, composition_check) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
                 expected: SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN,
@@ -620,6 +701,7 @@ pub fn decode_signal_commitment_payload_v1(
                 event_type,
                 points_delta,
             }),
+            None,
             None,
             None,
             None,
@@ -655,6 +737,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_stake_deposit {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN {
@@ -666,7 +749,14 @@ pub fn decode_signal_commitment_payload_v1(
         let mut amount_bytes = [0u8; 16];
         amount_bytes.copy_from_slice(&payload[66..82]);
         let amount = u128::from_be_bytes(amount_bytes);
-        (None, None, Some(StakeDepositExtraV1 { amount }), None, None)
+        (
+            None,
+            None,
+            Some(StakeDepositExtraV1 { amount }),
+            None,
+            None,
+            None,
+        )
     } else if is_stake_withdraw {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_WITHDRAW_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -682,6 +772,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeWithdrawExtraV1 { amount }),
+            None,
             None,
         )
     } else if is_stake_slash {
@@ -709,6 +800,35 @@ pub fn decode_signal_commitment_payload_v1(
                 rep_event_type,
                 points_delta,
             }),
+            None,
+        )
+    } else if is_composition_check {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut target_entity_id = [0u8; 32];
+        target_entity_id.copy_from_slice(&payload[66..98]);
+        let failed_dependency_idx = payload[98];
+        let failure_reason = payload[99];
+        if failure_reason > COMPOSITION_FAILURE_REASON_MAX {
+            return Err(ExecError::InvalidCompositionFailureReason {
+                byte: failure_reason,
+            });
+        }
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(CompositionCheckExtraV1 {
+                target_entity_id,
+                failed_dependency_idx,
+                failure_reason,
+            }),
         )
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
@@ -717,7 +837,7 @@ pub fn decode_signal_commitment_payload_v1(
                 got: payload.len(),
             });
         }
-        (None, None, None, None, None)
+        (None, None, None, None, None, None)
     };
 
     Ok(SignalCommitmentPayloadV1 {
@@ -729,6 +849,7 @@ pub fn decode_signal_commitment_payload_v1(
         stake_deposit,
         stake_withdraw,
         stake_slash,
+        composition_check,
     })
 }
 

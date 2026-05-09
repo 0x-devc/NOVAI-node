@@ -179,6 +179,7 @@ fn signal_below_minimum_rejected() {
         stake_deposit: None,
         stake_withdraw: None,
         stake_slash: None,
+        composition_check: None,
     });
 
     // Fee 500 is below minimum of 1000 for signals
@@ -230,6 +231,7 @@ fn signal_at_minimum_accepted() {
         stake_deposit: None,
         stake_withdraw: None,
         stake_slash: None,
+        composition_check: None,
     });
 
     let tx = create_test_tx(entity_id, 0, MIN_FEE_SIGNAL_COMMITMENT, payload);
@@ -430,6 +432,7 @@ fn distribute_fee_splits_ai_signal() {
         stake_deposit: None,
         stake_withdraw: None,
         stake_slash: None,
+        composition_check: None,
     });
 
     let fee = 1_000u64;
