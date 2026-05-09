@@ -21,6 +21,10 @@ pub enum AiSignalType {
     /// Reputation update emitted by an oracle entity (requires
     /// `submit_reputation_updates` capability).
     ReputationUpdate = 7,
+    /// Purchase of a priced signal listed in the seller's `SignalCatalog`
+    /// memory object. Carries an inline 41-byte purchase tail
+    /// (seller_entity_id || purchased_signal_type || max_price_be).
+    SignalPurchase = 8,
 }
 
 impl AiSignalType {
@@ -40,6 +44,7 @@ impl AiSignalType {
             5 => Some(AiSignalType::SpamRisk),
             6 => Some(AiSignalType::CongestionForecast),
             7 => Some(AiSignalType::ReputationUpdate),
+            8 => Some(AiSignalType::SignalPurchase),
             _ => None,
         }
     }

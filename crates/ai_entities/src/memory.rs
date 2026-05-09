@@ -42,6 +42,8 @@ pub const MAX_MEMORY_OBJECTS_PER_ENTITY: u32 = 100;
 /// - `StatisticsSnapshot`: Periodic chain statistics
 /// - `ReputationEvent`: Audit record of a reputation change applied to an entity
 /// - `Rating`: A counterparty rating event feeding reputation
+/// - `SignalCatalog`: Per-entity catalog of priced signal offerings for the
+///   marketplace; payload is the canonical `SignalCatalogData` encoding
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MemoryObjectType {
@@ -60,6 +62,9 @@ pub enum MemoryObjectType {
     ReputationEvent = 5,
     /// Counterparty rating (score, optional comment hash) feeding reputation.
     Rating = 6,
+    /// Marketplace pricing catalog: a list of priced signal offerings the
+    /// owning entity makes available to buyers.
+    SignalCatalog = 7,
 }
 
 impl MemoryObjectType {
@@ -80,6 +85,7 @@ impl MemoryObjectType {
             4 => Some(Self::StatisticsSnapshot),
             5 => Some(Self::ReputationEvent),
             6 => Some(Self::Rating),
+            7 => Some(Self::SignalCatalog),
             _ => None,
         }
     }
@@ -95,6 +101,7 @@ impl MemoryObjectType {
             Self::StatisticsSnapshot => "StatisticsSnapshot",
             Self::ReputationEvent => "ReputationEvent",
             Self::Rating => "Rating",
+            Self::SignalCatalog => "SignalCatalog",
         }
     }
 }
@@ -474,6 +481,7 @@ mod tests {
             MemoryObjectType::StatisticsSnapshot,
             MemoryObjectType::ReputationEvent,
             MemoryObjectType::Rating,
+            MemoryObjectType::SignalCatalog,
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
@@ -483,7 +491,7 @@ mod tests {
 
     #[test]
     fn memory_object_type_invalid_returns_none() {
-        assert!(MemoryObjectType::from_byte(7).is_none());
+        assert!(MemoryObjectType::from_byte(8).is_none());
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
 
@@ -500,11 +508,9 @@ mod tests {
             MemoryObjectType::StatisticsSnapshot.name(),
             "StatisticsSnapshot"
         );
-        assert_eq!(
-            MemoryObjectType::ReputationEvent.name(),
-            "ReputationEvent"
-        );
+        assert_eq!(MemoryObjectType::ReputationEvent.name(), "ReputationEvent");
         assert_eq!(MemoryObjectType::Rating.name(), "Rating");
+        assert_eq!(MemoryObjectType::SignalCatalog.name(), "SignalCatalog");
     }
 
     #[test]
@@ -700,6 +706,9 @@ mod tests {
             MemoryObjectType::EmbeddingCommitment,
             MemoryObjectType::AnomalyLog,
             MemoryObjectType::StatisticsSnapshot,
+            MemoryObjectType::ReputationEvent,
+            MemoryObjectType::Rating,
+            MemoryObjectType::SignalCatalog,
         ] {
             let obj = MemoryObject::new(owner, object_type, 1000, b"type test".to_vec());
             let encoded = encode_memory_object_v1(&obj);
