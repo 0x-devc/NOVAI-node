@@ -235,6 +235,17 @@ pub enum ExecError<E> {
     UnsupportedProofType {
         proof_type: u8,
     },
+    /// `ZkVerifier::verify_proof` returned `false` for a `ProofSubmission`
+    /// signal. Currently unreachable in v1 (the stub always returns
+    /// `true`); kept so the handler-side reject path is wired in advance
+    /// of plumbing in a real verifier.
+    ProofVerificationFailed,
+    /// (Reserved.) Same `proof_hash` already recorded for this entity.
+    /// v1 does not enforce dedup — every accepted proof produces its own
+    /// `VerificationRecord`. Kept defined so a future dedup index can
+    /// raise this without another `ExecError` ABI change.
+    #[allow(dead_code)]
+    ProofAlreadySubmitted,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -1928,12 +1939,15 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
 // ============================================================================
 
 use novai_ai_entities::{
-    AiEntity, AiSignalType, CompositionGraphData, MemoryObjectType, SignalCatalogData,
-    SignalCommitment, MAX_REPUTATION_SCORE,
+    encode_memory_object_v1, AiEntity, AiSignalType, CompositionGraphData, MemoryObject,
+    MemoryObjectType, SignalCatalogData, SignalCommitment, VerificationRecordData,
+    MAX_REPUTATION_SCORE,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
+use novai_crypto::{StubZkVerifier, ZkVerifier};
 use novai_state::{
-    ai_entity_key, ai_memory_key, ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
+    ai_entity_key, ai_memory_by_type_key, ai_memory_key, ai_memory_object_key,
+    ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
 };
 
 /// Read an AI entity from storage.
@@ -2834,6 +2848,87 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         ops.push(write_ai_entity_op(&target));
     }
 
+    // ProofSubmission branch: verify a ZK proof attesting to off-chain
+    // computation integrity. On success, persist a VerificationRecord
+    // memory object owned by the issuer and apply +3 reputation to the
+    // issuer. proof_type was already validated against PROOF_TYPE_MAX at
+    // decode time, so the verifier call is guaranteed to be on a
+    // supported system.
+    //
+    // v1 NOTE: the proof bytes themselves are NOT carried in the
+    // SignalCommitment tail (which is fixed-size 65 bytes for this
+    // signal). The stub verifier accepts an empty proof slice and always
+    // returns true. When a real verifier is plumbed in, proof bytes will
+    // be resolved off-chain via the artifact referenced by signal_hash;
+    // proof_hash below is blake3 of the bytes that were verified, so it
+    // remains a stable per-proof identifier across that transition.
+    if payload.signal_type == AiSignalType::ProofSubmission {
+        let extra = payload
+            .proof_submission
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("ProofSubmission missing extra".into()))?;
+
+        // Build public inputs by concatenating code_hash and computation_hash.
+        // The verifier also receives code_hash separately for circuit-key
+        // routing; keeping it in public_inputs lets the proof bind to the
+        // same value the trait caller passes.
+        let mut public_inputs = [0u8; 64];
+        public_inputs[..32].copy_from_slice(&extra.code_hash);
+        public_inputs[32..].copy_from_slice(&extra.computation_hash);
+
+        // v1: empty proof bytes (see NOTE above). proof_hash is hashed over
+        // the same empty slice for now; future real-verifier path will
+        // hash actual off-chain proof bytes.
+        let proof_bytes: &[u8] = &[];
+        if !StubZkVerifier::verify_proof(
+            proof_bytes,
+            &public_inputs,
+            extra.proof_type,
+            &extra.code_hash,
+        ) {
+            return Err(ExecError::ProofVerificationFailed);
+        }
+
+        // Persist VerificationRecord memory object owned by the issuer.
+        let proof_hash = *blake3::hash(proof_bytes).as_bytes();
+        let record = VerificationRecordData {
+            proof_type: extra.proof_type,
+            code_hash: extra.code_hash,
+            computation_hash: extra.computation_hash,
+            proof_hash,
+            height: current_height,
+        };
+        let mem_obj = MemoryObject::new(
+            entity.id,
+            MemoryObjectType::VerificationRecord,
+            current_height,
+            record.encode().to_vec(),
+        );
+        let mem_obj_id = mem_obj.object_id;
+        let mem_encoded = encode_memory_object_v1(&mem_obj);
+        ops.push(WriteOp::Put(
+            ai_memory_object_key(&entity.id, &mem_obj_id),
+            mem_encoded,
+        ));
+        ops.push(WriteOp::Put(
+            ai_memory_by_type_key(
+                MemoryObjectType::VerificationRecord.to_byte(),
+                &entity.id,
+                &mem_obj_id,
+            ),
+            Vec::new(),
+        ));
+
+        // Apply REP_EVENT_PROOF_VERIFIED with delta +3 to the issuer.
+        // Clamped i32 arithmetic mirrors the ReputationUpdate handler.
+        let new_score: u16 = (i32::from(entity.reputation_score) + 3)
+            .clamp(0, i32::from(MAX_REPUTATION_SCORE))
+            .try_into()
+            .map_err(|_| ExecError::Overflow)?;
+        entity.reputation_score = new_score;
+        entity.reputation_events_count = entity.reputation_events_count.saturating_add(1);
+    }
+
     ops.push(write_ai_entity_op(&entity));
 
     // Apply all changes atomically
@@ -3316,12 +3411,11 @@ pub fn check_ai_entity_sender<K: Kv>(
 // ============================================================================
 
 use novai_ai_entities::{
-    decode_memory_object_v1, encode_memory_object_v1, MemoryObject, MAX_MEMORY_OBJECTS_PER_ENTITY,
-    MAX_MEMORY_OBJECT_SIZE,
+    decode_memory_object_v1, MAX_MEMORY_OBJECTS_PER_ENTITY, MAX_MEMORY_OBJECT_SIZE,
 };
 use novai_state::{
-    ai_memory_by_type_key, ai_memory_count_key, ai_memory_object_key, decode_memory_count,
-    encode_memory_count, KEY_PREFIX_AI_MEMORY_BY_TYPE, KEY_PREFIX_AI_MEMORY_OBJECTS,
+    ai_memory_count_key, decode_memory_count, encode_memory_count, KEY_PREFIX_AI_MEMORY_BY_TYPE,
+    KEY_PREFIX_AI_MEMORY_OBJECTS,
 };
 
 /// Read memory object count for an entity.
