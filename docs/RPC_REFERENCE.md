@@ -290,10 +290,15 @@ Submits a hex-encoded, signed `TxV1` to the mempool. The node validates the sign
 | Code | When |
 |---|---|
 | `-32602` | params malformed |
-| `-32000` | tx hex too large; tx decode failed; tx exceeds binary size cap; signature invalid; mempool rejected (duplicate, nonce out of order, fee below minimum) |
+| `-32000` | tx hex too large; tx decode failed; tx exceeds binary size cap; signature invalid |
+| `-32001` | mempool at capacity |
+| `-32010` | nonce too low (message: `NonceTooLow: expected N, got M`) |
+| `-32011` | fee too low (message: `FeeTooLow: minimum N, got M`) |
+| `-32012` | per-sender pending limit exceeded (message: `SenderLimitExceeded: max N pending per sender`) |
+| `-32013` | other validation error |
 | `-32002` | DB read failure during validation |
 
-**Example** (request shown abridged — the `tx` value is a real ~300-byte hex blob built via the Rust SDK):
+**Example** (request shown abridged. The `tx` value is a real ~300-byte hex blob built via the Rust SDK):
 
 ```bash
 curl -s -X POST $URL -H 'Content-Type: application/json' \
@@ -393,10 +398,12 @@ Returns the full on-chain record for an AI entity. Returns `{ "entity": null }` 
     "params_root":      "<hex32>",          // (reserved; currently zero)
     "registered_at":    <u64>,              // block height of the register tx
     "last_active_at":   <u64>,              // most recent height at which this entity sent a tx
-    "is_active":        true                // false after a successful deactivation proposal
+    "is_active":        true                // false after a deactivation proposal OR auto-pause from a failed required composition dependency
   }
 }
 ```
+
+> **RPC schema lag.** The on-chain `AiEntity` record carries five additional fields that this RPC does not yet serialize: `reputation_score: u16`, `total_transactions: u32`, `reputation_events_count: u32`, `stake_balance: u128` (decimal string once exposed), and `stake_locked_until: u64`. Until the schema bumps to expose them, observe these by following the relevant signal index (`novai_getSignalsByIssuer` for reputation/stake/composition events) and confirming inclusion via `novai_getTransaction`. End-to-end audit is possible today; only the cumulative state read is missing. See [Observed gaps](#observed-gaps).
 
 **Capabilities bits** (combine to form the byte):
 
@@ -407,6 +414,7 @@ Returns the full on-chain record for an AI entity. Returns `{ "entity": null }` 
 | 2 (`0x04`) | `emit_proposals` | can publish signal commitments and submit proposals |
 | 3 (`0x08`) | `request_execution` | can request gated Tier-1/2 execution |
 | 4 (`0x10`) | `read_nnpx_derived` | can read schema-validated NNPX derived views |
+| 5 (`0x20`) | `submit_reputation_updates` | can issue ReputationUpdate, StakeSlash, and CompositionCheck signals (oracle-only) |
 
 **Errors**:
 
@@ -467,7 +475,7 @@ Returns every memory object owned by an entity. Order is by `object_id`.
   "objects": [
     {
       "object_id":    "<hex32>",
-      "object_type":  <u8>,            // 0..=4 (see Memory types below)
+      "object_type":  <u8>,            // 0..=9 (see Memory types below)
       "owner_entity": "<hex32>",       // always equal to the param
       "created_at":   <u64>,           // block height
       "updated_at":   <u64>,           // block height
@@ -480,15 +488,20 @@ Returns every memory object owned by an entity. Order is by `object_id`.
 
 **Memory object types**:
 
-| Byte | Variant |
-|---|---|
-| 0 | `chain-summary` |
-| 1 | `label-index` |
-| 2 | `embedding-commitment` |
-| 3 | `anomaly-log` |
-| 4 | `statistics-snapshot` |
+| Byte | Variant | Notes |
+|---|---|---|
+| 0 | `chain-summary` | |
+| 1 | `label-index` | |
+| 2 | `embedding-commitment` | |
+| 3 | `anomaly-log` | |
+| 4 | `statistics-snapshot` | |
+| 5 | `reputation-event` | audit record of a reputation change |
+| 6 | `rating` | counterparty rating record |
+| 7 | `signal-catalog` | marketplace pricing for priced signals (max 10 entries, 101 B max) |
+| 8 | `composition-graph` | cross-entity dependency declarations (max 10 deps, 441 B max) |
+| 9 | `verification-record` | ZK proof attestation, 105 B fixed |
 
-**Limits**: max 100 objects per entity, 64 KiB per object.
+**Limits**: max 100 objects per entity, 64 KiB per object (`SignalCatalog`, `CompositionGraph`, and `VerificationRecord` are smaller by construction).
 
 **Errors**:
 
@@ -537,7 +550,7 @@ All three signal queries return the same shape. Differences are how the index is
   "signals": [
     {
       "commitment_hash": "<hex32>",   // signed commitment to off-chain content
-      "signal_type":     <u8>,        // 0..=6 (see Signal types below)
+      "signal_type":     <u8>,        // 0..=13 (see Signal types below)
       "height":          <u64>,
       "issuer":          "<hex32>"    // canonical entity id
     }
@@ -547,15 +560,24 @@ All three signal queries return the same shape. Differences are how the index is
 
 **Signal types**:
 
-| Byte | Variant |
-|---|---|
-| 0 | `anomaly` |
-| 1 | `optimization` |
-| 2 | `prediction` |
-| 3 | `risk-score` |
-| 4 | `audit-report` |
-| 5 | `spam-risk` |
-| 6 | `congestion-forecast` |
+| Byte | Variant | Notes |
+|---|---|---|
+| 0 | `anomaly` | base 66 B payload |
+| 1 | `optimization` | base 66 B payload |
+| 2 | `prediction` | base 66 B payload |
+| 3 | `risk-score` | base 66 B payload |
+| 4 | `audit-report` | base 66 B payload |
+| 5 | `spam-risk` | base 66 B payload |
+| 6 | `congestion-forecast` | base 66 B payload |
+| 7 | `reputation-update` | base + 35 B tail; issuer needs bit 5 |
+| 8 | `signal-purchase` | base + 41 B tail |
+| 9 | `stake-deposit` | base + 16 B tail |
+| 10 | `stake-withdraw` | base + 16 B tail |
+| 11 | `stake-slash` | base + 51 B tail; issuer needs bit 5 |
+| 12 | `composition-check` | base + 34 B tail; issuer needs bit 5 |
+| 13 | `proof-submission` | base + 65 B tail |
+
+The signal index returns only the base header (`commitment_hash`, `signal_type`, `height`, `issuer`). Tx payload tails are not surfaced by these queries; reconstruct them from `getTransaction.payload_len` plus a direct read of the inner tx if you need them.
 
 **Common errors**:
 
@@ -634,7 +656,7 @@ Returns every signal of a given type within a height window.
 
 | Field | Type | Notes |
 |---|---|---|
-| `signal_type` | `u8` | one of `0..=6` |
+| `signal_type` | `u8` | one of `0..=13` |
 | `start_height` | `u64` | inclusive |
 | `end_height` | `u64` | inclusive; must satisfy `end - start ≤ 10000` |
 
@@ -704,10 +726,11 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
 ## Error codes
 
-The node uses a small set of codes consistently. Standard JSON-RPC 2.0 codes:
+The node uses these codes. Standard JSON-RPC 2.0 codes:
 
 | Code | Meaning | Where it comes from |
 |---|---|---|
+| `-32700` | Parse error | request body is not valid JSON |
 | `-32600` | Invalid Request | malformed JSON-RPC envelope (missing `jsonrpc`/`method`) |
 | `-32601` | Method not found | unknown method name |
 | `-32602` | Invalid params | wrong type, missing field, hex length wrong, range too large, height in the future |
@@ -716,8 +739,14 @@ Server-defined codes:
 
 | Code | Meaning | Common triggers |
 |---|---|---|
-| `-32000` | Application error | tx too large, tx decode/sig failure, mempool reject, faucet cooldown |
+| `-32000` | Application error | tx too large, tx decode/sig failure, faucet cooldown, faucet disabled |
+| `-32001` | Mempool full | mempool at capacity; submitter must back off |
 | `-32002` | Internal storage error | RocksDB read or codec failure during query |
+| `-32003` | Response too large | assembled response exceeds 10 MiB |
+| `-32010` | Nonce too low | tx nonce is below the sender's expected nonce |
+| `-32011` | Fee too low | tx fee is below the per-tx-type minimum |
+| `-32012` | Sender limit exceeded | too many pending txs from this sender in the mempool |
+| `-32013` | Other validation error | catch-all for additional mempool validation failures |
 
 **Examples** (real responses captured from the devnet):
 
@@ -756,8 +785,9 @@ Unknown method:
 | `height`, `round`, `nonce`, `tx_index`, `block_height` | `u64` | `0 .. 2^64-1` |
 | `fee` | `u64` | `0 .. 2^64-1`; minimum varies per tx type |
 | `balance`, `economic_balance` | `u128` (string) | `0 .. 2^128-1` |
-| `signal_type` | `u8` | `0..=6` |
-| `object_type`, `autonomy_mode`, `capabilities` | `u8` | `0..=255` |
+| `signal_type` | `u8` | `0..=13` |
+| `object_type` | `u8` | `0..=9` |
+| `autonomy_mode`, `capabilities` | `u8` | `0..=255` (only specific bits or values are valid; see relevant section) |
 
 ### Length-tagged fields
 
@@ -766,6 +796,22 @@ Unknown method:
 | `address`, `entity_id`, `block_hash`, `parent_hash`, `state_root`, `code_hash`, `pubkey`, `txid`, `commitment_hash`, `object_id`, `issuer`, `from`, `creator`, `memory_root`, `params_root` | 32 bytes / 64 hex chars | lowercase, no `0x` prefix |
 | `signature` (inside encoded tx) | 64 bytes / 128 hex chars | ed25519 detached |
 | `tx` (param to `submitTransaction`) | ≤ 256 KiB hex (= 128 KiB binary) | full canonical encoding |
+
+---
+
+## Observed gaps
+
+Surface that has shipped at the protocol layer but is not yet exposed by the RPC. Recipes in [AI_ENTITY_COOKBOOK.md](AI_ENTITY_COOKBOOK.md) work around these where they can.
+
+| Gap | Impact | Workaround today |
+|---|---|---|
+| `AiEntityJson` is V3-era | `reputation_score`, `total_transactions`, `reputation_events_count`, `stake_balance`, `stake_locked_until` are not returned | Inspect the underlying KV directly, or follow the relevant signal index for evidence of the mutation and confirm via `getTransaction` |
+| No treasury balance method | `treasury/ai`, `treasury/marketplace`, `treasury/slash` accumulate value but are not addressable accounts | Direct KV inspection (string keys: `treasury/ai`, `treasury/marketplace`, `treasury/slash`) |
+| No mempool query | Cannot enumerate pending txs | Poll `getTransaction(txid)` for inclusion |
+| No event subscription | RPC is HTTP request/response only; no WebSocket or push | Poll `getLatestBlock` and the signal index |
+| No transaction logs / traces | Receipts carry only `(block_height, tx_index, from, nonce, fee, payload_len)` | For execution outcome, cross-check the relevant state read after `getTransaction` returns non-null |
+| Memory object filter by type | `getMemoryObjects` returns all objects for an entity; no per-type query | Filter client-side on `object_type` |
+| Signal payload tail not surfaced | Index returns only base header (commitment_hash, signal_type, height, issuer); the tail bytes for signals 7-13 are not in the response | Read the wrapping tx via `getTransaction` and reconstruct the payload |
 
 ---
 
