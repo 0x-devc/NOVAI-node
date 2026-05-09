@@ -2500,7 +2500,7 @@ use novai_ai_entities::{
 };
 use novai_state::{
     ai_memory_by_type_key, ai_memory_count_key, ai_memory_object_key, decode_memory_count,
-    encode_memory_count, KEY_PREFIX_AI_MEMORY_OBJECTS,
+    encode_memory_count, KEY_PREFIX_AI_MEMORY_BY_TYPE, KEY_PREFIX_AI_MEMORY_OBJECTS,
 };
 
 /// Read memory object count for an entity.
@@ -2942,6 +2942,49 @@ pub fn get_memory_objects_by_entity<K: Kv>(
         let obj = decode_memory_object_v1(&value)
             .map_err(|e| ExecError::CodecDecode(format!("{e:?}")))?;
         results.push(obj);
+    }
+
+    Ok(results)
+}
+
+/// Query memory objects of a specific type owned by an entity.
+///
+/// Walks the `ai/memory_by_type/{type}/{entity_id}/` index, extracts the
+/// trailing 32-byte object id from each indexed key, and reads the object
+/// record via `read_memory_object`. Stale index entries (object record
+/// missing) are silently skipped so a partial index does not break callers.
+///
+/// # Errors
+/// Returns error if DB read fails, stored data is malformed, or an
+/// indexed key has fewer than 32 trailing bytes (corruption).
+pub fn get_memory_objects_by_entity_and_type<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+    object_type: u8,
+) -> Result<Vec<MemoryObject>, ExecError<K::Error>> {
+    // Build prefix: "ai/memory_by_type/" ++ type_byte ++ "/" ++ entity_id ++ "/"
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1 + 32 + 1);
+    prefix.extend_from_slice(KEY_PREFIX_AI_MEMORY_BY_TYPE);
+    prefix.push(object_type);
+    prefix.push(b'/');
+    prefix.extend_from_slice(entity_id);
+    prefix.push(b'/');
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let mut results = Vec::with_capacity(entries.len());
+    for (key, _value) in entries {
+        if key.len() < 32 {
+            return Err(ExecError::CodecDecode(format!(
+                "memory_by_type key too short: {} bytes",
+                key.len()
+            )));
+        }
+        let mut object_id = [0u8; 32];
+        object_id.copy_from_slice(&key[key.len() - 32..]);
+        if let Some(obj) = read_memory_object(db, entity_id, &object_id)? {
+            results.push(obj);
+        }
     }
 
     Ok(results)
@@ -3500,6 +3543,20 @@ pub const KEY_AI_TREASURY: &[u8] = b"treasury/ai";
 ///
 /// Reserved for future use — will receive fees from NNPX privacy transactions.
 pub const KEY_PRIVACY_TREASURY: &[u8] = b"treasury/privacy";
+
+/// Canonical key for the marketplace treasury balance record.
+///
+/// Receives the protocol-fee portion (`MARKETPLACE_FEE_BPS` basis points)
+/// of every signal purchase. Reuses the `FeePoolV1` codec used by the
+/// other treasury keys.
+pub const KEY_MARKETPLACE_TREASURY: &[u8] = b"treasury/marketplace";
+
+/// Marketplace protocol fee, in basis points (1 bp = 0.01%).
+/// 200 bps = 2% on every signal purchase.
+pub const MARKETPLACE_FEE_BPS: u128 = 200;
+
+/// Basis-points denominator (`10_000` = 100%).
+pub const BPS_DENOMINATOR: u128 = 10_000;
 
 /// Distribute a fee between the validator fee pool and the AI treasury.
 ///
