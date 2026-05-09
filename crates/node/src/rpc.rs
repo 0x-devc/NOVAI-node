@@ -275,6 +275,11 @@ struct AiEntityJson {
     registered_at: u64,
     last_active_at: u64,
     is_active: bool,
+    reputation_score: u16,
+    total_transactions: u32,
+    reputation_events_count: u32,
+    stake_balance: String,
+    stake_locked_until: u64,
 }
 
 /// Result for novai_getAiEntity.
@@ -1257,6 +1262,11 @@ fn handle_get_ai_entity(
             registered_at: e.registered_at,
             last_active_at: e.last_active_at,
             is_active: e.is_active,
+            reputation_score: e.reputation_score,
+            total_transactions: e.total_transactions,
+            reputation_events_count: e.reputation_events_count,
+            stake_balance: e.stake_balance.to_string(),
+            stake_locked_until: e.stake_locked_until,
         }),
     })
 }
@@ -1722,5 +1732,44 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"code\":-32000"));
         assert!(json.contains("\"message\":\"Test error\""));
+    }
+
+    #[test]
+    fn test_ai_entity_json_includes_v4_v5_fields() {
+        let entity = AiEntityJson {
+            id: "00".repeat(32),
+            code_hash: "11".repeat(32),
+            creator: "22".repeat(20),
+            autonomy_mode: 0,
+            capabilities: 0,
+            economic_balance: "1000".to_string(),
+            nonce: 5,
+            pubkey: "33".repeat(32),
+            memory_root: "44".repeat(32),
+            params_root: "55".repeat(32),
+            registered_at: 100,
+            last_active_at: 200,
+            is_active: true,
+            reputation_score: 75,
+            total_transactions: 42,
+            reputation_events_count: 7,
+            stake_balance: "5000000000000000000".to_string(),
+            stake_locked_until: 12345,
+        };
+
+        let json = serde_json::to_value(&entity).unwrap();
+
+        assert_eq!(json["reputation_score"], 75);
+        assert_eq!(json["total_transactions"], 42);
+        assert_eq!(json["reputation_events_count"], 7);
+        assert_eq!(json["stake_balance"], "5000000000000000000");
+        assert_eq!(json["stake_locked_until"], 12345);
+
+        assert!(json["stake_balance"].is_string());
+        assert!(json["economic_balance"].is_string());
+        assert!(json["reputation_score"].is_number());
+        assert!(json["total_transactions"].is_number());
+        assert!(json["reputation_events_count"].is_number());
+        assert!(json["stake_locked_until"].is_number());
     }
 }
