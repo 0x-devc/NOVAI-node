@@ -212,6 +212,24 @@ pub enum ExecError<E> {
     InvalidCompositionFailureReason {
         byte: u8,
     },
+    /// `CompositionCheck` target has no `CompositionGraph` memory object.
+    CompositionGraphNotFound,
+    /// `CompositionCheck` referenced a `failed_dependency_idx` outside the
+    /// target graph's dependency vec.
+    InvalidDependencyIndex {
+        index: u8,
+        max: u8,
+    },
+    /// `CompositionCheck` claimed a dependency failure that does not match
+    /// the source entity's current chain state (e.g., oracle reported
+    /// inactive but source is active).
+    DependencyFailureNotVerified,
+    /// `CompositionGraph` create or update declared a dependency whose
+    /// `source_entity_id` equals the owning entity's id (self-dependency
+    /// is prohibited).
+    SelfDependency,
+    /// `CompositionCheck` issuer attempted to check itself (prohibited).
+    SelfCompositionCheck,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -1780,8 +1798,8 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
 // ============================================================================
 
 use novai_ai_entities::{
-    AiEntity, AiSignalType, MemoryObjectType, SignalCatalogData, SignalCommitment,
-    MAX_REPUTATION_SCORE,
+    AiEntity, AiSignalType, CompositionGraphData, MemoryObjectType, SignalCatalogData,
+    SignalCommitment, MAX_REPUTATION_SCORE,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
 use novai_state::{
@@ -2590,6 +2608,93 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         // Apply reputation update on the same target. Clamp i32 arithmetic
         // matches the ReputationUpdate handler's clamp semantics.
         let new_score: u16 = (i32::from(target.reputation_score) + i32::from(extra.points_delta))
+            .clamp(0, i32::from(MAX_REPUTATION_SCORE))
+            .try_into()
+            .map_err(|_| ExecError::Overflow)?;
+        target.reputation_score = new_score;
+        target.reputation_events_count = target.reputation_events_count.saturating_add(1);
+
+        ops.push(write_ai_entity_op(&target));
+    }
+
+    if payload.signal_type == AiSignalType::CompositionCheck {
+        if !entity.capabilities.submit_reputation_updates {
+            return Err(ExecError::IssuerMissingCapability);
+        }
+        let extra = payload
+            .composition_check
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("CompositionCheck missing extra".into()))?;
+
+        // Self-check: an oracle cannot check itself (mirrors SelfSlash and
+        // SelfReputationUpdate gates).
+        if extra.target_entity_id == entity.id {
+            return Err(ExecError::SelfCompositionCheck);
+        }
+
+        let mut target =
+            read_ai_entity(db, &extra.target_entity_id)?.ok_or(ExecError::TargetEntityNotFound)?;
+
+        // Read the target's latest CompositionGraph. Same "last() wins"
+        // pattern as SignalCatalog purchase: get_memory_objects_by_entity_and_type
+        // returns entries sorted by trailing object_id; the lexicographically
+        // last one is treated as canonical.
+        let graphs = get_memory_objects_by_entity_and_type(
+            db,
+            &target.id,
+            MemoryObjectType::CompositionGraph.to_byte(),
+        )?;
+        if graphs.is_empty() {
+            return Err(ExecError::CompositionGraphNotFound);
+        }
+        let graph_obj = graphs.last().expect("non-empty checked above");
+        let graph = CompositionGraphData::decode(&graph_obj.data)
+            .ok_or_else(|| ExecError::CodecDecode("malformed CompositionGraph payload".into()))?;
+
+        let dep_count = graph.dependencies.len();
+        #[allow(clippy::cast_possible_truncation)]
+        let max_idx_byte = dep_count as u8;
+        let idx = extra.failed_dependency_idx as usize;
+        let dep = graph
+            .dependencies
+            .get(idx)
+            .ok_or(ExecError::InvalidDependencyIndex {
+                index: extra.failed_dependency_idx,
+                max: max_idx_byte,
+            })?;
+
+        // Verify the claimed failure_reason against the source entity's
+        // current state. failure_reason was already validated against
+        // COMPOSITION_FAILURE_REASON_MAX at decode time, so the match is
+        // exhaustive over [0, REASON_MAX].
+        let source_opt = read_ai_entity(db, &dep.source_entity_id)?;
+        let verified = match extra.failure_reason {
+            COMPOSITION_FAILURE_SOURCE_NOT_FOUND => source_opt.is_none(),
+            COMPOSITION_FAILURE_SOURCE_INACTIVE => {
+                source_opt.as_ref().is_some_and(|s| !s.is_active)
+            }
+            COMPOSITION_FAILURE_REPUTATION_BELOW_MIN => source_opt
+                .as_ref()
+                .is_some_and(|s| s.reputation_score < dep.min_reputation),
+            COMPOSITION_FAILURE_STAKE_BELOW_MIN => source_opt
+                .as_ref()
+                .is_some_and(|s| s.stake_balance < u128::from(dep.min_stake)),
+            _ => false,
+        };
+        if !verified {
+            return Err(ExecError::DependencyFailureNotVerified);
+        }
+
+        // Auto-pause if the dependency is required. Idempotent: re-pausing
+        // an already-inactive target is a no-op for is_active but still
+        // emits the reputation event, matching StakeSlash semantics on
+        // already-inactive targets.
+        if dep.is_required {
+            target.is_active = false;
+        }
+
+        // Always emit a REP_EVENT_COMPOSITION_FAILURE event with delta -1.
+        let new_score: u16 = (i32::from(target.reputation_score) - 1)
             .clamp(0, i32::from(MAX_REPUTATION_SCORE))
             .try_into()
             .map_err(|_| ExecError::Overflow)?;
