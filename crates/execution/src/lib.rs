@@ -205,6 +205,8 @@ pub enum ExecError<E> {
         required: u128,
         available: u128,
     },
+    /// `StakeSlash` issuer attempted to slash itself (prohibited).
+    SelfSlash,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -294,6 +296,14 @@ pub const STAKE_WITHDRAW_EXTRA_LEN: usize = 16;
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_WITHDRAW_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + STAKE_WITHDRAW_EXTRA_LEN;
 
+/// Inline-extra size for a `StakeSlash` signal payload.
+/// `target_entity_id:32 | slash_amount_be:16 | rep_event_type:1 | points_delta_be:2`
+pub const STAKE_SLASH_EXTRA_LEN: usize = 51;
+
+/// Total size of a `StakeSlash` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + STAKE_SLASH_EXTRA_LEN;
+
 /// Block-count duration that newly deposited stake is locked for.
 /// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
 pub const STAKE_LOCK_PERIOD: u64 = 1000;
@@ -315,8 +325,10 @@ pub const REP_EVENT_FRAUD_DETECTED: u8 = 3;
 pub const REP_EVENT_AUTO_RELEASE_PENALTY: u8 = 4;
 /// Reputation decay applied for inactivity.
 pub const REP_EVENT_DECAY: u8 = 5;
+/// Stake slash applied; oracle is slashing the target's `stake_balance`.
+pub const REP_EVENT_STAKE_SLASH: u8 = 6;
 /// Maximum valid reputation `event_type` discriminant.
-pub const REP_EVENT_MAX: u8 = REP_EVENT_DECAY;
+pub const REP_EVENT_MAX: u8 = REP_EVENT_STAKE_SLASH;
 
 /// Inline reputation-update tail carried in `ReputationUpdate` signal payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,6 +379,27 @@ pub struct StakeWithdrawExtraV1 {
     pub amount: u128,
 }
 
+/// Inline slash tail carried in `StakeSlash` signal payloads.
+///
+/// Wire layout (51 bytes): `target_entity_id:32 | slash_amount_be:16 |
+/// rep_event_type:1 | points_delta_be:2`. Every slash MUST carry a
+/// reputation update; the handler applies the rep delta and the stake
+/// deduction in a single atomic batch. Slashing is saturating: requesting
+/// more than the target's `stake_balance` deducts only what is available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StakeSlashExtraV1 {
+    /// Entity whose stake is being slashed.
+    pub target_entity_id: [u8; 32],
+    /// Amount to deduct from `target.stake_balance` and credit to
+    /// `KEY_SLASH_TREASURY`. Saturating against `stake_balance`.
+    pub slash_amount: u128,
+    /// Reputation event discriminant accompanying the slash. Validated
+    /// against `REP_EVENT_MAX`.
+    pub rep_event_type: u8,
+    /// Reputation points delta clamped into [0, 100] on the target.
+    pub points_delta: i16,
+}
+
 /// Canonical Signal Commitment payload (D14.1):
 /// - Base (signal types 0..=6): 66 bytes
 ///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
@@ -378,13 +411,15 @@ pub struct StakeWithdrawExtraV1 {
 ///   `... [amount_be:16]`
 /// - `StakeWithdraw` (signal type 10): 82 bytes (base + 16-byte tail)
 ///   `... [amount_be:16]`
+/// - `StakeSlash` (signal type 11): 117 bytes (base + 51-byte tail)
+///   `... [target_id:32][slash_amount_be:16][rep_event_type:1][points_delta_be:2]`
 ///
 /// At most one tail is populated; the active tail is determined by `signal_type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalCommitmentPayloadV1 {
     /// Commitment hash of the full signal.
     pub signal_hash: [u8; 32],
-    /// Signal type (0..=10).
+    /// Signal type (0..=11).
     pub signal_type: novai_ai_entities::AiSignalType,
     /// AI entity ID that issued this signal.
     pub issuer_entity_id: [u8; 32],
@@ -396,21 +431,25 @@ pub struct SignalCommitmentPayloadV1 {
     pub stake_deposit: Option<StakeDepositExtraV1>,
     /// Inline stake-withdraw tail. MUST be `Some` iff `signal_type == StakeWithdraw`.
     pub stake_withdraw: Option<StakeWithdrawExtraV1>,
+    /// Inline slash tail. MUST be `Some` iff `signal_type == StakeSlash`.
+    pub stake_slash: Option<StakeSlashExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
 ///
 /// Returns 66 bytes for base signals, 101 bytes for `ReputationUpdate`,
-/// 107 bytes for `SignalPurchase`, and 82 bytes for `StakeDeposit` /
-/// `StakeWithdraw`. Panics in debug if a tail is set inconsistently with
-/// `signal_type`; in release builds the inconsistency is silently fixed by
-/// zero-padding the active tail.
+/// 107 bytes for `SignalPurchase`, 82 bytes for `StakeDeposit` /
+/// `StakeWithdraw`, and 117 bytes for `StakeSlash`. Panics in debug if a
+/// tail is set inconsistently with `signal_type`; in release builds the
+/// inconsistency is silently fixed by zero-padding the active tail.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec<u8> {
     let is_reputation = p.signal_type == novai_ai_entities::AiSignalType::ReputationUpdate;
     let is_purchase = p.signal_type == novai_ai_entities::AiSignalType::SignalPurchase;
     let is_stake_deposit = p.signal_type == novai_ai_entities::AiSignalType::StakeDeposit;
     let is_stake_withdraw = p.signal_type == novai_ai_entities::AiSignalType::StakeWithdraw;
+    let is_stake_slash = p.signal_type == novai_ai_entities::AiSignalType::StakeSlash;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
@@ -431,11 +470,17 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.stake_withdraw.is_some(),
         "stake_withdraw tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_stake_slash,
+        p.stake_slash.is_some(),
+        "stake_slash tail presence must match signal_type"
+    );
     debug_assert!(
         u8::from(is_reputation)
             + u8::from(is_purchase)
             + u8::from(is_stake_deposit)
             + u8::from(is_stake_withdraw)
+            + u8::from(is_stake_slash)
             <= 1,
         "tails are mutually exclusive"
     );
@@ -448,6 +493,8 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN
     } else if is_stake_withdraw {
         SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_WITHDRAW_LEN
+    } else if is_stake_slash {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -489,6 +536,16 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; STAKE_WITHDRAW_EXTRA_LEN]);
         }
+    } else if is_stake_slash {
+        if let Some(extra) = &p.stake_slash {
+            out.extend_from_slice(&extra.target_entity_id);
+            out.extend_from_slice(&extra.slash_amount.to_be_bytes());
+            out.push(extra.rep_event_type);
+            out.extend_from_slice(&extra.points_delta.to_be_bytes());
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; STAKE_SLASH_EXTRA_LEN]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -498,8 +555,9 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
 /// Deterministically decode a signal commitment payload from `tx.payload`.
 ///
 /// Accepts 66 bytes for base signals, 101 bytes for `ReputationUpdate`,
-/// 107 bytes for `SignalPurchase`, and 82 bytes for `StakeDeposit` /
-/// `StakeWithdraw`. Length-vs-signal-type mismatch is rejected.
+/// 107 bytes for `SignalPurchase`, 82 bytes for `StakeDeposit` /
+/// `StakeWithdraw`, and 117 bytes for `StakeSlash`. Length-vs-signal-type
+/// mismatch is rejected.
 ///
 /// # Errors
 /// Returns error if payload length, version, or signal type is invalid.
@@ -512,6 +570,7 @@ pub fn decode_signal_commitment_payload_v1(
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_WITHDRAW_LEN
+        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN
     {
         return Err(ExecError::BadPayloadLength {
             expected: SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN,
@@ -531,7 +590,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 10, // max valid signal type
+            expected: 11, // max valid signal type
             got: payload[33],
         },
     )?;
@@ -543,7 +602,8 @@ pub fn decode_signal_commitment_payload_v1(
     let is_purchase = signal_type == novai_ai_entities::AiSignalType::SignalPurchase;
     let is_stake_deposit = signal_type == novai_ai_entities::AiSignalType::StakeDeposit;
     let is_stake_withdraw = signal_type == novai_ai_entities::AiSignalType::StakeWithdraw;
-    let (reputation, purchase, stake_deposit, stake_withdraw) = if is_reputation {
+    let is_stake_slash = signal_type == novai_ai_entities::AiSignalType::StakeSlash;
+    let (reputation, purchase, stake_deposit, stake_withdraw, stake_slash) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
                 expected: SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN,
@@ -560,6 +620,7 @@ pub fn decode_signal_commitment_payload_v1(
                 event_type,
                 points_delta,
             }),
+            None,
             None,
             None,
             None,
@@ -593,6 +654,7 @@ pub fn decode_signal_commitment_payload_v1(
             }),
             None,
             None,
+            None,
         )
     } else if is_stake_deposit {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN {
@@ -604,7 +666,7 @@ pub fn decode_signal_commitment_payload_v1(
         let mut amount_bytes = [0u8; 16];
         amount_bytes.copy_from_slice(&payload[66..82]);
         let amount = u128::from_be_bytes(amount_bytes);
-        (None, None, Some(StakeDepositExtraV1 { amount }), None)
+        (None, None, Some(StakeDepositExtraV1 { amount }), None, None)
     } else if is_stake_withdraw {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_WITHDRAW_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -615,7 +677,39 @@ pub fn decode_signal_commitment_payload_v1(
         let mut amount_bytes = [0u8; 16];
         amount_bytes.copy_from_slice(&payload[66..82]);
         let amount = u128::from_be_bytes(amount_bytes);
-        (None, None, None, Some(StakeWithdrawExtraV1 { amount }))
+        (
+            None,
+            None,
+            None,
+            Some(StakeWithdrawExtraV1 { amount }),
+            None,
+        )
+    } else if is_stake_slash {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut target_entity_id = [0u8; 32];
+        target_entity_id.copy_from_slice(&payload[66..98]);
+        let mut slash_amount_bytes = [0u8; 16];
+        slash_amount_bytes.copy_from_slice(&payload[98..114]);
+        let slash_amount = u128::from_be_bytes(slash_amount_bytes);
+        let rep_event_type = payload[114];
+        let points_delta = i16::from_be_bytes([payload[115], payload[116]]);
+        (
+            None,
+            None,
+            None,
+            None,
+            Some(StakeSlashExtraV1 {
+                target_entity_id,
+                slash_amount,
+                rep_event_type,
+                points_delta,
+            }),
+        )
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -623,7 +717,7 @@ pub fn decode_signal_commitment_payload_v1(
                 got: payload.len(),
             });
         }
-        (None, None, None, None)
+        (None, None, None, None, None)
     };
 
     Ok(SignalCommitmentPayloadV1 {
@@ -634,6 +728,7 @@ pub fn decode_signal_commitment_payload_v1(
         purchase,
         stake_deposit,
         stake_withdraw,
+        stake_slash,
     })
 }
 
@@ -2325,6 +2420,64 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             .ok_or(ExecError::Overflow)?;
     }
 
+    // Slash branch: oracle deducts target.stake_balance, credits the slashed
+    // amount to KEY_SLASH_TREASURY, and applies a reputation update in the
+    // same atomic batch. Slash is saturating - requesting more than is staked
+    // takes everything available and credits that lower amount to the treasury.
+    if payload.signal_type == AiSignalType::StakeSlash {
+        if !entity.capabilities.submit_reputation_updates {
+            return Err(ExecError::IssuerMissingCapability);
+        }
+        let extra = payload
+            .stake_slash
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("StakeSlash missing extra".into()))?;
+
+        if extra.rep_event_type > REP_EVENT_MAX {
+            return Err(ExecError::InvalidReputationEventType {
+                byte: extra.rep_event_type,
+            });
+        }
+        if extra.target_entity_id == entity.id {
+            return Err(ExecError::SelfSlash);
+        }
+
+        let mut target =
+            read_ai_entity(db, &extra.target_entity_id)?.ok_or(ExecError::TargetEntityNotFound)?;
+
+        // Saturating slash: take min(stake_balance, slash_amount) and only
+        // credit that actual amount to the treasury.
+        let actual_slashed = target.stake_balance.min(extra.slash_amount);
+        target.stake_balance = target
+            .stake_balance
+            .checked_sub(actual_slashed)
+            .ok_or(ExecError::Overflow)?;
+
+        if actual_slashed > 0 {
+            let new_treasury = read_treasury_balance(db, KEY_SLASH_TREASURY)?
+                .checked_add(actual_slashed)
+                .ok_or(ExecError::Overflow)?;
+            ops.push(WriteOp::Put(
+                KEY_SLASH_TREASURY.to_vec(),
+                encode_fee_pool_v1(&FeePoolV1 {
+                    balance: new_treasury,
+                })
+                .to_vec(),
+            ));
+        }
+
+        // Apply reputation update on the same target. Clamp i32 arithmetic
+        // matches the ReputationUpdate handler's clamp semantics.
+        let new_score: u16 = (i32::from(target.reputation_score) + i32::from(extra.points_delta))
+            .clamp(0, i32::from(MAX_REPUTATION_SCORE))
+            .try_into()
+            .map_err(|_| ExecError::Overflow)?;
+        target.reputation_score = new_score;
+        target.reputation_events_count = target.reputation_events_count.saturating_add(1);
+
+        ops.push(write_ai_entity_op(&target));
+    }
+
     ops.push(write_ai_entity_op(&entity));
 
     // Apply all changes atomically
@@ -3862,6 +4015,10 @@ pub const KEY_PRIVACY_TREASURY: &[u8] = b"treasury/privacy";
 /// of every signal purchase. Reuses the `FeePoolV1` codec used by the
 /// other treasury keys.
 pub const KEY_MARKETPLACE_TREASURY: &[u8] = b"treasury/marketplace";
+
+/// Storage key for the slash treasury (accumulates funds slashed from
+/// misbehaving entities' `stake_balance` via `StakeSlash` signals).
+pub const KEY_SLASH_TREASURY: &[u8] = b"treasury/slash";
 
 /// Marketplace protocol fee, in basis points (1 bp = 0.01%).
 /// 200 bps = 2% on every signal purchase.

@@ -175,6 +175,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
             purchase: None,
             stake_deposit: None,
             stake_withdraw: None,
+            stake_slash: None,
         };
         let signal_tx = TxV1 {
             version: TxVersion::V1,
@@ -215,6 +216,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
         purchase: None,
         stake_deposit: None,
         stake_withdraw: None,
+        stake_slash: None,
     };
     let anomaly_tx = TxV1 {
         version: TxVersion::V1,

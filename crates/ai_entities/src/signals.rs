@@ -33,6 +33,13 @@ pub enum AiSignalType {
     /// back to its `economic_balance`. Rejected unless
     /// `stake_locked_until <= current_height`. Carries a 16-byte amount tail.
     StakeWithdraw = 10,
+    /// Slash signal emitted by an oracle entity (requires
+    /// `submit_reputation_updates` capability). Deducts from a target
+    /// entity's `stake_balance`, credits the slashed amount to
+    /// `KEY_SLASH_TREASURY`, and applies a reputation update atomically.
+    /// Carries a 51-byte tail: target_id:32 | slash_amount_be:16 |
+    /// rep_event_type:1 | points_delta_be:2.
+    StakeSlash = 11,
 }
 
 impl AiSignalType {
@@ -55,6 +62,7 @@ impl AiSignalType {
             8 => Some(AiSignalType::SignalPurchase),
             9 => Some(AiSignalType::StakeDeposit),
             10 => Some(AiSignalType::StakeWithdraw),
+            11 => Some(AiSignalType::StakeSlash),
             _ => None,
         }
     }

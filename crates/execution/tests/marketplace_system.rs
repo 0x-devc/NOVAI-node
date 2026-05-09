@@ -133,6 +133,7 @@ fn build_purchase_payload(
         }),
         stake_deposit: None,
         stake_withdraw: None,
+        stake_slash: None,
     })
 }
 
@@ -505,6 +506,7 @@ fn non_purchase_signals_still_work() {
         purchase: None,
         stake_deposit: None,
         stake_withdraw: None,
+        stake_slash: None,
     });
     let tx = make_tx(issuer.id, 0, SIGNAL_FEE, payload);
 
