@@ -2,9 +2,9 @@
 
 Five recipes for the AI infrastructure features in NOVAI v1: reputation, marketplace, staking, composition, and ZK proofs. Each recipe shows what works today, the exact byte layouts where the SDK does not yet have a helper, and how to verify the on-chain effect.
 
-The CLI does not yet expose first-class commands for these features. Recipes use a mix of CLI (where it works), the Rust SDK (`sdk/novai-sdk`), and direct transaction byte construction with `novai-crypto` + `novai-codec` (where neither covers the case). Missing surface is tagged `[NOT YET IMPLEMENTED]`.
+The CLI now exposes first-class commands for all 14 signal types and all 10 memory object types. Recipes use a mix of CLI (`novai-cli signal publish`, `novai-cli memory create`, `novai-cli ai info`), the Rust SDK (`sdk/novai-sdk`), and direct transaction byte construction with `novai-crypto` + `novai-codec` (where neither covers the case). Remaining gaps are tagged `[NOT YET IMPLEMENTED]`.
 
-> **Observable state caveat.** `novai_getAiEntity` is V3-era and does not yet expose `reputation_score`, `total_transactions`, `reputation_events_count`, `stake_balance`, or `stake_locked_until`, even though the protocol mutates these fields. Each recipe below verifies what it can today: tx inclusion via `novai_getTransaction`, signal events via `novai_getSignalsByIssuer` and `novai_getSignalsByType`, memory objects via `novai_getMemoryObjects`, and `economic_balance` / `is_active` / `nonce` via `novai_getAiEntity`. See [RPC_REFERENCE.md#observed-gaps](RPC_REFERENCE.md#observed-gaps) for the full list.
+> **Observable state.** `novai_getAiEntity` exposes the V4/V5 entity fields: `reputation_score`, `total_transactions`, `reputation_events_count`, `stake_balance`, and `stake_locked_until`. `novai-cli ai info` displays them in human-readable form. Each recipe below verifies via a combination of `novai_getAiEntity` for cumulative state, `novai_getTransaction` for tx inclusion, `novai_getSignalsByIssuer` and `novai_getSignalsByType` for signal events, and `novai_getMemoryObjects` for memory objects. See [RPC_REFERENCE.md#observed-gaps](RPC_REFERENCE.md#observed-gaps) for remaining gaps.
 
 Prerequisites for every recipe:
 - A running local devnet ([QUICKSTART.md](QUICKSTART.md))
@@ -91,7 +91,7 @@ println!("oracle entity_id={}, txid={txid}", hex::encode(entity_id));
 
 ### Step 2: Issue a ReputationUpdate
 
-`[NOT YET IMPLEMENTED]` The SDK's `tx::signal_commitment` only emits the 66-byte base payload. Signal type 7 needs a 35-byte tail. Build the payload manually (101 bytes) and sign a `TxV1` directly:
+The CLI handles this directly: `novai-cli signal publish --signal-type reputation-update --target-entity-id <hex> --event-type 0 --points-delta 1 ...`. The SDK's `tx::signal_commitment` still emits only the 66-byte base payload, so SDK users build the 101-byte payload manually and sign a `TxV1` directly:
 
 ```text
 [0x02][signal_hash:32][0x07][issuer_id:32][target_id:32][event_type:1][delta_be:2]
@@ -101,19 +101,22 @@ println!("oracle entity_id={}, txid={txid}", hex::encode(entity_id));
 
 ### Verify
 
-`reputation_score` is not yet RPC-readable. Verify indirectly:
+`reputation_score` is RPC-readable. Read it directly:
 
 ```bash
-# 1) The ReputationUpdate tx was included.
+# Cumulative reputation_score on the target after the update.
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"novai_getTransaction","params":{"txid":"<txid>"},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"novai_getAiEntity","params":{"entity_id":"<target_id>"},"id":1}'
 
-# 2) A signal of type 7 from the oracle landed at that height.
+# Or human-readable via the CLI.
+novai-cli ai info --entity-id <target_id>
+
+# Cross-check the issuance trail.
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"novai_getSignalsByIssuer","params":{"issuer":"<oracle_id>","start_height":0,"end_height":10000},"id":1}'
 ```
 
-Direct read of `reputation_score` from chain state requires DB inspection until the RPC schema bumps.
+Expect `reputation_score` to move by `points_delta` (clamped to `[0, 100]` on apply) and `reputation_events_count` to increment by one.
 
 ### Common errors
 - `IssuerMissingCapability`: oracle entity does not have bit 5 set. Re-register.
@@ -144,7 +147,7 @@ catalog.push(0x01);                                 // is_active = true
 
 ### Step 2: Wrap as a memory object create tx
 
-`[NOT YET IMPLEMENTED]` The CLI memory parser stops at `statistics-snapshot` (type 4). The SDK's `tx::create_memory(...)` takes a `MemoryObjectType` enum and accepts type 7. Use the SDK:
+The CLI accepts `signal-catalog` directly: `novai-cli memory create --type signal-catalog --data-file ./catalog.bin --key-file /tmp/seller.key`. SDK users do the same via `tx::create_memory(...)`:
 
 ```rust
 use novai_ai_entities::MemoryObjectType;
@@ -225,19 +228,22 @@ The chain saturating-subtracts up to `slash_amount` from `target.stake_balance`,
 
 ### Verify
 
-`economic_balance` is RPC-readable. `stake_balance` and `stake_locked_until` are not yet exposed. The signal index records every stake operation:
+`economic_balance`, `stake_balance`, and `stake_locked_until` are all RPC-readable. The signal index records every stake operation:
 
 ```bash
 # Every StakeDeposit (type 9) ever issued in this height range.
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"novai_getSignalsByType","params":{"signal_type":9,"start_height":0,"end_height":10000},"id":1}'
 
-# Entity's economic_balance after the deposit.
+# Entity's balances and lock height after the deposit.
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"novai_getAiEntity","params":{"entity_id":"<entity_id>"},"id":1}'
+
+# Or in one line via the CLI.
+novai-cli ai info --entity-id <entity_id>
 ```
 
-After deposit: `economic_balance` decreased by `amount + fee`. After withdraw: `economic_balance` increased by `amount`. Direct stake state requires DB inspection.
+After deposit: `economic_balance` decreased by `amount + fee`, `stake_balance` increased by `amount`, `stake_locked_until` set to `current_height + 1000`. After withdraw: `economic_balance` increased by `amount`, `stake_balance` decreased by `amount`.
 
 ### Common errors
 - `InsufficientEntityBalance` (deposit): entity's `economic_balance` is below `amount + fee`.
@@ -303,7 +309,7 @@ curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"novai_getAiEntity","params":{"entity_id":"<consumer_id>"},"id":1}'
 ```
 
-After a successful required-dependency failure, `is_active` flips to `false`. That field is RPC-observable today. The bundled `-1` reputation delta also lands but is not yet readable from the RPC; trace it through the signal index instead:
+After a successful required-dependency failure: `is_active` flips to `false` and `reputation_score` decreases by `1` (`REP_EVENT_COMPOSITION_FAILURE`). Both fields are RPC-observable. Cross-check the signal index for the issuance trail:
 
 ```bash
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
@@ -362,14 +368,24 @@ In v1 `proof_hash` is `blake3(b"")` because the handler does not yet receive pro
 
 ### Step 4: Confirm the reputation effect
 
-The `+3` reputation lands in chain state, but the V3-era RPC does not yet expose `reputation_score`. Treat the new `VerificationRecord` from Step 3 plus a successful type-13 entry in the signal index as the observable proof today:
+The `+3` reputation bump is RPC-readable on the issuer:
+
+```bash
+curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"novai_getAiEntity","params":{"entity_id":"<issuer_id>"},"id":1}'
+
+# Or via the CLI.
+novai-cli ai info --entity-id <issuer_id>
+```
+
+Cross-check the signal index for the type-13 entry:
 
 ```bash
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"novai_getSignalsByType","params":{"signal_type":13,"start_height":0,"end_height":10000},"id":1}'
 ```
 
-If the issuer's submission appears in the result, the proof verified and the `+3` bump fired. The cumulative score read needs DB inspection or an updated RPC schema.
+If the issuer's submission appears and `reputation_score` has bumped by `3`, the proof verified.
 
 ### Common errors
 - `UnsupportedProofType`: `proof_type > 0` (only stub accepted in v1).

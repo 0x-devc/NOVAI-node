@@ -386,24 +386,27 @@ Returns the full on-chain record for an AI entity. Returns `{ "entity": null }` 
 ```jsonc
 {
   "entity": {
-    "id":               "<hex32>",          // canonical entity id (matches the param)
-    "code_hash":        "<hex32>",          // identifier supplied at registration
-    "creator":          "<hex32>",          // creator account address
-    "autonomy_mode":    <u8>,               // 0 = Advisory, 1 = Gated, 2 reserved
-    "capabilities":     <u8>,               // bitfield (see Capabilities)
-    "economic_balance": "<decimal-string>", // u128
-    "nonce":            <u64>,              // next nonce for entity-signed txs
-    "pubkey":           "<hex32>",          // ed25519 verifying key (zeros if registered without a key)
-    "memory_root":      "<hex32>",          // (reserved; currently zero)
-    "params_root":      "<hex32>",          // (reserved; currently zero)
-    "registered_at":    <u64>,              // block height of the register tx
-    "last_active_at":   <u64>,              // most recent height at which this entity sent a tx
-    "is_active":        true                // false after a deactivation proposal OR auto-pause from a failed required composition dependency
+    "id":                       "<hex32>",          // canonical entity id (matches the param)
+    "code_hash":                "<hex32>",          // identifier supplied at registration
+    "creator":                  "<hex32>",          // creator account address
+    "autonomy_mode":            <u8>,               // 0 = Advisory, 1 = Gated, 2 reserved
+    "capabilities":             <u8>,               // bitfield (see Capabilities)
+    "economic_balance":         "<decimal-string>", // u128
+    "nonce":                    <u64>,              // next nonce for entity-signed txs
+    "pubkey":                   "<hex32>",          // ed25519 verifying key (zeros if registered without a key)
+    "memory_root":              "<hex32>",          // (reserved; currently zero)
+    "params_root":              "<hex32>",          // (reserved; currently zero)
+    "registered_at":            <u64>,              // block height of the register tx
+    "last_active_at":           <u64>,              // most recent height at which this entity sent a tx
+    "is_active":                true,               // false after a deactivation proposal OR auto-pause from a failed required composition dependency
+    "reputation_score":         <u16>,              // current reputation in [0, 100]; defaults to 50 for new entities
+    "total_transactions":       <u32>,              // count of transactions counted toward reputation (e.g., job completions)
+    "reputation_events_count":  <u32>,              // number of reputation events ever applied to this entity
+    "stake_balance":            "<decimal-string>", // u128 stake locked as collateral
+    "stake_locked_until":       <u64>               // block height until which stake cannot be withdrawn (0 = unlocked)
   }
 }
 ```
-
-> **RPC schema lag.** The on-chain `AiEntity` record carries five additional fields that this RPC does not yet serialize: `reputation_score: u16`, `total_transactions: u32`, `reputation_events_count: u32`, `stake_balance: u128` (decimal string once exposed), and `stake_locked_until: u64`. Until the schema bumps to expose them, observe these by following the relevant signal index (`novai_getSignalsByIssuer` for reputation/stake/composition events) and confirming inclusion via `novai_getTransaction`. End-to-end audit is possible today; only the cumulative state read is missing. See [Observed gaps](#observed-gaps).
 
 **Capabilities bits** (combine to form the byte):
 
@@ -805,7 +808,6 @@ Surface that has shipped at the protocol layer but is not yet exposed by the RPC
 
 | Gap | Impact | Workaround today |
 |---|---|---|
-| `AiEntityJson` is V3-era | `reputation_score`, `total_transactions`, `reputation_events_count`, `stake_balance`, `stake_locked_until` are not returned | Inspect the underlying KV directly, or follow the relevant signal index for evidence of the mutation and confirm via `getTransaction` |
 | No treasury balance method | `treasury/ai`, `treasury/marketplace`, `treasury/slash` accumulate value but are not addressable accounts | Direct KV inspection (string keys: `treasury/ai`, `treasury/marketplace`, `treasury/slash`) |
 | No mempool query | Cannot enumerate pending txs | Poll `getTransaction(txid)` for inclusion |
 | No event subscription | RPC is HTTP request/response only; no WebSocket or push | Poll `getLatestBlock` and the signal index |
