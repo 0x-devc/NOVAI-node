@@ -8,7 +8,11 @@
 //! without blocking on ZK circuit development.
 //!
 //! INVARIANTS:
-//! - Trait signature is stable (changing it is a breaking change)
+//! - Trait signature is stable WITHIN a major version. The current shape
+//!   (proof, public_inputs, proof_type, code_hash) is v2; v1 (proof,
+//!   public_inputs) was extended for the ProofSubmission signal handler.
+//!   Future additions (e.g. computation_hash as a separate param) are a
+//!   breaking change requiring a v3.
 //! - Stub always returns true (for testing/development)
 //! - Real implementation will have same trait signature
 //!
@@ -35,7 +39,8 @@
 /// // Using the stub verifier (always returns true)
 /// let proof = b"mock_proof_data";
 /// let inputs = b"public_inputs";
-/// assert!(StubZkVerifier::verify_proof(proof, inputs));
+/// let code_hash = [0u8; 32];
+/// assert!(StubZkVerifier::verify_proof(proof, inputs, 0, &code_hash));
 /// ```
 pub trait ZkVerifier {
     /// Verify a ZK proof against public inputs.
@@ -44,6 +49,13 @@ pub trait ZkVerifier {
     ///
     /// * `proof` - The serialized proof bytes (format depends on implementation)
     /// * `public_inputs` - The public inputs the proof claims to satisfy
+    /// * `proof_type` - Discriminant identifying the proof system (see
+    ///   `PROOF_TYPE_*` in `novai-execution`). Lets a single verifier
+    ///   route to a different backend per proof system.
+    /// * `code_hash` - Hash of the AI module code/weights the proof attests
+    ///   to. Bound separately from `public_inputs` so backends can use it
+    ///   as a circuit selector (e.g. picking the right verifying key per
+    ///   code_hash) without parsing `public_inputs`.
     ///
     /// # Returns
     ///
@@ -53,7 +65,12 @@ pub trait ZkVerifier {
     ///
     /// The stub implementation always returns `true`. Real implementations
     /// will perform cryptographic verification.
-    fn verify_proof(proof: &[u8], public_inputs: &[u8]) -> bool;
+    fn verify_proof(
+        proof: &[u8],
+        public_inputs: &[u8],
+        proof_type: u8,
+        code_hash: &[u8; 32],
+    ) -> bool;
 }
 
 /// Stub ZK verifier that always returns true.
@@ -74,8 +91,9 @@ pub trait ZkVerifier {
 /// use novai_crypto::{ZkVerifier, StubZkVerifier};
 ///
 /// // Stub always returns true regardless of input
-/// assert!(StubZkVerifier::verify_proof(&[], &[]));
-/// assert!(StubZkVerifier::verify_proof(b"any_proof", b"any_inputs"));
+/// let code_hash = [0u8; 32];
+/// assert!(StubZkVerifier::verify_proof(&[], &[], 0, &code_hash));
+/// assert!(StubZkVerifier::verify_proof(b"any_proof", b"any_inputs", 0, &code_hash));
 /// ```
 /// M-08: WARNING — This stub verifier accepts ALL proofs as valid.
 /// It exists ONLY for development and testing. It **MUST** be replaced with a
@@ -88,18 +106,25 @@ pub trait ZkVerifier {
 pub struct StubZkVerifier;
 
 impl ZkVerifier for StubZkVerifier {
-    fn verify_proof(proof: &[u8], public_inputs: &[u8]) -> bool {
+    fn verify_proof(
+        proof: &[u8],
+        public_inputs: &[u8],
+        proof_type: u8,
+        code_hash: &[u8; 32],
+    ) -> bool {
         // Log proof details when zk-logging feature is enabled
         #[cfg(feature = "zk-logging")]
         eprintln!(
-            "[ZK STUB] verify_proof: proof_size={} bytes, inputs_size={} bytes -> true",
+            "[ZK STUB] verify_proof: proof_size={} bytes, inputs_size={} bytes, \
+             proof_type={proof_type}, code_hash={:02x?} -> true",
             proof.len(),
-            public_inputs.len()
+            public_inputs.len(),
+            &code_hash[..8],
         );
 
         // Suppress unused variable warnings when logging is disabled
         #[cfg(not(feature = "zk-logging"))]
-        let _ = (proof, public_inputs);
+        let _ = (proof, public_inputs, proof_type, code_hash);
 
         // Stub always returns true — NOT SAFE for production
         true
@@ -126,23 +151,35 @@ pub struct PlaceholderRealVerifier {
 mod tests {
     use super::*;
 
+    const ZERO_CODE_HASH: [u8; 32] = [0u8; 32];
+
     #[test]
     fn stub_returns_true_for_empty_inputs() {
-        assert!(StubZkVerifier::verify_proof(&[], &[]));
+        assert!(StubZkVerifier::verify_proof(&[], &[], 0, &ZERO_CODE_HASH));
     }
 
     #[test]
     fn stub_returns_true_for_any_inputs() {
         let proof = vec![0xDE, 0xAD, 0xBE, 0xEF];
         let inputs = vec![0x01, 0x02, 0x03];
-        assert!(StubZkVerifier::verify_proof(&proof, &inputs));
+        assert!(StubZkVerifier::verify_proof(
+            &proof,
+            &inputs,
+            0,
+            &ZERO_CODE_HASH
+        ));
     }
 
     #[test]
     fn stub_returns_true_for_large_inputs() {
         let proof = vec![0x42u8; 1024];
         let inputs = vec![0x99u8; 256];
-        assert!(StubZkVerifier::verify_proof(&proof, &inputs));
+        assert!(StubZkVerifier::verify_proof(
+            &proof,
+            &inputs,
+            0,
+            &ZERO_CODE_HASH
+        ));
     }
 
     #[test]
@@ -150,12 +187,38 @@ mod tests {
         let proof = b"test_proof";
         let inputs = b"test_inputs";
 
-        let result1 = StubZkVerifier::verify_proof(proof, inputs);
-        let result2 = StubZkVerifier::verify_proof(proof, inputs);
-        let result3 = StubZkVerifier::verify_proof(proof, inputs);
+        let result1 = StubZkVerifier::verify_proof(proof, inputs, 0, &ZERO_CODE_HASH);
+        let result2 = StubZkVerifier::verify_proof(proof, inputs, 0, &ZERO_CODE_HASH);
+        let result3 = StubZkVerifier::verify_proof(proof, inputs, 0, &ZERO_CODE_HASH);
 
         assert_eq!(result1, result2);
         assert_eq!(result2, result3);
         assert!(result1); // All should be true
+    }
+
+    #[test]
+    fn stub_ignores_proof_type_and_code_hash() {
+        // Stub returns true regardless of proof_type or code_hash. A real
+        // verifier would route on proof_type and bind to code_hash.
+        let proof = b"x";
+        let inputs = b"y";
+        assert!(StubZkVerifier::verify_proof(
+            proof,
+            inputs,
+            0,
+            &ZERO_CODE_HASH
+        ));
+        assert!(StubZkVerifier::verify_proof(
+            proof,
+            inputs,
+            1,
+            &[0xFFu8; 32]
+        ));
+        assert!(StubZkVerifier::verify_proof(
+            proof,
+            inputs,
+            255,
+            &[0xAAu8; 32]
+        ));
     }
 }

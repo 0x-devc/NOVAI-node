@@ -5,13 +5,15 @@
 
 use novai_crypto::{StubZkVerifier, ZkVerifier};
 
+const ZERO_CODE_HASH: [u8; 32] = [0u8; 32];
+
 // ============================================================================
 // BASIC FUNCTIONALITY TESTS
 // ============================================================================
 
 #[test]
 fn stub_returns_true_for_empty_inputs() {
-    let result = StubZkVerifier::verify_proof(&[], &[]);
+    let result = StubZkVerifier::verify_proof(&[], &[], 0, &ZERO_CODE_HASH);
     assert!(result, "Stub must return true for empty inputs");
 }
 
@@ -20,7 +22,7 @@ fn stub_returns_true_for_non_empty_inputs() {
     let proof = b"mock_zk_proof_data_here";
     let inputs = b"public_inputs_for_verification";
 
-    let result = StubZkVerifier::verify_proof(proof, inputs);
+    let result = StubZkVerifier::verify_proof(proof, inputs, 0, &ZERO_CODE_HASH);
     assert!(result, "Stub must return true for non-empty inputs");
 }
 
@@ -30,7 +32,7 @@ fn stub_returns_true_for_large_proof() {
     let proof = vec![0xABu8; 256];
     let inputs = vec![0xCDu8; 64];
 
-    let result = StubZkVerifier::verify_proof(&proof, &inputs);
+    let result = StubZkVerifier::verify_proof(&proof, &inputs, 0, &ZERO_CODE_HASH);
     assert!(result, "Stub must return true for large proofs");
 }
 
@@ -39,7 +41,7 @@ fn stub_returns_true_for_proof_only() {
     let proof = b"proof_without_inputs";
     let inputs: &[u8] = &[];
 
-    let result = StubZkVerifier::verify_proof(proof, inputs);
+    let result = StubZkVerifier::verify_proof(proof, inputs, 0, &ZERO_CODE_HASH);
     assert!(result, "Stub must return true even with empty inputs");
 }
 
@@ -48,7 +50,7 @@ fn stub_returns_true_for_inputs_only() {
     let proof: &[u8] = &[];
     let inputs = b"inputs_without_proof";
 
-    let result = StubZkVerifier::verify_proof(proof, inputs);
+    let result = StubZkVerifier::verify_proof(proof, inputs, 0, &ZERO_CODE_HASH);
     assert!(result, "Stub must return true even with empty proof");
 }
 
@@ -64,7 +66,7 @@ fn stub_is_deterministic() {
     // Call multiple times, should always return true
     for _ in 0..10 {
         assert!(
-            StubZkVerifier::verify_proof(proof, inputs),
+            StubZkVerifier::verify_proof(proof, inputs, 0, &ZERO_CODE_HASH),
             "Stub must be deterministic"
         );
     }
@@ -75,8 +77,8 @@ fn stub_same_result_for_same_inputs() {
     let proof = vec![0x11u8; 128];
     let inputs = vec![0x22u8; 32];
 
-    let result1 = StubZkVerifier::verify_proof(&proof, &inputs);
-    let result2 = StubZkVerifier::verify_proof(&proof, &inputs);
+    let result1 = StubZkVerifier::verify_proof(&proof, &inputs, 0, &ZERO_CODE_HASH);
+    let result2 = StubZkVerifier::verify_proof(&proof, &inputs, 0, &ZERO_CODE_HASH);
 
     assert_eq!(result1, result2, "Same inputs must produce same result");
 }
@@ -87,8 +89,13 @@ fn stub_same_result_for_same_inputs() {
 
 /// Function that accepts any ZkVerifier implementation.
 /// This is a compile-time check that the trait can be used as a bound.
-fn verify_with_trait<V: ZkVerifier>(proof: &[u8], inputs: &[u8]) -> bool {
-    V::verify_proof(proof, inputs)
+fn verify_with_trait<V: ZkVerifier>(
+    proof: &[u8],
+    inputs: &[u8],
+    proof_type: u8,
+    code_hash: &[u8; 32],
+) -> bool {
+    V::verify_proof(proof, inputs, proof_type, code_hash)
 }
 
 #[test]
@@ -97,7 +104,7 @@ fn trait_can_be_used_as_bound() {
     let inputs = b"trait_inputs";
 
     // Use the generic function with StubZkVerifier
-    let result = verify_with_trait::<StubZkVerifier>(proof, inputs);
+    let result = verify_with_trait::<StubZkVerifier>(proof, inputs, 0, &ZERO_CODE_HASH);
     assert!(
         result,
         "Trait bound function should work with StubZkVerifier"
@@ -109,29 +116,74 @@ fn trait_can_be_used_as_bound() {
 struct MockRealVerifier;
 
 impl ZkVerifier for MockRealVerifier {
-    fn verify_proof(proof: &[u8], public_inputs: &[u8]) -> bool {
-        // A "real" verifier might check proof length, etc.
-        // For this mock, we just check that both are non-empty
-        !proof.is_empty() && !public_inputs.is_empty()
+    fn verify_proof(
+        proof: &[u8],
+        public_inputs: &[u8],
+        proof_type: u8,
+        code_hash: &[u8; 32],
+    ) -> bool {
+        // A "real" verifier might check proof length, route on proof_type,
+        // bind to code_hash, etc. For this mock, we just check that both
+        // proof and inputs are non-empty AND that proof_type matches stub
+        // AND that code_hash is the canonical zero — exercising every
+        // parameter so a future trait change would force a test update.
+        !proof.is_empty()
+            && !public_inputs.is_empty()
+            && proof_type == 0
+            && code_hash == &ZERO_CODE_HASH
     }
 }
 
 #[test]
 fn custom_implementation_works() {
-    // MockRealVerifier requires non-empty inputs
-    assert!(!MockRealVerifier::verify_proof(&[], &[]));
-    assert!(!MockRealVerifier::verify_proof(b"proof", &[]));
-    assert!(!MockRealVerifier::verify_proof(&[], b"inputs"));
-    assert!(MockRealVerifier::verify_proof(b"proof", b"inputs"));
+    // MockRealVerifier requires non-empty inputs + proof_type=0 + zero code_hash
+    assert!(!MockRealVerifier::verify_proof(
+        &[],
+        &[],
+        0,
+        &ZERO_CODE_HASH
+    ));
+    assert!(!MockRealVerifier::verify_proof(
+        b"proof",
+        &[],
+        0,
+        &ZERO_CODE_HASH
+    ));
+    assert!(!MockRealVerifier::verify_proof(
+        &[],
+        b"inputs",
+        0,
+        &ZERO_CODE_HASH
+    ));
+    assert!(MockRealVerifier::verify_proof(
+        b"proof",
+        b"inputs",
+        0,
+        &ZERO_CODE_HASH
+    ));
+    // Wrong proof_type → reject
+    assert!(!MockRealVerifier::verify_proof(
+        b"proof",
+        b"inputs",
+        1,
+        &ZERO_CODE_HASH
+    ));
+    // Non-zero code_hash → reject
+    assert!(!MockRealVerifier::verify_proof(
+        b"proof",
+        b"inputs",
+        0,
+        &[0xFFu8; 32]
+    ));
 }
 
 #[test]
 fn trait_bound_works_with_custom_impl() {
     // Verify the trait bound function works with custom implementations
-    let result = verify_with_trait::<MockRealVerifier>(b"proof", b"inputs");
+    let result = verify_with_trait::<MockRealVerifier>(b"proof", b"inputs", 0, &ZERO_CODE_HASH);
     assert!(result);
 
-    let result_empty = verify_with_trait::<MockRealVerifier>(&[], &[]);
+    let result_empty = verify_with_trait::<MockRealVerifier>(&[], &[], 0, &ZERO_CODE_HASH);
     assert!(!result_empty);
 }
 
@@ -146,7 +198,7 @@ fn stub_handles_binary_data() {
     let inputs: Vec<u8> = (0u8..=255).rev().collect();
 
     assert!(
-        StubZkVerifier::verify_proof(&proof, &inputs),
+        StubZkVerifier::verify_proof(&proof, &inputs, 0, &ZERO_CODE_HASH),
         "Stub must handle all byte values"
     );
 }
@@ -157,7 +209,7 @@ fn stub_handles_null_bytes() {
     let inputs = vec![0u8; 50];
 
     assert!(
-        StubZkVerifier::verify_proof(&proof, &inputs),
+        StubZkVerifier::verify_proof(&proof, &inputs, 0, &ZERO_CODE_HASH),
         "Stub must handle null bytes"
     );
 }
