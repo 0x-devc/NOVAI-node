@@ -40,6 +40,15 @@ pub enum AiSignalType {
     /// Carries a 51-byte tail: target_id:32 | slash_amount_be:16 |
     /// rep_event_type:1 | points_delta_be:2.
     StakeSlash = 11,
+    /// Composition health check emitted by an oracle entity (requires
+    /// `submit_reputation_updates` capability). Validates a target entity's
+    /// declared `CompositionGraph` dependency and, if the failure is
+    /// corroborated by chain state and the dependency is marked required,
+    /// auto-pauses the target by setting `is_active = false`. Always emits a
+    /// `REP_EVENT_COMPOSITION_FAILURE` reputation event with delta -1.
+    /// Carries a 34-byte tail: target_id:32 | failed_dependency_idx:1 |
+    /// failure_reason:1.
+    CompositionCheck = 12,
 }
 
 impl AiSignalType {
@@ -63,6 +72,7 @@ impl AiSignalType {
             9 => Some(AiSignalType::StakeDeposit),
             10 => Some(AiSignalType::StakeWithdraw),
             11 => Some(AiSignalType::StakeSlash),
+            12 => Some(AiSignalType::CompositionCheck),
             _ => None,
         }
     }
@@ -139,6 +149,26 @@ impl AiSignalV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_signal_type_from_byte_boundary() {
+        assert_eq!(
+            AiSignalType::from_byte(11),
+            Some(AiSignalType::StakeSlash),
+            "11 must decode to StakeSlash"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(12),
+            Some(AiSignalType::CompositionCheck),
+            "12 must decode to CompositionCheck"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(13),
+            None,
+            "13 must be rejected as unknown signal type"
+        );
+        assert_eq!(AiSignalType::CompositionCheck.to_byte(), 12);
+    }
 
     #[test]
     fn commitment_hash_is_deterministic() {

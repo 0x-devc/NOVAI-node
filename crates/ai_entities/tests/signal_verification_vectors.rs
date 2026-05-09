@@ -507,17 +507,18 @@ fn verify_signal_type_encoding() {
     assert_eq!(AiSignalType::StakeDeposit.to_byte(), 9);
     assert_eq!(AiSignalType::StakeWithdraw.to_byte(), 10);
     assert_eq!(AiSignalType::StakeSlash.to_byte(), 11);
+    assert_eq!(AiSignalType::CompositionCheck.to_byte(), 12);
 }
 
 /// Verify signal type roundtrip from byte.
 #[test]
 fn verify_signal_type_roundtrip() {
-    for i in 0u8..=11 {
+    for i in 0u8..=12 {
         let signal_type = AiSignalType::from_byte(i).expect("valid type");
         assert_eq!(signal_type.to_byte(), i);
     }
 
     // Invalid bytes should return None
-    assert!(AiSignalType::from_byte(12).is_none());
+    assert!(AiSignalType::from_byte(13).is_none());
     assert!(AiSignalType::from_byte(255).is_none());
 }
