@@ -624,6 +624,11 @@ pub const COMPOSITION_DEPENDENCY_SIZE: usize = 32 + 1 + 2 + 8 + 1;
 pub const COMPOSITION_GRAPH_MAX_SIZE: usize =
     1 + MAX_COMPOSITION_DEPENDENCIES * COMPOSITION_DEPENDENCY_SIZE;
 
+/// Fixed on-wire size of a `VerificationRecordData` payload.
+/// `proof_type:1 | code_hash:32 | computation_hash:32 | proof_hash:32 |
+/// height_be:8`.
+pub const VERIFICATION_RECORD_SIZE: usize = 1 + 32 + 32 + 32 + 8;
+
 /// One inbound dependency within a `CompositionGraph`.
 ///
 /// Layout (44 bytes):
@@ -765,6 +770,75 @@ impl CompositionGraphData {
             dependencies.push(dep);
         }
         Some(Self { dependencies })
+    }
+}
+
+/// On-chain audit record of a successful ZK proof verification.
+///
+/// Stored as the data field of a `MemoryObjectType::VerificationRecord`
+/// memory object, owned by the entity that submitted the proof. The
+/// `ProofSubmission` signal handler creates one record per accepted
+/// proof; the record is immutable for the lifetime of the memory object.
+///
+/// Wire layout (105 bytes, fixed):
+/// `proof_type:1 | code_hash:32 | computation_hash:32 | proof_hash:32 |
+/// height_be:8`.
+///
+/// `proof_hash` is `blake3(proof_bytes)` — the hash of the actual proof
+/// material (which is NOT carried inline in the `ProofSubmission` signal
+/// payload; future real verifiers will resolve proof bytes via the
+/// off-chain artifact referenced by the signal commitment hash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerificationRecordData {
+    /// Discriminant identifying the proof system (e.g. stub / Groth16 / PLONK).
+    pub proof_type: u8,
+    /// Hash of the AI module code/weights the proof attests to.
+    pub code_hash: [u8; 32],
+    /// Hash of the computation context (inputs/outputs) the proof asserts.
+    pub computation_hash: [u8; 32],
+    /// `blake3` hash of the proof bytes that were verified.
+    pub proof_hash: [u8; 32],
+    /// Block height at which the proof was verified and recorded.
+    pub height: u64,
+}
+
+impl VerificationRecordData {
+    /// Encode this record to its 105-byte canonical form.
+    #[must_use]
+    pub fn encode(&self) -> [u8; VERIFICATION_RECORD_SIZE] {
+        let mut out = [0u8; VERIFICATION_RECORD_SIZE];
+        out[0] = self.proof_type;
+        out[1..33].copy_from_slice(&self.code_hash);
+        out[33..65].copy_from_slice(&self.computation_hash);
+        out[65..97].copy_from_slice(&self.proof_hash);
+        out[97..105].copy_from_slice(&self.height.to_be_bytes());
+        out
+    }
+
+    /// Decode a record from canonical bytes.
+    ///
+    /// Returns `None` if the slice length is not exactly
+    /// `VERIFICATION_RECORD_SIZE`.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != VERIFICATION_RECORD_SIZE {
+            return None;
+        }
+        let proof_type = bytes[0];
+        let mut code_hash = [0u8; 32];
+        code_hash.copy_from_slice(&bytes[1..33]);
+        let mut computation_hash = [0u8; 32];
+        computation_hash.copy_from_slice(&bytes[33..65]);
+        let mut proof_hash = [0u8; 32];
+        proof_hash.copy_from_slice(&bytes[65..97]);
+        let height = u64::from_be_bytes(bytes[97..105].try_into().ok()?);
+        Some(Self {
+            proof_type,
+            code_hash,
+            computation_hash,
+            proof_hash,
+            height,
+        })
     }
 }
 
@@ -1439,5 +1513,68 @@ mod tests {
         bytes.extend_from_slice(&dep_b.encode());
         let decoded = CompositionGraphData::decode(&bytes).expect("decode");
         assert_eq!(decoded.dependencies.len(), 2);
+    }
+
+    // ========================================================================
+    // VerificationRecordData tests
+    // ========================================================================
+
+    #[test]
+    fn verification_record_data_roundtrip() {
+        let record = VerificationRecordData {
+            proof_type: 0,
+            code_hash: [0xA1u8; 32],
+            computation_hash: [0xB2u8; 32],
+            proof_hash: [0xC3u8; 32],
+            height: 1_234_567,
+        };
+        let encoded = record.encode();
+        assert_eq!(encoded.len(), VERIFICATION_RECORD_SIZE);
+        assert_eq!(encoded.len(), 105);
+        let decoded = VerificationRecordData::decode(&encoded).expect("decode");
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn verification_record_data_byte_layout_is_frozen() {
+        // Frozen field offsets — moving any of these is a wire-format break.
+        let record = VerificationRecordData {
+            proof_type: 7,
+            code_hash: [0x11u8; 32],
+            computation_hash: [0x22u8; 32],
+            proof_hash: [0x33u8; 32],
+            height: 0x0102_0304_0506_0708,
+        };
+        let encoded = record.encode();
+        assert_eq!(encoded[0], 7, "proof_type at byte 0");
+        assert_eq!(&encoded[1..33], &[0x11u8; 32], "code_hash at 1..33");
+        assert_eq!(
+            &encoded[33..65],
+            &[0x22u8; 32],
+            "computation_hash at 33..65"
+        );
+        assert_eq!(&encoded[65..97], &[0x33u8; 32], "proof_hash at 65..97");
+        assert_eq!(
+            &encoded[97..105],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "height_be at 97..105"
+        );
+    }
+
+    #[test]
+    fn verification_record_data_decode_too_short() {
+        let bytes = vec![0u8; VERIFICATION_RECORD_SIZE - 1];
+        assert!(VerificationRecordData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn verification_record_data_decode_too_long() {
+        let bytes = vec![0u8; VERIFICATION_RECORD_SIZE + 1];
+        assert!(VerificationRecordData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn verification_record_data_decode_empty_returns_none() {
+        assert!(VerificationRecordData::decode(&[]).is_none());
     }
 }
