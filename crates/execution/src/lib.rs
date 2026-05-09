@@ -1431,7 +1431,10 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
 // AI STORAGE OPERATIONS (Retrofit Week 3)
 // ============================================================================
 
-use novai_ai_entities::{AiEntity, AiSignalType, SignalCommitment, MAX_REPUTATION_SCORE};
+use novai_ai_entities::{
+    AiEntity, AiSignalType, MemoryObjectType, SignalCatalogData, SignalCommitment,
+    MAX_REPUTATION_SCORE,
+};
 use novai_codec::{decode_ai_entity, encode_ai_entity_v4, encode_signal_commitment_v1};
 use novai_state::{
     ai_entity_key, ai_memory_key, ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
@@ -1908,6 +1911,7 @@ pub fn apply_signal_commitment_tx<K: KvBatch>(
 /// Storage keys are derived from the canonical `entity.id` rather than `tx.from`,
 /// because `tx.from` is `address_from_pubkey(entity.pubkey)` while signals are
 /// indexed by the entity's primary id (`compute_id(code_hash, creator)`).
+#[allow(clippy::too_many_lines)]
 fn apply_signal_commitment_tx_inner<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -2035,6 +2039,100 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         target.reputation_events_count = target.reputation_events_count.saturating_add(1);
 
         ops.push(write_ai_entity_op(&target));
+    }
+
+    // Signal purchase branch: pay seller for a priced signal listed in their
+    // SignalCatalog memory object. Service fee accrues to KEY_MARKETPLACE_TREASURY.
+    // Runs BEFORE the buyer (entity) write so the atomic batch carries every
+    // balance change together.
+    if payload.signal_type == AiSignalType::SignalPurchase {
+        let extra = payload
+            .purchase
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("SignalPurchase missing extra".into()))?;
+
+        if extra.seller_entity_id == entity.id {
+            return Err(ExecError::SellerIsBuyer);
+        }
+
+        let mut seller =
+            read_ai_entity(db, &extra.seller_entity_id)?.ok_or(ExecError::SellerEntityNotFound)?;
+        if !seller.is_active {
+            return Err(ExecError::SellerEntityNotActive);
+        }
+
+        let catalogs = get_memory_objects_by_entity_and_type(
+            db,
+            &seller.id,
+            MemoryObjectType::SignalCatalog.to_byte(),
+        )?;
+        if catalogs.is_empty() {
+            return Err(ExecError::SignalCatalogNotFound);
+        }
+        // "Latest wins" when multiple catalogs exist: ai/memory_by_type/{type}/{entity}/{object_id}
+        // is sorted by trailing object_id, which is the deterministic blake3 over (owner, type,
+        // created_at, data); newer publications produce a different id, and the last entry in
+        // the prefix scan is the canonical one for any given (entity, type) slot.
+        let catalog_obj = catalogs.last().expect("non-empty checked above");
+        let catalog = SignalCatalogData::decode(&catalog_obj.data)
+            .ok_or_else(|| ExecError::CodecDecode("malformed SignalCatalog payload".into()))?;
+
+        let offering = catalog.find_offering(extra.purchased_signal_type).ok_or(
+            ExecError::SignalOfferingNotFound {
+                signal_type: extra.purchased_signal_type,
+            },
+        )?;
+        if !offering.is_active {
+            return Err(ExecError::SignalOfferingInactive);
+        }
+        if offering.price_per_signal > extra.max_price {
+            return Err(ExecError::PriceExceedsMaxPrice {
+                offered: offering.price_per_signal,
+                max: extra.max_price,
+            });
+        }
+
+        let price = u128::from(offering.price_per_signal);
+        let service_fee = price
+            .checked_mul(MARKETPLACE_FEE_BPS)
+            .ok_or(ExecError::Overflow)?
+            / BPS_DENOMINATOR;
+        let total = price.checked_add(service_fee).ok_or(ExecError::Overflow)?;
+
+        if entity.economic_balance < total {
+            return Err(ExecError::InsufficientEntityBalance {
+                required: total,
+                available: entity.economic_balance,
+            });
+        }
+        entity.economic_balance = entity
+            .economic_balance
+            .checked_sub(total)
+            .ok_or(ExecError::Overflow)?;
+        seller.economic_balance = seller
+            .economic_balance
+            .checked_add(price)
+            .ok_or(ExecError::Overflow)?;
+
+        // Treasury credit only when there's a non-zero fee, so free signals
+        // (price = 0) do not touch the treasury record at all.
+        if service_fee > 0 {
+            let new_treasury = read_treasury_balance(db, KEY_MARKETPLACE_TREASURY)?
+                .checked_add(service_fee)
+                .ok_or(ExecError::Overflow)?;
+            ops.push(WriteOp::Put(
+                KEY_MARKETPLACE_TREASURY.to_vec(),
+                encode_fee_pool_v1(&FeePoolV1 {
+                    balance: new_treasury,
+                })
+                .to_vec(),
+            ));
+        }
+
+        entity.total_transactions = entity.total_transactions.saturating_add(1);
+        seller.total_transactions = seller.total_transactions.saturating_add(1);
+
+        ops.push(write_ai_entity_op(&seller));
     }
 
     ops.push(write_ai_entity_op(&entity));
