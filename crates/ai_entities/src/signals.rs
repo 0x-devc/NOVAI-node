@@ -25,6 +25,10 @@ pub enum AiSignalType {
     /// memory object. Carries an inline 41-byte purchase tail
     /// (seller_entity_id || purchased_signal_type || max_price_be).
     SignalPurchase = 8,
+    /// Stake-deposit signal moving funds from the issuer's `economic_balance`
+    /// to its `stake_balance`. Locks the deposited amount until
+    /// `current_height + STAKE_LOCK_PERIOD`. Carries a 16-byte amount tail.
+    StakeDeposit = 9,
 }
 
 impl AiSignalType {
@@ -45,6 +49,7 @@ impl AiSignalType {
             6 => Some(AiSignalType::CongestionForecast),
             7 => Some(AiSignalType::ReputationUpdate),
             8 => Some(AiSignalType::SignalPurchase),
+            9 => Some(AiSignalType::StakeDeposit),
             _ => None,
         }
     }

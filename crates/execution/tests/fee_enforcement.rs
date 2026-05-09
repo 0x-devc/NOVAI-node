@@ -176,6 +176,7 @@ fn signal_below_minimum_rejected() {
         issuer_entity_id: entity_id,
         reputation: None,
         purchase: None,
+        stake_deposit: None,
     });
 
     // Fee 500 is below minimum of 1000 for signals
@@ -224,6 +225,7 @@ fn signal_at_minimum_accepted() {
         issuer_entity_id: entity_id,
         reputation: None,
         purchase: None,
+        stake_deposit: None,
     });
 
     let tx = create_test_tx(entity_id, 0, MIN_FEE_SIGNAL_COMMITMENT, payload);
@@ -421,6 +423,7 @@ fn distribute_fee_splits_ai_signal() {
         issuer_entity_id: entity_id,
         reputation: None,
         purchase: None,
+        stake_deposit: None,
     });
 
     let fee = 1_000u64;

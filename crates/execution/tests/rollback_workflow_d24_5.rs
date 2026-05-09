@@ -173,6 +173,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
             issuer_entity_id: module_id,
             reputation: None,
             purchase: None,
+            stake_deposit: None,
         };
         let signal_tx = TxV1 {
             version: TxVersion::V1,
@@ -211,6 +212,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
         issuer_entity_id: module_id,
         reputation: None,
         purchase: None,
+        stake_deposit: None,
     };
     let anomaly_tx = TxV1 {
         version: TxVersion::V1,

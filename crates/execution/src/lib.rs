@@ -268,6 +268,22 @@ pub const SIGNAL_PURCHASE_EXTRA_LEN: usize = 41;
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SIGNAL_PURCHASE_EXTRA_LEN;
 
+/// Inline-extra size for a `StakeDeposit` signal payload.
+/// `amount_be:16`
+pub const STAKE_DEPOSIT_EXTRA_LEN: usize = 16;
+
+/// Total size of a `StakeDeposit` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + STAKE_DEPOSIT_EXTRA_LEN;
+
+/// Block-count duration that newly deposited stake is locked for.
+/// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
+pub const STAKE_LOCK_PERIOD: u64 = 1000;
+
+/// Minimum stake required for an entity to publish a `SignalCatalog` memory
+/// object. Set to `0` (gate disabled). Reserved for governance activation.
+pub const MIN_STAKE_FOR_CATALOG: u128 = 0;
+
 // Reputation event_type discriminants (carried inline in the signal payload).
 /// Job/transaction successfully completed by the target entity.
 pub const REP_EVENT_JOB_COMPLETED: u8 = 0;
@@ -310,6 +326,17 @@ pub struct SignalPurchaseExtraV1 {
     pub max_price: u64,
 }
 
+/// Inline stake-deposit tail carried in `StakeDeposit` signal payloads.
+///
+/// Wire layout (16 bytes): `amount_be:16`. The issuer entity is debited
+/// from `economic_balance` and credited to `stake_balance`, and
+/// `stake_locked_until` is set to `current_height + STAKE_LOCK_PERIOD`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StakeDepositExtraV1 {
+    /// Amount to move from `economic_balance` to `stake_balance`.
+    pub amount: u128,
+}
+
 /// Canonical Signal Commitment payload (D14.1):
 /// - Base (signal types 0..=6): 66 bytes
 ///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
@@ -317,14 +344,16 @@ pub struct SignalPurchaseExtraV1 {
 ///   `... [target_entity_id:32][event_type:1][points_delta_be:2]`
 /// - `SignalPurchase` (signal type 8): 107 bytes (base + 41-byte tail)
 ///   `... [seller_entity_id:32][purchased_signal_type:1][max_price_be:8]`
+/// - `StakeDeposit` (signal type 9): 82 bytes (base + 16-byte tail)
+///   `... [amount_be:16]`
 ///
-/// At most one tail (`reputation` or `purchase`) is populated; the active
-/// tail is determined by `signal_type`.
+/// At most one tail (`reputation`, `purchase`, or `stake_deposit`) is
+/// populated; the active tail is determined by `signal_type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalCommitmentPayloadV1 {
     /// Commitment hash of the full signal.
     pub signal_hash: [u8; 32],
-    /// Signal type (0..=8).
+    /// Signal type (0..=9).
     pub signal_type: novai_ai_entities::AiSignalType,
     /// AI entity ID that issued this signal.
     pub issuer_entity_id: [u8; 32],
@@ -332,18 +361,21 @@ pub struct SignalCommitmentPayloadV1 {
     pub reputation: Option<ReputationUpdateExtraV1>,
     /// Inline purchase tail. MUST be `Some` iff `signal_type == SignalPurchase`.
     pub purchase: Option<SignalPurchaseExtraV1>,
+    /// Inline stake-deposit tail. MUST be `Some` iff `signal_type == StakeDeposit`.
+    pub stake_deposit: Option<StakeDepositExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
 ///
 /// Returns 66 bytes for base signals, 101 bytes for `ReputationUpdate`,
-/// and 107 bytes for `SignalPurchase`. Panics in debug if a tail is set
-/// inconsistently with `signal_type`; in release builds the inconsistency
-/// is silently fixed by zero-padding the active tail.
+/// 107 bytes for `SignalPurchase`, and 82 bytes for `StakeDeposit`. Panics
+/// in debug if a tail is set inconsistently with `signal_type`; in release
+/// builds the inconsistency is silently fixed by zero-padding the active tail.
 #[must_use]
 pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec<u8> {
     let is_reputation = p.signal_type == novai_ai_entities::AiSignalType::ReputationUpdate;
     let is_purchase = p.signal_type == novai_ai_entities::AiSignalType::SignalPurchase;
+    let is_stake_deposit = p.signal_type == novai_ai_entities::AiSignalType::StakeDeposit;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
@@ -354,15 +386,22 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.purchase.is_some(),
         "purchase tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_stake_deposit,
+        p.stake_deposit.is_some(),
+        "stake_deposit tail presence must match signal_type"
+    );
     debug_assert!(
-        !(is_reputation && is_purchase),
-        "reputation and purchase tails are mutually exclusive"
+        u8::from(is_reputation) + u8::from(is_purchase) + u8::from(is_stake_deposit) <= 1,
+        "tails are mutually exclusive"
     );
 
     let total = if is_reputation {
         SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN
     } else if is_purchase {
         SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN
+    } else if is_stake_deposit {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -390,6 +429,13 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; SIGNAL_PURCHASE_EXTRA_LEN]);
         }
+    } else if is_stake_deposit {
+        if let Some(extra) = &p.stake_deposit {
+            out.extend_from_slice(&extra.amount.to_be_bytes());
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; STAKE_DEPOSIT_EXTRA_LEN]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -399,17 +445,19 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
 /// Deterministically decode a signal commitment payload from `tx.payload`.
 ///
 /// Accepts 66 bytes for base signals, 101 bytes for `ReputationUpdate`,
-/// and 107 bytes for `SignalPurchase`. Length-vs-signal-type mismatch is
-/// rejected.
+/// 107 bytes for `SignalPurchase`, and 82 bytes for `StakeDeposit`.
+/// Length-vs-signal-type mismatch is rejected.
 ///
 /// # Errors
 /// Returns error if payload length, version, or signal type is invalid.
+#[allow(clippy::too_many_lines)]
 pub fn decode_signal_commitment_payload_v1(
     payload: &[u8],
 ) -> Result<SignalCommitmentPayloadV1, ExecError<()>> {
     if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN
+        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN
     {
         return Err(ExecError::BadPayloadLength {
             expected: SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN,
@@ -429,7 +477,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 8, // max valid signal type
+            expected: 9, // max valid signal type
             got: payload[33],
         },
     )?;
@@ -439,7 +487,8 @@ pub fn decode_signal_commitment_payload_v1(
 
     let is_reputation = signal_type == novai_ai_entities::AiSignalType::ReputationUpdate;
     let is_purchase = signal_type == novai_ai_entities::AiSignalType::SignalPurchase;
-    let (reputation, purchase) = if is_reputation {
+    let is_stake_deposit = signal_type == novai_ai_entities::AiSignalType::StakeDeposit;
+    let (reputation, purchase, stake_deposit) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
                 expected: SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN,
@@ -456,6 +505,7 @@ pub fn decode_signal_commitment_payload_v1(
                 event_type,
                 points_delta,
             }),
+            None,
             None,
         )
     } else if is_purchase {
@@ -485,7 +535,19 @@ pub fn decode_signal_commitment_payload_v1(
                 purchased_signal_type,
                 max_price,
             }),
+            None,
         )
+    } else if is_stake_deposit {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut amount_bytes = [0u8; 16];
+        amount_bytes.copy_from_slice(&payload[66..82]);
+        let amount = u128::from_be_bytes(amount_bytes);
+        (None, None, Some(StakeDepositExtraV1 { amount }))
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -493,7 +555,7 @@ pub fn decode_signal_commitment_payload_v1(
                 got: payload.len(),
             });
         }
-        (None, None)
+        (None, None, None)
     };
 
     Ok(SignalCommitmentPayloadV1 {
@@ -502,6 +564,7 @@ pub fn decode_signal_commitment_payload_v1(
         issuer_entity_id,
         reputation,
         purchase,
+        stake_deposit,
     })
 }
 
@@ -2133,6 +2196,33 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         seller.total_transactions = seller.total_transactions.saturating_add(1);
 
         ops.push(write_ai_entity_op(&seller));
+    }
+
+    // Stake deposit branch: move funds from issuer's economic_balance to its
+    // stake_balance and refresh the lock height. Atomic with the entity write.
+    if payload.signal_type == AiSignalType::StakeDeposit {
+        let extra = payload
+            .stake_deposit
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("StakeDeposit missing extra".into()))?;
+
+        if entity.economic_balance < extra.amount {
+            return Err(ExecError::InsufficientEntityBalance {
+                required: extra.amount,
+                available: entity.economic_balance,
+            });
+        }
+        entity.economic_balance = entity
+            .economic_balance
+            .checked_sub(extra.amount)
+            .ok_or(ExecError::Overflow)?;
+        entity.stake_balance = entity
+            .stake_balance
+            .checked_add(extra.amount)
+            .ok_or(ExecError::Overflow)?;
+        entity.stake_locked_until = current_height
+            .checked_add(STAKE_LOCK_PERIOD)
+            .ok_or(ExecError::Overflow)?;
     }
 
     ops.push(write_ai_entity_op(&entity));

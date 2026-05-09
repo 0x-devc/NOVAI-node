@@ -88,6 +88,7 @@ fn build_reputation_payload(
             points_delta,
         }),
         purchase: None,
+        stake_deposit: None,
     })
 }
 
@@ -346,6 +347,7 @@ fn non_reputation_signal_unchanged_behavior() {
         issuer_entity_id: entity.id,
         reputation: None,
         purchase: None,
+        stake_deposit: None,
     });
     let tx = make_tx(entity.id, 0, SIGNAL_FEE, payload);
     apply_signal_commitment_tx(&mut db, &tx, 100).expect("non-reputation must still work");
@@ -372,6 +374,7 @@ fn reputation_payload_is_101_bytes() {
             points_delta: -7,
         }),
         purchase: None,
+        stake_deposit: None,
     });
     assert_eq!(payload.len(), 101);
     assert_eq!(payload.len(), SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN);
