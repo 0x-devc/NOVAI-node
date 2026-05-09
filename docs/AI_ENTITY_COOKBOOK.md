@@ -4,6 +4,8 @@ Five recipes for the AI infrastructure features in NOVAI v1: reputation, marketp
 
 The CLI does not yet expose first-class commands for these features. Recipes use a mix of CLI (where it works), the Rust SDK (`sdk/novai-sdk`), and direct transaction byte construction with `novai-crypto` + `novai-codec` (where neither covers the case). Missing surface is tagged `[NOT YET IMPLEMENTED]`.
 
+> **Observable state caveat.** `novai_getAiEntity` is V3-era and does not yet expose `reputation_score`, `total_transactions`, `reputation_events_count`, `stake_balance`, or `stake_locked_until`, even though the protocol mutates these fields. Each recipe below verifies what it can today: tx inclusion via `novai_getTransaction`, signal events via `novai_getSignalsByIssuer` and `novai_getSignalsByType`, memory objects via `novai_getMemoryObjects`, and `economic_balance` / `is_active` / `nonce` via `novai_getAiEntity`. See [RPC_REFERENCE.md#observed-gaps](RPC_REFERENCE.md#observed-gaps) for the full list.
+
 Prerequisites for every recipe:
 - A running local devnet ([QUICKSTART.md](QUICKSTART.md))
 - A funded creator key at `/tmp/creator.key`
@@ -99,12 +101,19 @@ println!("oracle entity_id={}, txid={txid}", hex::encode(entity_id));
 
 ### Verify
 
+`reputation_score` is not yet RPC-readable. Verify indirectly:
+
 ```bash
+# 1) The ReputationUpdate tx was included.
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"novai_getAiEntity","params":{"entity_id":"<target_hex>"},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"novai_getTransaction","params":{"txid":"<txid>"},"id":1}'
+
+# 2) A signal of type 7 from the oracle landed at that height.
+curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"novai_getSignalsByIssuer","params":{"issuer":"<oracle_id>","start_height":0,"end_height":10000},"id":1}'
 ```
 
-Look at `result.entity.reputation_score` (default 50, after `+5` expect 55) and `reputation_events_count` (incremented).
+Direct read of `reputation_score` from chain state requires DB inspection until the RPC schema bumps.
 
 ### Common errors
 - `IssuerMissingCapability`: oracle entity does not have bit 5 set. Re-register.
@@ -216,12 +225,19 @@ The chain saturating-subtracts up to `slash_amount` from `target.stake_balance`,
 
 ### Verify
 
+`economic_balance` is RPC-readable. `stake_balance` and `stake_locked_until` are not yet exposed. The signal index records every stake operation:
+
 ```bash
+# Every StakeDeposit (type 9) ever issued in this height range.
+curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"novai_getSignalsByType","params":{"signal_type":9,"start_height":0,"end_height":10000},"id":1}'
+
+# Entity's economic_balance after the deposit.
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"novai_getAiEntity","params":{"entity_id":"<entity_id>"},"id":1}'
 ```
 
-After deposit: `stake_balance` reflects the new total, `stake_locked_until` is `commit_height + 1000`. After withdraw: `stake_balance` decreases, `economic_balance` increases. After slash: `stake_balance` decreases, `reputation_score` clamps after the bundled delta.
+After deposit: `economic_balance` decreased by `amount + fee`. After withdraw: `economic_balance` increased by `amount`. Direct stake state requires DB inspection.
 
 ### Common errors
 - `InsufficientEntityBalance` (deposit): entity's `economic_balance` is below `amount + fee`.
@@ -287,7 +303,14 @@ curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"novai_getAiEntity","params":{"entity_id":"<consumer_id>"},"id":1}'
 ```
 
-After a successful required-dependency failure: `is_active = false`, `reputation_score` decremented by 1. The consumer cannot publish further signals or memory objects until reactivated through governance.
+After a successful required-dependency failure, `is_active` flips to `false`. That field is RPC-observable today. The bundled `-1` reputation delta also lands but is not yet readable from the RPC; trace it through the signal index instead:
+
+```bash
+curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"novai_getSignalsByType","params":{"signal_type":12,"start_height":0,"end_height":10000},"id":1}'
+```
+
+A paused consumer cannot publish further signals or memory objects until reactivated through governance.
 
 ### Common errors
 - `SelfDependency` (publication): a dependency lists the consumer's own entity_id.
@@ -337,14 +360,16 @@ The new memory object has `object_type = 9` and `data` is a 105-byte hex blob:
 
 In v1 `proof_hash` is `blake3(b"")` because the handler does not yet receive proof bytes. All v1 stub records share that proof_hash; do not rely on it as a uniqueness key.
 
-### Step 4: Confirm the reputation boost
+### Step 4: Confirm the reputation effect
+
+The `+3` reputation lands in chain state, but the V3-era RPC does not yet expose `reputation_score`. Treat the new `VerificationRecord` from Step 3 plus a successful type-13 entry in the signal index as the observable proof today:
 
 ```bash
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"novai_getAiEntity","params":{"entity_id":"<issuer_id>"},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"novai_getSignalsByType","params":{"signal_type":13,"start_height":0,"end_height":10000},"id":1}'
 ```
 
-`reputation_score` increased by 3, clamped to 100. `reputation_events_count` incremented.
+If the issuer's submission appears in the result, the proof verified and the `+3` bump fired. The cumulative score read needs DB inspection or an updated RPC schema.
 
 ### Common errors
 - `UnsupportedProofType`: `proof_type > 0` (only stub accepted in v1).
