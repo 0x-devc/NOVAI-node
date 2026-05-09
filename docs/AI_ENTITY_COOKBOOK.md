@@ -374,7 +374,7 @@ If the issuer's submission appears in the result, the proof verified and the `+3
 ### Common errors
 - `UnsupportedProofType`: `proof_type > 0` (only stub accepted in v1).
 - `ProofVerificationFailed`: never returned in v1 because the stub always passes; will appear once Groth16/PLONK land.
-- `IssuerMissingCapability`: rare — `emit_proposals` is part of the default 0x07.
+- `IssuerMissingCapability`: rare; `emit_proposals` is part of the default 0x07.
 
 ---
 

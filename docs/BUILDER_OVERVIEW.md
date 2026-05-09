@@ -135,9 +135,9 @@ Minimum fees are enforced at submission. A tx below the minimum returns `-32011 
 
 Three components, layered:
 
-1. **Reputation** — `[0, 100]` score, default 50. Mutated by oracle observation. Bounded so it cannot run away. Cheap to read (when the RPC schema bumps).
-2. **Stake** — `economic_balance` moved into `stake_balance`. Locked for 1,000 blocks. Slashable. Skin in the game.
-3. **ZK proofs** — cryptographic attestation of off-chain computation. Stub in v1, real in future. Earns `+3` per successful submission.
+1. **Reputation**: `[0, 100]` score, default 50. Mutated by oracle observation. Bounded so it cannot run away. Cheap to read (when the RPC schema bumps).
+2. **Stake**: `economic_balance` moved into `stake_balance`. Locked for 1,000 blocks. Slashable. Skin in the game.
+3. **ZK proofs**: cryptographic attestation of off-chain computation. Stub in v1, real in future. Earns `+3` per successful submission.
 
 The protocol does not enforce trust thresholds at the protocol layer for most operations. The exception is composition: `CompositionGraph` lets a consumer declare "I depend on entities with reputation >= R and stake >= S", and the chain validates failures of those declared minima before applying the auto-pause. That is the only place trust thresholds are protocol-enforced.
 
@@ -224,9 +224,9 @@ Flow:
 
 ## Where to go next
 
-- [QUICKSTART.md](QUICKSTART.md) — boot a 4-node devnet in 5 minutes.
-- [tutorials/FIRST_AI_ENTITY.md](tutorials/FIRST_AI_ENTITY.md) — register an entity, publish a signal, create a memory object end-to-end.
-- [AI_ENTITY_COOKBOOK.md](AI_ENTITY_COOKBOOK.md) — recipes for reputation, marketplace, staking, composition, ZK.
-- [RPC_REFERENCE.md](RPC_REFERENCE.md) — every JSON-RPC method, error code, and known gap.
-- [ARCHITECTURE.md](ARCHITECTURE.md) — internal tour of the crates and how they fit together.
-- [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md) — consensus-critical specifications (binding).
+- [QUICKSTART.md](QUICKSTART.md): boot a 4-node devnet in 5 minutes.
+- [tutorials/FIRST_AI_ENTITY.md](tutorials/FIRST_AI_ENTITY.md): register an entity, publish a signal, create a memory object end-to-end.
+- [AI_ENTITY_COOKBOOK.md](AI_ENTITY_COOKBOOK.md): recipes for reputation, marketplace, staking, composition, ZK.
+- [RPC_REFERENCE.md](RPC_REFERENCE.md): every JSON-RPC method, error code, and known gap.
+- [ARCHITECTURE.md](ARCHITECTURE.md): internal tour of the crates and how they fit together.
+- [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md): consensus-critical specifications (binding).

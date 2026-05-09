@@ -65,7 +65,7 @@ All examples assume `URL=http://localhost:3030` and a `./scripts/devnet.sh` runn
 
 Returns the header of the most recently committed block.
 
-**Params**: none — pass `{}`.
+**Params**: none. Pass `{}`.
 
 **Result** (`null` if no blocks have committed yet):
 
@@ -271,7 +271,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
 Submits a hex-encoded, signed `TxV1` to the mempool. The node validates the signature, address derivation, fee minimum, and size, then broadcasts it via P2P. It does **not** wait for inclusion.
 
-**Building the hex.** Use one of the SDKs — see [`sdk/novai-sdk-ts/`](../sdk/novai-sdk-ts/) (TypeScript) or [`sdk/novai-sdk/`](../sdk/novai-sdk/) (Rust). Hand-rolling the 149-byte canonical encoding plus ed25519 signature is possible but error-prone; the `txid` returned by the node only confirms the bytes parsed and the signature verified — not that the tx will succeed at execution.
+**Building the hex.** Use one of the SDKs. See [`sdk/novai-sdk-ts/`](../sdk/novai-sdk-ts/) (TypeScript) or [`sdk/novai-sdk/`](../sdk/novai-sdk/) (Rust). Hand-rolling the 149-byte canonical encoding plus ed25519 signature is possible but error-prone; the `txid` returned by the node only confirms the bytes parsed and the signature verified, not that the tx will succeed at execution.
 
 **Params**:
 
@@ -336,7 +336,7 @@ Returns receipt metadata for a committed transaction. Returns `null` if the txid
 }
 ```
 
-The receipt does **not** carry the payload itself or the success/failure status — execution outcome is reflected in subsequent state (e.g. balance debit, entity record). To distinguish "committed but execution rejected" from "still pending", combine with the relevant state read.
+The receipt does **not** carry the payload itself or the success/failure status. Execution outcome is reflected in subsequent state (e.g. balance debit, entity record). To distinguish "committed but execution rejected" from "still pending", combine with the relevant state read.
 
 **Errors**:
 
@@ -817,7 +817,7 @@ Surface that has shipped at the protocol layer but is not yet exposed by the RPC
 
 ## See also
 
-- [`docs/tutorials/FIRST_AI_ENTITY.md`](tutorials/FIRST_AI_ENTITY.md) — end-to-end CLI walkthrough.
-- [`sdk/novai-sdk-ts/examples/quick-start/`](../sdk/novai-sdk-ts/examples/quick-start/) — TypeScript SDK example.
-- [`sdk/novai-sdk/examples/quick-start/`](../sdk/novai-sdk/examples/quick-start/) — Rust SDK example.
-- [`crates/node/src/rpc.rs`](../crates/node/src/rpc.rs) — RPC server implementation.
+- [`docs/tutorials/FIRST_AI_ENTITY.md`](tutorials/FIRST_AI_ENTITY.md): end-to-end CLI walkthrough.
+- [`sdk/novai-sdk-ts/examples/quick-start/`](../sdk/novai-sdk-ts/examples/quick-start/): TypeScript SDK example.
+- [`sdk/novai-sdk/examples/quick-start/`](../sdk/novai-sdk/examples/quick-start/): Rust SDK example.
+- [`crates/node/src/rpc.rs`](../crates/node/src/rpc.rs): RPC server implementation.
