@@ -44,6 +44,8 @@ pub const MAX_MEMORY_OBJECTS_PER_ENTITY: u32 = 100;
 /// - `Rating`: A counterparty rating event feeding reputation
 /// - `SignalCatalog`: Per-entity catalog of priced signal offerings for the
 ///   marketplace; payload is the canonical `SignalCatalogData` encoding
+/// - `CompositionGraph`: Per-entity declaration of inbound signal
+///   dependencies; payload is the canonical `CompositionGraphData` encoding
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MemoryObjectType {
@@ -65,6 +67,11 @@ pub enum MemoryObjectType {
     /// Marketplace pricing catalog: a list of priced signal offerings the
     /// owning entity makes available to buyers.
     SignalCatalog = 7,
+    /// Cross-entity composition graph: a list of source-entity dependencies
+    /// the owning entity declares it consumes signals from. Used by oracle
+    /// `CompositionCheck` signals to verify dependency health and auto-pause
+    /// the owner when a required dependency has failed.
+    CompositionGraph = 8,
 }
 
 impl MemoryObjectType {
@@ -86,6 +93,7 @@ impl MemoryObjectType {
             5 => Some(Self::ReputationEvent),
             6 => Some(Self::Rating),
             7 => Some(Self::SignalCatalog),
+            8 => Some(Self::CompositionGraph),
             _ => None,
         }
     }
@@ -102,6 +110,7 @@ impl MemoryObjectType {
             Self::ReputationEvent => "ReputationEvent",
             Self::Rating => "Rating",
             Self::SignalCatalog => "SignalCatalog",
+            Self::CompositionGraph => "CompositionGraph",
         }
     }
 }
@@ -591,6 +600,169 @@ impl SignalCatalogData {
 }
 
 // ============================================================================
+// COMPOSITION GRAPH (cross-entity dependency declarations)
+// ============================================================================
+
+/// Maximum number of inbound dependencies a single entity may declare.
+pub const MAX_COMPOSITION_DEPENDENCIES: usize = 10;
+
+/// On-wire size of one `CompositionDependency`
+/// (source_entity_id + required_signal_type + min_reputation_be +
+/// min_stake_be + is_required).
+pub const COMPOSITION_DEPENDENCY_SIZE: usize = 32 + 1 + 2 + 8 + 1;
+
+/// Maximum encoded size of a full `CompositionGraphData` payload
+/// (`1` count byte + up to `MAX_COMPOSITION_DEPENDENCIES`
+/// × `COMPOSITION_DEPENDENCY_SIZE`).
+pub const COMPOSITION_GRAPH_MAX_SIZE: usize =
+    1 + MAX_COMPOSITION_DEPENDENCIES * COMPOSITION_DEPENDENCY_SIZE;
+
+/// One inbound dependency within a `CompositionGraph`.
+///
+/// Layout (44 bytes):
+/// `source_entity_id:32 | required_signal_type:1 | min_reputation_be:2 |
+/// min_stake_be:8 | is_required:1`.
+///
+/// `is_required` is encoded as `0` (advisory only) or `1` (auto-pause owner
+/// when this dependency fails); decoders reject any other value.
+///
+/// `min_reputation` is `0` to accept any reputation. `min_stake` is `0`
+/// (units) to accept any stake balance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositionDependency {
+    /// 32-byte ID of the entity this owner depends on.
+    pub source_entity_id: [u8; 32],
+    /// `AiSignalType` byte the owner consumes from the source.
+    pub required_signal_type: u8,
+    /// Minimum reputation score the source must hold (0 = any).
+    pub min_reputation: u16,
+    /// Minimum stake balance the source must hold, in smallest units
+    /// (0 = any). u64 caps below the actual u128 stake balance but is
+    /// sufficient for any practical threshold.
+    pub min_stake: u64,
+    /// Whether failure of this dependency auto-pauses the owning entity.
+    pub is_required: bool,
+}
+
+/// An owning entity's declared cross-entity dependencies, stored as the data
+/// field of a `MemoryObjectType::CompositionGraph` memory object.
+///
+/// On-wire layout: `count:1 | entries: count * COMPOSITION_DEPENDENCY_SIZE`,
+/// where `count <= MAX_COMPOSITION_DEPENDENCIES`.
+///
+/// Unlike `SignalCatalogData`, the codec rejects duplicates: no two entries
+/// may share the same `(source_entity_id, required_signal_type)` pair.
+/// Composition semantics cannot tolerate ambiguity at a given dependency
+/// index, so duplicates are a hard error rather than a warning.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompositionGraphData {
+    /// Inbound dependencies (max `MAX_COMPOSITION_DEPENDENCIES`).
+    pub dependencies: Vec<CompositionDependency>,
+}
+
+impl CompositionDependency {
+    /// Encode this dependency to its 44-byte canonical form.
+    #[must_use]
+    pub fn encode(&self) -> [u8; COMPOSITION_DEPENDENCY_SIZE] {
+        let mut out = [0u8; COMPOSITION_DEPENDENCY_SIZE];
+        out[0..32].copy_from_slice(&self.source_entity_id);
+        out[32] = self.required_signal_type;
+        out[33..35].copy_from_slice(&self.min_reputation.to_be_bytes());
+        out[35..43].copy_from_slice(&self.min_stake.to_be_bytes());
+        out[43] = u8::from(self.is_required);
+        out
+    }
+
+    /// Decode a single dependency from a 44-byte slice.
+    ///
+    /// Returns `None` if the slice is too short or `is_required` is not
+    /// `0`/`1`.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < COMPOSITION_DEPENDENCY_SIZE {
+            return None;
+        }
+        let mut source_entity_id = [0u8; 32];
+        source_entity_id.copy_from_slice(&bytes[0..32]);
+        let required_signal_type = bytes[32];
+        let min_reputation = u16::from_be_bytes(bytes[33..35].try_into().ok()?);
+        let min_stake = u64::from_be_bytes(bytes[35..43].try_into().ok()?);
+        let is_required = match bytes[43] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Self {
+            source_entity_id,
+            required_signal_type,
+            min_reputation,
+            min_stake,
+            is_required,
+        })
+    }
+}
+
+impl CompositionGraphData {
+    /// Encode this graph to canonical bytes.
+    ///
+    /// Silently truncates to `MAX_COMPOSITION_DEPENDENCIES` if the entries
+    /// vec is longer (mirroring `SignalCatalogData::encode`). Owners are
+    /// expected to maintain a graph within bounds and rely on the matching
+    /// decode-side rejection to catch inconsistencies.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let count = self.dependencies.len().min(MAX_COMPOSITION_DEPENDENCIES);
+        let mut out = Vec::with_capacity(1 + count * COMPOSITION_DEPENDENCY_SIZE);
+        #[allow(clippy::cast_possible_truncation)]
+        out.push(count as u8);
+        for dep in self.dependencies.iter().take(count) {
+            out.extend_from_slice(&dep.encode());
+        }
+        out
+    }
+
+    /// Decode a graph from canonical bytes.
+    ///
+    /// Returns `None` if the count byte exceeds `MAX_COMPOSITION_DEPENDENCIES`,
+    /// the buffer is shorter than `1 + count * COMPOSITION_DEPENDENCY_SIZE`,
+    /// any entry fails to decode, or two entries share the same
+    /// `(source_entity_id, required_signal_type)` pair.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let count = bytes[0] as usize;
+        if count > MAX_COMPOSITION_DEPENDENCIES {
+            return None;
+        }
+        let expected_len = 1 + count * COMPOSITION_DEPENDENCY_SIZE;
+        if bytes.len() < expected_len {
+            return None;
+        }
+        let mut dependencies = Vec::with_capacity(count);
+        for i in 0..count {
+            let off = 1 + i * COMPOSITION_DEPENDENCY_SIZE;
+            let dep = CompositionDependency::decode(
+                &bytes[off..off + COMPOSITION_DEPENDENCY_SIZE],
+            )?;
+            // Codec-level duplicate rejection: no two deps may share the same
+            // (source_entity_id, required_signal_type) pair.
+            for prev in &dependencies {
+                let p: &CompositionDependency = prev;
+                if p.source_entity_id == dep.source_entity_id
+                    && p.required_signal_type == dep.required_signal_type
+                {
+                    return None;
+                }
+            }
+            dependencies.push(dep);
+        }
+        Some(Self { dependencies })
+    }
+}
+
+// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -609,6 +781,7 @@ mod tests {
             MemoryObjectType::ReputationEvent,
             MemoryObjectType::Rating,
             MemoryObjectType::SignalCatalog,
+            MemoryObjectType::CompositionGraph,
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
@@ -618,7 +791,7 @@ mod tests {
 
     #[test]
     fn memory_object_type_invalid_returns_none() {
-        assert!(MemoryObjectType::from_byte(8).is_none());
+        assert!(MemoryObjectType::from_byte(9).is_none());
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
 
@@ -638,6 +811,10 @@ mod tests {
         assert_eq!(MemoryObjectType::ReputationEvent.name(), "ReputationEvent");
         assert_eq!(MemoryObjectType::Rating.name(), "Rating");
         assert_eq!(MemoryObjectType::SignalCatalog.name(), "SignalCatalog");
+        assert_eq!(
+            MemoryObjectType::CompositionGraph.name(),
+            "CompositionGraph"
+        );
     }
 
     #[test]
@@ -1029,5 +1206,212 @@ mod tests {
             "find_offering returns first match"
         );
         assert!(cat.find_offering(7).is_none());
+    }
+
+    // ========================================================================
+    // CompositionGraph (Feature 4) tests
+    // ========================================================================
+
+    fn sample_dep(source: [u8; 32], sig_type: u8, is_required: bool) -> CompositionDependency {
+        CompositionDependency {
+            source_entity_id: source,
+            required_signal_type: sig_type,
+            min_reputation: 50,
+            min_stake: 1_000,
+            is_required,
+        }
+    }
+
+    #[test]
+    fn memory_object_type_composition_graph_byte() {
+        assert_eq!(MemoryObjectType::CompositionGraph.to_byte(), 8);
+        assert_eq!(
+            MemoryObjectType::from_byte(8),
+            Some(MemoryObjectType::CompositionGraph)
+        );
+        assert_eq!(MemoryObjectType::from_byte(9), None);
+        assert_eq!(MemoryObjectType::CompositionGraph.name(), "CompositionGraph");
+    }
+
+    #[test]
+    fn composition_dependency_byte_layout() {
+        let dep = CompositionDependency {
+            source_entity_id: [0xAAu8; 32],
+            required_signal_type: 2,
+            min_reputation: 0x1234,
+            min_stake: 0x0102_0304_0506_0708,
+            is_required: true,
+        };
+        let bytes = dep.encode();
+        assert_eq!(bytes.len(), COMPOSITION_DEPENDENCY_SIZE);
+        assert_eq!(bytes.len(), 44);
+        assert_eq!(&bytes[0..32], &[0xAAu8; 32], "source_entity_id at 0..32");
+        assert_eq!(bytes[32], 2, "required_signal_type at 32");
+        assert_eq!(&bytes[33..35], &0x1234u16.to_be_bytes(), "min_reputation BE at 33..35");
+        assert_eq!(
+            &bytes[35..43],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "min_stake BE at 35..43"
+        );
+        assert_eq!(bytes[43], 1, "is_required at 43 (1 = true)");
+    }
+
+    #[test]
+    fn composition_dependency_roundtrip() {
+        let cases = [
+            CompositionDependency {
+                source_entity_id: [0u8; 32],
+                required_signal_type: 0,
+                min_reputation: 0,
+                min_stake: 0,
+                is_required: false,
+            },
+            CompositionDependency {
+                source_entity_id: [0xFFu8; 32],
+                required_signal_type: u8::MAX,
+                min_reputation: u16::MAX,
+                min_stake: u64::MAX,
+                is_required: true,
+            },
+            sample_dep([0x42u8; 32], 7, false),
+        ];
+        for c in &cases {
+            let encoded = c.encode();
+            let decoded = CompositionDependency::decode(&encoded).expect("decode");
+            assert_eq!(&decoded, c);
+        }
+    }
+
+    #[test]
+    fn composition_dependency_decode_invalid_is_required_byte() {
+        let mut bytes = [0u8; COMPOSITION_DEPENDENCY_SIZE];
+        bytes[43] = 2;
+        assert!(CompositionDependency::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn composition_dependency_decode_too_short() {
+        let bytes = [0u8; COMPOSITION_DEPENDENCY_SIZE - 1];
+        assert!(CompositionDependency::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn composition_graph_data_empty_roundtrip() {
+        let g = CompositionGraphData::default();
+        let encoded = g.encode();
+        assert_eq!(encoded, vec![0u8]);
+        let decoded = CompositionGraphData::decode(&encoded).expect("decode");
+        assert_eq!(decoded, g);
+    }
+
+    #[test]
+    fn composition_graph_data_single_entry_roundtrip() {
+        let dep = sample_dep([0x12u8; 32], 3, true);
+        let g = CompositionGraphData { dependencies: vec![dep] };
+        let encoded = g.encode();
+        assert_eq!(encoded.len(), 1 + COMPOSITION_DEPENDENCY_SIZE);
+        let decoded = CompositionGraphData::decode(&encoded).expect("decode");
+        assert_eq!(decoded, g);
+    }
+
+    #[test]
+    fn composition_graph_data_full_capacity_roundtrip() {
+        let mut deps = Vec::with_capacity(MAX_COMPOSITION_DEPENDENCIES);
+        for i in 0..MAX_COMPOSITION_DEPENDENCIES {
+            // Ensure unique (source_entity_id, required_signal_type) pairs.
+            let mut id = [0u8; 32];
+            id[0] = i as u8;
+            deps.push(CompositionDependency {
+                source_entity_id: id,
+                required_signal_type: i as u8,
+                min_reputation: i as u16,
+                min_stake: 1_000 * (i as u64 + 1),
+                is_required: i % 2 == 0,
+            });
+        }
+        let g = CompositionGraphData { dependencies: deps };
+        let encoded = g.encode();
+        assert_eq!(
+            encoded.len(),
+            1 + MAX_COMPOSITION_DEPENDENCIES * COMPOSITION_DEPENDENCY_SIZE
+        );
+        assert_eq!(encoded.len(), COMPOSITION_GRAPH_MAX_SIZE);
+        assert_eq!(encoded.len(), 441);
+        let decoded = CompositionGraphData::decode(&encoded).expect("decode");
+        assert_eq!(decoded, g);
+        assert_eq!(decoded.dependencies.len(), MAX_COMPOSITION_DEPENDENCIES);
+    }
+
+    #[test]
+    fn composition_graph_data_decode_count_too_large() {
+        let mut bytes = vec![0u8; 1 + (MAX_COMPOSITION_DEPENDENCIES + 1) * COMPOSITION_DEPENDENCY_SIZE];
+        bytes[0] = (MAX_COMPOSITION_DEPENDENCIES + 1) as u8;
+        assert!(CompositionGraphData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn composition_graph_data_decode_truncated() {
+        // Claim 2 deps but provide only 1 dep's worth of bytes after count.
+        let mut bytes = vec![2u8];
+        bytes.extend_from_slice(&[0u8; COMPOSITION_DEPENDENCY_SIZE]);
+        assert!(CompositionGraphData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn composition_graph_data_decode_empty_buffer() {
+        assert!(CompositionGraphData::decode(&[]).is_none());
+    }
+
+    #[test]
+    fn composition_graph_data_encode_caps_at_max_dependencies() {
+        let mut deps = Vec::new();
+        for i in 0..(MAX_COMPOSITION_DEPENDENCIES + 5) {
+            let mut id = [0u8; 32];
+            id[0] = i as u8;
+            deps.push(sample_dep(id, i as u8, false));
+        }
+        let g = CompositionGraphData { dependencies: deps };
+        let encoded = g.encode();
+        assert_eq!(encoded.len(), COMPOSITION_GRAPH_MAX_SIZE);
+        assert_eq!(encoded[0], MAX_COMPOSITION_DEPENDENCIES as u8);
+    }
+
+    #[test]
+    fn composition_graph_data_decode_rejects_duplicate_dependency() {
+        // Two entries with identical (source_entity_id, required_signal_type)
+        // must be rejected at decode time.
+        let dup_source = [0x77u8; 32];
+        let dep_a = CompositionDependency {
+            source_entity_id: dup_source,
+            required_signal_type: 4,
+            min_reputation: 10,
+            min_stake: 100,
+            is_required: true,
+        };
+        let dep_b = CompositionDependency {
+            source_entity_id: dup_source,
+            required_signal_type: 4,
+            min_reputation: 99,
+            min_stake: 999,
+            is_required: false,
+        };
+        let mut bytes = vec![2u8];
+        bytes.extend_from_slice(&dep_a.encode());
+        bytes.extend_from_slice(&dep_b.encode());
+        assert!(CompositionGraphData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn composition_graph_data_decode_allows_same_source_different_signal() {
+        // Same source_entity_id but different required_signal_type is fine —
+        // the owner consumes two distinct signal kinds from one source.
+        let source = [0x42u8; 32];
+        let dep_a = sample_dep(source, 1, false);
+        let dep_b = sample_dep(source, 2, false);
+        let mut bytes = vec![2u8];
+        bytes.extend_from_slice(&dep_a.encode());
+        bytes.extend_from_slice(&dep_b.encode());
+        let decoded = CompositionGraphData::decode(&bytes).expect("decode");
+        assert_eq!(decoded.dependencies.len(), 2);
     }
 }
