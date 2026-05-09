@@ -464,6 +464,133 @@ impl StatisticsSnapshotData {
 }
 
 // ============================================================================
+// SIGNAL CATALOG (marketplace pricing)
+// ============================================================================
+
+/// Maximum number of distinct signal offerings a single entity may list.
+pub const MAX_CATALOG_OFFERINGS: usize = 10;
+
+/// On-wire size of one `SignalCatalogEntry` (signal_type + price_be + is_active).
+pub const SIGNAL_CATALOG_ENTRY_SIZE: usize = 1 + 8 + 1;
+
+/// Maximum encoded size of a full `SignalCatalogData` payload
+/// (`1` count byte + up to `MAX_CATALOG_OFFERINGS` × `SIGNAL_CATALOG_ENTRY_SIZE`).
+pub const SIGNAL_CATALOG_MAX_SIZE: usize = 1 + MAX_CATALOG_OFFERINGS * SIGNAL_CATALOG_ENTRY_SIZE;
+
+/// One priced offering within a `SignalCatalog`.
+///
+/// Layout (10 bytes): `signal_type:1 | price_per_signal_be:8 | is_active:1`.
+/// `is_active` is encoded as `0` (inactive) or `1` (active); decoders
+/// reject any other value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalCatalogEntry {
+    /// `AiSignalType` byte value this offering prices.
+    pub signal_type: u8,
+    /// Price per signal in the smallest token unit, big-endian on the wire.
+    pub price_per_signal: u64,
+    /// Whether this offering currently accepts purchases.
+    pub is_active: bool,
+}
+
+/// A seller's catalog of priced signal offerings, stored as the data field of
+/// a `MemoryObjectType::SignalCatalog` memory object.
+///
+/// On-wire layout: `count:1 | entries: count * SIGNAL_CATALOG_ENTRY_SIZE`,
+/// where `count <= MAX_CATALOG_OFFERINGS`.
+///
+/// Catalog entries are not deduplicated by the codec; a buyer-side lookup is
+/// expected to pick the first matching `signal_type`. Sellers wanting a
+/// canonical view should ensure each `signal_type` appears at most once.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SignalCatalogData {
+    /// Priced offerings (max `MAX_CATALOG_OFFERINGS`).
+    pub entries: Vec<SignalCatalogEntry>,
+}
+
+impl SignalCatalogEntry {
+    /// Encode this entry to its 10-byte canonical form.
+    #[must_use]
+    pub fn encode(&self) -> [u8; SIGNAL_CATALOG_ENTRY_SIZE] {
+        let mut out = [0u8; SIGNAL_CATALOG_ENTRY_SIZE];
+        out[0] = self.signal_type;
+        out[1..9].copy_from_slice(&self.price_per_signal.to_be_bytes());
+        out[9] = u8::from(self.is_active);
+        out
+    }
+
+    /// Decode a single entry from a 10-byte slice.
+    ///
+    /// Returns `None` if the slice is too short or `is_active` is not `0`/`1`.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < SIGNAL_CATALOG_ENTRY_SIZE {
+            return None;
+        }
+        let signal_type = bytes[0];
+        let price_per_signal = u64::from_be_bytes(bytes[1..9].try_into().ok()?);
+        let is_active = match bytes[9] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Self {
+            signal_type,
+            price_per_signal,
+            is_active,
+        })
+    }
+}
+
+impl SignalCatalogData {
+    /// Encode this catalog to canonical bytes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let count = self.entries.len().min(MAX_CATALOG_OFFERINGS);
+        let mut out = Vec::with_capacity(1 + count * SIGNAL_CATALOG_ENTRY_SIZE);
+        #[allow(clippy::cast_possible_truncation)]
+        out.push(count as u8);
+        for entry in self.entries.iter().take(count) {
+            out.extend_from_slice(&entry.encode());
+        }
+        out
+    }
+
+    /// Decode a catalog from canonical bytes.
+    ///
+    /// Returns `None` if the count byte exceeds `MAX_CATALOG_OFFERINGS`,
+    /// the buffer is shorter than `1 + count * SIGNAL_CATALOG_ENTRY_SIZE`,
+    /// or any entry fails to decode.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let count = bytes[0] as usize;
+        if count > MAX_CATALOG_OFFERINGS {
+            return None;
+        }
+        let expected_len = 1 + count * SIGNAL_CATALOG_ENTRY_SIZE;
+        if bytes.len() < expected_len {
+            return None;
+        }
+        let mut entries = Vec::with_capacity(count);
+        for i in 0..count {
+            let off = 1 + i * SIGNAL_CATALOG_ENTRY_SIZE;
+            let entry = SignalCatalogEntry::decode(&bytes[off..off + SIGNAL_CATALOG_ENTRY_SIZE])?;
+            entries.push(entry);
+        }
+        Some(Self { entries })
+    }
+
+    /// Find the first offering matching `signal_type`, ignoring duplicates
+    /// past the first match.
+    #[must_use]
+    pub fn find_offering(&self, signal_type: u8) -> Option<&SignalCatalogEntry> {
+        self.entries.iter().find(|e| e.signal_type == signal_type)
+    }
+}
+
+// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -735,5 +862,172 @@ mod tests {
         let enc2 = encode_memory_object_v1(&obj);
 
         assert_eq!(enc1, enc2, "Encoding must be deterministic");
+    }
+
+    // ========================================================================
+    // SignalCatalog tests
+    // ========================================================================
+
+    #[test]
+    fn signal_catalog_entry_byte_layout() {
+        let entry = SignalCatalogEntry {
+            signal_type: 3,
+            price_per_signal: 0x0102_0304_0506_0708,
+            is_active: true,
+        };
+        let encoded = entry.encode();
+
+        assert_eq!(encoded.len(), SIGNAL_CATALOG_ENTRY_SIZE);
+        assert_eq!(encoded[0], 3, "signal_type at offset 0");
+        assert_eq!(
+            &encoded[1..9],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "price_be at offsets 1..9"
+        );
+        assert_eq!(encoded[9], 1, "is_active=true encodes as 1");
+    }
+
+    #[test]
+    fn signal_catalog_entry_roundtrip() {
+        let cases = [
+            SignalCatalogEntry {
+                signal_type: 0,
+                price_per_signal: 0,
+                is_active: false,
+            },
+            SignalCatalogEntry {
+                signal_type: 7,
+                price_per_signal: u64::MAX,
+                is_active: true,
+            },
+            SignalCatalogEntry {
+                signal_type: 5,
+                price_per_signal: 1_000_000,
+                is_active: false,
+            },
+        ];
+        for entry in cases {
+            let encoded = entry.encode();
+            let decoded = SignalCatalogEntry::decode(&encoded).expect("decode");
+            assert_eq!(entry, decoded, "roundtrip {entry:?}");
+        }
+    }
+
+    #[test]
+    fn signal_catalog_entry_decode_invalid_active_byte() {
+        let mut bytes = [0u8; SIGNAL_CATALOG_ENTRY_SIZE];
+        bytes[9] = 2;
+        assert!(SignalCatalogEntry::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn signal_catalog_entry_decode_too_short() {
+        let bytes = [0u8; 9];
+        assert!(SignalCatalogEntry::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn signal_catalog_data_empty_roundtrip() {
+        let cat = SignalCatalogData {
+            entries: Vec::new(),
+        };
+        let encoded = cat.encode();
+        assert_eq!(encoded, vec![0u8], "empty catalog is a single zero byte");
+        let decoded = SignalCatalogData::decode(&encoded).expect("decode");
+        assert_eq!(cat, decoded);
+    }
+
+    #[test]
+    fn signal_catalog_data_single_entry_roundtrip() {
+        let cat = SignalCatalogData {
+            entries: vec![SignalCatalogEntry {
+                signal_type: 2,
+                price_per_signal: 42,
+                is_active: true,
+            }],
+        };
+        let encoded = cat.encode();
+        assert_eq!(encoded.len(), 1 + SIGNAL_CATALOG_ENTRY_SIZE);
+        assert_eq!(encoded[0], 1, "count byte");
+        let decoded = SignalCatalogData::decode(&encoded).expect("decode");
+        assert_eq!(cat, decoded);
+    }
+
+    #[test]
+    fn signal_catalog_data_full_capacity_roundtrip() {
+        let entries: Vec<SignalCatalogEntry> = (0..MAX_CATALOG_OFFERINGS)
+            .map(|i| SignalCatalogEntry {
+                signal_type: i as u8,
+                price_per_signal: 100 * (i as u64 + 1),
+                is_active: i % 2 == 0,
+            })
+            .collect();
+        let cat = SignalCatalogData { entries };
+        let encoded = cat.encode();
+        assert_eq!(encoded.len(), SIGNAL_CATALOG_MAX_SIZE);
+        assert_eq!(encoded.len(), 101, "max catalog encoding is 101 bytes");
+        let decoded = SignalCatalogData::decode(&encoded).expect("decode");
+        assert_eq!(cat, decoded);
+    }
+
+    #[test]
+    fn signal_catalog_data_decode_count_too_large() {
+        let mut bytes = vec![0u8; 1 + (MAX_CATALOG_OFFERINGS + 1) * SIGNAL_CATALOG_ENTRY_SIZE];
+        bytes[0] = (MAX_CATALOG_OFFERINGS + 1) as u8;
+        assert!(SignalCatalogData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn signal_catalog_data_decode_truncated() {
+        // Claims 2 entries but only carries 1 entry's worth of bytes.
+        let mut bytes = vec![0u8; 1 + SIGNAL_CATALOG_ENTRY_SIZE];
+        bytes[0] = 2;
+        assert!(SignalCatalogData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn signal_catalog_data_decode_empty_buffer() {
+        assert!(SignalCatalogData::decode(&[]).is_none());
+    }
+
+    #[test]
+    fn signal_catalog_data_encode_caps_at_max_offerings() {
+        // If a caller hands in more than MAX_CATALOG_OFFERINGS, encode truncates
+        // rather than producing an oversized payload that decode would reject.
+        let entries: Vec<SignalCatalogEntry> = (0..MAX_CATALOG_OFFERINGS + 5)
+            .map(|i| SignalCatalogEntry {
+                signal_type: i as u8,
+                price_per_signal: 1,
+                is_active: true,
+            })
+            .collect();
+        let cat = SignalCatalogData { entries };
+        let encoded = cat.encode();
+        assert_eq!(encoded.len(), SIGNAL_CATALOG_MAX_SIZE);
+        assert_eq!(encoded[0] as usize, MAX_CATALOG_OFFERINGS);
+    }
+
+    #[test]
+    fn signal_catalog_find_offering_picks_first_match() {
+        let cat = SignalCatalogData {
+            entries: vec![
+                SignalCatalogEntry {
+                    signal_type: 4,
+                    price_per_signal: 100,
+                    is_active: true,
+                },
+                SignalCatalogEntry {
+                    signal_type: 4,
+                    price_per_signal: 999,
+                    is_active: false,
+                },
+            ],
+        };
+        let hit = cat.find_offering(4).expect("found");
+        assert_eq!(
+            hit.price_per_signal, 100,
+            "find_offering returns first match"
+        );
+        assert!(cat.find_offering(7).is_none());
     }
 }
