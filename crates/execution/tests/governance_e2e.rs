@@ -104,6 +104,7 @@ fn create_signal_payload(
         signal_type,
         issuer_entity_id: issuer,
         reputation: None,
+        purchase: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }

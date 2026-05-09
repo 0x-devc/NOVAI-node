@@ -547,6 +547,7 @@ fn register_then_signal() {
         signal_type: AiSignalType::Prediction,
         issuer_entity_id: entity_id,
         reputation: None,
+        purchase: None,
     });
 
     // Signal tx is from the entity itself (entity pays fee from its balance)

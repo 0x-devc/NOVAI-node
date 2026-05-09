@@ -236,6 +236,14 @@ pub const REPUTATION_UPDATE_EXTRA_LEN: usize = 35;
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + REPUTATION_UPDATE_EXTRA_LEN;
 
+/// Inline-extra size for a `SignalPurchase` signal payload.
+/// `seller_entity_id:32 | purchased_signal_type:1 | max_price_be:8`
+pub const SIGNAL_PURCHASE_EXTRA_LEN: usize = 41;
+
+/// Total size of a `SignalPurchase` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SIGNAL_PURCHASE_EXTRA_LEN;
+
 // Reputation event_type discriminants (carried inline in the signal payload).
 /// Job/transaction successfully completed by the target entity.
 pub const REP_EVENT_JOB_COMPLETED: u8 = 0;
@@ -264,40 +272,73 @@ pub struct ReputationUpdateExtraV1 {
     pub points_delta: i16,
 }
 
+/// Inline purchase tail carried in `SignalPurchase` signal payloads.
+///
+/// Wire layout (41 bytes): `seller_entity_id:32 | purchased_signal_type:1 | max_price_be:8`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalPurchaseExtraV1 {
+    /// AI entity selling the signal (catalog owner).
+    pub seller_entity_id: [u8; 32],
+    /// `AiSignalType` byte the buyer is purchasing.
+    pub purchased_signal_type: u8,
+    /// Buyer-side price ceiling. Execution rejects the purchase if the
+    /// catalog's current price exceeds this value.
+    pub max_price: u64,
+}
+
 /// Canonical Signal Commitment payload (D14.1):
 /// - Base (signal types 0..=6): 66 bytes
 ///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
 /// - `ReputationUpdate` (signal type 7): 101 bytes (base + 35-byte tail)
 ///   `... [target_entity_id:32][event_type:1][points_delta_be:2]`
+/// - `SignalPurchase` (signal type 8): 107 bytes (base + 41-byte tail)
+///   `... [seller_entity_id:32][purchased_signal_type:1][max_price_be:8]`
+///
+/// At most one tail (`reputation` or `purchase`) is populated; the active
+/// tail is determined by `signal_type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalCommitmentPayloadV1 {
     /// Commitment hash of the full signal.
     pub signal_hash: [u8; 32],
-    /// Signal type (0..=7).
+    /// Signal type (0..=8).
     pub signal_type: novai_ai_entities::AiSignalType,
     /// AI entity ID that issued this signal.
     pub issuer_entity_id: [u8; 32],
     /// Inline reputation tail. MUST be `Some` iff `signal_type == ReputationUpdate`.
     pub reputation: Option<ReputationUpdateExtraV1>,
+    /// Inline purchase tail. MUST be `Some` iff `signal_type == SignalPurchase`.
+    pub purchase: Option<SignalPurchaseExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
 ///
-/// Returns 66 bytes for non-reputation signals and 101 bytes for
-/// `ReputationUpdate`. Panics in debug if `reputation` is set inconsistently
-/// with `signal_type`; in release builds the inconsistency is silently fixed
-/// by ignoring the unused `reputation` field.
+/// Returns 66 bytes for base signals, 101 bytes for `ReputationUpdate`,
+/// and 107 bytes for `SignalPurchase`. Panics in debug if a tail is set
+/// inconsistently with `signal_type`; in release builds the inconsistency
+/// is silently fixed by zero-padding the active tail.
 #[must_use]
 pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec<u8> {
     let is_reputation = p.signal_type == novai_ai_entities::AiSignalType::ReputationUpdate;
+    let is_purchase = p.signal_type == novai_ai_entities::AiSignalType::SignalPurchase;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
         "reputation tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_purchase,
+        p.purchase.is_some(),
+        "purchase tail presence must match signal_type"
+    );
+    debug_assert!(
+        !(is_reputation && is_purchase),
+        "reputation and purchase tails are mutually exclusive"
+    );
 
     let total = if is_reputation {
         SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN
+    } else if is_purchase {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -316,6 +357,15 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; REPUTATION_UPDATE_EXTRA_LEN]);
         }
+    } else if is_purchase {
+        if let Some(extra) = &p.purchase {
+            out.extend_from_slice(&extra.seller_entity_id);
+            out.push(extra.purchased_signal_type);
+            out.extend_from_slice(&extra.max_price.to_be_bytes());
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; SIGNAL_PURCHASE_EXTRA_LEN]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -324,8 +374,9 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
 
 /// Deterministically decode a signal commitment payload from `tx.payload`.
 ///
-/// Accepts 66 bytes for non-reputation signals and 101 bytes for
-/// `ReputationUpdate`. Mismatched length-vs-signal-type is rejected.
+/// Accepts 66 bytes for base signals, 101 bytes for `ReputationUpdate`,
+/// and 107 bytes for `SignalPurchase`. Length-vs-signal-type mismatch is
+/// rejected.
 ///
 /// # Errors
 /// Returns error if payload length, version, or signal type is invalid.
@@ -334,6 +385,7 @@ pub fn decode_signal_commitment_payload_v1(
 ) -> Result<SignalCommitmentPayloadV1, ExecError<()>> {
     if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN
+        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN
     {
         return Err(ExecError::BadPayloadLength {
             expected: SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN,
@@ -353,7 +405,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 7, // max valid signal type
+            expected: 8, // max valid signal type
             got: payload[33],
         },
     )?;
@@ -362,7 +414,8 @@ pub fn decode_signal_commitment_payload_v1(
     issuer_entity_id.copy_from_slice(&payload[34..66]);
 
     let is_reputation = signal_type == novai_ai_entities::AiSignalType::ReputationUpdate;
-    let reputation = if is_reputation {
+    let is_purchase = signal_type == novai_ai_entities::AiSignalType::SignalPurchase;
+    let (reputation, purchase) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
                 expected: SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN,
@@ -373,11 +426,42 @@ pub fn decode_signal_commitment_payload_v1(
         target_entity_id.copy_from_slice(&payload[66..98]);
         let event_type = payload[98];
         let points_delta = i16::from_be_bytes([payload[99], payload[100]]);
-        Some(ReputationUpdateExtraV1 {
-            target_entity_id,
-            event_type,
-            points_delta,
-        })
+        (
+            Some(ReputationUpdateExtraV1 {
+                target_entity_id,
+                event_type,
+                points_delta,
+            }),
+            None,
+        )
+    } else if is_purchase {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut seller_entity_id = [0u8; 32];
+        seller_entity_id.copy_from_slice(&payload[66..98]);
+        let purchased_signal_type = payload[98];
+        let max_price = u64::from_be_bytes([
+            payload[99],
+            payload[100],
+            payload[101],
+            payload[102],
+            payload[103],
+            payload[104],
+            payload[105],
+            payload[106],
+        ]);
+        (
+            None,
+            Some(SignalPurchaseExtraV1 {
+                seller_entity_id,
+                purchased_signal_type,
+                max_price,
+            }),
+        )
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -385,7 +469,7 @@ pub fn decode_signal_commitment_payload_v1(
                 got: payload.len(),
             });
         }
-        None
+        (None, None)
     };
 
     Ok(SignalCommitmentPayloadV1 {
@@ -393,6 +477,7 @@ pub fn decode_signal_commitment_payload_v1(
         signal_type,
         issuer_entity_id,
         reputation,
+        purchase,
     })
 }
 
@@ -1910,8 +1995,8 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             return Err(ExecError::SelfReputationUpdate);
         }
 
-        let mut target = read_ai_entity(db, &extra.target_entity_id)?
-            .ok_or(ExecError::TargetEntityNotFound)?;
+        let mut target =
+            read_ai_entity(db, &extra.target_entity_id)?.ok_or(ExecError::TargetEntityNotFound)?;
 
         // Clamped i32 arithmetic so u16 underflow is impossible.
         let new_score: u16 = (i32::from(target.reputation_score) + i32::from(extra.points_delta))

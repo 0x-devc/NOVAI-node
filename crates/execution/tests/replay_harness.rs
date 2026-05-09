@@ -105,6 +105,7 @@ fn mk_signal_commitment(
         signal_type,
         issuer_entity_id,
         reputation: None,
+        purchase: None,
     });
     TxV1 {
         version: TxVersion::V1,

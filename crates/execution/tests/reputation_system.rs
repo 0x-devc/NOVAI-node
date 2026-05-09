@@ -87,6 +87,7 @@ fn build_reputation_payload(
             event_type,
             points_delta,
         }),
+        purchase: None,
     })
 }
 
@@ -112,8 +113,7 @@ fn reputation_update_oracle_increments_score() {
     let oracle = make_oracle(&mut db, [0x11u8; 32], [0x21u8; 32]);
     let target = make_target(&mut db, [0x12u8; 32], [0x22u8; 32]);
 
-    let payload =
-        build_reputation_payload(oracle.id, target.id, REP_EVENT_JOB_COMPLETED, 5);
+    let payload = build_reputation_payload(oracle.id, target.id, REP_EVENT_JOB_COMPLETED, 5);
     let tx = make_tx(oracle.id, 0, SIGNAL_FEE, payload);
 
     apply_signal_commitment_tx(&mut db, &tx, 100).expect("oracle update should succeed");
@@ -261,7 +261,10 @@ fn total_transactions_unchanged_on_other_events() {
     }
 
     let updated = read_ai_entity(&db, &target.id).unwrap().unwrap();
-    assert_eq!(updated.total_transactions, 0, "non-completion must not bump counter");
+    assert_eq!(
+        updated.total_transactions, 0,
+        "non-completion must not bump counter"
+    );
     assert_eq!(updated.reputation_events_count, 4);
 }
 
@@ -276,8 +279,7 @@ fn reputation_events_count_always_increments() {
     let target = make_target(&mut db, [0x12u8; 32], [0x22u8; 32]);
 
     for nonce in 0u64..3 {
-        let payload =
-            build_reputation_payload(oracle.id, target.id, REP_EVENT_JOB_COMPLETED, 1);
+        let payload = build_reputation_payload(oracle.id, target.id, REP_EVENT_JOB_COMPLETED, 1);
         let tx = make_tx(oracle.id, nonce, SIGNAL_FEE, payload);
         apply_signal_commitment_tx(&mut db, &tx, 100 + nonce).unwrap();
     }
@@ -300,7 +302,10 @@ fn reputation_self_update_rejected() {
     let tx = make_tx(oracle.id, 0, SIGNAL_FEE, payload);
 
     let err = apply_signal_commitment_tx(&mut db, &tx, 100).expect_err("must fail");
-    assert!(matches!(err, ExecError::SelfReputationUpdate), "got {err:?}");
+    assert!(
+        matches!(err, ExecError::SelfReputationUpdate),
+        "got {err:?}"
+    );
 }
 
 // ============================================================================
@@ -313,12 +318,14 @@ fn reputation_update_target_not_found() {
     let oracle = make_oracle(&mut db, [0x11u8; 32], [0x21u8; 32]);
     let bogus_target = [0xDEu8; 32];
 
-    let payload =
-        build_reputation_payload(oracle.id, bogus_target, REP_EVENT_JOB_COMPLETED, 5);
+    let payload = build_reputation_payload(oracle.id, bogus_target, REP_EVENT_JOB_COMPLETED, 5);
     let tx = make_tx(oracle.id, 0, SIGNAL_FEE, payload);
 
     let err = apply_signal_commitment_tx(&mut db, &tx, 100).expect_err("must fail");
-    assert!(matches!(err, ExecError::TargetEntityNotFound), "got {err:?}");
+    assert!(
+        matches!(err, ExecError::TargetEntityNotFound),
+        "got {err:?}"
+    );
 }
 
 // ============================================================================
@@ -338,6 +345,7 @@ fn non_reputation_signal_unchanged_behavior() {
         signal_type: AiSignalType::Anomaly,
         issuer_entity_id: entity.id,
         reputation: None,
+        purchase: None,
     });
     let tx = make_tx(entity.id, 0, SIGNAL_FEE, payload);
     apply_signal_commitment_tx(&mut db, &tx, 100).expect("non-reputation must still work");
@@ -363,6 +371,7 @@ fn reputation_payload_is_101_bytes() {
             event_type: REP_EVENT_JOB_COMPLETED,
             points_delta: -7,
         }),
+        purchase: None,
     });
     assert_eq!(payload.len(), 101);
     assert_eq!(payload.len(), SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN);
