@@ -221,6 +221,26 @@ pub async fn run_info(rpc: &RpcClient, entity_id_hex: &str, json: bool) -> Resul
                     "Active:          {}",
                     e["is_active"].as_bool().unwrap_or(false)
                 );
+                println!(
+                    "Reputation:      {} / 100",
+                    e["reputation_score"].as_u64().unwrap_or(0)
+                );
+                println!(
+                    "Total Txs:       {}",
+                    e["total_transactions"].as_u64().unwrap_or(0)
+                );
+                println!(
+                    "Rep Events:      {}",
+                    e["reputation_events_count"].as_u64().unwrap_or(0)
+                );
+                println!(
+                    "Stake:           {}",
+                    e["stake_balance"].as_str().unwrap_or("0")
+                );
+                println!(
+                    "Stake Locked:    {}",
+                    e["stake_locked_until"].as_u64().unwrap_or(0)
+                );
             }
         }
     }
