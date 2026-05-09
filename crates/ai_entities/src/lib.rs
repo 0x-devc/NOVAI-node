@@ -249,6 +249,10 @@ pub struct AiEntity {
     pub total_transactions: u32,
     /// Number of reputation events applied to this entity.
     pub reputation_events_count: u32,
+    /// Amount of stake locked as collateral, in smallest balance unit.
+    pub stake_balance: u128,
+    /// Block height until which stake cannot be withdrawn (0 = unlocked).
+    pub stake_locked_until: u64,
 }
 
 /// Default reputation score for newly registered entities (neutral midpoint).
@@ -293,6 +297,8 @@ impl AiEntity {
             reputation_score: DEFAULT_REPUTATION_SCORE,
             total_transactions: 0,
             reputation_events_count: 0,
+            stake_balance: 0,
+            stake_locked_until: 0,
         }
     }
 
@@ -323,6 +329,8 @@ impl AiEntity {
             reputation_score: DEFAULT_REPUTATION_SCORE,
             total_transactions: 0,
             reputation_events_count: 0,
+            stake_balance: 0,
+            stake_locked_until: 0,
         }
     }
 

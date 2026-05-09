@@ -1435,7 +1435,7 @@ use novai_ai_entities::{
     AiEntity, AiSignalType, MemoryObjectType, SignalCatalogData, SignalCommitment,
     MAX_REPUTATION_SCORE,
 };
-use novai_codec::{decode_ai_entity, encode_ai_entity_v4, encode_signal_commitment_v1};
+use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
 use novai_state::{
     ai_entity_key, ai_memory_key, ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
 };
@@ -1463,12 +1463,12 @@ pub fn read_ai_entity<K: Kv>(
 
 /// Write an AI entity to storage (returns `WriteOp` for batching).
 ///
-/// Canonical writer is V4 (246 bytes). Old V1/V2/V3 reads are still accepted
-/// by `decode_ai_entity` and are promoted to V4 on next write.
+/// Canonical writer is V5 (270 bytes). Old V1/V2/V3/V4 reads are still accepted
+/// by `decode_ai_entity` and are promoted to V5 on next write.
 #[must_use]
 pub fn write_ai_entity_op(entity: &AiEntity) -> WriteOp {
     let key = ai_entity_key(&entity.id);
-    let value = encode_ai_entity_v4(entity);
+    let value = encode_ai_entity_v5(entity);
     WriteOp::Put(key, value)
 }
 

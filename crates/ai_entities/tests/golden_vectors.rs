@@ -9,7 +9,7 @@ use novai_ai_entities::{AiEntity, AutonomyMode, Capabilities, DEFAULT_REPUTATION
 // Golden vector tests intentionally use v1 codec to verify backward compatibility
 use novai_codec::ai_entity_codec::{
     decode_ai_entity, encode_ai_entity_v2, encode_ai_entity_v3, encode_ai_entity_v4,
-    AI_ENTITY_V4_SIZE,
+    encode_ai_entity_v5, AI_ENTITY_V4_SIZE, AI_ENTITY_V5_SIZE,
 };
 #[allow(deprecated)]
 use novai_codec::ai_entity_codec::{decode_ai_entity_v1, encode_ai_entity_v1};
@@ -333,4 +333,99 @@ fn golden_ai_entity_v4_is_stable_across_runs() {
     let bytes1 = encode_ai_entity_v4(&entity);
     let bytes2 = encode_ai_entity_v4(&entity);
     assert_eq!(bytes1, bytes2, "V4 encoding must be deterministic");
+}
+
+// ============================================================================
+// V5 Golden Vector Tests (includes stake tail)
+// ============================================================================
+
+#[test]
+fn golden_ai_entity_v5() {
+    let mut entity = golden_test_entity();
+    entity.pubkey = [0xAB; 32];
+    entity.reputation_score = 73;
+    entity.total_transactions = 12;
+    entity.reputation_events_count = 4;
+    entity.stake_balance = 250_000;
+    entity.stake_locked_until = 5_000;
+
+    let bytes = encode_ai_entity_v5(&entity);
+    let path = vectors_dir().join("ai_entity_v5.bin");
+
+    if should_update_vectors() {
+        fs::create_dir_all(vectors_dir()).expect("failed to create vectors dir");
+        fs::write(&path, &bytes).expect("failed to write golden vector");
+        println!("Updated golden vector: {path:?}");
+        println!("Vector length: {} bytes", bytes.len());
+    } else {
+        let expected = fs::read(&path)
+            .expect("Golden vector file missing. Run with UPDATE_VECTORS=1 to generate.");
+        assert_eq!(
+            bytes, expected,
+            "AI entity v5 encoding drifted from golden vector!"
+        );
+    }
+
+    assert_eq!(bytes.len(), AI_ENTITY_V5_SIZE);
+    assert_eq!(bytes.len(), 270);
+    assert_eq!(bytes[0], 0x05, "V5 must start with version byte 0x05");
+
+    // stake tail at offsets 246, 262
+    assert_eq!(&bytes[246..262], &250_000_u128.to_le_bytes());
+    assert_eq!(&bytes[262..270], &5_000_u64.to_le_bytes());
+
+    let decoded = decode_ai_entity(&bytes).expect("v5 decode failed");
+    assert_eq!(entity.id, decoded.id);
+    assert_eq!(entity.pubkey, decoded.pubkey);
+    assert_eq!(decoded.reputation_score, 73);
+    assert_eq!(decoded.total_transactions, 12);
+    assert_eq!(decoded.reputation_events_count, 4);
+    assert_eq!(decoded.stake_balance, 250_000);
+    assert_eq!(decoded.stake_locked_until, 5_000);
+}
+
+#[test]
+fn v4_backward_compat_promotes_stake_defaults() {
+    let mut entity = golden_test_entity();
+    entity.reputation_score = 73;
+    entity.total_transactions = 12;
+    entity.reputation_events_count = 4;
+
+    let v4_bytes = encode_ai_entity_v4(&entity);
+    let decoded = decode_ai_entity(&v4_bytes).expect("v4 decode failed");
+
+    assert_eq!(
+        decoded.stake_balance, 0,
+        "V4 entities must decode with stake_balance = 0"
+    );
+    assert_eq!(
+        decoded.stake_locked_until, 0,
+        "V4 entities must decode with stake_locked_until = 0"
+    );
+    // Reputation tail still preserved on V4 → V5 promotion
+    assert_eq!(decoded.reputation_score, 73);
+    assert_eq!(decoded.total_transactions, 12);
+    assert_eq!(decoded.reputation_events_count, 4);
+}
+
+#[test]
+fn v3_backward_compat_promotes_stake_and_reputation_defaults() {
+    let entity = golden_test_entity();
+    let v3_bytes = encode_ai_entity_v3(&entity);
+    let decoded = decode_ai_entity(&v3_bytes).expect("v3 decode failed");
+
+    assert_eq!(decoded.stake_balance, 0);
+    assert_eq!(decoded.stake_locked_until, 0);
+    assert_eq!(decoded.reputation_score, DEFAULT_REPUTATION_SCORE);
+}
+
+#[test]
+fn golden_ai_entity_v5_is_stable_across_runs() {
+    let mut entity = golden_test_entity();
+    entity.stake_balance = 12_345_678;
+    entity.stake_locked_until = 9_999;
+
+    let bytes1 = encode_ai_entity_v5(&entity);
+    let bytes2 = encode_ai_entity_v5(&entity);
+    assert_eq!(bytes1, bytes2, "V5 encoding must be deterministic");
 }

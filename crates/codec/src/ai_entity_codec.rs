@@ -1,14 +1,16 @@
 //! Canonical encoding for AI entity types.
 //!
-//! Supports four versions:
+//! Supports five versions:
 //! - V1 (0x01): 203 bytes, no is_active field (legacy)
 //! - V2 (0x02): 204 bytes, includes is_active field
 //! - V3 (0x03): 236 bytes, includes pubkey field
-//! - V4 (0x04): 246 bytes, includes reputation tail (current)
+//! - V4 (0x04): 246 bytes, includes reputation tail
+//! - V5 (0x05): 270 bytes, includes stake tail (current)
 //!
 //! Decoding auto-detects version. V1/V2 entities decode with pubkey = [0u8; 32].
 //! V1/V2/V3 entities decode with reputation_score = DEFAULT_REPUTATION_SCORE,
 //! total_transactions = 0, reputation_events_count = 0.
+//! V1/V2/V3/V4 entities decode with stake_balance = 0, stake_locked_until = 0.
 
 use novai_ai_entities::{AiEntity, AutonomyMode, Capabilities, CodeHash};
 use novai_types::Address;
@@ -22,8 +24,11 @@ pub const AI_ENTITY_V2: u8 = 0x02;
 /// Version byte for AiEntity encoding V3 (includes pubkey).
 pub const AI_ENTITY_V3: u8 = 0x03;
 
-/// Version byte for AiEntity encoding V4 (current, includes reputation tail).
+/// Version byte for AiEntity encoding V4 (includes reputation tail).
 pub const AI_ENTITY_V4: u8 = 0x04;
+
+/// Version byte for AiEntity encoding V5 (current, includes stake tail).
+pub const AI_ENTITY_V5: u8 = 0x05;
 
 /// Encoded size of AiEntity v1 in bytes (legacy).
 pub const AI_ENTITY_V1_SIZE: usize = 203;
@@ -36,6 +41,9 @@ pub const AI_ENTITY_V3_SIZE: usize = 236;
 
 /// Encoded size of AiEntity v4 in bytes (V3 layout + 10-byte reputation tail).
 pub const AI_ENTITY_V4_SIZE: usize = 246;
+
+/// Encoded size of AiEntity v5 in bytes (V4 layout + 24-byte stake tail).
+pub const AI_ENTITY_V5_SIZE: usize = 270;
 
 /// Errors during AI entity encoding/decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +215,60 @@ pub fn encode_ai_entity_v4(entity: &AiEntity) -> Vec<u8> {
     buf
 }
 
+/// Encode an AiEntity to canonical bytes (V5 format, current).
+///
+/// V5 = V4 layout + 24-byte stake tail appended after `reputation_events_count`.
+///
+/// # Layout (270 bytes, little-endian integers)
+///
+/// | Offset | Size | Field                   |
+/// |--------|------|-------------------------|
+/// | 0      | 1    | version (0x05)          |
+/// | 1      | 32   | id                      |
+/// | 33     | 32   | code_hash               |
+/// | 65     | 32   | creator                 |
+/// | 97     | 1    | autonomy_mode           |
+/// | 98     | 1    | capabilities            |
+/// | 99     | 16   | economic_balance        |
+/// | 115    | 8    | nonce                   |
+/// | 123    | 32   | pubkey                  |
+/// | 155    | 32   | memory_root             |
+/// | 187    | 32   | params_root             |
+/// | 219    | 8    | registered_at           |
+/// | 227    | 8    | last_active_at          |
+/// | 235    | 1    | is_active               |
+/// | 236    | 2    | reputation_score        |
+/// | 238    | 4    | total_transactions      |
+/// | 242    | 4    | reputation_events_count |
+/// | 246    | 16   | stake_balance           |
+/// | 262    | 8    | stake_locked_until      |
+pub fn encode_ai_entity_v5(entity: &AiEntity) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(AI_ENTITY_V5_SIZE);
+
+    buf.push(AI_ENTITY_V5);
+    buf.extend_from_slice(&entity.id);
+    buf.extend_from_slice(&entity.code_hash);
+    buf.extend_from_slice(&entity.creator);
+    buf.push(entity.autonomy_mode.to_byte());
+    buf.push(entity.capabilities.to_byte());
+    buf.extend_from_slice(&entity.economic_balance.to_le_bytes());
+    buf.extend_from_slice(&entity.nonce.to_le_bytes());
+    buf.extend_from_slice(&entity.pubkey);
+    buf.extend_from_slice(&entity.memory_root);
+    buf.extend_from_slice(&entity.params_root);
+    buf.extend_from_slice(&entity.registered_at.to_le_bytes());
+    buf.extend_from_slice(&entity.last_active_at.to_le_bytes());
+    buf.push(u8::from(entity.is_active));
+    buf.extend_from_slice(&entity.reputation_score.to_le_bytes());
+    buf.extend_from_slice(&entity.total_transactions.to_le_bytes());
+    buf.extend_from_slice(&entity.reputation_events_count.to_le_bytes());
+    buf.extend_from_slice(&entity.stake_balance.to_le_bytes());
+    buf.extend_from_slice(&entity.stake_locked_until.to_le_bytes());
+
+    debug_assert_eq!(buf.len(), AI_ENTITY_V5_SIZE);
+    buf
+}
+
 /// Encode an AiEntity to canonical bytes (V1 format, legacy).
 ///
 /// # Layout (203 bytes, little-endian integers)
@@ -267,6 +329,7 @@ pub fn decode_ai_entity(input: &[u8]) -> Result<AiEntity, AiEntityCodecError> {
         AI_ENTITY_V2 => decode_ai_entity_v2_impl(input),
         AI_ENTITY_V3 => decode_ai_entity_v3_impl(input),
         AI_ENTITY_V4 => decode_ai_entity_v4_impl(input),
+        AI_ENTITY_V5 => decode_ai_entity_v5_impl(input),
         _ => Err(AiEntityCodecError::InvalidVersion(version)),
     }
 }
@@ -359,10 +422,13 @@ fn decode_ai_entity_v1_impl(input: &[u8]) -> Result<AiEntity, AiEntityCodecError
         registered_at,
         last_active_at,
         is_active: true, // V1 backward compat: default to active
-        // V1→V4 promotion: reputation defaults
+        // V1→V5 promotion: reputation defaults
         reputation_score: novai_ai_entities::DEFAULT_REPUTATION_SCORE,
         total_transactions: 0,
         reputation_events_count: 0,
+        // V1→V5 promotion: stake defaults
+        stake_balance: 0,
+        stake_locked_until: 0,
     })
 }
 
@@ -458,10 +524,13 @@ fn decode_ai_entity_v2_impl(input: &[u8]) -> Result<AiEntity, AiEntityCodecError
         registered_at,
         last_active_at,
         is_active,
-        // V2→V4 promotion: reputation defaults
+        // V2→V5 promotion: reputation defaults
         reputation_score: novai_ai_entities::DEFAULT_REPUTATION_SCORE,
         total_transactions: 0,
         reputation_events_count: 0,
+        // V2→V5 promotion: stake defaults
+        stake_balance: 0,
+        stake_locked_until: 0,
     })
 }
 
@@ -550,10 +619,13 @@ fn decode_ai_entity_v3_impl(input: &[u8]) -> Result<AiEntity, AiEntityCodecError
         registered_at,
         last_active_at,
         is_active,
-        // V3→V4 promotion: reputation defaults
+        // V3→V5 promotion: reputation defaults
         reputation_score: novai_ai_entities::DEFAULT_REPUTATION_SCORE,
         total_transactions: 0,
         reputation_events_count: 0,
+        // V3→V5 promotion: stake defaults
+        stake_balance: 0,
+        stake_locked_until: 0,
     })
 }
 
@@ -665,6 +737,136 @@ fn decode_ai_entity_v4_impl(input: &[u8]) -> Result<AiEntity, AiEntityCodecError
         reputation_score,
         total_transactions,
         reputation_events_count,
+        // V4→V5 promotion: stake defaults
+        stake_balance: 0,
+        stake_locked_until: 0,
+    })
+}
+
+/// Decode V5 format (V4 layout + stake tail).
+fn decode_ai_entity_v5_impl(input: &[u8]) -> Result<AiEntity, AiEntityCodecError> {
+    if input.len() < AI_ENTITY_V5_SIZE {
+        return Err(AiEntityCodecError::BufferTooShort);
+    }
+
+    let mut cursor = 1; // Skip version byte
+
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&input[cursor..cursor + 32]);
+    cursor += 32;
+
+    let mut code_hash: CodeHash = [0u8; 32];
+    code_hash.copy_from_slice(&input[cursor..cursor + 32]);
+    cursor += 32;
+
+    let mut creator: Address = [0u8; 32];
+    creator.copy_from_slice(&input[cursor..cursor + 32]);
+    cursor += 32;
+
+    let autonomy_byte = input[cursor];
+    cursor += 1;
+    let autonomy_mode = AutonomyMode::from_byte(autonomy_byte)
+        .ok_or(AiEntityCodecError::InvalidAutonomyMode(autonomy_byte))?;
+
+    let capabilities = Capabilities::from_byte(input[cursor]);
+    cursor += 1;
+
+    let economic_balance = u128::from_le_bytes(
+        input[cursor..cursor + 16]
+            .try_into()
+            .expect("slice is 16 bytes"),
+    );
+    cursor += 16;
+
+    let nonce = u64::from_le_bytes(
+        input[cursor..cursor + 8]
+            .try_into()
+            .expect("slice is 8 bytes"),
+    );
+    cursor += 8;
+
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&input[cursor..cursor + 32]);
+    cursor += 32;
+
+    let mut memory_root = [0u8; 32];
+    memory_root.copy_from_slice(&input[cursor..cursor + 32]);
+    cursor += 32;
+
+    let mut params_root = [0u8; 32];
+    params_root.copy_from_slice(&input[cursor..cursor + 32]);
+    cursor += 32;
+
+    let registered_at = u64::from_le_bytes(
+        input[cursor..cursor + 8]
+            .try_into()
+            .expect("slice is 8 bytes"),
+    );
+    cursor += 8;
+
+    let last_active_at = u64::from_le_bytes(
+        input[cursor..cursor + 8]
+            .try_into()
+            .expect("slice is 8 bytes"),
+    );
+    cursor += 8;
+
+    let is_active = input[cursor] != 0;
+    cursor += 1;
+
+    let reputation_score = u16::from_le_bytes(
+        input[cursor..cursor + 2]
+            .try_into()
+            .expect("slice is 2 bytes"),
+    );
+    cursor += 2;
+
+    let total_transactions = u32::from_le_bytes(
+        input[cursor..cursor + 4]
+            .try_into()
+            .expect("slice is 4 bytes"),
+    );
+    cursor += 4;
+
+    let reputation_events_count = u32::from_le_bytes(
+        input[cursor..cursor + 4]
+            .try_into()
+            .expect("slice is 4 bytes"),
+    );
+    cursor += 4;
+
+    let stake_balance = u128::from_le_bytes(
+        input[cursor..cursor + 16]
+            .try_into()
+            .expect("slice is 16 bytes"),
+    );
+    cursor += 16;
+
+    let stake_locked_until = u64::from_le_bytes(
+        input[cursor..cursor + 8]
+            .try_into()
+            .expect("slice is 8 bytes"),
+    );
+
+    Ok(AiEntity {
+        id,
+        code_hash,
+        creator,
+        autonomy_mode,
+        capabilities,
+        economic_balance,
+        nonce,
+        pubkey,
+        memory_root,
+        params_root,
+        registered_at,
+        last_active_at,
+        is_active,
+        reputation_score,
+        total_transactions,
+        reputation_events_count,
+        stake_balance,
+        stake_locked_until,
     })
 }
 
@@ -821,5 +1023,86 @@ mod tests {
     fn decode_empty_buffer_returns_error() {
         let result = decode_ai_entity(&[]);
         assert_eq!(result, Err(AiEntityCodecError::BufferTooShort));
+    }
+
+    #[test]
+    fn encode_v5_produces_correct_size() {
+        let entity = test_entity();
+        let encoded = encode_ai_entity_v5(&entity);
+        assert_eq!(encoded.len(), AI_ENTITY_V5_SIZE);
+        assert_eq!(encoded.len(), 270);
+    }
+
+    #[test]
+    fn encode_v5_starts_with_version() {
+        let entity = test_entity();
+        let encoded = encode_ai_entity_v5(&entity);
+        assert_eq!(encoded[0], AI_ENTITY_V5);
+    }
+
+    #[test]
+    fn roundtrip_v5_works() {
+        let mut entity = test_entity();
+        entity.economic_balance = 1_000_000;
+        entity.stake_balance = 500_000;
+        entity.stake_locked_until = 12_345;
+
+        let encoded = encode_ai_entity_v5(&entity);
+        let decoded = decode_ai_entity(&encoded).unwrap();
+
+        assert_eq!(entity.id, decoded.id);
+        assert_eq!(entity.economic_balance, decoded.economic_balance);
+        assert_eq!(entity.stake_balance, decoded.stake_balance);
+        assert_eq!(entity.stake_locked_until, decoded.stake_locked_until);
+    }
+
+    #[test]
+    fn v4_blob_decodes_with_zero_stake_defaults() {
+        let entity = test_entity();
+        let v4_bytes = encode_ai_entity_v4(&entity);
+        let decoded = decode_ai_entity(&v4_bytes).expect("v4 decode failed");
+        assert_eq!(
+            decoded.stake_balance, 0,
+            "V4 entities must decode with stake_balance = 0"
+        );
+        assert_eq!(
+            decoded.stake_locked_until, 0,
+            "V4 entities must decode with stake_locked_until = 0"
+        );
+    }
+
+    #[test]
+    fn v5_encoding_is_deterministic() {
+        let mut entity = test_entity();
+        entity.stake_balance = 999_999;
+        entity.stake_locked_until = 7;
+
+        let encoded1 = encode_ai_entity_v5(&entity);
+        let encoded2 = encode_ai_entity_v5(&entity);
+        assert_eq!(encoded1, encoded2, "V5 encoding must be deterministic");
+    }
+
+    #[test]
+    fn v5_decode_rejects_short_buffer() {
+        let mut short = vec![0u8; 100];
+        short[0] = AI_ENTITY_V5;
+        let result = decode_ai_entity(&short);
+        assert_eq!(result, Err(AiEntityCodecError::BufferTooShort));
+    }
+
+    #[test]
+    fn v5_stake_tail_offsets_correct() {
+        let mut entity = test_entity();
+        entity.stake_balance = 0xDEAD_BEEF_CAFE_BABE_u128;
+        entity.stake_locked_until = 0xFEED_FACE_u64;
+
+        let encoded = encode_ai_entity_v5(&entity);
+        // stake_balance at offset 246 (16 bytes)
+        assert_eq!(
+            &encoded[246..262],
+            &0xDEAD_BEEF_CAFE_BABE_u128.to_le_bytes()
+        );
+        // stake_locked_until at offset 262 (8 bytes)
+        assert_eq!(&encoded[262..270], &0xFEED_FACE_u64.to_le_bytes());
     }
 }
