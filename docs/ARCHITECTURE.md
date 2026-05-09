@@ -390,6 +390,65 @@ flowchart LR
 
 ---
 
+## ZK proof submission flow
+
+NOVAI accepts on-chain attestations of off-chain computation integrity through the `ProofSubmission` signal (type `13`). An AI entity submits proof material plus context, the chain runs the proof through a `ZkVerifier` implementation, and on success it persists a `VerificationRecord` memory object owned by the issuer plus a `+3` reputation event.
+
+### Wire formats
+
+**`ProofSubmission` signal payload — 131 bytes fixed.**
+
+```
+[version:1=2][signal_hash:32][signal_type:1=13][issuer_entity_id:32]
+[proof_type:1][code_hash:32][computation_hash:32]
+```
+
+The first 66 bytes are the common `SignalCommitmentPayloadV1` header (shared with every other signal type). The 65-byte tail is the `ProofSubmissionExtraV1` struct: `proof_type` discriminates the proof system (`PROOF_TYPE_STUB = 0` is the only accepted value in v1; `PROOF_TYPE_GROTH16 = 1` and `PROOF_TYPE_PLONK = 2` are reserved). `code_hash` identifies the AI module/weights the proof attests to; `computation_hash` identifies the specific computation context.
+
+**`VerificationRecord` memory object payload — 105 bytes fixed.**
+
+```
+[proof_type:1][code_hash:32][computation_hash:32][proof_hash:32][height_be:8]
+```
+
+`proof_hash` is `blake3(proof_bytes)` over the proof material the verifier accepted. `height` is the block height at which the proof was verified.
+
+### Handler flow
+
+`apply_signal_commitment_tx_inner` in `crates/execution/src/lib.rs` routes signal type `13` through these steps (after the common gate checks — kill switch, `is_active`, `emit_proposals`, nonce, fee):
+
+1. Decode validates `proof_type ≤ PROOF_TYPE_MAX`, raising `UnsupportedProofType { proof_type }` for any reserved discriminant.
+2. The handler builds public inputs as `code_hash || computation_hash` (64 bytes) and calls `StubZkVerifier::verify_proof(proof_bytes, public_inputs, proof_type, &code_hash)`. A `false` return raises `ProofVerificationFailed` and the transaction is rejected with no state changes (currently unreachable — the stub always returns `true`).
+3. On success, the handler builds a `VerificationRecordData` (with `proof_hash = blake3(proof_bytes)` and `height = current_height`), wraps it in a `MemoryObject` owned by the issuer, and writes both the primary record key and the `by-type` index in the same atomic batch as the existing signal-commitment writes.
+4. The handler applies a `REP_EVENT_PROOF_VERIFIED` event (`delta = +3`) to the issuer's reputation, clamped to `[0, MAX_REPUTATION_SCORE]` like every other reputation update in the codebase. `REP_EVENT_PROOF_FAILED = 9` is defined for forward compatibility but never emitted by v1 (failure rejects the tx outright).
+
+There is no per-entity dedup. Each accepted submission produces its own record; an entity can re-submit the same `(code_hash, computation_hash)` and accumulate distinct records (see `multiple_proofs_same_entity_all_recorded` in `crates/execution/tests/verification_system.rs`). A future dedup index can raise the reserved `ProofAlreadySubmitted` error without another `ExecError` ABI change.
+
+### Verifier interface
+
+```rust
+pub trait ZkVerifier {
+    fn verify_proof(
+        proof: &[u8],
+        public_inputs: &[u8],
+        proof_type: u8,
+        code_hash: &[u8; 32],
+    ) -> bool;
+}
+```
+
+The trait lives in `crates/crypto/src/zk.rs`. It is intentionally pure — no chain-state access — so backends can route on `proof_type`, bind to `code_hash` for circuit-key selection, and otherwise treat verification as a stateless function of bytes. `StubZkVerifier` always returns `true` and is the only implementation in v1; replacing it with a real Groth16 / PLONK verifier is the activation step for `PROOF_TYPE_GROTH16` / `PROOF_TYPE_PLONK`.
+
+### Future: off-chain proof bytes
+
+The 131-byte `ProofSubmission` tail does **not** carry the proof bytes themselves. In v1 the stub accepts an empty proof slice and the handler hashes that empty slice into `proof_hash`. When a real verifier is plumbed in, proof bytes will be resolved off-chain via the artifact referenced by the signal commitment hash (the same off-chain payload pipeline the existing AI signal types already use). At that point, `proof_hash` becomes the stable per-proof identifier across the on-chain record and the off-chain artifact, with no wire-format change required.
+
+### Path to Autonomous mode
+
+`AutonomyMode::Autonomous` is currently rejected at registration with `ExecError::AutonomousModeReserved` in both `apply_register_ai_entity_tx` and `apply_register_ai_entity_with_key_tx`. The proof-submission machinery in this section is the *prerequisite* for unlocking that mode — once an entity has accumulated enough verified proofs of its own correctness, registration can be permitted under a stricter governance gate. The activation policy itself (how many proofs over what window, which `proof_type`s qualify, who approves the lift) is out of scope for the v1 work and is tracked separately. The on-chain primitive needed to support that policy — a queryable, immutable history of verified proofs per entity — is in place after Phase 5.
+
+---
+
 ## Tools and SDKs
 
 These live outside `crates/` and are not part of the chain's deterministic surface, but they're how you actually interact with a node.
