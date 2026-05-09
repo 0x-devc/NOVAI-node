@@ -2,6 +2,7 @@ mod commands;
 mod rpc_client;
 
 use clap::{Parser, Subcommand};
+use commands::signal::ExtendedSignalArgs;
 use commands::{account, ai, keygen, memory, signal};
 use rpc_client::RpcClient;
 
@@ -214,6 +215,7 @@ enum MemoryCommand {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum SignalCommand {
     /// Publish a signal commitment.
     Publish {
@@ -223,7 +225,9 @@ enum SignalCommand {
         /// Hex-encoded 32-byte signal hash.
         #[arg(long)]
         signal_hash: String,
-        /// Signal type: anomaly, optimization, prediction, risk-score, audit-report, spam-risk, congestion-forecast.
+        /// Signal type: anomaly, optimization, prediction, risk-score, audit-report,
+        /// spam-risk, congestion-forecast, reputation-update, signal-purchase,
+        /// stake-deposit, stake-withdraw, stake-slash, composition-check, proof-submission.
         #[arg(long)]
         signal_type: String,
         /// Hex-encoded 32-byte issuer entity ID.
@@ -232,6 +236,9 @@ enum SignalCommand {
         /// Transaction fee (default: 1000).
         #[arg(long, default_value_t = 1000)]
         fee: u64,
+        /// Extended payload arguments (required for signal types 7-13).
+        #[command(flatten)]
+        extra: ExtendedSignalArgs,
     },
     /// Query signals by block height.
     ByHeight {
@@ -376,6 +383,7 @@ async fn main() {
                 signal_type,
                 issuer_entity_id,
                 fee,
+                extra,
             } => {
                 signal::run_publish(
                     &rpc,
@@ -384,6 +392,7 @@ async fn main() {
                     &signal_type,
                     &issuer_entity_id,
                     fee,
+                    &extra,
                     cli.json,
                 )
                 .await

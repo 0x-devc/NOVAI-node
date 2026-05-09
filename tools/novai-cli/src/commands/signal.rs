@@ -3,7 +3,72 @@
 use crate::commands::account::sign_and_submit;
 use crate::commands::keygen::parse_hex32;
 use crate::rpc_client::RpcClient;
+use clap::Args;
 use novai_ai_entities::AiSignalType;
+
+/// Optional extended-payload arguments for signal types 7-13.
+///
+/// Required flags depend on signal type; see per-field docs for which
+/// signal type each flag applies to. Signal types 0-6 (the original seven)
+/// take no extended flags.
+#[derive(Args, Default, Debug, Clone)]
+pub struct ExtendedSignalArgs {
+    /// Hex-encoded 32-byte target entity ID (reputation-update, stake-slash, composition-check).
+    #[arg(long)]
+    pub target_entity_id: Option<String>,
+
+    /// Reputation event type byte (reputation-update, stake-slash).
+    #[arg(long)]
+    pub event_type: Option<u8>,
+
+    /// Reputation points delta (reputation-update, stake-slash).
+    #[arg(long, allow_hyphen_values = true)]
+    pub points_delta: Option<i16>,
+
+    /// Hex-encoded 32-byte seller entity ID (signal-purchase).
+    #[arg(long)]
+    pub seller_entity_id: Option<String>,
+
+    /// Purchased signal type byte (signal-purchase).
+    #[arg(long)]
+    pub purchased_signal_type: Option<u8>,
+
+    /// Maximum purchase price (signal-purchase).
+    #[arg(long)]
+    pub max_price: Option<u64>,
+
+    /// Stake deposit amount (stake-deposit).
+    #[arg(long)]
+    pub stake_amount: Option<u128>,
+
+    /// Stake withdrawal amount (stake-withdraw).
+    #[arg(long)]
+    pub withdraw_amount: Option<u128>,
+
+    /// Slash amount (stake-slash).
+    #[arg(long)]
+    pub slash_amount: Option<u128>,
+
+    /// Index of the failed dependency (composition-check).
+    #[arg(long)]
+    pub failed_dependency_idx: Option<u8>,
+
+    /// Failure reason byte (composition-check).
+    #[arg(long)]
+    pub failure_reason: Option<u8>,
+
+    /// Proof type byte (proof-submission).
+    #[arg(long)]
+    pub proof_type: Option<u8>,
+
+    /// Hex-encoded 32-byte code hash (proof-submission).
+    #[arg(long)]
+    pub code_hash: Option<String>,
+
+    /// Hex-encoded 32-byte computation hash (proof-submission).
+    #[arg(long)]
+    pub computation_hash: Option<String>,
+}
 
 /// Parse signal type string.
 fn parse_signal_type(s: &str) -> Result<AiSignalType, String> {
@@ -15,13 +80,162 @@ fn parse_signal_type(s: &str) -> Result<AiSignalType, String> {
         "audit-report" => Ok(AiSignalType::AuditReport),
         "spam-risk" => Ok(AiSignalType::SpamRisk),
         "congestion-forecast" => Ok(AiSignalType::CongestionForecast),
+        "reputation-update" => Ok(AiSignalType::ReputationUpdate),
+        "signal-purchase" => Ok(AiSignalType::SignalPurchase),
+        "stake-deposit" => Ok(AiSignalType::StakeDeposit),
+        "stake-withdraw" => Ok(AiSignalType::StakeWithdraw),
+        "stake-slash" => Ok(AiSignalType::StakeSlash),
+        "composition-check" => Ok(AiSignalType::CompositionCheck),
+        "proof-submission" => Ok(AiSignalType::ProofSubmission),
         _ => Err(format!(
-            "Unknown signal type '{s}'. Valid: anomaly, optimization, prediction, risk-score, audit-report, spam-risk, congestion-forecast"
+            "Unknown signal type '{s}'. Valid: anomaly, optimization, prediction, risk-score, audit-report, spam-risk, congestion-forecast, reputation-update, signal-purchase, stake-deposit, stake-withdraw, stake-slash, composition-check, proof-submission"
         )),
     }
 }
 
-/// Publish a signal commitment (payload type 2, 66 bytes).
+fn require_str<'a>(
+    value: &'a Option<String>,
+    flag: &str,
+    sig_type: &str,
+) -> Result<&'a str, String> {
+    value
+        .as_deref()
+        .ok_or_else(|| format!("{flag} is required for signal type {sig_type}"))
+}
+
+fn require_some<T>(value: Option<T>, flag: &str, sig_type: &str) -> Result<T, String> {
+    value.ok_or_else(|| format!("{flag} is required for signal type {sig_type}"))
+}
+
+/// Build the signal commitment payload bytes.
+///
+/// Layout: `[2][signal_hash:32][signal_type:1][issuer_entity_id:32]` (66 bytes)
+/// optionally followed by a type-specific tail for signal types 7-13.
+fn build_signal_payload(
+    signal_hash: [u8; 32],
+    signal_type: AiSignalType,
+    issuer_entity_id: [u8; 32],
+    extra: &ExtendedSignalArgs,
+) -> Result<Vec<u8>, String> {
+    let mut payload = Vec::with_capacity(131);
+    payload.push(2);
+    payload.extend_from_slice(&signal_hash);
+    payload.push(signal_type.to_byte());
+    payload.extend_from_slice(&issuer_entity_id);
+
+    match signal_type {
+        AiSignalType::Anomaly
+        | AiSignalType::Optimization
+        | AiSignalType::Prediction
+        | AiSignalType::RiskScore
+        | AiSignalType::AuditReport
+        | AiSignalType::SpamRisk
+        | AiSignalType::CongestionForecast => {}
+        AiSignalType::ReputationUpdate => {
+            let target = parse_hex32(
+                require_str(
+                    &extra.target_entity_id,
+                    "--target-entity-id",
+                    "reputation-update",
+                )?,
+                "target_entity_id",
+            )?;
+            let event_type = require_some(extra.event_type, "--event-type", "reputation-update")?;
+            let points_delta =
+                require_some(extra.points_delta, "--points-delta", "reputation-update")?;
+            payload.extend_from_slice(&target);
+            payload.push(event_type);
+            payload.extend_from_slice(&points_delta.to_be_bytes());
+        }
+        AiSignalType::SignalPurchase => {
+            let seller = parse_hex32(
+                require_str(
+                    &extra.seller_entity_id,
+                    "--seller-entity-id",
+                    "signal-purchase",
+                )?,
+                "seller_entity_id",
+            )?;
+            let purchased = require_some(
+                extra.purchased_signal_type,
+                "--purchased-signal-type",
+                "signal-purchase",
+            )?;
+            let max_price = require_some(extra.max_price, "--max-price", "signal-purchase")?;
+            payload.extend_from_slice(&seller);
+            payload.push(purchased);
+            payload.extend_from_slice(&max_price.to_be_bytes());
+        }
+        AiSignalType::StakeDeposit => {
+            let amount = require_some(extra.stake_amount, "--stake-amount", "stake-deposit")?;
+            payload.extend_from_slice(&amount.to_be_bytes());
+        }
+        AiSignalType::StakeWithdraw => {
+            let amount =
+                require_some(extra.withdraw_amount, "--withdraw-amount", "stake-withdraw")?;
+            payload.extend_from_slice(&amount.to_be_bytes());
+        }
+        AiSignalType::StakeSlash => {
+            let target = parse_hex32(
+                require_str(&extra.target_entity_id, "--target-entity-id", "stake-slash")?,
+                "target_entity_id",
+            )?;
+            let slash_amount = require_some(extra.slash_amount, "--slash-amount", "stake-slash")?;
+            let event_type = require_some(extra.event_type, "--event-type", "stake-slash")?;
+            let points_delta = require_some(extra.points_delta, "--points-delta", "stake-slash")?;
+            payload.extend_from_slice(&target);
+            payload.extend_from_slice(&slash_amount.to_be_bytes());
+            payload.push(event_type);
+            payload.extend_from_slice(&points_delta.to_be_bytes());
+        }
+        AiSignalType::CompositionCheck => {
+            let target = parse_hex32(
+                require_str(
+                    &extra.target_entity_id,
+                    "--target-entity-id",
+                    "composition-check",
+                )?,
+                "target_entity_id",
+            )?;
+            let failed_idx = require_some(
+                extra.failed_dependency_idx,
+                "--failed-dependency-idx",
+                "composition-check",
+            )?;
+            let reason = require_some(
+                extra.failure_reason,
+                "--failure-reason",
+                "composition-check",
+            )?;
+            payload.extend_from_slice(&target);
+            payload.push(failed_idx);
+            payload.push(reason);
+        }
+        AiSignalType::ProofSubmission => {
+            let proof_type = require_some(extra.proof_type, "--proof-type", "proof-submission")?;
+            let code = parse_hex32(
+                require_str(&extra.code_hash, "--code-hash", "proof-submission")?,
+                "code_hash",
+            )?;
+            let computation = parse_hex32(
+                require_str(
+                    &extra.computation_hash,
+                    "--computation-hash",
+                    "proof-submission",
+                )?,
+                "computation_hash",
+            )?;
+            payload.push(proof_type);
+            payload.extend_from_slice(&code);
+            payload.extend_from_slice(&computation);
+        }
+    }
+
+    Ok(payload)
+}
+
+/// Publish a signal commitment (payload type 2). Total payload length depends
+/// on signal type: 66 bytes for types 0-6, larger for types 7-13.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_publish(
     rpc: &RpcClient,
@@ -30,18 +244,14 @@ pub async fn run_publish(
     signal_type_str: &str,
     issuer_entity_id_hex: &str,
     fee: u64,
+    extra: &ExtendedSignalArgs,
     json: bool,
 ) -> Result<(), String> {
     let signal_hash = parse_hex32(signal_hash_hex, "signal_hash")?;
     let signal_type = parse_signal_type(signal_type_str)?;
     let issuer_entity_id = parse_hex32(issuer_entity_id_hex, "issuer_entity_id")?;
 
-    // Build payload: [2][signal_hash:32][signal_type:1][issuer_entity_id:32]
-    let mut payload = Vec::with_capacity(66);
-    payload.push(2);
-    payload.extend_from_slice(&signal_hash);
-    payload.push(signal_type.to_byte());
-    payload.extend_from_slice(&issuer_entity_id);
+    let payload = build_signal_payload(signal_hash, signal_type, issuer_entity_id, extra)?;
 
     let txid = sign_and_submit(rpc, key_file, payload, fee).await?;
 
@@ -128,4 +338,86 @@ pub async fn run_by_type(
         .await?;
     print_signals(&signals, json);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn full_extra() -> ExtendedSignalArgs {
+        ExtendedSignalArgs {
+            target_entity_id: Some("00".repeat(32)),
+            event_type: Some(0),
+            points_delta: Some(0),
+            seller_entity_id: Some("00".repeat(32)),
+            purchased_signal_type: Some(0),
+            max_price: Some(0),
+            stake_amount: Some(0),
+            withdraw_amount: Some(0),
+            slash_amount: Some(0),
+            failed_dependency_idx: Some(0),
+            failure_reason: Some(0),
+            proof_type: Some(0),
+            code_hash: Some("00".repeat(32)),
+            computation_hash: Some("00".repeat(32)),
+        }
+    }
+
+    #[test]
+    fn test_signal_payload_lengths_for_all_14_types() {
+        let extra = full_extra();
+        for (sig_type, expected_len) in [
+            (AiSignalType::Anomaly, 66),
+            (AiSignalType::Optimization, 66),
+            (AiSignalType::Prediction, 66),
+            (AiSignalType::RiskScore, 66),
+            (AiSignalType::AuditReport, 66),
+            (AiSignalType::SpamRisk, 66),
+            (AiSignalType::CongestionForecast, 66),
+            (AiSignalType::ReputationUpdate, 101),
+            (AiSignalType::SignalPurchase, 107),
+            (AiSignalType::StakeDeposit, 82),
+            (AiSignalType::StakeWithdraw, 82),
+            (AiSignalType::StakeSlash, 117),
+            (AiSignalType::CompositionCheck, 100),
+            (AiSignalType::ProofSubmission, 131),
+        ] {
+            let payload = build_signal_payload([0u8; 32], sig_type, [0u8; 32], &extra).unwrap();
+            assert_eq!(payload.len(), expected_len, "wrong length for {sig_type:?}");
+        }
+    }
+
+    #[test]
+    fn test_parse_signal_type_accepts_all_14_strings() {
+        let cases = [
+            ("anomaly", AiSignalType::Anomaly),
+            ("optimization", AiSignalType::Optimization),
+            ("prediction", AiSignalType::Prediction),
+            ("risk-score", AiSignalType::RiskScore),
+            ("audit-report", AiSignalType::AuditReport),
+            ("spam-risk", AiSignalType::SpamRisk),
+            ("congestion-forecast", AiSignalType::CongestionForecast),
+            ("reputation-update", AiSignalType::ReputationUpdate),
+            ("signal-purchase", AiSignalType::SignalPurchase),
+            ("stake-deposit", AiSignalType::StakeDeposit),
+            ("stake-withdraw", AiSignalType::StakeWithdraw),
+            ("stake-slash", AiSignalType::StakeSlash),
+            ("composition-check", AiSignalType::CompositionCheck),
+            ("proof-submission", AiSignalType::ProofSubmission),
+        ];
+        for (s, expected) in cases {
+            assert_eq!(parse_signal_type(s).unwrap(), expected, "for input '{s}'");
+        }
+    }
+
+    #[test]
+    fn test_missing_required_flag_returns_clear_error() {
+        let mut extra = full_extra();
+        extra.target_entity_id = None;
+        let err =
+            build_signal_payload([0u8; 32], AiSignalType::ReputationUpdate, [0u8; 32], &extra)
+                .unwrap_err();
+        assert!(err.contains("--target-entity-id"), "err = {err}");
+        assert!(err.contains("reputation-update"), "err = {err}");
+    }
 }
