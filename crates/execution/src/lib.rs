@@ -2433,13 +2433,19 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         return Err(ExecError::AiKillSwitchActive);
     }
 
-    // Decode payload (validates signal_type is 0-6)
+    // Decode payload (validates signal_type, failure_reason, proof_type)
     let payload = decode_signal_commitment_payload_v1(&tx.payload).map_err(|e| match e {
         ExecError::BadPayloadLength { expected, got } => {
             ExecError::BadPayloadLength { expected, got }
         }
         ExecError::BadPayloadVersion { expected, got } => {
             ExecError::BadPayloadVersion { expected, got }
+        }
+        ExecError::InvalidCompositionFailureReason { byte } => {
+            ExecError::InvalidCompositionFailureReason { byte }
+        }
+        ExecError::UnsupportedProofType { proof_type } => {
+            ExecError::UnsupportedProofType { proof_type }
         }
         _ => ExecError::Overflow,
     })?;
