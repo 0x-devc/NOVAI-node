@@ -171,6 +171,30 @@ pub enum ExecError<E> {
     InvalidReputationEventType {
         byte: u8,
     },
+    /// Signal purchase referenced a seller that does not exist in state.
+    SellerEntityNotFound,
+    /// Signal purchase referenced a seller whose entity is deactivated.
+    SellerEntityNotActive,
+    /// Signal purchase target seller has no `SignalCatalog` memory object.
+    SignalCatalogNotFound,
+    /// Signal purchase asked for a `signal_type` not listed in the catalog.
+    SignalOfferingNotFound {
+        signal_type: u8,
+    },
+    /// Catalog offering exists but is currently inactive.
+    SignalOfferingInactive,
+    /// Catalog price exceeds the buyer-supplied price ceiling.
+    PriceExceedsMaxPrice {
+        offered: u64,
+        max: u64,
+    },
+    /// Buyer's entity balance is insufficient to cover price + service fee.
+    InsufficientEntityBalance {
+        required: u128,
+        available: u128,
+    },
+    /// Buyer and seller are the same entity (self-purchase prohibited).
+    SellerIsBuyer,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
