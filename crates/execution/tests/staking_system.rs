@@ -99,6 +99,7 @@ fn build_stake_deposit_payload(issuer: [u8; 32], amount: u128) -> Vec<u8> {
         stake_withdraw: None,
         stake_slash: None,
         composition_check: None,
+        proof_submission: None,
     })
 }
 
@@ -113,6 +114,7 @@ fn build_stake_withdraw_payload(issuer: [u8; 32], amount: u128) -> Vec<u8> {
         stake_withdraw: Some(StakeWithdrawExtraV1 { amount }),
         stake_slash: None,
         composition_check: None,
+        proof_submission: None,
     })
 }
 
@@ -138,6 +140,7 @@ fn build_stake_slash_payload(
             points_delta,
         }),
         composition_check: None,
+        proof_submission: None,
     })
 }
 
@@ -609,6 +612,7 @@ fn entity_with_zero_stake_can_still_operate() {
         stake_withdraw: None,
         stake_slash: None,
         composition_check: None,
+        proof_submission: None,
     });
     apply_signal_commitment_tx(
         &mut db,

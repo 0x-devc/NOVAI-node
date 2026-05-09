@@ -115,6 +115,7 @@ fn signal_publish_lands_via_dispatcher() {
         stake_withdraw: None,
         stake_slash: None,
         composition_check: None,
+        proof_submission: None,
     });
 
     let signal_tx = mk_tx(entity_addr, entity_pubkey, 0, 1_000, signal_payload);
@@ -274,6 +275,7 @@ fn signal_from_non_entity_address_returns_issuer_not_found() {
         stake_withdraw: None,
         stake_slash: None,
         composition_check: None,
+        proof_submission: None,
     });
 
     let tx = mk_tx(
@@ -316,6 +318,7 @@ fn signal_with_mismatched_payload_issuer_returns_mismatch() {
         stake_withdraw: None,
         stake_slash: None,
         composition_check: None,
+        proof_submission: None,
     });
 
     let tx = mk_tx(entity_addr, entity_pubkey, 0, 1_000, payload);

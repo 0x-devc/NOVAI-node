@@ -25,14 +25,14 @@ use novai_ai_entities::{
     MAX_COMPOSITION_DEPENDENCIES,
 };
 use novai_execution::{
-    apply_create_memory_object_tx, apply_signal_commitment_tx,
-    apply_update_memory_object_tx, encode_create_memory_object_payload_v1,
-    encode_signal_commitment_payload_v1, encode_update_memory_object_payload_v1,
-    read_ai_entity, write_ai_entity_op, CompositionCheckExtraV1, CreateMemoryObjectPayloadV1,
-    ExecError, SignalCommitmentPayloadV1, UpdateMemoryObjectPayloadV1,
-    COMPOSITION_FAILURE_REPUTATION_BELOW_MIN, COMPOSITION_FAILURE_SOURCE_INACTIVE,
-    COMPOSITION_FAILURE_SOURCE_NOT_FOUND, COMPOSITION_FAILURE_STAKE_BELOW_MIN,
-    REP_EVENT_COMPOSITION_FAILURE, SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN,
+    apply_create_memory_object_tx, apply_signal_commitment_tx, apply_update_memory_object_tx,
+    encode_create_memory_object_payload_v1, encode_signal_commitment_payload_v1,
+    encode_update_memory_object_payload_v1, read_ai_entity, write_ai_entity_op,
+    CompositionCheckExtraV1, CreateMemoryObjectPayloadV1, ExecError, SignalCommitmentPayloadV1,
+    UpdateMemoryObjectPayloadV1, COMPOSITION_FAILURE_REPUTATION_BELOW_MIN,
+    COMPOSITION_FAILURE_SOURCE_INACTIVE, COMPOSITION_FAILURE_SOURCE_NOT_FOUND,
+    COMPOSITION_FAILURE_STAKE_BELOW_MIN, REP_EVENT_COMPOSITION_FAILURE,
+    SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN,
 };
 use novai_state::{
     ai_entity_by_address_key, ai_memory_by_type_key, ai_memory_object_key, Kv, KvBatch, MemKv,
@@ -194,6 +194,7 @@ fn build_composition_check_payload(
             failed_dependency_idx,
             failure_reason,
         }),
+        proof_submission: None,
     })
 }
 
@@ -272,8 +273,7 @@ fn composition_graph_max_10_dependencies() {
     assert_eq!(graph.encode().len(), 441);
 
     let tx = make_tx(target.id, 0, CREATE_FEE, build_create_graph_payload(&graph));
-    apply_create_memory_object_tx(&mut db, &tx, HEIGHT)
-        .expect("max-capacity graph accepted");
+    apply_create_memory_object_tx(&mut db, &tx, HEIGHT).expect("max-capacity graph accepted");
 }
 
 #[test]
@@ -301,7 +301,12 @@ fn composition_graph_update_rejects_self_dependency() {
     let clean_graph = CompositionGraphData {
         dependencies: vec![sample_dep(source.id, 2, 0, 0, true)],
     };
-    let create_tx = make_tx(target.id, 0, CREATE_FEE, build_create_graph_payload(&clean_graph));
+    let create_tx = make_tx(
+        target.id,
+        0,
+        CREATE_FEE,
+        build_create_graph_payload(&clean_graph),
+    );
     let object_id =
         apply_create_memory_object_tx(&mut db, &create_tx, HEIGHT).expect("clean create");
 
@@ -451,7 +456,10 @@ fn composition_check_does_not_pause_optional_dependency() {
         .expect("optional-dep check verified");
 
     let target_after = read_ai_entity(&db, &target.id).unwrap().unwrap();
-    assert!(target_after.is_active, "optional-dep failure must NOT pause");
+    assert!(
+        target_after.is_active,
+        "optional-dep failure must NOT pause"
+    );
     assert_eq!(
         target_after.reputation_events_count, 1,
         "rep event still fires for optional-dep failures"
@@ -481,12 +489,9 @@ fn composition_check_rejected_failure_not_verified() {
         0,
         COMPOSITION_FAILURE_SOURCE_INACTIVE,
     );
-    let err = apply_signal_commitment_tx(
-        &mut db,
-        &make_tx(oracle.id, 0, SIGNAL_FEE, payload),
-        HEIGHT,
-    )
-    .expect_err("must reject false claim");
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(oracle.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("must reject false claim");
     assert!(
         matches!(err, ExecError::DependencyFailureNotVerified),
         "got {err:?}"
@@ -545,12 +550,9 @@ fn composition_check_rejected_graph_not_found() {
         0,
         COMPOSITION_FAILURE_SOURCE_INACTIVE,
     );
-    let err = apply_signal_commitment_tx(
-        &mut db,
-        &make_tx(oracle.id, 0, SIGNAL_FEE, payload),
-        HEIGHT,
-    )
-    .expect_err("must reject when no graph exists");
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(oracle.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("must reject when no graph exists");
     assert!(
         matches!(err, ExecError::CompositionGraphNotFound),
         "got {err:?}"
@@ -576,12 +578,9 @@ fn composition_check_rejected_invalid_dependency_index() {
         5,
         COMPOSITION_FAILURE_SOURCE_INACTIVE,
     );
-    let err = apply_signal_commitment_tx(
-        &mut db,
-        &make_tx(oracle.id, 0, SIGNAL_FEE, payload),
-        HEIGHT,
-    )
-    .expect_err("invalid index must reject");
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(oracle.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("invalid index must reject");
     assert!(
         matches!(err, ExecError::InvalidDependencyIndex { index: 5, max: 1 }),
         "got {err:?}"
@@ -600,12 +599,9 @@ fn composition_check_rejects_self_target() {
         0,
         COMPOSITION_FAILURE_SOURCE_INACTIVE,
     );
-    let err = apply_signal_commitment_tx(
-        &mut db,
-        &make_tx(oracle.id, 0, SIGNAL_FEE, payload),
-        HEIGHT,
-    )
-    .expect_err("self-check must reject");
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(oracle.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("self-check must reject");
     assert!(
         matches!(err, ExecError::SelfCompositionCheck),
         "got {err:?}"
@@ -713,13 +709,10 @@ fn non_composition_signals_still_work() {
         stake_withdraw: None,
         stake_slash: None,
         composition_check: None,
+        proof_submission: None,
     });
-    apply_signal_commitment_tx(
-        &mut db,
-        &make_tx(issuer.id, 0, SIGNAL_FEE, anomaly),
-        HEIGHT,
-    )
-    .expect("base anomaly still applies; CompositionCheck doesn't break it");
+    apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, anomaly), HEIGHT)
+        .expect("base anomaly still applies; CompositionCheck doesn't break it");
 
     let after = read_ai_entity(&db, &issuer.id).unwrap().unwrap();
     assert_eq!(after.reputation_events_count, 0);
@@ -741,7 +734,10 @@ fn golden_vector_composition_check_payload_100_bytes() {
     );
 
     assert_eq!(payload.len(), 100);
-    assert_eq!(payload.len(), SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN);
+    assert_eq!(
+        payload.len(),
+        SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN
+    );
 
     // Frozen field offsets — moving any of these is a wire-format break.
     assert_eq!(payload[0], 2, "version byte");
@@ -756,8 +752,7 @@ fn golden_vector_composition_check_payload_100_bytes() {
     assert_eq!(&payload[66..98], &target, "target_entity_id at 66..98");
     assert_eq!(payload[98], 7, "failed_dependency_idx at 98");
     assert_eq!(
-        payload[99],
-        COMPOSITION_FAILURE_REPUTATION_BELOW_MIN,
+        payload[99], COMPOSITION_FAILURE_REPUTATION_BELOW_MIN,
         "failure_reason at 99"
     );
 }

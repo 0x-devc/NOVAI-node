@@ -230,6 +230,11 @@ pub enum ExecError<E> {
     SelfDependency,
     /// `CompositionCheck` issuer attempted to check itself (prohibited).
     SelfCompositionCheck,
+    /// `ProofSubmission` payload carries a `proof_type` byte above
+    /// `PROOF_TYPE_MAX` (only the stub verifier is accepted in v1).
+    UnsupportedProofType {
+        proof_type: u8,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -335,6 +340,19 @@ pub const COMPOSITION_CHECK_EXTRA_LEN: usize = 34;
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + COMPOSITION_CHECK_EXTRA_LEN;
 
+/// Inline-extra size for a `ProofSubmission` signal payload.
+/// `proof_type:1 | code_hash:32 | computation_hash:32`
+///
+/// Note: the proof bytes themselves are NOT carried inline (the
+/// `SignalCommitment` tail is fixed-size). When a real ZK verifier replaces
+/// the stub, proof bytes will be resolved off-chain via the artifact
+/// referenced by `signal_hash`.
+pub const PROOF_SUBMISSION_EXTRA_LEN: usize = 1 + 32 + 32;
+
+/// Total size of a `ProofSubmission` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + PROOF_SUBMISSION_EXTRA_LEN;
+
 /// Block-count duration that newly deposited stake is locked for.
 /// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
 pub const STAKE_LOCK_PERIOD: u64 = 1000;
@@ -361,8 +379,18 @@ pub const REP_EVENT_STAKE_SLASH: u8 = 6;
 /// Composition dependency failure detected; oracle is auto-pausing the target
 /// owner of a `CompositionGraph` whose required dependency has failed.
 pub const REP_EVENT_COMPOSITION_FAILURE: u8 = 7;
+/// ZK proof verified successfully by the `ProofSubmission` signal handler.
+/// Applied to the issuing entity with delta +3.
+pub const REP_EVENT_PROOF_VERIFIED: u8 = 8;
+/// ZK proof verification failed (reserved).
+///
+/// Currently unreachable: the v1 handler rejects the transaction with
+/// `ProofVerificationFailed` instead of recording an on-chain failure
+/// event. Defined here for forward compatibility with a future
+/// "record + slash" failure path.
+pub const REP_EVENT_PROOF_FAILED: u8 = 9;
 /// Maximum valid reputation `event_type` discriminant.
-pub const REP_EVENT_MAX: u8 = REP_EVENT_COMPOSITION_FAILURE;
+pub const REP_EVENT_MAX: u8 = REP_EVENT_PROOF_FAILED;
 
 // CompositionCheck failure_reason discriminants (carried inline in the
 // signal payload). The handler verifies the reported reason against the
@@ -380,6 +408,22 @@ pub const COMPOSITION_FAILURE_STAKE_BELOW_MIN: u8 = 2;
 pub const COMPOSITION_FAILURE_SOURCE_NOT_FOUND: u8 = 3;
 /// Maximum valid `failure_reason` discriminant.
 pub const COMPOSITION_FAILURE_REASON_MAX: u8 = COMPOSITION_FAILURE_SOURCE_NOT_FOUND;
+
+// ProofSubmission proof_type discriminants (carried inline in the
+// `ProofSubmission` signal payload). The handler rejects any value above
+// `PROOF_TYPE_MAX` with `UnsupportedProofType`. In v1 only the stub
+// verifier is wired in, so only `PROOF_TYPE_STUB` is accepted; the
+// reserved discriminants are kept for forward-compat with future ZK
+// libraries.
+/// Stub verifier (v1, accepts everything — NOT for production).
+pub const PROOF_TYPE_STUB: u8 = 0;
+/// Reserved for a future Groth16 verifier integration.
+pub const PROOF_TYPE_GROTH16: u8 = 1;
+/// Reserved for a future PLONK verifier integration.
+pub const PROOF_TYPE_PLONK: u8 = 2;
+/// Maximum `proof_type` discriminant accepted by the v1 handler. Bumping
+/// this value is the gate for activating a real verifier.
+pub const PROOF_TYPE_MAX: u8 = PROOF_TYPE_STUB;
 
 /// Inline reputation-update tail carried in `ReputationUpdate` signal payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,6 +516,26 @@ pub struct CompositionCheckExtraV1 {
     pub failure_reason: u8,
 }
 
+/// Inline proof-submission tail carried in `ProofSubmission` signal payloads.
+///
+/// Wire layout (65 bytes): `proof_type:1 | code_hash:32 | computation_hash:32`.
+/// The decoder validates `proof_type <= PROOF_TYPE_MAX` (only stub accepted
+/// in v1). `code_hash` is the AI module/weight hash the proof attests to;
+/// `computation_hash` identifies the specific computation context. Both
+/// are passed to the verifier as public inputs. The proof bytes themselves
+/// are NOT carried inline (the `SignalCommitment` tail is fixed-size); a
+/// future real verifier would resolve them via the off-chain artifact
+/// referenced by `signal_hash`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofSubmissionExtraV1 {
+    /// Discriminant identifying the proof system (see `PROOF_TYPE_*`).
+    pub proof_type: u8,
+    /// Hash of the AI module code/weights the proof attests to.
+    pub code_hash: [u8; 32],
+    /// Hash of the computation context (inputs/outputs) the proof asserts.
+    pub computation_hash: [u8; 32],
+}
+
 /// Canonical Signal Commitment payload (D14.1):
 /// - Base (signal types 0..=6): 66 bytes
 ///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
@@ -487,13 +551,15 @@ pub struct CompositionCheckExtraV1 {
 ///   `... [target_id:32][slash_amount_be:16][rep_event_type:1][points_delta_be:2]`
 /// - `CompositionCheck` (signal type 12): 100 bytes (base + 34-byte tail)
 ///   `... [target_id:32][failed_dependency_idx:1][failure_reason:1]`
+/// - `ProofSubmission` (signal type 13): 131 bytes (base + 65-byte tail)
+///   `... [proof_type:1][code_hash:32][computation_hash:32]`
 ///
 /// At most one tail is populated; the active tail is determined by `signal_type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalCommitmentPayloadV1 {
     /// Commitment hash of the full signal.
     pub signal_hash: [u8; 32],
-    /// Signal type (0..=12).
+    /// Signal type (0..=13).
     pub signal_type: novai_ai_entities::AiSignalType,
     /// AI entity ID that issued this signal.
     pub issuer_entity_id: [u8; 32],
@@ -510,6 +576,9 @@ pub struct SignalCommitmentPayloadV1 {
     /// Inline composition-check tail. MUST be `Some` iff
     /// `signal_type == CompositionCheck`.
     pub composition_check: Option<CompositionCheckExtraV1>,
+    /// Inline proof-submission tail. MUST be `Some` iff
+    /// `signal_type == ProofSubmission`.
+    pub proof_submission: Option<ProofSubmissionExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
@@ -527,8 +596,8 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
     let is_stake_deposit = p.signal_type == novai_ai_entities::AiSignalType::StakeDeposit;
     let is_stake_withdraw = p.signal_type == novai_ai_entities::AiSignalType::StakeWithdraw;
     let is_stake_slash = p.signal_type == novai_ai_entities::AiSignalType::StakeSlash;
-    let is_composition_check =
-        p.signal_type == novai_ai_entities::AiSignalType::CompositionCheck;
+    let is_composition_check = p.signal_type == novai_ai_entities::AiSignalType::CompositionCheck;
+    let is_proof_submission = p.signal_type == novai_ai_entities::AiSignalType::ProofSubmission;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
@@ -559,6 +628,11 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.composition_check.is_some(),
         "composition_check tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_proof_submission,
+        p.proof_submission.is_some(),
+        "proof_submission tail presence must match signal_type"
+    );
     debug_assert!(
         u8::from(is_reputation)
             + u8::from(is_purchase)
@@ -566,6 +640,7 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             + u8::from(is_stake_withdraw)
             + u8::from(is_stake_slash)
             + u8::from(is_composition_check)
+            + u8::from(is_proof_submission)
             <= 1,
         "tails are mutually exclusive"
     );
@@ -582,6 +657,8 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN
     } else if is_composition_check {
         SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN
+    } else if is_proof_submission {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -642,6 +719,15 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; COMPOSITION_CHECK_EXTRA_LEN]);
         }
+    } else if is_proof_submission {
+        if let Some(extra) = &p.proof_submission {
+            out.push(extra.proof_type);
+            out.extend_from_slice(&extra.code_hash);
+            out.extend_from_slice(&extra.computation_hash);
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; PROOF_SUBMISSION_EXTRA_LEN]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -668,6 +754,7 @@ pub fn decode_signal_commitment_payload_v1(
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_WITHDRAW_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN
+        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN
     {
         return Err(ExecError::BadPayloadLength {
             expected: SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN,
@@ -687,7 +774,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 12, // max valid signal type
+            expected: 13, // max valid signal type
             got: payload[33],
         },
     )?;
@@ -700,9 +787,17 @@ pub fn decode_signal_commitment_payload_v1(
     let is_stake_deposit = signal_type == novai_ai_entities::AiSignalType::StakeDeposit;
     let is_stake_withdraw = signal_type == novai_ai_entities::AiSignalType::StakeWithdraw;
     let is_stake_slash = signal_type == novai_ai_entities::AiSignalType::StakeSlash;
-    let is_composition_check =
-        signal_type == novai_ai_entities::AiSignalType::CompositionCheck;
-    let (reputation, purchase, stake_deposit, stake_withdraw, stake_slash, composition_check) = if is_reputation {
+    let is_composition_check = signal_type == novai_ai_entities::AiSignalType::CompositionCheck;
+    let is_proof_submission = signal_type == novai_ai_entities::AiSignalType::ProofSubmission;
+    let (
+        reputation,
+        purchase,
+        stake_deposit,
+        stake_withdraw,
+        stake_slash,
+        composition_check,
+        proof_submission,
+    ) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
                 expected: SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN,
@@ -719,6 +814,7 @@ pub fn decode_signal_commitment_payload_v1(
                 event_type,
                 points_delta,
             }),
+            None,
             None,
             None,
             None,
@@ -756,6 +852,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_stake_deposit {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN {
@@ -771,6 +868,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeDepositExtraV1 { amount }),
+            None,
             None,
             None,
             None,
@@ -790,6 +888,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeWithdrawExtraV1 { amount }),
+            None,
             None,
             None,
         )
@@ -819,6 +918,7 @@ pub fn decode_signal_commitment_payload_v1(
                 points_delta,
             }),
             None,
+            None,
         )
     } else if is_composition_check {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN {
@@ -847,6 +947,35 @@ pub fn decode_signal_commitment_payload_v1(
                 failed_dependency_idx,
                 failure_reason,
             }),
+            None,
+        )
+    } else if is_proof_submission {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN,
+                got: payload.len(),
+            });
+        }
+        let proof_type = payload[66];
+        if proof_type > PROOF_TYPE_MAX {
+            return Err(ExecError::UnsupportedProofType { proof_type });
+        }
+        let mut code_hash = [0u8; 32];
+        code_hash.copy_from_slice(&payload[67..99]);
+        let mut computation_hash = [0u8; 32];
+        computation_hash.copy_from_slice(&payload[99..131]);
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(ProofSubmissionExtraV1 {
+                proof_type,
+                code_hash,
+                computation_hash,
+            }),
         )
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
@@ -855,7 +984,7 @@ pub fn decode_signal_commitment_payload_v1(
                 got: payload.len(),
             });
         }
-        (None, None, None, None, None, None)
+        (None, None, None, None, None, None, None)
     };
 
     Ok(SignalCommitmentPayloadV1 {
@@ -868,6 +997,7 @@ pub fn decode_signal_commitment_payload_v1(
         stake_withdraw,
         stake_slash,
         composition_check,
+        proof_submission,
     })
 }
 
@@ -3489,11 +3619,7 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
     // Per-type structural validation on the NEW payload bytes.
     // CompositionGraph rejects self-dependencies even when introduced via
     // update, not just at create time.
-    validate_composition_graph_payload(
-        memory_object.object_type,
-        &payload.new_data,
-        &entity.id,
-    )?;
+    validate_composition_graph_payload(memory_object.object_type, &payload.new_data, &entity.id)?;
 
     // Update memory object
     memory_object.data = payload.new_data;

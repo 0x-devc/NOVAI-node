@@ -113,6 +113,7 @@ fn create_signal_payload(issuer: [u8; 32]) -> Vec<u8> {
         stake_withdraw: None,
         stake_slash: None,
         composition_check: None,
+        proof_submission: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }

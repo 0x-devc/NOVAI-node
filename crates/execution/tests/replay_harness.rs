@@ -110,6 +110,7 @@ fn mk_signal_commitment(
         stake_withdraw: None,
         stake_slash: None,
         composition_check: None,
+        proof_submission: None,
     });
     TxV1 {
         version: TxVersion::V1,
