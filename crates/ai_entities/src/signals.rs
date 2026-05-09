@@ -29,6 +29,10 @@ pub enum AiSignalType {
     /// to its `stake_balance`. Locks the deposited amount until
     /// `current_height + STAKE_LOCK_PERIOD`. Carries a 16-byte amount tail.
     StakeDeposit = 9,
+    /// Stake-withdraw signal moving funds from the issuer's `stake_balance`
+    /// back to its `economic_balance`. Rejected unless
+    /// `stake_locked_until <= current_height`. Carries a 16-byte amount tail.
+    StakeWithdraw = 10,
 }
 
 impl AiSignalType {
@@ -50,6 +54,7 @@ impl AiSignalType {
             7 => Some(AiSignalType::ReputationUpdate),
             8 => Some(AiSignalType::SignalPurchase),
             9 => Some(AiSignalType::StakeDeposit),
+            10 => Some(AiSignalType::StakeWithdraw),
             _ => None,
         }
     }

@@ -549,6 +549,7 @@ fn register_then_signal() {
         reputation: None,
         purchase: None,
         stake_deposit: None,
+        stake_withdraw: None,
     });
 
     // Signal tx is from the entity itself (entity pays fee from its balance)

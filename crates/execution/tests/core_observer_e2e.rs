@@ -58,6 +58,7 @@ fn create_signal_payload(
         reputation: None,
         purchase: None,
         stake_deposit: None,
+        stake_withdraw: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }

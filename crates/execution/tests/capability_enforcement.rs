@@ -110,6 +110,7 @@ fn create_signal_payload(issuer: [u8; 32]) -> Vec<u8> {
         reputation: None,
         purchase: None,
         stake_deposit: None,
+        stake_withdraw: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }

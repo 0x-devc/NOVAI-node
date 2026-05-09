@@ -107,6 +107,7 @@ fn mk_signal_commitment(
         reputation: None,
         purchase: None,
         stake_deposit: None,
+        stake_withdraw: None,
     });
     TxV1 {
         version: TxVersion::V1,
