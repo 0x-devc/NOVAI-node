@@ -163,7 +163,9 @@ enum MemoryCommand {
         /// Path to entity's key file.
         #[arg(long)]
         key_file: String,
-        /// Memory object type: chain-summary, label-index, embedding-commitment, anomaly-log, statistics-snapshot.
+        /// Memory object type: chain-summary, label-index, embedding-commitment, anomaly-log,
+        /// statistics-snapshot, reputation-event, rating, signal-catalog, composition-graph,
+        /// verification-record.
         #[arg(long, name = "type")]
         object_type: String,
         /// Data as UTF-8 string (mutually exclusive with --data-file).

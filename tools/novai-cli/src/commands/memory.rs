@@ -13,8 +13,13 @@ fn parse_memory_type(s: &str) -> Result<MemoryObjectType, String> {
         "embedding-commitment" => Ok(MemoryObjectType::EmbeddingCommitment),
         "anomaly-log" => Ok(MemoryObjectType::AnomalyLog),
         "statistics-snapshot" => Ok(MemoryObjectType::StatisticsSnapshot),
+        "reputation-event" => Ok(MemoryObjectType::ReputationEvent),
+        "rating" => Ok(MemoryObjectType::Rating),
+        "signal-catalog" => Ok(MemoryObjectType::SignalCatalog),
+        "composition-graph" => Ok(MemoryObjectType::CompositionGraph),
+        "verification-record" => Ok(MemoryObjectType::VerificationRecord),
         _ => Err(format!(
-            "Unknown memory object type '{s}'. Valid: chain-summary, label-index, embedding-commitment, anomaly-log, statistics-snapshot"
+            "Unknown memory object type '{s}'. Valid: chain-summary, label-index, embedding-commitment, anomaly-log, statistics-snapshot, reputation-event, rating, signal-catalog, composition-graph, verification-record"
         )),
     }
 }
