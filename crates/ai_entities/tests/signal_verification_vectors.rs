@@ -513,12 +513,12 @@ fn verify_signal_type_encoding() {
 /// Verify signal type roundtrip from byte.
 #[test]
 fn verify_signal_type_roundtrip() {
-    for i in 0u8..=12 {
+    for i in 0u8..=13 {
         let signal_type = AiSignalType::from_byte(i).expect("valid type");
         assert_eq!(signal_type.to_byte(), i);
     }
 
     // Invalid bytes should return None
-    assert!(AiSignalType::from_byte(13).is_none());
+    assert!(AiSignalType::from_byte(14).is_none());
     assert!(AiSignalType::from_byte(255).is_none());
 }

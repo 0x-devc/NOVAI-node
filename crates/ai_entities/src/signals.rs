@@ -49,6 +49,16 @@ pub enum AiSignalType {
     /// Carries a 34-byte tail: target_id:32 | failed_dependency_idx:1 |
     /// failure_reason:1.
     CompositionCheck = 12,
+    /// AI entity submits a ZK proof attesting to off-chain computation
+    /// integrity. Carries a 65-byte tail: proof_type:1 | code_hash:32 |
+    /// computation_hash:32. The proof bytes themselves are NOT carried
+    /// inline (the SignalCommitment tail is fixed-size); a real verifier
+    /// would resolve them via the off-chain payload referenced by
+    /// `signal_hash`. The execution handler verifies the proof via the
+    /// `ZkVerifier` trait, and on success creates a `VerificationRecord`
+    /// memory object owned by the issuer plus a `REP_EVENT_PROOF_VERIFIED`
+    /// reputation event with delta +3.
+    ProofSubmission = 13,
 }
 
 impl AiSignalType {
@@ -73,6 +83,7 @@ impl AiSignalType {
             10 => Some(AiSignalType::StakeWithdraw),
             11 => Some(AiSignalType::StakeSlash),
             12 => Some(AiSignalType::CompositionCheck),
+            13 => Some(AiSignalType::ProofSubmission),
             _ => None,
         }
     }
@@ -164,10 +175,16 @@ mod tests {
         );
         assert_eq!(
             AiSignalType::from_byte(13),
+            Some(AiSignalType::ProofSubmission),
+            "13 must decode to ProofSubmission"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(14),
             None,
-            "13 must be rejected as unknown signal type"
+            "14 must be rejected as unknown signal type"
         );
         assert_eq!(AiSignalType::CompositionCheck.to_byte(), 12);
+        assert_eq!(AiSignalType::ProofSubmission.to_byte(), 13);
     }
 
     #[test]

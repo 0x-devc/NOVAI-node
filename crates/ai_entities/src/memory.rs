@@ -72,6 +72,11 @@ pub enum MemoryObjectType {
     /// `CompositionCheck` signals to verify dependency health and auto-pause
     /// the owner when a required dependency has failed.
     CompositionGraph = 8,
+    /// On-chain audit record of a verified ZK proof submission. Created by
+    /// the `ProofSubmission` signal handler when the verifier accepts a
+    /// proof. Fixed 105-byte payload: proof_type:1 | code_hash:32 |
+    /// computation_hash:32 | proof_hash:32 | height_be:8.
+    VerificationRecord = 9,
 }
 
 impl MemoryObjectType {
@@ -94,6 +99,7 @@ impl MemoryObjectType {
             6 => Some(Self::Rating),
             7 => Some(Self::SignalCatalog),
             8 => Some(Self::CompositionGraph),
+            9 => Some(Self::VerificationRecord),
             _ => None,
         }
     }
@@ -111,6 +117,7 @@ impl MemoryObjectType {
             Self::Rating => "Rating",
             Self::SignalCatalog => "SignalCatalog",
             Self::CompositionGraph => "CompositionGraph",
+            Self::VerificationRecord => "VerificationRecord",
         }
     }
 }
@@ -743,9 +750,8 @@ impl CompositionGraphData {
         let mut dependencies = Vec::with_capacity(count);
         for i in 0..count {
             let off = 1 + i * COMPOSITION_DEPENDENCY_SIZE;
-            let dep = CompositionDependency::decode(
-                &bytes[off..off + COMPOSITION_DEPENDENCY_SIZE],
-            )?;
+            let dep =
+                CompositionDependency::decode(&bytes[off..off + COMPOSITION_DEPENDENCY_SIZE])?;
             // Codec-level duplicate rejection: no two deps may share the same
             // (source_entity_id, required_signal_type) pair.
             for prev in &dependencies {
@@ -791,7 +797,7 @@ mod tests {
 
     #[test]
     fn memory_object_type_invalid_returns_none() {
-        assert!(MemoryObjectType::from_byte(9).is_none());
+        assert!(MemoryObjectType::from_byte(10).is_none());
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
 
@@ -1013,6 +1019,8 @@ mod tests {
             MemoryObjectType::ReputationEvent,
             MemoryObjectType::Rating,
             MemoryObjectType::SignalCatalog,
+            MemoryObjectType::CompositionGraph,
+            MemoryObjectType::VerificationRecord,
         ] {
             let obj = MemoryObject::new(owner, object_type, 1000, b"type test".to_vec());
             let encoded = encode_memory_object_v1(&obj);
@@ -1229,8 +1237,19 @@ mod tests {
             MemoryObjectType::from_byte(8),
             Some(MemoryObjectType::CompositionGraph)
         );
-        assert_eq!(MemoryObjectType::from_byte(9), None);
-        assert_eq!(MemoryObjectType::CompositionGraph.name(), "CompositionGraph");
+        assert_eq!(
+            MemoryObjectType::from_byte(9),
+            Some(MemoryObjectType::VerificationRecord)
+        );
+        assert_eq!(MemoryObjectType::from_byte(10), None);
+        assert_eq!(
+            MemoryObjectType::CompositionGraph.name(),
+            "CompositionGraph"
+        );
+        assert_eq!(
+            MemoryObjectType::VerificationRecord.name(),
+            "VerificationRecord"
+        );
     }
 
     #[test]
@@ -1247,7 +1266,11 @@ mod tests {
         assert_eq!(bytes.len(), 44);
         assert_eq!(&bytes[0..32], &[0xAAu8; 32], "source_entity_id at 0..32");
         assert_eq!(bytes[32], 2, "required_signal_type at 32");
-        assert_eq!(&bytes[33..35], &0x1234u16.to_be_bytes(), "min_reputation BE at 33..35");
+        assert_eq!(
+            &bytes[33..35],
+            &0x1234u16.to_be_bytes(),
+            "min_reputation BE at 33..35"
+        );
         assert_eq!(
             &bytes[35..43],
             &0x0102_0304_0506_0708u64.to_be_bytes(),
@@ -1307,7 +1330,9 @@ mod tests {
     #[test]
     fn composition_graph_data_single_entry_roundtrip() {
         let dep = sample_dep([0x12u8; 32], 3, true);
-        let g = CompositionGraphData { dependencies: vec![dep] };
+        let g = CompositionGraphData {
+            dependencies: vec![dep],
+        };
         let encoded = g.encode();
         assert_eq!(encoded.len(), 1 + COMPOSITION_DEPENDENCY_SIZE);
         let decoded = CompositionGraphData::decode(&encoded).expect("decode");
@@ -1344,7 +1369,8 @@ mod tests {
 
     #[test]
     fn composition_graph_data_decode_count_too_large() {
-        let mut bytes = vec![0u8; 1 + (MAX_COMPOSITION_DEPENDENCIES + 1) * COMPOSITION_DEPENDENCY_SIZE];
+        let mut bytes =
+            vec![0u8; 1 + (MAX_COMPOSITION_DEPENDENCIES + 1) * COMPOSITION_DEPENDENCY_SIZE];
         bytes[0] = (MAX_COMPOSITION_DEPENDENCIES + 1) as u8;
         assert!(CompositionGraphData::decode(&bytes).is_none());
     }
