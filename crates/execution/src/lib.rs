@@ -3256,6 +3256,34 @@ pub fn apply_create_memory_object_tx<K: KvBatch>(
 /// Storage keys (object key, type index, count) are derived from `entity.id`
 /// rather than `tx.from`, which equals `address_from_pubkey(entity.pubkey)` and
 /// would not match what `get_memory_objects_by_entity(entity_id)` reads.
+/// Validate a `CompositionGraph` payload against the owning entity.
+///
+/// Decodes the payload as `CompositionGraphData` and rejects any
+/// dependency whose `source_entity_id` equals the owner — entities cannot
+/// depend on themselves. Used by both create and update handlers so the
+/// invariant cannot be bypassed by creating a clean graph and then
+/// updating it to include a self-reference.
+///
+/// Returns `Ok(())` if `object_type != CompositionGraph` (no-op on
+/// non-composition types) or the graph passes validation.
+fn validate_composition_graph_payload<E>(
+    object_type: MemoryObjectType,
+    data: &[u8],
+    owner_id: &[u8; 32],
+) -> Result<(), ExecError<E>> {
+    if object_type != MemoryObjectType::CompositionGraph {
+        return Ok(());
+    }
+    let graph = CompositionGraphData::decode(data)
+        .ok_or_else(|| ExecError::CodecDecode("malformed CompositionGraph payload".into()))?;
+    for dep in &graph.dependencies {
+        if &dep.source_entity_id == owner_id {
+            return Err(ExecError::SelfDependency);
+        }
+    }
+    Ok(())
+}
+
 fn apply_create_memory_object_tx_inner<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -3286,6 +3314,10 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
             max: MAX_MEMORY_OBJECT_SIZE,
         });
     }
+
+    // Per-type structural validation. CompositionGraph rejects
+    // self-dependencies; other types are no-op.
+    validate_composition_graph_payload(payload.object_type, &payload.data, &entity.id)?;
 
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
@@ -3453,6 +3485,15 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
     if memory_object.owner_entity != entity.id {
         return Err(ExecError::MemoryObjectOwnerMismatch);
     }
+
+    // Per-type structural validation on the NEW payload bytes.
+    // CompositionGraph rejects self-dependencies even when introduced via
+    // update, not just at create time.
+    validate_composition_graph_payload(
+        memory_object.object_type,
+        &payload.new_data,
+        &entity.id,
+    )?;
 
     // Update memory object
     memory_object.data = payload.new_data;
