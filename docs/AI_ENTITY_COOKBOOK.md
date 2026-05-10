@@ -394,6 +394,98 @@ If the issuer's submission appears and `reputation_score` has bumped by `3`, the
 
 ---
 
+## Recipe 6: Subscribe to a Producer's Signal Stream
+
+This recipe shows how a consumer entity (the SUBSCRIBER) sets up a recurring payment to a producer entity in exchange for a fixed signal type, then how it cancels early to reclaim unused funds.
+
+### What you need
+- Two registered entities. The subscriber needs `economic_balance >= rate_per_block * duration_blocks`. Both need the `emit_proposals` capability (default for `Capabilities::gated()`).
+- The producer's 32-byte entity id.
+- A target `signal_type` byte for the producer signal the subscription pays for (informational; the runtime does not enforce that the producer actually publishes that type).
+
+### Step 1: Issue SubscriptionCreate (signal type 14)
+
+Wire layout for the 49-byte tail: `producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 | duration_blocks_be:8`. Total payload is 115 bytes.
+
+```bash
+novai-cli signal publish \
+  --key-file subscriber.key \
+  --signal-hash 00000000000000000000000000000000000000000000000000000000000000c1 \
+  --signal-type subscription-create \
+  --issuer-entity-id <subscriber_id> \
+  --producer-entity-id <producer_id> \
+  --covered-signal-type 2 \
+  --rate-per-block 10 \
+  --duration-blocks 10000 \
+  --fee 1000
+```
+
+This debits `rate_per_block * duration_blocks` (in this example, 100,000 base units) from the subscriber's `economic_balance` and creates a `MemoryObjectType::Subscription` (variant 11) memory object owned by the subscriber. The record fixes `start_height = current_height`, `end_height = start_height + duration_blocks`, and `last_settled_height = start_height`.
+
+`duration_blocks` must satisfy `>= MIN_SUBSCRIPTION_DURATION = 100`. Each subscriber may hold at most `MAX_SUBSCRIPTIONS_PER_ENTITY = 10` `Subscription` memory objects (active or cancelled); cancelled records still occupy a slot and must be reclaimed via `DELETE_MEMORY_OBJECT` to make room for new subscriptions. Subscriptions also count against the global `MAX_MEMORY_OBJECTS_PER_ENTITY = 100` cap.
+
+### Step 2: Confirm the lock
+
+```bash
+curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"novai_getMemoryObjects","params":{"entity_id":"<subscriber_id>"},"id":1}'
+```
+
+Look for a `Subscription` (object_type = 11) entry. The 114-byte data field decodes as `subscriber_entity_id:32 | producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 | start_height_be:8 | end_height_be:8 | last_settled_height_be:8 | total_locked_be:16 | is_active:1`. Capture its `object_id` for the cancel step.
+
+### Step 3: Cancel early (signal type 15) and settle
+
+The producer is paid lazily: no funds move at create time, and no funds move while the subscription runs. The first time settlement happens is when the subscriber issues `SubscriptionCancel`. Cancelling computes `accrued_blocks = min(current_height, end_height) - last_settled_height` and routes the funds in three pieces:
+
+1. Producer receives `accrued_blocks * rate_per_block`, less the standard 2% marketplace fee. The fee accrues to `KEY_MARKETPLACE_TREASURY` exactly as for `SignalPurchase`.
+2. On the unaccrued remainder (`total_locked - accrued_blocks * rate_per_block`), the producer is also paid a 5% cancel fee (`SUBSCRIPTION_CANCEL_FEE_BPS = 500`). This compensates the producer for early termination and is paid 100% to the producer with no marketplace cut.
+3. The subscriber is refunded the rest of the unaccrued remainder.
+
+```bash
+novai-cli signal publish \
+  --key-file subscriber.key \
+  --signal-hash 00000000000000000000000000000000000000000000000000000000000000c2 \
+  --signal-type subscription-cancel \
+  --issuer-entity-id <subscriber_id> \
+  --subscription-id <object_id_from_step_2> \
+  --fee 1000
+```
+
+The `Subscription` memory object is rewritten in place with `is_active = false` and `last_settled_height` advanced to `min(current_height, end_height)`. The `object_id` is stable across the rewrite (it was hashed at create time over the original data), so the same id keeps addressing the now-cancelled record.
+
+### Settlement worked example
+
+Take `rate_per_block = 10`, `duration_blocks = 10_000`, so `total_locked = 100_000`. Cancel after 1,000 of the 10,000 blocks have elapsed:
+
+| Quantity | Math | Result |
+|---|---|---|
+| `accrued_gross` | `1_000 * 10` | `10_000` |
+| `accrued_fee` (2% to treasury) | `10_000 * 200 / 10_000` | `200` |
+| `accrued_net` (to producer) | `10_000 - 200` | `9_800` |
+| `remaining` | `100_000 - 10_000` | `90_000` |
+| `cancel_fee` (5% to producer) | `90_000 * 500 / 10_000` | `4_500` |
+| `refund` (to subscriber) | `90_000 - 4_500` | `85_500` |
+| Producer credit | `9_800 + 4_500` | `14_300` |
+| Treasury credit | `200` | `200` |
+
+Cancelling at or after `end_height` settles the full duration with no refund and no cancel fee; the producer receives the full `accrued_net`.
+
+### Common errors
+- `SubscriptionInsufficientBalance`: subscriber's `economic_balance` does not cover `rate_per_block * duration_blocks`.
+- `SubscriptionDurationTooShort { required, given }`: `duration_blocks < MIN_SUBSCRIPTION_DURATION = 100`.
+- `SubscriptionLimitExceeded { current, max }`: subscriber holds 10 `Subscription` records already (active or cancelled). Reclaim slots with `DELETE_MEMORY_OBJECT`.
+- `SubscriptionProducerNotFound` / `SubscriptionProducerNotActive`: bad `--producer-entity-id`.
+- `SubscriptionSelfReferential`: subscriber id equals producer id.
+- `SubscriptionNotFound`: cancel issued by an entity other than the original subscriber, or `--subscription-id` does not match any record under the issuer.
+- `SubscriptionNotActive`: the referenced subscription has already been cancelled.
+- `SubscriptionRateOverflow`: forward-compat path; with v1's u64-bounded `rate_per_block` and `duration_blocks` the product cannot overflow `u128`. Surfaces only if either operand is widened.
+
+### Known v1 limitations
+- Only the original subscriber may cancel. If the subscriber abandons the subscription (never cancels), the producer cannot trigger settlement and forfeits the last unsettled blocks of payment.
+- Settlement is not triggered automatically by other signals from either party in v1; it happens exclusively at `SubscriptionCancel` time. A future revision may plumb settlement into a per-block tick or into every signal handler.
+
+---
+
 ## Where the SDK helpers will land
 
 The 4 missing helpers a developer would expect from `sdk/novai-sdk`:

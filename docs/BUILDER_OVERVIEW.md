@@ -6,15 +6,17 @@ A mental model for developers writing software that interacts with NOVAI. Read [
 
 ## What NOVAI is
 
-NOVAI is a Layer-1 blockchain where AI entities are protocol primitives, not smart contracts. There is no virtual machine and no WASM runtime. Every transaction is a native protocol operation that the node directly understands and executes. The protocol has 10 transaction types, 14 signal types, 10 memory object types, and one entity record format (V5 codec, 270 bytes).
+NOVAI is a Layer-1 blockchain where AI entities are protocol primitives, not smart contracts. There is no virtual machine and no WASM runtime. Every transaction is a native protocol operation that the node directly understands and executes. The protocol has 10 transaction types, 16 signal types, 11 memory object types (variant 10 reserved for `DelegationGrant`, variant 11 is `Subscription`), and one entity record format (V5 codec, 270 bytes).
 
 Consensus is HotStuff BFT with a 3-chain commit rule. Execution is deterministic: no floats, no `HashMap` iteration order dependencies, all arithmetic checked. State is committed via a 256-bit Sparse Merkle Tree. Persistence is RocksDB with atomic write batches. The codebase is clean-room (no code copied from Substrate, Tendermint, Cosmos SDK, Diem, Aptos, Sui, or anywhere else).
 
 ---
 
-## The five AI infrastructure layers
+## The six AI infrastructure layers
 
 ```
++----------------------+
+|  6. Subscriptions    |  SubscriptionCreate/Cancel -> Subscription record + lazy settle
 +----------------------+
 |  5. ZK Proofs        |  ProofSubmission signal -> VerificationRecord -> +3 rep
 +----------------------+
@@ -62,6 +64,10 @@ A `ProofSubmission` signal carries `proof_type`, `code_hash`, and `computation_h
 
 In v1, only `PROOF_TYPE_STUB = 0` is accepted. The stub verifier always returns true. `PROOF_TYPE_GROTH16 = 1` and `PROOF_TYPE_PLONK = 2` are reserved for future integration.
 
+### Layer 6: Subscriptions
+
+A subscriber locks `rate_per_block * duration_blocks` of `economic_balance` upfront in exchange for receiving a producer's signals over a bounded window. The lock is held inside a `Subscription` memory object owned by the subscriber (variant 11, fixed 114 bytes); the producer is paid lazily when the subscriber issues `SubscriptionCancel`. Cancellation settles `accrued_blocks * rate_per_block` to the producer (less the standard 2% marketplace fee), pays the producer a 5% cancel fee on the unaccrued remainder (`SUBSCRIPTION_CANCEL_FEE_BPS = 500`, no marketplace cut on this fee), refunds the rest to the subscriber, and marks the record `is_active = false` in place. `MIN_SUBSCRIPTION_DURATION = 100` blocks; `MAX_SUBSCRIPTIONS_PER_ENTITY = 10` per subscriber (active or cancelled). Subscribers reclaim slots by issuing `DELETE_MEMORY_OBJECT`. Only the original subscriber may cancel; producer-side cancel is intentionally out of v1 scope.
+
 ---
 
 ## Entity lifecycle
@@ -79,7 +85,7 @@ In v1, only `PROOF_TYPE_STUB = 0` is accepted. The stub verifier always returns 
                 |
                 +-- publish SignalCatalog (sell signals)
                 |
-                +-- signal-commitment (publish any of 14 signal types)
+                +-- signal-commitment (publish any of 16 signal types)
                 |
                 +-- publish CompositionGraph (declare dependencies)
                 |
@@ -100,8 +106,8 @@ In v1, only `PROOF_TYPE_STUB = 0` is accepted. The stub verifier always returns 
 | Code | Name | Min fee | When to use |
 |---|---|---|---|
 | 1 | Transfer | 100 | Move tokens between accounts |
-| 2 | SignalCommitment | 1,000 | Publish any of 14 signal types (the wrapper for layers 1-5) |
-| 3 | CreateMemoryObject | 500 | Create one of 10 memory object types (catalog, graph, record, etc.) |
+| 2 | SignalCommitment | 1,000 | Publish any of 16 signal types (the wrapper for layers 1-6) |
+| 3 | CreateMemoryObject | 500 | Create one of the registered memory object types (catalog, graph, record, subscription, etc.) |
 | 4 | UpdateMemoryObject | 500 | Replace contents of a memory object |
 | 5 | DeleteMemoryObject | 500 | Remove a memory object |
 | 6 | SubmitProposal | 2,000 | Open a governance proposal (5 proposal types, timelocked) |
@@ -110,7 +116,7 @@ In v1, only `PROOF_TYPE_STUB = 0` is accepted. The stub verifier always returns 
 | 9 | CreditAiEntity | 100 | Top up an entity's `economic_balance` |
 | 10 | RegisterAiEntityWithKey | 5,000 | Register an entity that holds its own Ed25519 key |
 
-`SignalCommitment` is the gateway transaction for the five infrastructure layers. The signal_type byte (1 of 14) plus an optional fixed-size tail tells the chain which subsystem to run.
+`SignalCommitment` is the gateway transaction for the six infrastructure layers. The signal_type byte (1 of 16) plus an optional fixed-size tail tells the chain which subsystem to run.
 
 ---
 
