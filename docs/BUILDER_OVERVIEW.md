@@ -12,9 +12,11 @@ Consensus is HotStuff BFT with a 3-chain commit rule. Execution is deterministic
 
 ---
 
-## The six AI infrastructure layers
+## The eight AI infrastructure layers
 
 ```
++----------------------+
+|  7. Delegation       |  DelegationGrant memory obj -> resolver merges into effective caps
 +----------------------+
 |  6. Subscriptions    |  SubscriptionCreate/Cancel -> Subscription record + lazy settle
 +----------------------+
@@ -67,6 +69,10 @@ In v1, only `PROOF_TYPE_STUB = 0` is accepted. The stub verifier always returns 
 ### Layer 6: Subscriptions
 
 A subscriber locks `rate_per_block * duration_blocks` of `economic_balance` upfront in exchange for receiving a producer's signals over a bounded window. The lock is held inside a `Subscription` memory object owned by the subscriber (variant 11, fixed 114 bytes); the producer is paid lazily when the subscriber issues `SubscriptionCancel`. Cancellation settles `accrued_blocks * rate_per_block` to the producer (less the standard 2% marketplace fee), pays the producer a 5% cancel fee on the unaccrued remainder (`SUBSCRIPTION_CANCEL_FEE_BPS = 500`, no marketplace cut on this fee), refunds the rest to the subscriber, and marks the record `is_active = false` in place. `MIN_SUBSCRIPTION_DURATION = 100` blocks; `MAX_SUBSCRIPTIONS_PER_ENTITY = 10` per subscriber (active or cancelled). Subscribers reclaim slots by issuing `DELETE_MEMORY_OBJECT`. Only the original subscriber may cancel; producer-side cancel is intentionally out of v1 scope.
+
+### Layer 7: Delegation
+
+A delegator entity grants a subset of its own capabilities to another entity for a bounded duration by writing a `DelegationGrant` memory object (variant 10, fixed 42 bytes: `version:1 | delegate_entity_id:32 | granted_capabilities:1 | expires_at_be:8`). At admission time, the runtime resolves an entity's effective capabilities by OR-merging its static bits with every active, non-expired grant naming it as the delegate, via a secondary index `ai/delegations_by_delegate/<delegate_id>/<grant_id>`. A fast path skips the scan when the entity already holds the requested capability statically. Revocation is `DELETE_MEMORY_OBJECT` on the grant and takes effect on the next tx; delegation is not transitive (B cannot re-delegate A's grant) and grants are immutable (UPDATE is rejected). `MAX_DELEGATION_GRANTS = 20` per delegator. Use case: a master entity registered with high stake delegates `emit_proposals` to many sub-entities running different strategies, and revokes a single sub-entity without touching the master.
 
 ---
 

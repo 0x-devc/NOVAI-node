@@ -486,6 +486,93 @@ Cancelling at or after `end_height` settles the full duration with no refund and
 
 ---
 
+## Recipe 7: Delegate a Capability (Master + Sub-Entity)
+
+This recipe shows how a master entity grants a single capability (here, `emit_proposals`) to a sub-entity for a bounded duration, so the sub-entity can act on the master's behalf without holding the capability statically. Revocation is a one-tx `DELETE_MEMORY_OBJECT` and takes effect immediately.
+
+### What you need
+- A master entity (the DELEGATOR) registered with the capability you intend to grant. `Capabilities::advisory()` gives you `read_public_chain | read_memory_objects | emit_proposals = 0x07`, which is enough for this recipe.
+- A sub-entity (the DELEGATE) registered with `Capabilities::read_only() = 0x03` (no `emit_proposals` of its own).
+- Both entities' 32-byte ids; the delegate's id is what gets embedded in the grant payload.
+
+### Step 1: Master issues a DelegationGrant (memory object type 10)
+
+Wire layout for the 42-byte payload: `version:1 | delegate_entity_id:32 | granted_capabilities:1 | expires_at_be:8`. `version` must equal 1. `granted_capabilities` is the same byte format as `Capabilities::to_byte`: bit 2 (`0x04`) is `emit_proposals`. `expires_at` is a block height; pass `0` for no expiry.
+
+```bash
+# Build the 42-byte payload by hand (no CLI sugar yet) and base64/hex-encode it
+# for `novai-cli memory create --data-hex`. The payload below grants 0x04
+# (emit_proposals) to the delegate, no expiry.
+PAYLOAD_HEX=$(python3 -c "
+import sys
+delegate_id = bytes.fromhex('<delegate_id>')
+version = b'\\x01'
+granted = b'\\x04'
+expires = (0).to_bytes(8, 'big')
+sys.stdout.write((version + delegate_id + granted + expires).hex())
+")
+
+novai-cli memory create \
+  --key-file master.key \
+  --object-type delegation-grant \
+  --data-hex $PAYLOAD_HEX \
+  --fee 500
+```
+
+The master entity's `economic_balance` is debited by the fee. The runtime decodes the payload, verifies the delegate is not the master itself (`InvalidDelegationSelf` otherwise), verifies every bit set in `granted_capabilities` is also set in the master's static caps (`DelegationCapabilityNotHeld` otherwise), and verifies the master holds fewer than `MAX_DELEGATION_GRANTS = 20` open grants (`DelegationCountExceeded` otherwise). On success it writes the primary memory object record AND a secondary index entry `ai/delegations_by_delegate/<delegate_id>/<grant_id>` whose value is the master's id.
+
+### Step 2: The sub-entity uses the delegated capability
+
+The sub-entity emits a signal it could not have emitted before the grant. `dispatch_tx` calls `requires_capability(db, &sub_entity, current_height, |c| c.emit_proposals)`. The fast path sees `sub_entity.capabilities.emit_proposals == false` and falls through to the slow path. The resolver scans `ai/delegations_by_delegate/<sub_entity_id>/`, finds the master's grant, confirms the master is still `is_active` and the grant has not expired, and ORs `0x04` into the effective set. The signal passes admission.
+
+```bash
+novai-cli signal publish \
+  --key-file sub_entity.key \
+  --signal-hash 0000000000000000000000000000000000000000000000000000000000000071 \
+  --signal-type anomaly \
+  --issuer-entity-id <sub_entity_id> \
+  --fee 1000
+```
+
+### Step 3: Confirm the grant
+
+Query the master's memory objects and look for `object_type = 10`:
+
+```bash
+curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"novai_getMemoryObjects","params":{"entity_id":"<master_id>"},"id":1}'
+```
+
+The `data` field of the grant decodes as `version:1 | delegate_entity_id:32 | granted_capabilities:1 | expires_at_be:8`.
+
+### Step 4: Revoke
+
+Delete the grant memory object:
+
+```bash
+novai-cli memory delete \
+  --key-file master.key \
+  --object-id <grant_id> \
+  --fee 500
+```
+
+The atomic batch tears down both the primary record and the by-delegate index entry. Any subsequent signal from the sub-entity that depends on the delegated capability is rejected immediately with `IssuerMissingCapability`; there is no propagation delay.
+
+### Common errors
+- `InvalidDelegationSelf`: master's id equals the embedded `delegate_entity_id`.
+- `DelegationCapabilityNotHeld`: `granted_capabilities` includes a bit the master does not hold statically. An entity cannot grant authority it lacks.
+- `DelegationCountExceeded { current, max }`: master already holds 20 open grants. Delete one before issuing another. Expired-but-undeleted grants still count toward the cap; reclaim slots with `DELETE_MEMORY_OBJECT`.
+- `InvalidDelegationGrant`: payload bytes do not decode as `DelegationGrantData` (wrong length, wrong version byte).
+- `DelegationGrantNotUpdatable`: `UPDATE_MEMORY_OBJECT` targeting a `DelegationGrant` is rejected outright. Grants are immutable; delete and recreate to change scope or duration.
+- `IssuerMissingCapability` on the sub-entity's signal: no active grant covers the requested capability. Check that the master is still `is_active`, that `expires_at == 0` or `current_height < expires_at`, and that the master has not deleted the grant.
+
+### Known v1 limitations
+- Delegation is not transitive: a grant from A to B does not let B re-delegate A's capability to a third entity C. The resolver only consults grants directly naming the calling entity.
+- There is no separate `manage_delegations` capability bit. Any entity that can issue `CREATE_MEMORY_OBJECT` (`read_memory_objects = bit 1`) can create a `DelegationGrant`, with the subset check ensuring it cannot grant authority it does not itself hold.
+- Expired grants are NOT swept automatically. They remain in state until the delegator issues `DELETE_MEMORY_OBJECT`, and they count against `MAX_DELEGATION_GRANTS` until then.
+
+---
+
 ## Where the SDK helpers will land
 
 The 4 missing helpers a developer would expect from `sdk/novai-sdk`:
