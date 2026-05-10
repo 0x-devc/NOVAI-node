@@ -109,6 +109,17 @@ pub const KEY_PREFIX_AI_MEMORY_COUNT: &[u8] = b"ai/memory_count/";
 /// Key: `ai/memory_by_type/{type_u8}/{entity_id32}/{object_id32}` → empty (presence index)
 pub const KEY_PREFIX_AI_MEMORY_BY_TYPE: &[u8] = b"ai/memory_by_type/";
 
+/// Canonical prefix for AI delegation grants indexed by delegate (Feature 8).
+///
+/// Key: `ai/delegations_by_delegate/{delegate_id32}/{grant_id32}` → delegator_id (32 bytes)
+///
+/// Delegation grant memory objects are owned by the delegator (Entity A) but
+/// must be discoverable by the delegate (Entity B) at capability resolution
+/// time. The value carries the 32-byte delegator id so the consumer can
+/// reconstruct the primary record key `ai_memory_object_key(delegator_id,
+/// grant_id)` without an extra lookup.
+pub const KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE: &[u8] = b"ai/delegations_by_delegate/";
+
 // ============================================================================
 // NNPX PRIVACY KEY PREFIXES (Week 22)
 // ============================================================================
@@ -333,6 +344,34 @@ pub fn ai_memory_by_type_key(
     k.extend_from_slice(entity_id);
     k.push(b'/');
     k.extend_from_slice(object_id);
+    k
+}
+
+/// Build canonical key for a delegation grant indexed by delegate (Feature 8):
+/// `b"ai/delegations_by_delegate/" ++ delegate_id32 ++ "/" ++ grant_id32`.
+///
+/// The stored value is the 32-byte delegator entity id (the owner of the
+/// underlying `DelegationGrant` memory object), which the consumer combines
+/// with `grant_id` to address the primary record via `ai_memory_object_key`.
+pub fn ai_delegation_by_delegate_key(delegate_id: &[u8; 32], grant_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE.len() + 32 + 1 + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE);
+    k.extend_from_slice(delegate_id);
+    k.push(b'/');
+    k.extend_from_slice(grant_id);
+    k
+}
+
+/// Build the canonical scan prefix for all delegation grants targeting a
+/// given delegate: `b"ai/delegations_by_delegate/" ++ delegate_id32 ++ "/"`.
+///
+/// A range scan over this prefix yields every grant that names the delegate
+/// as its recipient, regardless of which entity issued the grant.
+pub fn ai_delegations_by_delegate_prefix(delegate_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE.len() + 32 + 1);
+    k.extend_from_slice(KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE);
+    k.extend_from_slice(delegate_id);
+    k.push(b'/');
     k
 }
 
@@ -1259,5 +1298,126 @@ mod tests {
 
         assert!(is_derived_view_key(&key), "Should be a derived view key");
         assert!(!is_nnpx_key(&key), "Should NOT be an NNPX key");
+    }
+
+    // ========================================================================
+    // ai_delegation_by_delegate_key tests (Feature 8)
+    // ========================================================================
+
+    #[test]
+    fn test_delegation_by_delegate_key_format() {
+        let delegate = [0x42u8; 32];
+        let grant = [0xAAu8; 32];
+
+        let key = ai_delegation_by_delegate_key(&delegate, &grant);
+
+        assert!(key.starts_with(KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE));
+        assert_eq!(
+            key.len(),
+            KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE.len() + 32 + 1 + 32
+        );
+
+        let prefix_len = KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE.len();
+        assert_eq!(&key[prefix_len..prefix_len + 32], &delegate);
+        assert_eq!(key[prefix_len + 32], b'/');
+        assert_eq!(&key[prefix_len + 33..], &grant);
+    }
+
+    #[test]
+    fn test_delegation_by_delegate_key_uniqueness() {
+        let d1 = [0x01u8; 32];
+        let d2 = [0x02u8; 32];
+        let g1 = [0x10u8; 32];
+        let g2 = [0x20u8; 32];
+
+        let k_d1_g1 = ai_delegation_by_delegate_key(&d1, &g1);
+        let k_d1_g2 = ai_delegation_by_delegate_key(&d1, &g2);
+        let k_d2_g1 = ai_delegation_by_delegate_key(&d2, &g1);
+
+        assert_ne!(k_d1_g1, k_d1_g2);
+        assert_ne!(k_d1_g1, k_d2_g1);
+        assert_ne!(k_d1_g2, k_d2_g1);
+    }
+
+    #[test]
+    fn test_delegations_by_delegate_prefix_format() {
+        let delegate = [0x42u8; 32];
+
+        let prefix = ai_delegations_by_delegate_prefix(&delegate);
+
+        assert!(prefix.starts_with(KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE));
+        assert_eq!(
+            prefix.len(),
+            KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE.len() + 32 + 1
+        );
+        assert_eq!(*prefix.last().unwrap(), b'/');
+    }
+
+    #[test]
+    fn test_delegation_key_starts_with_prefix() {
+        let delegate = [0x33u8; 32];
+        let grant = [0x55u8; 32];
+
+        let prefix = ai_delegations_by_delegate_prefix(&delegate);
+        let key = ai_delegation_by_delegate_key(&delegate, &grant);
+
+        assert!(
+            key.starts_with(&prefix),
+            "Per-delegate prefix scan must include grant key"
+        );
+    }
+
+    #[test]
+    fn test_delegation_prefix_does_not_match_other_delegate() {
+        let d1 = [0x01u8; 32];
+        let d2 = [0x02u8; 32];
+        let grant = [0xAAu8; 32];
+
+        let prefix_d1 = ai_delegations_by_delegate_prefix(&d1);
+        let key_d2 = ai_delegation_by_delegate_key(&d2, &grant);
+
+        assert!(
+            !key_d2.starts_with(&prefix_d1),
+            "Scan prefix for d1 must not match d2's grant key"
+        );
+    }
+
+    #[test]
+    fn test_delegation_keys_lex_ordered_within_delegate() {
+        // Within a single delegate, lex order over keys is grant_id order;
+        // this is what enables stable iteration during resolution.
+        let delegate = [0x42u8; 32];
+        let g_low = [0x00u8; 32];
+        let mut g_mid = [0u8; 32];
+        g_mid[0] = 0x80;
+        let g_high = [0xFFu8; 32];
+
+        let k_low = ai_delegation_by_delegate_key(&delegate, &g_low);
+        let k_mid = ai_delegation_by_delegate_key(&delegate, &g_mid);
+        let k_high = ai_delegation_by_delegate_key(&delegate, &g_high);
+
+        assert!(k_low < k_mid);
+        assert!(k_mid < k_high);
+    }
+
+    #[test]
+    fn test_delegation_key_produces_valid_smt_key() {
+        let delegate = [0x42u8; 32];
+        let grant = [0xAAu8; 32];
+
+        let key = ai_delegation_by_delegate_key(&delegate, &grant);
+        let smt_key = smt_key_for_state_key(&key);
+
+        assert_eq!(smt_key.len(), 32);
+        let smt_key2 = smt_key_for_state_key(&key);
+        assert_eq!(smt_key, smt_key2, "smt key must be deterministic");
+    }
+
+    #[test]
+    fn test_delegation_prefix_disjoint_from_memory_by_type_prefix() {
+        // The two prefixes share the `ai/` namespace but must not overlap
+        // so a by-delegate scan never accidentally hits memory_by_type entries.
+        assert!(!KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE.starts_with(KEY_PREFIX_AI_MEMORY_BY_TYPE));
+        assert!(!KEY_PREFIX_AI_MEMORY_BY_TYPE.starts_with(KEY_PREFIX_AI_DELEGATIONS_BY_DELEGATE));
     }
 }
