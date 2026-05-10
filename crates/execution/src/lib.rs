@@ -2706,10 +2706,8 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         return Err(ExecError::EntityNotActive);
     }
 
-    // D14.2: Validate emit_proposals capability
-    if !entity.capabilities.emit_proposals {
-        return Err(ExecError::IssuerMissingCapability);
-    }
+    // D14.2: Validate emit_proposals capability (static or delegated)
+    requires_capability(db, &entity, current_height, |c| c.emit_proposals)?;
 
     // D14.2: Validate nonce
     if tx.nonce != entity.nonce {
@@ -2767,9 +2765,7 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
     // Reputation update branch: only oracle entities, target lookup + clamp + write.
     // Runs BEFORE the issuer write so a single atomic batch covers both records.
     if payload.signal_type == AiSignalType::ReputationUpdate {
-        if !entity.capabilities.submit_reputation_updates {
-            return Err(ExecError::IssuerMissingCapability);
-        }
+        requires_capability(db, &entity, current_height, |c| c.submit_reputation_updates)?;
         let extra = payload
             .reputation
             .as_ref()
@@ -2958,9 +2954,7 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
     // same atomic batch. Slash is saturating - requesting more than is staked
     // takes everything available and credits that lower amount to the treasury.
     if payload.signal_type == AiSignalType::StakeSlash {
-        if !entity.capabilities.submit_reputation_updates {
-            return Err(ExecError::IssuerMissingCapability);
-        }
+        requires_capability(db, &entity, current_height, |c| c.submit_reputation_updates)?;
         let extra = payload
             .stake_slash
             .as_ref()
@@ -3012,9 +3006,7 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
     }
 
     if payload.signal_type == AiSignalType::CompositionCheck {
-        if !entity.capabilities.submit_reputation_updates {
-            return Err(ExecError::IssuerMissingCapability);
-        }
+        requires_capability(db, &entity, current_height, |c| c.submit_reputation_updates)?;
         let extra = payload
             .composition_check
             .as_ref()
@@ -3938,6 +3930,7 @@ where
 pub fn check_ai_entity_sender<K: Kv>(
     db: &K,
     tx: &TxV1,
+    current_height: u64,
 ) -> Result<Option<AiEntity>, ExecError<K::Error>> {
     let Some(entity) = lookup_ai_entity_by_address(db, &tx.from)? else {
         return Ok(None);
@@ -3958,24 +3951,18 @@ pub fn check_ai_entity_sender<K: Kv>(
         // ALLOW: Transfer (type 1)
         TRANSFER_PAYLOAD_V1 => Ok(Some(entity)),
 
-        // ALLOW: Signal Commitment (type 2) — if emit_proposals capability
+        // ALLOW: Signal Commitment (type 2) — if emit_proposals (static or delegated)
         SIGNAL_COMMITMENT_PAYLOAD_V1 => {
-            if entity.has_capability("emit_proposals") {
-                Ok(Some(entity))
-            } else {
-                Err(ExecError::IssuerMissingCapability)
-            }
+            requires_capability(db, &entity, current_height, |c| c.emit_proposals)?;
+            Ok(Some(entity))
         }
 
-        // ALLOW: Memory CRUD (types 3, 4, 5) — if read_memory_objects capability
+        // ALLOW: Memory CRUD (types 3, 4, 5) — if read_memory_objects (static or delegated)
         CREATE_MEMORY_OBJECT_PAYLOAD_V1
         | UPDATE_MEMORY_OBJECT_PAYLOAD_V1
         | DELETE_MEMORY_OBJECT_PAYLOAD_V1 => {
-            if entity.has_capability("read_memory_objects") {
-                Ok(Some(entity))
-            } else {
-                Err(ExecError::IssuerMissingCapability)
-            }
+            requires_capability(db, &entity, current_height, |c| c.read_memory_objects)?;
+            Ok(Some(entity))
         }
 
         // DENY: Governance (6,7), entity registration (8,10), credit entity (9),
@@ -4126,10 +4113,8 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
         return Err(ExecError::EntityNotActive);
     }
 
-    // Validate capability
-    if !entity.capabilities.read_memory_objects {
-        return Err(ExecError::IssuerMissingCapability);
-    }
+    // Validate capability (static or via active delegation grant)
+    requires_capability(db, &entity, current_height, |c| c.read_memory_objects)?;
 
     // Validate nonce
     if tx.nonce != entity.nonce {
@@ -5301,8 +5286,10 @@ pub fn dispatch_tx<K: KvBatch>(
     // Check AI entity sender restrictions before routing.
     // If sender is an AI entity, verify it is allowed to submit this tx type.
     // The returned entity is passed to apply functions that need it, avoiding
-    // a redundant lookup_ai_entity_by_address call.
-    let ai_entity = check_ai_entity_sender(db, tx)?;
+    // a redundant lookup_ai_entity_by_address call. Capability resolution is
+    // delegation-aware: an entity may pass via a static capability or via an
+    // active delegation grant naming it as the delegate.
+    let ai_entity = check_ai_entity_sender(db, tx, current_height)?;
 
     let version = tx
         .payload
@@ -6925,7 +6912,7 @@ mod tests {
             sig: [0u8; 64],
         };
 
-        let result = check_ai_entity_sender(&db, &tx);
+        let result = check_ai_entity_sender(&db, &tx, 100);
         assert!(matches!(result, Err(ExecError::IssuerMissingCapability)));
     }
 
@@ -6951,7 +6938,7 @@ mod tests {
             sig: [0u8; 64],
         };
 
-        let result = check_ai_entity_sender(&db, &tx);
+        let result = check_ai_entity_sender(&db, &tx, 100);
         assert!(matches!(result, Err(ExecError::IssuerMissingCapability)));
     }
 
@@ -6977,7 +6964,7 @@ mod tests {
             sig: [0u8; 64],
         };
 
-        let result = check_ai_entity_sender(&db, &tx);
+        let result = check_ai_entity_sender(&db, &tx, 100);
         assert!(matches!(result, Err(ExecError::IssuerMissingCapability)));
     }
 
@@ -7005,7 +6992,7 @@ mod tests {
             sig: [0u8; 64],
         };
 
-        let result = check_ai_entity_sender(&db, &tx);
+        let result = check_ai_entity_sender(&db, &tx, 100);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some()); // returns Some(entity)
     }
@@ -7030,7 +7017,7 @@ mod tests {
             sig: [0u8; 64],
         };
 
-        let result = check_ai_entity_sender(&db, &tx);
+        let result = check_ai_entity_sender(&db, &tx, 100);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none()); // not an entity
     }
