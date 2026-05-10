@@ -13,9 +13,12 @@
 
 use novai_ai_entities::{AiEntity, AiSignalType, AutonomyMode, Capabilities};
 use novai_execution::{
-    apply_signal_commitment_tx, encode_signal_commitment_payload_v1, get_signals_by_height,
-    get_signals_by_issuer, get_signals_by_type, read_ai_entity, write_ai_entity_op, ExecError,
-    SignalCommitmentPayloadV1,
+    apply_signal_commitment_tx, decode_signal_commitment_payload_v1,
+    encode_signal_commitment_payload_v1, get_signals_by_height, get_signals_by_issuer,
+    get_signals_by_type, read_ai_entity, write_ai_entity_op, ExecError, SignalCommitmentPayloadV1,
+    SubscriptionCancelExtraV1, SubscriptionCreateExtraV1,
+    SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN,
+    SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN,
 };
 use novai_state::{ai_entity_by_address_key, KvBatch, MemKv, WriteOp};
 use novai_types::{TxV1, TxVersion};
@@ -52,6 +55,8 @@ fn create_signal_payload(
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }
@@ -462,5 +467,217 @@ fn last_active_at_is_updated() {
     assert_eq!(
         updated_entity.last_active_at, execution_height,
         "last_active_at should be set to execution height"
+    );
+}
+
+// ============================================================================
+// Phase 3: Subscription codec roundtrip + length validation tests (Feature 9)
+// ============================================================================
+
+#[test]
+fn subscription_create_payload_roundtrip() {
+    let producer = [0xC1u8; 32];
+    let issuer = [0xB2u8; 32];
+    let signal_hash = [0xA3u8; 32];
+    let original = SignalCommitmentPayloadV1 {
+        signal_hash,
+        signal_type: AiSignalType::SubscriptionCreate,
+        issuer_entity_id: issuer,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: Some(SubscriptionCreateExtraV1 {
+            producer_entity_id: producer,
+            covered_signal_type: 2, // Prediction
+            rate_per_block: 0x0102_0304_0506_0708,
+            duration_blocks: 0x1112_1314_1516_1718,
+        }),
+        subscription_cancel: None,
+    };
+    let encoded = encode_signal_commitment_payload_v1(&original);
+    assert_eq!(
+        encoded.len(),
+        SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN
+    );
+    assert_eq!(encoded.len(), 115);
+    let decoded = decode_signal_commitment_payload_v1(&encoded).expect("decode succeeds");
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn subscription_cancel_payload_roundtrip() {
+    let issuer = [0xB2u8; 32];
+    let signal_hash = [0xA3u8; 32];
+    let sub_id = [0xD4u8; 32];
+    let original = SignalCommitmentPayloadV1 {
+        signal_hash,
+        signal_type: AiSignalType::SubscriptionCancel,
+        issuer_entity_id: issuer,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: Some(SubscriptionCancelExtraV1 {
+            subscription_id: sub_id,
+        }),
+    };
+    let encoded = encode_signal_commitment_payload_v1(&original);
+    assert_eq!(
+        encoded.len(),
+        SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN
+    );
+    assert_eq!(encoded.len(), 98);
+    let decoded = decode_signal_commitment_payload_v1(&encoded).expect("decode succeeds");
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn subscription_create_byte_layout_locked() {
+    let original = SignalCommitmentPayloadV1 {
+        signal_hash: [0u8; 32],
+        signal_type: AiSignalType::SubscriptionCreate,
+        issuer_entity_id: [0u8; 32],
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: Some(SubscriptionCreateExtraV1 {
+            producer_entity_id: [0xCCu8; 32],
+            covered_signal_type: 0x07,
+            rate_per_block: 0x0102_0304_0506_0708,
+            duration_blocks: 0x1112_1314_1516_1718,
+        }),
+        subscription_cancel: None,
+    };
+    let encoded = encode_signal_commitment_payload_v1(&original);
+    // Base header lock (offsets 0..66 already covered by other roundtrip
+    // tests). Spot-check the tail offsets to lock the wire format.
+    assert_eq!(
+        encoded[33], 14,
+        "signal_type byte == SubscriptionCreate(14)"
+    );
+    assert_eq!(
+        &encoded[66..98],
+        &[0xCCu8; 32],
+        "producer_entity_id at 66..98"
+    );
+    assert_eq!(encoded[98], 0x07, "covered_signal_type at 98");
+    assert_eq!(
+        &encoded[99..107],
+        &0x0102_0304_0506_0708u64.to_be_bytes(),
+        "rate_per_block_be at 99..107"
+    );
+    assert_eq!(
+        &encoded[107..115],
+        &0x1112_1314_1516_1718u64.to_be_bytes(),
+        "duration_blocks_be at 107..115"
+    );
+}
+
+#[test]
+fn subscription_cancel_byte_layout_locked() {
+    let original = SignalCommitmentPayloadV1 {
+        signal_hash: [0u8; 32],
+        signal_type: AiSignalType::SubscriptionCancel,
+        issuer_entity_id: [0u8; 32],
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: Some(SubscriptionCancelExtraV1 {
+            subscription_id: [0xEEu8; 32],
+        }),
+    };
+    let encoded = encode_signal_commitment_payload_v1(&original);
+    assert_eq!(
+        encoded[33], 15,
+        "signal_type byte == SubscriptionCancel(15)"
+    );
+    assert_eq!(&encoded[66..98], &[0xEEu8; 32], "subscription_id at 66..98");
+}
+
+#[test]
+fn subscription_create_with_wrong_length_rejected() {
+    // Encode a SubscriptionCreate payload then truncate it; decode must reject.
+    let payload = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash: [0u8; 32],
+        signal_type: AiSignalType::SubscriptionCreate,
+        issuer_entity_id: [0u8; 32],
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: Some(SubscriptionCreateExtraV1 {
+            producer_entity_id: [0u8; 32],
+            covered_signal_type: 0,
+            rate_per_block: 0,
+            duration_blocks: 0,
+        }),
+        subscription_cancel: None,
+    });
+    let mut truncated = payload.clone();
+    truncated.truncate(payload.len() - 1);
+    assert!(matches!(
+        decode_signal_commitment_payload_v1(&truncated),
+        Err(ExecError::BadPayloadLength { .. })
+    ));
+}
+
+#[test]
+fn subscription_cancel_with_wrong_length_rejected() {
+    let payload = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash: [0u8; 32],
+        signal_type: AiSignalType::SubscriptionCancel,
+        issuer_entity_id: [0u8; 32],
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: Some(SubscriptionCancelExtraV1 {
+            subscription_id: [0u8; 32],
+        }),
+    });
+    let mut truncated = payload.clone();
+    truncated.truncate(payload.len() - 1);
+    assert!(matches!(
+        decode_signal_commitment_payload_v1(&truncated),
+        Err(ExecError::BadPayloadLength { .. })
+    ));
+}
+
+#[test]
+fn unknown_signal_type_byte_16_rejected_by_decoder() {
+    // Build a base-length (66 byte) payload with signal_type byte = 16.
+    // The decoder runs from_byte() at offset 33 and must reject with a
+    // version-style error (the "max valid signal type" guard).
+    let mut payload = vec![0u8; 66];
+    payload[0] = 2; // version
+    payload[33] = 16; // unknown signal_type
+    let result = decode_signal_commitment_payload_v1(&payload);
+    assert!(
+        matches!(result, Err(ExecError::BadPayloadVersion { .. })),
+        "byte 16 must be rejected as unknown signal type, got {result:?}"
     );
 }

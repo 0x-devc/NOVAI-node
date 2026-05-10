@@ -195,6 +195,8 @@ fn build_composition_check_payload(
             failure_reason,
         }),
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     })
 }
 
@@ -710,6 +712,8 @@ fn non_composition_signals_still_work() {
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     });
     apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, anomaly), HEIGHT)
         .expect("base anomaly still applies; CompositionCheck doesn't break it");

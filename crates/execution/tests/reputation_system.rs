@@ -93,6 +93,8 @@ fn build_reputation_payload(
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     })
 }
 
@@ -356,6 +358,8 @@ fn non_reputation_signal_unchanged_behavior() {
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     });
     let tx = make_tx(entity.id, 0, SIGNAL_FEE, payload);
     apply_signal_commitment_tx(&mut db, &tx, 100).expect("non-reputation must still work");
@@ -387,6 +391,8 @@ fn reputation_payload_is_101_bytes() {
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     });
     assert_eq!(payload.len(), 101);
     assert_eq!(payload.len(), SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN);

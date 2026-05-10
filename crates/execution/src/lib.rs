@@ -364,6 +364,23 @@ pub const PROOF_SUBMISSION_EXTRA_LEN: usize = 1 + 32 + 32;
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + PROOF_SUBMISSION_EXTRA_LEN;
 
+/// Inline-extra size for a `SubscriptionCreate` signal payload.
+/// `producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 |
+/// duration_blocks_be:8`.
+pub const SUBSCRIPTION_CREATE_EXTRA_LEN: usize = 32 + 1 + 8 + 8;
+
+/// Total size of a `SubscriptionCreate` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SUBSCRIPTION_CREATE_EXTRA_LEN;
+
+/// Inline-extra size for a `SubscriptionCancel` signal payload.
+/// `subscription_id:32` (memory object id of the `Subscription` record).
+pub const SUBSCRIPTION_CANCEL_EXTRA_LEN: usize = 32;
+
+/// Total size of a `SubscriptionCancel` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SUBSCRIPTION_CANCEL_EXTRA_LEN;
+
 /// Block-count duration that newly deposited stake is locked for.
 /// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
 pub const STAKE_LOCK_PERIOD: u64 = 1000;
@@ -547,6 +564,45 @@ pub struct ProofSubmissionExtraV1 {
     pub computation_hash: [u8; 32],
 }
 
+/// Inline subscription-create tail carried in `SubscriptionCreate` signal
+/// payloads (Feature 9).
+///
+/// Wire layout (49 bytes): `producer_entity_id:32 | covered_signal_type:1 |
+/// rate_per_block_be:8 | duration_blocks_be:8`. The handler debits the
+/// issuer's `economic_balance` by `rate_per_block * duration_blocks`
+/// (checked u128 multiplication) and creates a `Subscription` memory
+/// object owned by the issuer with `start_height = current_height` and
+/// `end_height = current_height + duration_blocks`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionCreateExtraV1 {
+    /// AI entity that will receive accrued payment under this subscription.
+    pub producer_entity_id: [u8; 32],
+    /// `AiSignalType` byte the subscription pays the producer for
+    /// (informational; not enforced at handler time).
+    pub covered_signal_type: u8,
+    /// Per-block payment rate, in base units of `economic_balance`.
+    pub rate_per_block: u64,
+    /// Number of blocks the subscription will run from `current_height`.
+    /// Must satisfy `>= MIN_SUBSCRIPTION_DURATION` (validated in the handler).
+    pub duration_blocks: u64,
+}
+
+/// Inline subscription-cancel tail carried in `SubscriptionCancel` signal
+/// payloads (Feature 9).
+///
+/// Wire layout (32 bytes): `subscription_id:32`. The handler loads the
+/// referenced `Subscription` memory object, verifies the issuer is the
+/// recorded subscriber, settles accrued payment to the producer (with the
+/// 2% marketplace fee), pays the producer the 5% cancel fee on the
+/// remaining locked funds (no marketplace cut on the cancel fee), refunds
+/// the rest to the subscriber, and rewrites the memory object with
+/// `is_active = false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionCancelExtraV1 {
+    /// Memory object id of the `Subscription` record being cancelled.
+    pub subscription_id: [u8; 32],
+}
+
 /// Canonical Signal Commitment payload (D14.1):
 /// - Base (signal types 0..=6): 66 bytes
 ///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
@@ -564,13 +620,17 @@ pub struct ProofSubmissionExtraV1 {
 ///   `... [target_id:32][failed_dependency_idx:1][failure_reason:1]`
 /// - `ProofSubmission` (signal type 13): 131 bytes (base + 65-byte tail)
 ///   `... [proof_type:1][code_hash:32][computation_hash:32]`
+/// - `SubscriptionCreate` (signal type 14): 115 bytes (base + 49-byte tail)
+///   `... [producer_id:32][covered_signal_type:1][rate_per_block_be:8][duration_blocks_be:8]`
+/// - `SubscriptionCancel` (signal type 15): 98 bytes (base + 32-byte tail)
+///   `... [subscription_id:32]`
 ///
 /// At most one tail is populated; the active tail is determined by `signal_type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalCommitmentPayloadV1 {
     /// Commitment hash of the full signal.
     pub signal_hash: [u8; 32],
-    /// Signal type (0..=13).
+    /// Signal type (0..=15).
     pub signal_type: novai_ai_entities::AiSignalType,
     /// AI entity ID that issued this signal.
     pub issuer_entity_id: [u8; 32],
@@ -590,6 +650,12 @@ pub struct SignalCommitmentPayloadV1 {
     /// Inline proof-submission tail. MUST be `Some` iff
     /// `signal_type == ProofSubmission`.
     pub proof_submission: Option<ProofSubmissionExtraV1>,
+    /// Inline subscription-create tail. MUST be `Some` iff
+    /// `signal_type == SubscriptionCreate`.
+    pub subscription_create: Option<SubscriptionCreateExtraV1>,
+    /// Inline subscription-cancel tail. MUST be `Some` iff
+    /// `signal_type == SubscriptionCancel`.
+    pub subscription_cancel: Option<SubscriptionCancelExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
@@ -609,6 +675,10 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
     let is_stake_slash = p.signal_type == novai_ai_entities::AiSignalType::StakeSlash;
     let is_composition_check = p.signal_type == novai_ai_entities::AiSignalType::CompositionCheck;
     let is_proof_submission = p.signal_type == novai_ai_entities::AiSignalType::ProofSubmission;
+    let is_subscription_create =
+        p.signal_type == novai_ai_entities::AiSignalType::SubscriptionCreate;
+    let is_subscription_cancel =
+        p.signal_type == novai_ai_entities::AiSignalType::SubscriptionCancel;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
@@ -644,6 +714,16 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.proof_submission.is_some(),
         "proof_submission tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_subscription_create,
+        p.subscription_create.is_some(),
+        "subscription_create tail presence must match signal_type"
+    );
+    debug_assert_eq!(
+        is_subscription_cancel,
+        p.subscription_cancel.is_some(),
+        "subscription_cancel tail presence must match signal_type"
+    );
     debug_assert!(
         u8::from(is_reputation)
             + u8::from(is_purchase)
@@ -652,6 +732,8 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             + u8::from(is_stake_slash)
             + u8::from(is_composition_check)
             + u8::from(is_proof_submission)
+            + u8::from(is_subscription_create)
+            + u8::from(is_subscription_cancel)
             <= 1,
         "tails are mutually exclusive"
     );
@@ -670,6 +752,10 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN
     } else if is_proof_submission {
         SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN
+    } else if is_subscription_create {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN
+    } else if is_subscription_cancel {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -739,6 +825,23 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; PROOF_SUBMISSION_EXTRA_LEN]);
         }
+    } else if is_subscription_create {
+        if let Some(extra) = &p.subscription_create {
+            out.extend_from_slice(&extra.producer_entity_id);
+            out.push(extra.covered_signal_type);
+            out.extend_from_slice(&extra.rate_per_block.to_be_bytes());
+            out.extend_from_slice(&extra.duration_blocks.to_be_bytes());
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; SUBSCRIPTION_CREATE_EXTRA_LEN]);
+        }
+    } else if is_subscription_cancel {
+        if let Some(extra) = &p.subscription_cancel {
+            out.extend_from_slice(&extra.subscription_id);
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; SUBSCRIPTION_CANCEL_EXTRA_LEN]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -766,6 +869,8 @@ pub fn decode_signal_commitment_payload_v1(
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN
         && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN
+        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN
+        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN
     {
         return Err(ExecError::BadPayloadLength {
             expected: SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN,
@@ -785,7 +890,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 13, // max valid signal type
+            expected: 15, // max valid signal type
             got: payload[33],
         },
     )?;
@@ -800,6 +905,8 @@ pub fn decode_signal_commitment_payload_v1(
     let is_stake_slash = signal_type == novai_ai_entities::AiSignalType::StakeSlash;
     let is_composition_check = signal_type == novai_ai_entities::AiSignalType::CompositionCheck;
     let is_proof_submission = signal_type == novai_ai_entities::AiSignalType::ProofSubmission;
+    let is_subscription_create = signal_type == novai_ai_entities::AiSignalType::SubscriptionCreate;
+    let is_subscription_cancel = signal_type == novai_ai_entities::AiSignalType::SubscriptionCancel;
     let (
         reputation,
         purchase,
@@ -808,6 +915,8 @@ pub fn decode_signal_commitment_payload_v1(
         stake_slash,
         composition_check,
         proof_submission,
+        subscription_create,
+        subscription_cancel,
     ) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -825,6 +934,8 @@ pub fn decode_signal_commitment_payload_v1(
                 event_type,
                 points_delta,
             }),
+            None,
+            None,
             None,
             None,
             None,
@@ -864,6 +975,8 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
+            None,
         )
     } else if is_stake_deposit {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN {
@@ -879,6 +992,8 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeDepositExtraV1 { amount }),
+            None,
+            None,
             None,
             None,
             None,
@@ -899,6 +1014,8 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeWithdrawExtraV1 { amount }),
+            None,
+            None,
             None,
             None,
             None,
@@ -930,6 +1047,8 @@ pub fn decode_signal_commitment_payload_v1(
             }),
             None,
             None,
+            None,
+            None,
         )
     } else if is_composition_check {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN {
@@ -959,6 +1078,8 @@ pub fn decode_signal_commitment_payload_v1(
                 failure_reason,
             }),
             None,
+            None,
+            None,
         )
     } else if is_proof_submission {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN {
@@ -987,6 +1108,74 @@ pub fn decode_signal_commitment_payload_v1(
                 code_hash,
                 computation_hash,
             }),
+            None,
+            None,
+        )
+    } else if is_subscription_create {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut producer_entity_id = [0u8; 32];
+        producer_entity_id.copy_from_slice(&payload[66..98]);
+        let covered_signal_type = payload[98];
+        let rate_per_block = u64::from_be_bytes([
+            payload[99],
+            payload[100],
+            payload[101],
+            payload[102],
+            payload[103],
+            payload[104],
+            payload[105],
+            payload[106],
+        ]);
+        let duration_blocks = u64::from_be_bytes([
+            payload[107],
+            payload[108],
+            payload[109],
+            payload[110],
+            payload[111],
+            payload[112],
+            payload[113],
+            payload[114],
+        ]);
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(SubscriptionCreateExtraV1 {
+                producer_entity_id,
+                covered_signal_type,
+                rate_per_block,
+                duration_blocks,
+            }),
+            None,
+        )
+    } else if is_subscription_cancel {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut subscription_id = [0u8; 32];
+        subscription_id.copy_from_slice(&payload[66..98]);
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(SubscriptionCancelExtraV1 { subscription_id }),
         )
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
@@ -995,7 +1184,7 @@ pub fn decode_signal_commitment_payload_v1(
                 got: payload.len(),
             });
         }
-        (None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None)
     };
 
     Ok(SignalCommitmentPayloadV1 {
@@ -1009,6 +1198,8 @@ pub fn decode_signal_commitment_payload_v1(
         stake_slash,
         composition_check,
         proof_submission,
+        subscription_create,
+        subscription_cancel,
     })
 }
 

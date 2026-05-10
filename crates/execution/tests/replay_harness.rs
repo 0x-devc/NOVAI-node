@@ -111,6 +111,8 @@ fn mk_signal_commitment(
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     });
     TxV1 {
         version: TxVersion::V1,

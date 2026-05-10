@@ -178,6 +178,8 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
             stake_slash: None,
             composition_check: None,
             proof_submission: None,
+            subscription_create: None,
+            subscription_cancel: None,
         };
         let signal_tx = TxV1 {
             version: TxVersion::V1,
@@ -221,6 +223,8 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     };
     let anomaly_tx = TxV1 {
         version: TxVersion::V1,

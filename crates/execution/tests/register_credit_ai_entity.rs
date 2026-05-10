@@ -553,6 +553,8 @@ fn register_then_signal() {
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     });
 
     // Signal tx is from the entity itself (entity pays fee from its balance)

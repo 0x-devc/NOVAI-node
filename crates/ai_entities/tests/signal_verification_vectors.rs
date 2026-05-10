@@ -522,3 +522,79 @@ fn verify_signal_type_roundtrip() {
     assert!(AiSignalType::from_byte(16).is_none());
     assert!(AiSignalType::from_byte(255).is_none());
 }
+
+// ============================================================================
+// Feature 9: SubscriptionCreate / SubscriptionCancel commitment vectors
+// ============================================================================
+
+/// VERIFICATION STEPS for SubscriptionCreate (type=14):
+/// 1. Input: signal_type=14, height=1000+1400=2400 (LE),
+///    issuer=[14,15,...45], confidence=100+14=114, payload_hash=[28,29,...59],
+///    no proof.
+/// 2. Domain: "NOVAI_SIGNAL_COMMIT_V1" (21 bytes).
+/// 3. Hash: blake3(domain || type || height_le || issuer || confidence ||
+///    payload_hash || proof_len=0).
+/// 4. Expected: <golden vector in signal_commit_subscription_create.bin>.
+/// 5. Signature [0x55; 64] is NOT included in commitment.
+#[test]
+fn verify_signal_subscription_create() {
+    let signal = make_signal(AiSignalType::SubscriptionCreate);
+
+    assert_eq!(signal.signal_type, AiSignalType::SubscriptionCreate);
+    assert_eq!(signal.signal_type.to_byte(), 14);
+    assert_eq!(signal.height, 1000 + 14 * 100);
+    assert_eq!(signal.confidence, 100 + 14);
+    assert_eq!(signal.issuer[0], 14);
+    assert_eq!(signal.payload_hash[0], 14u8.wrapping_mul(2));
+
+    let commitment = signal.to_commitment();
+    assert_eq!(commitment.signal_type, AiSignalType::SubscriptionCreate);
+    assert_eq!(commitment.height, 2400);
+
+    let path = vectors_dir().join("signal_commit_subscription_create.bin");
+    write_or_compare_hash(&path, &commitment.commitment_hash, "SubscriptionCreate");
+
+    let mut signal2 = signal.clone();
+    signal2.signature = [0x77; 64];
+    assert_eq!(
+        signal.to_commitment().commitment_hash,
+        signal2.to_commitment().commitment_hash,
+        "Commitment must be independent of signature"
+    );
+}
+
+/// VERIFICATION STEPS for SubscriptionCancel (type=15):
+/// 1. Input: signal_type=15, height=1000+1500=2500 (LE),
+///    issuer=[15,16,...46], confidence=100+15=115, payload_hash=[30,31,...61],
+///    no proof.
+/// 2. Domain: "NOVAI_SIGNAL_COMMIT_V1" (21 bytes).
+/// 3. Hash: blake3(domain || type || height_le || issuer || confidence ||
+///    payload_hash || proof_len=0).
+/// 4. Expected: <golden vector in signal_commit_subscription_cancel.bin>.
+/// 5. Signature [0x55; 64] is NOT included in commitment.
+#[test]
+fn verify_signal_subscription_cancel() {
+    let signal = make_signal(AiSignalType::SubscriptionCancel);
+
+    assert_eq!(signal.signal_type, AiSignalType::SubscriptionCancel);
+    assert_eq!(signal.signal_type.to_byte(), 15);
+    assert_eq!(signal.height, 1000 + 15 * 100);
+    assert_eq!(signal.confidence, 100 + 15);
+    assert_eq!(signal.issuer[0], 15);
+    assert_eq!(signal.payload_hash[0], 15u8.wrapping_mul(2));
+
+    let commitment = signal.to_commitment();
+    assert_eq!(commitment.signal_type, AiSignalType::SubscriptionCancel);
+    assert_eq!(commitment.height, 2500);
+
+    let path = vectors_dir().join("signal_commit_subscription_cancel.bin");
+    write_or_compare_hash(&path, &commitment.commitment_hash, "SubscriptionCancel");
+
+    let mut signal2 = signal.clone();
+    signal2.signature = [0x88; 64];
+    assert_eq!(
+        signal.to_commitment().commitment_hash,
+        signal2.to_commitment().commitment_hash,
+        "Commitment must be independent of signature"
+    );
+}

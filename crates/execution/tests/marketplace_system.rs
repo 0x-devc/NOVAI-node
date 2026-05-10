@@ -136,6 +136,8 @@ fn build_purchase_payload(
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     })
 }
 
@@ -511,6 +513,8 @@ fn non_purchase_signals_still_work() {
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     });
     let tx = make_tx(issuer.id, 0, SIGNAL_FEE, payload);
 

@@ -110,6 +110,8 @@ fn create_signal_payload(
         stake_slash: None,
         composition_check: None,
         proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }
