@@ -246,6 +246,59 @@ pub enum ExecError<E> {
     /// raise this without another `ExecError` ABI change.
     #[allow(dead_code)]
     ProofAlreadySubmitted,
+    /// `SubscriptionCreate`: producer entity referenced by the tail does
+    /// not exist in state.
+    SubscriptionProducerNotFound,
+    /// `SubscriptionCreate`: producer entity exists but `is_active` is
+    /// false; subscriptions to inactive producers are rejected.
+    SubscriptionProducerNotActive,
+    /// `SubscriptionCreate`: subscriber and producer would be the same
+    /// entity; self-subscription is not allowed.
+    SubscriptionSelfReferential,
+    /// `SubscriptionCreate`: `rate_per_block * duration_blocks` overflowed
+    /// `u128`. Rejected before any balance mutation.
+    SubscriptionRateOverflow,
+    /// `SubscriptionCreate`: requested `duration_blocks` is below the
+    /// `MIN_SUBSCRIPTION_DURATION` floor.
+    SubscriptionDurationTooShort {
+        /// Minimum required duration in blocks.
+        required: u64,
+        /// Duration the subscriber asked for.
+        given: u64,
+    },
+    /// `SubscriptionCreate`: subscriber already holds the maximum allowed
+    /// `Subscription` memory objects (`MAX_SUBSCRIPTIONS_PER_ENTITY`).
+    /// Cancelled records still count toward the cap until the subscriber
+    /// deletes them via `DELETE_MEMORY_OBJECT`.
+    SubscriptionLimitExceeded {
+        /// Subscriber's current `Subscription` memory object count.
+        current: u32,
+        /// Cap (`MAX_SUBSCRIPTIONS_PER_ENTITY`).
+        max: u32,
+    },
+    /// `SubscriptionCreate`: subscriber's `economic_balance` does not
+    /// cover the full `total_locked` amount.
+    SubscriptionInsufficientBalance {
+        /// Required `total_locked`.
+        required: u128,
+        /// Subscriber's current `economic_balance`.
+        available: u128,
+    },
+    /// `SubscriptionCancel`: no `Subscription` memory object with the
+    /// requested `subscription_id` exists under the issuer.
+    SubscriptionNotFound,
+    /// `SubscriptionCancel`: the referenced memory object exists but is
+    /// not a `Subscription` (`object_type` mismatch).
+    SubscriptionWrongObjectType,
+    /// `SubscriptionCancel`: payload bytes failed to decode as
+    /// `SubscriptionData`. Indicates state corruption.
+    SubscriptionMemoryDecodeFailed,
+    /// `SubscriptionCancel`: the issuer is not the recorded subscriber on
+    /// the referenced subscription record. Only the subscriber can cancel.
+    SubscriptionNotOwner,
+    /// `SubscriptionCancel`: the referenced subscription has already been
+    /// cancelled or expired (`is_active == false`).
+    SubscriptionNotActive,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -2131,8 +2184,8 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
 
 use novai_ai_entities::{
     encode_memory_object_v1, AiEntity, AiSignalType, CompositionGraphData, MemoryObject,
-    MemoryObjectType, SignalCatalogData, SignalCommitment, VerificationRecordData,
-    MAX_REPUTATION_SCORE,
+    MemoryObjectType, SignalCatalogData, SignalCommitment, SubscriptionData,
+    VerificationRecordData, MAX_REPUTATION_SCORE, MAX_SUBSCRIPTIONS_PER_ENTITY,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
 use novai_crypto::{StubZkVerifier, ZkVerifier};
@@ -3124,6 +3177,230 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             .map_err(|_| ExecError::Overflow)?;
         entity.reputation_score = new_score;
         entity.reputation_events_count = entity.reputation_events_count.saturating_add(1);
+    }
+
+    // SubscriptionCreate branch (Feature 9): the issuer (subscriber) locks
+    // `rate_per_block * duration_blocks` of `economic_balance` and creates
+    // a `Subscription` memory object owned by itself. The locked amount
+    // sits inside the memory object record (NOT in stake_balance) and is
+    // released by a subsequent `SubscriptionCancel` signal.
+    if payload.signal_type == AiSignalType::SubscriptionCreate {
+        let extra = payload
+            .subscription_create
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("SubscriptionCreate missing extra".into()))?;
+
+        if extra.producer_entity_id == entity.id {
+            return Err(ExecError::SubscriptionSelfReferential);
+        }
+        if extra.duration_blocks < MIN_SUBSCRIPTION_DURATION {
+            return Err(ExecError::SubscriptionDurationTooShort {
+                required: MIN_SUBSCRIPTION_DURATION,
+                given: extra.duration_blocks,
+            });
+        }
+
+        let producer = read_ai_entity(db, &extra.producer_entity_id)?
+            .ok_or(ExecError::SubscriptionProducerNotFound)?;
+        if !producer.is_active {
+            return Err(ExecError::SubscriptionProducerNotActive);
+        }
+
+        // Cap enforcement: count Subscription memory objects under this
+        // subscriber. Cancelled records still occupy a slot until the
+        // subscriber deletes them via DELETE_MEMORY_OBJECT.
+        let existing = get_memory_objects_by_entity_and_type(
+            db,
+            &entity.id,
+            MemoryObjectType::Subscription.to_byte(),
+        )?;
+        #[allow(clippy::cast_possible_truncation)]
+        let existing_count = existing.len() as u32;
+        if existing_count >= MAX_SUBSCRIPTIONS_PER_ENTITY {
+            return Err(ExecError::SubscriptionLimitExceeded {
+                current: existing_count,
+                max: MAX_SUBSCRIPTIONS_PER_ENTITY,
+            });
+        }
+
+        // Subscriptions also count against the global per-entity memory cap.
+        let mem_count = read_memory_count(db, &entity.id)?;
+        if mem_count >= MAX_MEMORY_OBJECTS_PER_ENTITY {
+            return Err(ExecError::MemoryObjectCountExceeded {
+                count: mem_count,
+                max: MAX_MEMORY_OBJECTS_PER_ENTITY,
+            });
+        }
+
+        let total_locked = u128::from(extra.rate_per_block)
+            .checked_mul(u128::from(extra.duration_blocks))
+            .ok_or(ExecError::SubscriptionRateOverflow)?;
+        if entity.economic_balance < total_locked {
+            return Err(ExecError::SubscriptionInsufficientBalance {
+                required: total_locked,
+                available: entity.economic_balance,
+            });
+        }
+        entity.economic_balance = entity
+            .economic_balance
+            .checked_sub(total_locked)
+            .ok_or(ExecError::Overflow)?;
+
+        let end_height = current_height
+            .checked_add(extra.duration_blocks)
+            .ok_or(ExecError::Overflow)?;
+        let sub_data = SubscriptionData {
+            subscriber_entity_id: entity.id,
+            producer_entity_id: extra.producer_entity_id,
+            covered_signal_type: extra.covered_signal_type,
+            rate_per_block: extra.rate_per_block,
+            start_height: current_height,
+            end_height,
+            last_settled_height: current_height,
+            total_locked,
+            is_active: true,
+        };
+        let encoded_data = sub_data.encode().to_vec();
+        let mem_obj = MemoryObject::new(
+            entity.id,
+            MemoryObjectType::Subscription,
+            current_height,
+            encoded_data,
+        );
+        let mem_obj_id = mem_obj.object_id;
+        let mem_encoded = encode_memory_object_v1(&mem_obj);
+        ops.push(WriteOp::Put(
+            ai_memory_object_key(&entity.id, &mem_obj_id),
+            mem_encoded,
+        ));
+        ops.push(WriteOp::Put(
+            ai_memory_by_type_key(
+                MemoryObjectType::Subscription.to_byte(),
+                &entity.id,
+                &mem_obj_id,
+            ),
+            Vec::new(),
+        ));
+        ops.push(WriteOp::Put(
+            ai_memory_count_key(&entity.id),
+            encode_memory_count(mem_count + 1).to_vec(),
+        ));
+    }
+
+    // SubscriptionCancel branch (Feature 9): the original subscriber
+    // terminates an active subscription early. Settles accrued payment
+    // (with the standard 2% marketplace fee), pays the producer the 5%
+    // cancel fee on the unaccrued remainder, refunds the rest to the
+    // subscriber, and rewrites the memory object with is_active = false.
+    if payload.signal_type == AiSignalType::SubscriptionCancel {
+        let extra = payload
+            .subscription_cancel
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("SubscriptionCancel missing extra".into()))?;
+
+        // Subscription records are stored under their owner (the subscriber);
+        // the issuer of the cancel signal must be that owner, which we
+        // enforce both by addressing the primary record under entity.id and
+        // by re-checking the embedded subscriber_entity_id below.
+        let sub_obj = read_memory_object(db, &entity.id, &extra.subscription_id)?
+            .ok_or(ExecError::SubscriptionNotFound)?;
+        if sub_obj.object_type != MemoryObjectType::Subscription {
+            return Err(ExecError::SubscriptionWrongObjectType);
+        }
+        let mut sub_data = SubscriptionData::decode(&sub_obj.data)
+            .ok_or(ExecError::SubscriptionMemoryDecodeFailed)?;
+        if sub_data.subscriber_entity_id != entity.id {
+            return Err(ExecError::SubscriptionNotOwner);
+        }
+        if !sub_data.is_active {
+            return Err(ExecError::SubscriptionNotActive);
+        }
+
+        // Settlement: accrued blocks are capped at end_height. The gross
+        // amount cannot overflow u128 in v1 (both factors are u64) but is
+        // checked anyway so a future widening of either field stays safe.
+        let cap = if current_height < sub_data.end_height {
+            current_height
+        } else {
+            sub_data.end_height
+        };
+        let settled_blocks = cap.saturating_sub(sub_data.last_settled_height);
+        let accrued_gross = u128::from(settled_blocks)
+            .checked_mul(u128::from(sub_data.rate_per_block))
+            .ok_or(ExecError::Overflow)?;
+        let accrued_fee = accrued_gross
+            .checked_mul(MARKETPLACE_FEE_BPS)
+            .ok_or(ExecError::Overflow)?
+            / BPS_DENOMINATOR;
+        let accrued_net = accrued_gross
+            .checked_sub(accrued_fee)
+            .ok_or(ExecError::Overflow)?;
+
+        // Unaccrued remainder: total_locked - accrued_gross. The 5% cancel
+        // fee on this remainder is paid 100% to the producer (no
+        // marketplace cut on the cancel fee, by design). The rest goes
+        // back to the subscriber.
+        let remaining = sub_data
+            .total_locked
+            .checked_sub(accrued_gross)
+            .ok_or(ExecError::Overflow)?;
+        let cancel_fee = remaining
+            .checked_mul(SUBSCRIPTION_CANCEL_FEE_BPS)
+            .ok_or(ExecError::Overflow)?
+            / BPS_DENOMINATOR;
+        let refund = remaining
+            .checked_sub(cancel_fee)
+            .ok_or(ExecError::Overflow)?;
+
+        let producer_credit = accrued_net
+            .checked_add(cancel_fee)
+            .ok_or(ExecError::Overflow)?;
+
+        let mut producer = read_ai_entity(db, &sub_data.producer_entity_id)?
+            .ok_or(ExecError::SubscriptionProducerNotFound)?;
+        // Producer being inactive does not block settlement; funds owed
+        // for already-rendered service must still flow.
+        producer.economic_balance = producer
+            .economic_balance
+            .checked_add(producer_credit)
+            .ok_or(ExecError::Overflow)?;
+        entity.economic_balance = entity
+            .economic_balance
+            .checked_add(refund)
+            .ok_or(ExecError::Overflow)?;
+
+        if accrued_fee > 0 {
+            let new_treasury = read_treasury_balance(db, KEY_MARKETPLACE_TREASURY)?
+                .checked_add(accrued_fee)
+                .ok_or(ExecError::Overflow)?;
+            ops.push(WriteOp::Put(
+                KEY_MARKETPLACE_TREASURY.to_vec(),
+                encode_fee_pool_v1(&FeePoolV1 {
+                    balance: new_treasury,
+                })
+                .to_vec(),
+            ));
+        }
+
+        // Mark the record settled and inactive. Rewriting in place keeps
+        // the existing object_id (it was hashed at create time over the
+        // original data); the subscriber can address it by the same id
+        // for inspection or later DELETE_MEMORY_OBJECT cleanup.
+        sub_data.last_settled_height = cap;
+        sub_data.is_active = false;
+        let updated_data = sub_data.encode().to_vec();
+        let updated_obj = MemoryObject {
+            data: updated_data,
+            updated_at: current_height,
+            ..sub_obj
+        };
+        let updated_encoded = encode_memory_object_v1(&updated_obj);
+        ops.push(WriteOp::Put(
+            ai_memory_object_key(&entity.id, &updated_obj.object_id),
+            updated_encoded,
+        ));
+
+        ops.push(write_ai_entity_op(&producer));
     }
 
     ops.push(write_ai_entity_op(&entity));
@@ -4811,6 +5088,17 @@ pub const KEY_SLASH_TREASURY: &[u8] = b"treasury/slash";
 /// Marketplace protocol fee, in basis points (1 bp = 0.01%).
 /// 200 bps = 2% on every signal purchase.
 pub const MARKETPLACE_FEE_BPS: u128 = 200;
+
+/// Subscription early-cancellation fee, in basis points (Feature 9).
+///
+/// 500 bps = 5% of the unaccrued (refundable) portion of a subscription.
+/// Paid 100% to the producer as compensation for early termination; no
+/// marketplace cut is taken from this fee.
+pub const SUBSCRIPTION_CANCEL_FEE_BPS: u128 = 500;
+
+/// Minimum allowed `duration_blocks` for a `SubscriptionCreate` signal
+/// (Feature 9). Subscriptions below this floor are rejected.
+pub const MIN_SUBSCRIPTION_DURATION: u64 = 100;
 
 /// Basis-points denominator (`10_000` = 100%).
 pub const BPS_DENOMINATOR: u128 = 10_000;
