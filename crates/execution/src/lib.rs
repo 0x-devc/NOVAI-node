@@ -4242,10 +4242,8 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
         return Err(ExecError::EntityNotActive);
     }
 
-    // Validate read_memory_objects capability
-    if !entity.capabilities.read_memory_objects {
-        return Err(ExecError::IssuerMissingCapability);
-    }
+    // Validate read_memory_objects capability (static or via active delegation grant)
+    requires_capability(db, &entity, current_height, |c| c.read_memory_objects)?;
 
     // Validate nonce
     if tx.nonce != entity.nonce {
@@ -4361,10 +4359,8 @@ fn apply_delete_memory_object_tx_inner<K: KvBatch>(
         return Err(ExecError::EntityNotActive);
     }
 
-    // Validate read_memory_objects capability
-    if !entity.capabilities.read_memory_objects {
-        return Err(ExecError::IssuerMissingCapability);
-    }
+    // Validate read_memory_objects capability (static or via active delegation grant)
+    requires_capability(db, &entity, current_height, |c| c.read_memory_objects)?;
 
     // Validate nonce
     if tx.nonce != entity.nonce {
