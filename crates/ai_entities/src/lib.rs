@@ -204,6 +204,36 @@ impl Capabilities {
             _reserved: [false; 2],
         }
     }
+
+    /// Return a capability set with every flag enabled in `self` OR `other`.
+    ///
+    /// Used to fold an entity's static capabilities together with capabilities
+    /// granted via active delegation memory objects when resolving the
+    /// effective capabilities for a transaction.
+    #[must_use]
+    pub fn or(&self, other: &Self) -> Self {
+        Self {
+            read_public_chain: self.read_public_chain || other.read_public_chain,
+            read_memory_objects: self.read_memory_objects || other.read_memory_objects,
+            emit_proposals: self.emit_proposals || other.emit_proposals,
+            request_execution: self.request_execution || other.request_execution,
+            read_nnpx_derived: self.read_nnpx_derived || other.read_nnpx_derived,
+            submit_reputation_updates: self.submit_reputation_updates
+                || other.submit_reputation_updates,
+            _reserved: [
+                self._reserved[0] || other._reserved[0],
+                self._reserved[1] || other._reserved[1],
+            ],
+        }
+    }
+}
+
+impl core::ops::BitOr for Capabilities {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        self.or(&rhs)
+    }
 }
 
 /// An AI entity registered on-chain.
@@ -589,5 +619,66 @@ mod tests {
         let id2 = manifest.compute_id();
 
         assert_eq!(id1, id2, "Manifest ID must be deterministic");
+    }
+
+    #[test]
+    fn capabilities_or_idempotent() {
+        let caps = Capabilities::gated();
+        let merged = caps.or(&caps);
+        assert_eq!(caps.to_byte(), merged.to_byte());
+    }
+
+    #[test]
+    fn capabilities_or_with_default_is_identity() {
+        let caps = Capabilities::advisory();
+        let identity = Capabilities::default();
+        assert_eq!(caps.to_byte(), caps.or(&identity).to_byte());
+        assert_eq!(caps.to_byte(), identity.or(&caps).to_byte());
+    }
+
+    #[test]
+    fn capabilities_or_combines_disjoint_sets() {
+        let read_only = Capabilities::read_only();
+        let signal_oracle = Capabilities {
+            submit_reputation_updates: true,
+            ..Capabilities::default()
+        };
+        let merged = read_only.or(&signal_oracle);
+        assert!(merged.read_public_chain);
+        assert!(merged.read_memory_objects);
+        assert!(merged.submit_reputation_updates);
+        assert!(!merged.emit_proposals);
+        assert!(!merged.request_execution);
+    }
+
+    #[test]
+    fn capabilities_or_preserves_byte_layout() {
+        let a = Capabilities::from_byte(0b0000_0011);
+        let b = Capabilities::from_byte(0b0010_0100);
+        let merged = a.or(&b);
+        assert_eq!(merged.to_byte(), 0b0010_0111);
+    }
+
+    #[test]
+    fn capabilities_bitor_matches_or_method() {
+        let a = Capabilities::advisory();
+        let b = Capabilities::gated();
+        let by_method = a.or(&b);
+        let by_op = a | b;
+        assert_eq!(by_method.to_byte(), by_op.to_byte());
+    }
+
+    #[test]
+    fn capabilities_or_merges_reserved_bits() {
+        let a = Capabilities {
+            _reserved: [true, false],
+            ..Capabilities::default()
+        };
+        let b = Capabilities {
+            _reserved: [false, true],
+            ..Capabilities::default()
+        };
+        let merged = a.or(&b);
+        assert_eq!(merged._reserved, [true, true]);
     }
 }
