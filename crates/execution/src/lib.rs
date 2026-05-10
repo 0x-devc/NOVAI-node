@@ -299,6 +299,30 @@ pub enum ExecError<E> {
     /// `SubscriptionCancel`: the referenced subscription has already been
     /// cancelled or expired (`is_active == false`).
     SubscriptionNotActive,
+    /// `CreateMemoryObject` (Feature 8): payload bytes for a
+    /// `DelegationGrant` failed to decode as `DelegationGrantData`, or
+    /// the version byte does not match `DELEGATION_GRANT_VERSION`.
+    InvalidDelegationGrant,
+    /// `CreateMemoryObject` (Feature 8): a `DelegationGrant` names the
+    /// delegator itself as the delegate. Self-delegation is rejected.
+    InvalidDelegationSelf,
+    /// `CreateMemoryObject` (Feature 8): the grant's
+    /// `granted_capabilities` is not a subset of the delegator's static
+    /// capabilities. An entity cannot delegate authority it does not hold.
+    DelegationCapabilityNotHeld,
+    /// `CreateMemoryObject` (Feature 8): the delegator already holds
+    /// `MAX_DELEGATION_GRANTS` open `DelegationGrant` memory objects.
+    /// Existing grants must be deleted before issuing more.
+    DelegationCountExceeded {
+        /// Delegator's current `DelegationGrant` count.
+        current: u32,
+        /// Cap (`MAX_DELEGATION_GRANTS`).
+        max: u32,
+    },
+    /// `UpdateMemoryObject` (Feature 8): updating a `DelegationGrant`
+    /// memory object is forbidden. Grants are immutable once issued; to
+    /// change scope or duration, delete the grant and create a new one.
+    DelegationGrantNotUpdatable,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -3976,11 +4000,12 @@ pub fn check_ai_entity_sender<K: Kv>(
 // ============================================================================
 
 use novai_ai_entities::{
-    decode_memory_object_v1, MAX_MEMORY_OBJECTS_PER_ENTITY, MAX_MEMORY_OBJECT_SIZE,
+    decode_memory_object_v1, MAX_DELEGATION_GRANTS, MAX_MEMORY_OBJECTS_PER_ENTITY,
+    MAX_MEMORY_OBJECT_SIZE,
 };
 use novai_state::{
-    ai_memory_count_key, decode_memory_count, encode_memory_count, KEY_PREFIX_AI_MEMORY_BY_TYPE,
-    KEY_PREFIX_AI_MEMORY_OBJECTS,
+    ai_delegation_by_delegate_key, ai_memory_count_key, decode_memory_count, encode_memory_count,
+    KEY_PREFIX_AI_MEMORY_BY_TYPE, KEY_PREFIX_AI_MEMORY_OBJECTS,
 };
 
 /// Read memory object count for an entity.
@@ -4073,6 +4098,65 @@ fn validate_composition_graph_payload<E>(
     Ok(())
 }
 
+/// Per-type structural and semantic validation for a `DelegationGrant`
+/// memory object payload. No-op for non-`DelegationGrant` types so the
+/// CREATE handler can call it unconditionally alongside the existing
+/// `validate_composition_graph_payload`.
+///
+/// Validation rules (Feature 8):
+/// 1. `DelegationGrantData` decodes cleanly and the version byte matches
+///    `DELEGATION_GRANT_VERSION`.
+/// 2. `delegate_entity_id != delegator.id` (no self-delegation).
+/// 3. Every bit set in `granted_capabilities` is also set in the
+///    delegator's static capabilities. An entity cannot grant authority
+///    it does not currently hold.
+/// 4. The delegator currently holds fewer than `MAX_DELEGATION_GRANTS`
+///    open `DelegationGrant` memory objects. Cancelled or expired grants
+///    still count toward the cap until they are deleted.
+///
+/// Returns the decoded `DelegationGrantData` on success so the create
+/// handler can derive the `delegate_entity_id` for the by-delegate
+/// secondary index without re-decoding.
+fn validate_delegation_grant_payload<K: Kv>(
+    db: &K,
+    object_type: MemoryObjectType,
+    data: &[u8],
+    delegator: &AiEntity,
+) -> Result<Option<DelegationGrantData>, ExecError<K::Error>> {
+    if object_type != MemoryObjectType::DelegationGrant {
+        return Ok(None);
+    }
+    let grant = DelegationGrantData::decode(data).ok_or(ExecError::InvalidDelegationGrant)?;
+    if grant.delegate_entity_id == delegator.id {
+        return Err(ExecError::InvalidDelegationSelf);
+    }
+    let delegator_caps = delegator.capabilities.to_byte();
+    if (grant.granted_capabilities & !delegator_caps) != 0 {
+        return Err(ExecError::DelegationCapabilityNotHeld);
+    }
+
+    // Count existing DelegationGrant memory objects owned by this
+    // delegator via the ai_memory_by_type index. Bounded scan over the
+    // (type, delegator) prefix; the cap is small so the linear walk is
+    // cheaper than maintaining a dedicated counter.
+    let mut count_prefix = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1 + 32 + 1);
+    count_prefix.extend_from_slice(KEY_PREFIX_AI_MEMORY_BY_TYPE);
+    count_prefix.push(MemoryObjectType::DelegationGrant.to_byte());
+    count_prefix.push(b'/');
+    count_prefix.extend_from_slice(&delegator.id);
+    count_prefix.push(b'/');
+    let entries = db.scan_prefix(&count_prefix).map_err(ExecError::Db)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let current = entries.len() as u32;
+    if current >= MAX_DELEGATION_GRANTS {
+        return Err(ExecError::DelegationCountExceeded {
+            current,
+            max: MAX_DELEGATION_GRANTS,
+        });
+    }
+    Ok(Some(grant))
+}
+
 fn apply_create_memory_object_tx_inner<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -4107,6 +4191,12 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
     // Per-type structural validation. CompositionGraph rejects
     // self-dependencies; other types are no-op.
     validate_composition_graph_payload(payload.object_type, &payload.data, &entity.id)?;
+
+    // Per-type structural validation for DelegationGrant (Feature 8).
+    // Decodes the grant once so the by-delegate secondary index Put below
+    // can address the delegate without redecoding the payload.
+    let delegation_grant =
+        validate_delegation_grant_payload(db, payload.object_type, &payload.data, &entity)?;
 
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
@@ -4167,6 +4257,15 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
 
     let type_key = ai_memory_by_type_key(payload.object_type.to_byte(), &entity.id, &object_id);
     ops.push(WriteOp::Put(type_key, vec![])); // Presence-only index
+
+    // Feature 8: secondary index by delegate so capability resolution can
+    // discover grants without scanning every memory object owned by every
+    // delegator. Value carries the delegator id; key carries the grant id.
+    if let Some(grant) = &delegation_grant {
+        let delegate_index_key =
+            ai_delegation_by_delegate_key(&grant.delegate_entity_id, &object_id);
+        ops.push(WriteOp::Put(delegate_index_key, entity.id.to_vec()));
+    }
 
     let count_key = ai_memory_count_key(&entity.id);
     ops.push(WriteOp::Put(
@@ -4269,6 +4368,14 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
     // Validate ownership against canonical entity.id
     if memory_object.owner_entity != entity.id {
         return Err(ExecError::MemoryObjectOwnerMismatch);
+    }
+
+    // Feature 8: DelegationGrant memory objects are immutable. Mutation
+    // could quietly add capabilities a delegator no longer holds, change
+    // the delegate, or extend expiry past the original audit trail.
+    // Force delete-and-recreate instead.
+    if memory_object.object_type == MemoryObjectType::DelegationGrant {
+        return Err(ExecError::DelegationGrantNotUpdatable);
     }
 
     // Per-type structural validation on the NEW payload bytes.
@@ -4414,6 +4521,19 @@ fn apply_delete_memory_object_tx_inner<K: KvBatch>(
         &payload.object_id,
     );
     ops.push(WriteOp::Delete(type_key));
+
+    // Feature 8: tear down the by-delegate secondary index when a
+    // DelegationGrant is deleted. The grant payload is decoded from the
+    // primary record (loaded above) to recover the delegate id; a stale
+    // payload causes the index Delete to be skipped silently rather than
+    // failing the whole tx, mirroring the resolver's tolerance policy.
+    if memory_object.object_type == MemoryObjectType::DelegationGrant {
+        if let Some(grant) = DelegationGrantData::decode(&memory_object.data) {
+            let delegate_index_key =
+                ai_delegation_by_delegate_key(&grant.delegate_entity_id, &payload.object_id);
+            ops.push(WriteOp::Delete(delegate_index_key));
+        }
+    }
 
     // Update count (decrement, but don't go below 0)
     let count_key = ai_memory_count_key(&entity.id);
@@ -7298,5 +7418,125 @@ mod tests {
 
         let resolved = resolve_effective_capabilities(&db, &delegate, u64::MAX - 1).unwrap();
         assert!(resolved.emit_proposals);
+    }
+
+    // ========================================================================
+    // validate_delegation_grant_payload tests (Feature 8 / Phase 6)
+    // ========================================================================
+
+    fn make_grant_bytes(delegate_id: [u8; 32], granted: u8, expires_at: u64) -> Vec<u8> {
+        let g = DelegationGrantData {
+            version: novai_ai_entities::DELEGATION_GRANT_VERSION,
+            delegate_entity_id: delegate_id,
+            granted_capabilities: granted,
+            expires_at,
+        };
+        g.encode().to_vec()
+    }
+
+    #[test]
+    fn validate_grant_passes_for_subset_capabilities() {
+        let db = MemKv::new();
+        let delegator = make_entity(0xA1, 0x01, Capabilities::advisory()); // 0x07
+        let delegate = make_entity(0xA2, 0x02, Capabilities::read_only());
+        let bytes = make_grant_bytes(delegate.id, 0x04, 0); // emit_proposals subset
+        let r = validate_delegation_grant_payload::<MemKv>(
+            &db,
+            MemoryObjectType::DelegationGrant,
+            &bytes,
+            &delegator,
+        );
+        assert!(matches!(r, Ok(Some(_))));
+    }
+
+    #[test]
+    fn validate_grant_no_op_for_other_object_types() {
+        let db = MemKv::new();
+        let delegator = make_entity(0xA3, 0x01, Capabilities::advisory());
+        let r = validate_delegation_grant_payload::<MemKv>(
+            &db,
+            MemoryObjectType::ChainSummary,
+            &[0u8; 16],
+            &delegator,
+        );
+        assert!(matches!(r, Ok(None)));
+    }
+
+    #[test]
+    fn validate_grant_rejects_self_delegation() {
+        let db = MemKv::new();
+        let delegator = make_entity(0xA4, 0x01, Capabilities::advisory());
+        let bytes = make_grant_bytes(delegator.id, 0x04, 0);
+        let r = validate_delegation_grant_payload::<MemKv>(
+            &db,
+            MemoryObjectType::DelegationGrant,
+            &bytes,
+            &delegator,
+        );
+        assert!(matches!(r, Err(ExecError::InvalidDelegationSelf)));
+    }
+
+    #[test]
+    fn validate_grant_rejects_superset_capability() {
+        let db = MemKv::new();
+        // delegator only has read_only (0x03); tries to grant emit_proposals (0x04).
+        let delegator = make_entity(0xA5, 0x01, Capabilities::read_only());
+        let delegate = make_entity(0xA6, 0x02, Capabilities::default());
+        let bytes = make_grant_bytes(delegate.id, 0x04, 0);
+        let r = validate_delegation_grant_payload::<MemKv>(
+            &db,
+            MemoryObjectType::DelegationGrant,
+            &bytes,
+            &delegator,
+        );
+        assert!(matches!(r, Err(ExecError::DelegationCapabilityNotHeld)));
+    }
+
+    #[test]
+    fn validate_grant_rejects_bad_version_byte() {
+        let db = MemKv::new();
+        let delegator = make_entity(0xA7, 0x01, Capabilities::advisory());
+        let mut bytes = make_grant_bytes([0xAAu8; 32], 0x04, 0);
+        bytes[0] = 99; // wrong version
+        let r = validate_delegation_grant_payload::<MemKv>(
+            &db,
+            MemoryObjectType::DelegationGrant,
+            &bytes,
+            &delegator,
+        );
+        assert!(matches!(r, Err(ExecError::InvalidDelegationGrant)));
+    }
+
+    #[test]
+    fn validate_grant_rejects_at_max_count() {
+        let mut db = MemKv::new();
+        let delegator = make_entity(0xA8, 0x01, Capabilities::advisory());
+        let delegate = make_entity(0xA9, 0x02, Capabilities::default());
+        write_entity(&mut db, &delegator);
+        write_entity(&mut db, &delegate);
+        // Pre-populate the by-type index with MAX_DELEGATION_GRANTS sentinel
+        // entries so the count check trips.
+        for i in 0..MAX_DELEGATION_GRANTS {
+            let mut fake_id = [0u8; 32];
+            fake_id[..4].copy_from_slice(&i.to_be_bytes());
+            let key = ai_memory_by_type_key(
+                MemoryObjectType::DelegationGrant.to_byte(),
+                &delegator.id,
+                &fake_id,
+            );
+            db.apply_batch(&[WriteOp::Put(key, vec![])]).unwrap();
+        }
+        let bytes = make_grant_bytes(delegate.id, 0x04, 0);
+        let r = validate_delegation_grant_payload::<MemKv>(
+            &db,
+            MemoryObjectType::DelegationGrant,
+            &bytes,
+            &delegator,
+        );
+        assert!(matches!(
+            r,
+            Err(ExecError::DelegationCountExceeded { current, max })
+                if current == MAX_DELEGATION_GRANTS && max == MAX_DELEGATION_GRANTS
+        ));
     }
 }
