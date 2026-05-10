@@ -28,6 +28,16 @@ pub const MAX_MEMORY_OBJECT_SIZE: usize = 65536;
 /// Maximum number of memory objects per AI entity.
 pub const MAX_MEMORY_OBJECTS_PER_ENTITY: u32 = 100;
 
+/// Maximum number of `DelegationGrant` memory objects a single delegator may
+/// hold open at one time. Counts against the per-entity object cap as well.
+pub const MAX_DELEGATION_GRANTS: u32 = 20;
+
+/// Codec version for `DelegationGrantData`.
+pub const DELEGATION_GRANT_VERSION: u8 = 1;
+
+/// Canonical wire size of a `DelegationGrantData` payload (42 bytes).
+pub const DELEGATION_GRANT_SIZE: usize = 1 + 32 + 1 + 8;
+
 // ============================================================================
 // MEMORY OBJECT TYPE ENUM (D21.1)
 // ============================================================================
@@ -77,6 +87,13 @@ pub enum MemoryObjectType {
     /// proof. Fixed 105-byte payload: proof_type:1 | code_hash:32 |
     /// computation_hash:32 | proof_hash:32 | height_be:8.
     VerificationRecord = 9,
+    /// On-chain delegation grant: an AI entity (the memory object owner /
+    /// delegator) authorizes another AI entity (the delegate, identified by
+    /// the embedded `delegate_entity_id`) to act with a subset of the
+    /// delegator's capabilities for a bounded duration. Stored as a fixed
+    /// 42-byte payload (`DelegationGrantData`). Revocation is performed by
+    /// deleting the memory object via `DELETE_MEMORY_OBJECT`.
+    DelegationGrant = 10,
 }
 
 impl MemoryObjectType {
@@ -100,6 +117,7 @@ impl MemoryObjectType {
             7 => Some(Self::SignalCatalog),
             8 => Some(Self::CompositionGraph),
             9 => Some(Self::VerificationRecord),
+            10 => Some(Self::DelegationGrant),
             _ => None,
         }
     }
@@ -118,6 +136,7 @@ impl MemoryObjectType {
             Self::SignalCatalog => "SignalCatalog",
             Self::CompositionGraph => "CompositionGraph",
             Self::VerificationRecord => "VerificationRecord",
+            Self::DelegationGrant => "DelegationGrant",
         }
     }
 }
@@ -842,6 +861,83 @@ impl VerificationRecordData {
     }
 }
 
+/// On-chain delegation grant payload data.
+///
+/// Stored as the data field of a `MemoryObjectType::DelegationGrant`
+/// memory object. The owner of the surrounding memory object envelope is
+/// the DELEGATOR (Entity A); the embedded `delegate_entity_id` identifies
+/// the recipient (Entity B). While the grant is active, its
+/// `granted_capabilities` bits are merged into the delegate's effective
+/// capabilities at signal/memory-CRUD admission time.
+///
+/// Wire layout (42 bytes, fixed):
+/// `version:1 | delegate_entity_id:32 | granted_capabilities:1 | expires_at_be:8`.
+///
+/// `expires_at == 0` is the explicit no-expiry sentinel; the grant
+/// remains active until the delegator deletes the memory object.
+/// Revocation is performed via `DELETE_MEMORY_OBJECT`; updates of a
+/// `DelegationGrant` memory object are rejected by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DelegationGrantData {
+    /// Codec version (must equal `DELEGATION_GRANT_VERSION`).
+    pub version: u8,
+    /// AI entity ID that receives the delegated capabilities.
+    pub delegate_entity_id: [u8; 32],
+    /// Capability bits granted to the delegate (same byte layout as
+    /// `Capabilities::to_byte`).
+    pub granted_capabilities: u8,
+    /// Block height at which the grant expires; `0` means no expiry.
+    pub expires_at: u64,
+}
+
+impl DelegationGrantData {
+    /// Encode this grant to its 42-byte canonical form.
+    #[must_use]
+    pub fn encode(&self) -> [u8; DELEGATION_GRANT_SIZE] {
+        let mut out = [0u8; DELEGATION_GRANT_SIZE];
+        out[0] = self.version;
+        out[1..33].copy_from_slice(&self.delegate_entity_id);
+        out[33] = self.granted_capabilities;
+        out[34..42].copy_from_slice(&self.expires_at.to_be_bytes());
+        out
+    }
+
+    /// Decode a grant from canonical bytes.
+    ///
+    /// Returns `None` if the slice length is not exactly
+    /// `DELEGATION_GRANT_SIZE` or the version byte does not match
+    /// `DELEGATION_GRANT_VERSION`.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != DELEGATION_GRANT_SIZE {
+            return None;
+        }
+        let version = bytes[0];
+        if version != DELEGATION_GRANT_VERSION {
+            return None;
+        }
+        let mut delegate_entity_id = [0u8; 32];
+        delegate_entity_id.copy_from_slice(&bytes[1..33]);
+        let granted_capabilities = bytes[33];
+        let expires_at = u64::from_be_bytes(bytes[34..42].try_into().ok()?);
+        Some(Self {
+            version,
+            delegate_entity_id,
+            granted_capabilities,
+            expires_at,
+        })
+    }
+
+    /// True when the grant is currently usable at the given block height.
+    ///
+    /// `expires_at == 0` is treated as no expiry. Otherwise the grant is
+    /// active strictly while `current_height < expires_at`.
+    #[must_use]
+    pub const fn is_active_at(&self, current_height: u64) -> bool {
+        self.expires_at == 0 || current_height < self.expires_at
+    }
+}
+
 // ============================================================================
 // TESTS
 // ============================================================================
@@ -862,6 +958,7 @@ mod tests {
             MemoryObjectType::Rating,
             MemoryObjectType::SignalCatalog,
             MemoryObjectType::CompositionGraph,
+            MemoryObjectType::DelegationGrant,
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
@@ -871,7 +968,7 @@ mod tests {
 
     #[test]
     fn memory_object_type_invalid_returns_none() {
-        assert!(MemoryObjectType::from_byte(10).is_none());
+        assert!(MemoryObjectType::from_byte(11).is_none());
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
 
@@ -895,6 +992,7 @@ mod tests {
             MemoryObjectType::CompositionGraph.name(),
             "CompositionGraph"
         );
+        assert_eq!(MemoryObjectType::DelegationGrant.name(), "DelegationGrant");
     }
 
     #[test]
@@ -1095,6 +1193,7 @@ mod tests {
             MemoryObjectType::SignalCatalog,
             MemoryObjectType::CompositionGraph,
             MemoryObjectType::VerificationRecord,
+            MemoryObjectType::DelegationGrant,
         ] {
             let obj = MemoryObject::new(owner, object_type, 1000, b"type test".to_vec());
             let encoded = encode_memory_object_v1(&obj);
@@ -1315,7 +1414,11 @@ mod tests {
             MemoryObjectType::from_byte(9),
             Some(MemoryObjectType::VerificationRecord)
         );
-        assert_eq!(MemoryObjectType::from_byte(10), None);
+        assert_eq!(
+            MemoryObjectType::from_byte(10),
+            Some(MemoryObjectType::DelegationGrant)
+        );
+        assert_eq!(MemoryObjectType::from_byte(11), None);
         assert_eq!(
             MemoryObjectType::CompositionGraph.name(),
             "CompositionGraph"
@@ -1324,6 +1427,7 @@ mod tests {
             MemoryObjectType::VerificationRecord.name(),
             "VerificationRecord"
         );
+        assert_eq!(MemoryObjectType::DelegationGrant.name(), "DelegationGrant");
     }
 
     #[test]
@@ -1576,5 +1680,129 @@ mod tests {
     #[test]
     fn verification_record_data_decode_empty_returns_none() {
         assert!(VerificationRecordData::decode(&[]).is_none());
+    }
+
+    // ========================================================================
+    // DelegationGrant (Feature 8) tests
+    // ========================================================================
+
+    fn sample_grant() -> DelegationGrantData {
+        DelegationGrantData {
+            version: DELEGATION_GRANT_VERSION,
+            delegate_entity_id: [0xAAu8; 32],
+            granted_capabilities: 0x04, // emit_proposals
+            expires_at: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn delegation_grant_data_byte_layout() {
+        let g = DelegationGrantData {
+            version: DELEGATION_GRANT_VERSION,
+            delegate_entity_id: [0xBBu8; 32],
+            granted_capabilities: 0x27,
+            expires_at: 0x0102_0304_0506_0708,
+        };
+        let encoded = g.encode();
+        assert_eq!(encoded.len(), DELEGATION_GRANT_SIZE);
+        assert_eq!(encoded.len(), 42);
+        assert_eq!(encoded[0], DELEGATION_GRANT_VERSION, "version at 0");
+        assert_eq!(
+            &encoded[1..33],
+            &[0xBBu8; 32],
+            "delegate_entity_id at 1..33"
+        );
+        assert_eq!(encoded[33], 0x27, "granted_capabilities at 33");
+        assert_eq!(
+            &encoded[34..42],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "expires_at_be at 34..42"
+        );
+    }
+
+    #[test]
+    fn delegation_grant_data_roundtrip() {
+        let cases = [
+            sample_grant(),
+            DelegationGrantData {
+                version: DELEGATION_GRANT_VERSION,
+                delegate_entity_id: [0u8; 32],
+                granted_capabilities: 0,
+                expires_at: 0,
+            },
+            DelegationGrantData {
+                version: DELEGATION_GRANT_VERSION,
+                delegate_entity_id: [0xFFu8; 32],
+                granted_capabilities: u8::MAX,
+                expires_at: u64::MAX,
+            },
+        ];
+        for g in cases {
+            let encoded = g.encode();
+            let decoded = DelegationGrantData::decode(&encoded).expect("decode");
+            assert_eq!(g, decoded, "roundtrip {g:?}");
+        }
+    }
+
+    #[test]
+    fn delegation_grant_data_decode_wrong_size() {
+        let too_short = vec![0u8; DELEGATION_GRANT_SIZE - 1];
+        assert!(DelegationGrantData::decode(&too_short).is_none());
+        let too_long = vec![0u8; DELEGATION_GRANT_SIZE + 1];
+        assert!(DelegationGrantData::decode(&too_long).is_none());
+        assert!(DelegationGrantData::decode(&[]).is_none());
+    }
+
+    #[test]
+    fn delegation_grant_data_decode_bad_version() {
+        let mut bytes = sample_grant().encode();
+        bytes[0] = DELEGATION_GRANT_VERSION + 1;
+        assert!(DelegationGrantData::decode(&bytes).is_none());
+        bytes[0] = 0;
+        assert!(DelegationGrantData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn delegation_grant_data_is_active_at_no_expiry() {
+        let g = DelegationGrantData {
+            expires_at: 0,
+            ..sample_grant()
+        };
+        assert!(g.is_active_at(0));
+        assert!(g.is_active_at(u64::MAX));
+    }
+
+    #[test]
+    fn delegation_grant_data_is_active_at_with_expiry() {
+        let g = DelegationGrantData {
+            expires_at: 100,
+            ..sample_grant()
+        };
+        assert!(g.is_active_at(0));
+        assert!(g.is_active_at(99));
+        assert!(!g.is_active_at(100), "expires_at is exclusive upper bound");
+        assert!(!g.is_active_at(101));
+    }
+
+    #[test]
+    fn delegation_grant_via_memory_object_envelope_roundtrip() {
+        let owner = [0x42u8; 32];
+        let grant = sample_grant();
+        let obj = MemoryObject::new(
+            owner,
+            MemoryObjectType::DelegationGrant,
+            5_000,
+            grant.encode().to_vec(),
+        );
+        let encoded = encode_memory_object_v1(&obj);
+        let decoded = decode_memory_object_v1(&encoded).expect("envelope decode");
+        assert_eq!(decoded.object_type, MemoryObjectType::DelegationGrant);
+        let payload = DelegationGrantData::decode(&decoded.data).expect("payload decode");
+        assert_eq!(payload, grant);
+    }
+
+    #[test]
+    fn max_delegation_grants_constant() {
+        assert_eq!(MAX_DELEGATION_GRANTS, 20);
     }
 }
