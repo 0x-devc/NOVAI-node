@@ -23,6 +23,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Generate a new Ed25519 keypair.
     Keygen {

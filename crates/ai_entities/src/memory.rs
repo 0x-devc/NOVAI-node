@@ -38,6 +38,20 @@ pub const DELEGATION_GRANT_VERSION: u8 = 1;
 /// Canonical wire size of a `DelegationGrantData` payload (42 bytes).
 pub const DELEGATION_GRANT_SIZE: usize = 1 + 32 + 1 + 8;
 
+/// Maximum number of `Subscription` memory objects a single subscriber may
+/// hold (active or cancelled) at one time. Counts against the per-entity
+/// object cap as well; cancelled records remain in state for audit until
+/// the subscriber explicitly deletes them via `DELETE_MEMORY_OBJECT`.
+pub const MAX_SUBSCRIPTIONS_PER_ENTITY: u32 = 10;
+
+/// Canonical wire size of a `SubscriptionData` payload (114 bytes).
+///
+/// Layout: `subscriber_entity_id:32 | producer_entity_id:32 |
+/// covered_signal_type:1 | rate_per_block_be:8 | start_height_be:8 |
+/// end_height_be:8 | last_settled_height_be:8 | total_locked_be:16 |
+/// is_active:1`.
+pub const SUBSCRIPTION_SIZE: usize = 32 + 32 + 1 + 8 + 8 + 8 + 8 + 16 + 1;
+
 // ============================================================================
 // MEMORY OBJECT TYPE ENUM (D21.1)
 // ============================================================================
@@ -94,6 +108,17 @@ pub enum MemoryObjectType {
     /// 42-byte payload (`DelegationGrantData`). Revocation is performed by
     /// deleting the memory object via `DELETE_MEMORY_OBJECT`.
     DelegationGrant = 10,
+    /// Recurring payment subscription record (Feature 9): the memory
+    /// object owner is the SUBSCRIBER, who has locked
+    /// `rate_per_block * duration_blocks` of `economic_balance` to a
+    /// producer for a fixed covered signal type. Settlement is lazy and
+    /// triggered by the subscriber's `SubscriptionCancel` signal; on
+    /// cancel, accrued payment is transferred to the producer (less the
+    /// 2% marketplace fee), the 5% cancel fee on remaining locked funds
+    /// is paid to the producer, the rest is refunded to the subscriber,
+    /// and `is_active` is set to false. Stored as a fixed 114-byte
+    /// payload (`SubscriptionData`).
+    Subscription = 11,
 }
 
 impl MemoryObjectType {
@@ -118,6 +143,7 @@ impl MemoryObjectType {
             8 => Some(Self::CompositionGraph),
             9 => Some(Self::VerificationRecord),
             10 => Some(Self::DelegationGrant),
+            11 => Some(Self::Subscription),
             _ => None,
         }
     }
@@ -137,6 +163,7 @@ impl MemoryObjectType {
             Self::CompositionGraph => "CompositionGraph",
             Self::VerificationRecord => "VerificationRecord",
             Self::DelegationGrant => "DelegationGrant",
+            Self::Subscription => "Subscription",
         }
     }
 }
@@ -938,6 +965,147 @@ impl DelegationGrantData {
     }
 }
 
+/// On-chain subscription record payload data (Feature 9).
+///
+/// Stored as the data field of a `MemoryObjectType::Subscription` memory
+/// object. The owner of the surrounding memory object envelope is the
+/// SUBSCRIBER, who has locked `rate_per_block * (end_height - start_height)`
+/// units of `economic_balance` at creation time. The `producer_entity_id`
+/// embedded here identifies the counterparty that will receive accrued
+/// payment when settlement occurs.
+///
+/// Wire layout (114 bytes, fixed):
+/// `subscriber_entity_id:32 | producer_entity_id:32 |
+/// covered_signal_type:1 | rate_per_block_be:8 | start_height_be:8 |
+/// end_height_be:8 | last_settled_height_be:8 | total_locked_be:16 |
+/// is_active:1`.
+///
+/// Settlement is performed lazily by the `SubscriptionCancel` signal
+/// handler. The handler:
+///   1. Computes accrued blocks as
+///      `min(current_height, end_height) - last_settled_height`.
+///   2. Credits the producer with `accrued_blocks * rate_per_block` less
+///      the standard 2% marketplace fee (which accumulates in the
+///      marketplace treasury).
+///   3. Computes the unaccrued remainder as
+///      `total_locked - accrued_blocks * rate_per_block`.
+///   4. Pays the producer a 5% cancel fee on the remainder (no
+///      marketplace cut on this fee, by design).
+///   5. Refunds the rest of the remainder to the subscriber.
+///   6. Sets `is_active = false` and advances `last_settled_height` to
+///      `min(current_height, end_height)`.
+///
+/// Cancelled records remain in state for audit. The subscriber may
+/// reclaim the memory object slot by issuing a `DELETE_MEMORY_OBJECT`
+/// transaction. Only the original subscriber may cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubscriptionData {
+    /// AI entity that pays for and owns this subscription.
+    pub subscriber_entity_id: [u8; 32],
+    /// AI entity that the subscriber is paying.
+    pub producer_entity_id: [u8; 32],
+    /// `AiSignalType` byte identifying which producer signal type the
+    /// subscription covers (informational; not enforced by the runtime).
+    pub covered_signal_type: u8,
+    /// Per-block payment rate, in base units of `economic_balance`.
+    pub rate_per_block: u64,
+    /// Block height at which the subscription began.
+    pub start_height: u64,
+    /// Block height at which the subscription naturally expires (the
+    /// upper bound for accrual; cancellations after this height accrue
+    /// no extra blocks).
+    pub end_height: u64,
+    /// Block height up to which payment has already been settled to the
+    /// producer. Initialized to `start_height` at creation.
+    pub last_settled_height: u64,
+    /// Total amount locked at creation:
+    /// `rate_per_block * (end_height - start_height)`.
+    pub total_locked: u128,
+    /// `false` after the subscription has been cancelled or fully
+    /// settled. Only `true` records authorize further settlement.
+    pub is_active: bool,
+}
+
+impl SubscriptionData {
+    /// Encode this subscription record to its 114-byte canonical form.
+    #[must_use]
+    pub fn encode(&self) -> [u8; SUBSCRIPTION_SIZE] {
+        let mut out = [0u8; SUBSCRIPTION_SIZE];
+        out[0..32].copy_from_slice(&self.subscriber_entity_id);
+        out[32..64].copy_from_slice(&self.producer_entity_id);
+        out[64] = self.covered_signal_type;
+        out[65..73].copy_from_slice(&self.rate_per_block.to_be_bytes());
+        out[73..81].copy_from_slice(&self.start_height.to_be_bytes());
+        out[81..89].copy_from_slice(&self.end_height.to_be_bytes());
+        out[89..97].copy_from_slice(&self.last_settled_height.to_be_bytes());
+        out[97..113].copy_from_slice(&self.total_locked.to_be_bytes());
+        out[113] = u8::from(self.is_active);
+        out
+    }
+
+    /// Decode a subscription record from canonical bytes.
+    ///
+    /// Returns `None` if the slice length is not exactly
+    /// `SUBSCRIPTION_SIZE` or the `is_active` byte is not `0` or `1`.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != SUBSCRIPTION_SIZE {
+            return None;
+        }
+        let mut subscriber_entity_id = [0u8; 32];
+        subscriber_entity_id.copy_from_slice(&bytes[0..32]);
+        let mut producer_entity_id = [0u8; 32];
+        producer_entity_id.copy_from_slice(&bytes[32..64]);
+        let covered_signal_type = bytes[64];
+        let rate_per_block = u64::from_be_bytes(bytes[65..73].try_into().ok()?);
+        let start_height = u64::from_be_bytes(bytes[73..81].try_into().ok()?);
+        let end_height = u64::from_be_bytes(bytes[81..89].try_into().ok()?);
+        let last_settled_height = u64::from_be_bytes(bytes[89..97].try_into().ok()?);
+        let total_locked = u128::from_be_bytes(bytes[97..113].try_into().ok()?);
+        let is_active = match bytes[113] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Self {
+            subscriber_entity_id,
+            producer_entity_id,
+            covered_signal_type,
+            rate_per_block,
+            start_height,
+            end_height,
+            last_settled_height,
+            total_locked,
+            is_active,
+        })
+    }
+
+    /// Compute the number of blocks eligible for settlement at the given
+    /// height. Saturates at `end_height`; returns 0 if the record is
+    /// already inactive or `current_height <= last_settled_height`.
+    #[must_use]
+    pub fn settlable_blocks(&self, current_height: u64) -> u64 {
+        if !self.is_active {
+            return 0;
+        }
+        let cap = if current_height < self.end_height {
+            current_height
+        } else {
+            self.end_height
+        };
+        cap.saturating_sub(self.last_settled_height)
+    }
+
+    /// Compute the gross accrued payment at the given height
+    /// (`settlable_blocks * rate_per_block`). Returns `None` on overflow.
+    #[must_use]
+    pub fn accrued_gross(&self, current_height: u64) -> Option<u128> {
+        let blocks = u128::from(self.settlable_blocks(current_height));
+        let rate = u128::from(self.rate_per_block);
+        blocks.checked_mul(rate)
+    }
+}
+
 // ============================================================================
 // TESTS
 // ============================================================================
@@ -959,6 +1127,7 @@ mod tests {
             MemoryObjectType::SignalCatalog,
             MemoryObjectType::CompositionGraph,
             MemoryObjectType::DelegationGrant,
+            MemoryObjectType::Subscription,
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
@@ -968,7 +1137,7 @@ mod tests {
 
     #[test]
     fn memory_object_type_invalid_returns_none() {
-        assert!(MemoryObjectType::from_byte(11).is_none());
+        assert!(MemoryObjectType::from_byte(12).is_none());
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
 
@@ -1418,7 +1587,11 @@ mod tests {
             MemoryObjectType::from_byte(10),
             Some(MemoryObjectType::DelegationGrant)
         );
-        assert_eq!(MemoryObjectType::from_byte(11), None);
+        assert_eq!(
+            MemoryObjectType::from_byte(11),
+            Some(MemoryObjectType::Subscription)
+        );
+        assert_eq!(MemoryObjectType::from_byte(12), None);
         assert_eq!(
             MemoryObjectType::CompositionGraph.name(),
             "CompositionGraph"
@@ -1428,6 +1601,7 @@ mod tests {
             "VerificationRecord"
         );
         assert_eq!(MemoryObjectType::DelegationGrant.name(), "DelegationGrant");
+        assert_eq!(MemoryObjectType::Subscription.name(), "Subscription");
     }
 
     #[test]
@@ -1804,5 +1978,223 @@ mod tests {
     #[test]
     fn max_delegation_grants_constant() {
         assert_eq!(MAX_DELEGATION_GRANTS, 20);
+    }
+
+    // ========================================================================
+    // Subscription (Feature 9) tests
+    // ========================================================================
+
+    fn sample_subscription() -> SubscriptionData {
+        SubscriptionData {
+            subscriber_entity_id: [0xAAu8; 32],
+            producer_entity_id: [0xBBu8; 32],
+            covered_signal_type: 2, // Prediction
+            rate_per_block: 10,
+            start_height: 1_000,
+            end_height: 11_000,
+            last_settled_height: 1_000,
+            total_locked: 100_000,
+            is_active: true,
+        }
+    }
+
+    #[test]
+    fn subscription_data_byte_layout() {
+        let s = SubscriptionData {
+            subscriber_entity_id: [0x11u8; 32],
+            producer_entity_id: [0x22u8; 32],
+            covered_signal_type: 0x07,
+            rate_per_block: 0x0102_0304_0506_0708,
+            start_height: 0x1112_1314_1516_1718,
+            end_height: 0x2122_2324_2526_2728,
+            last_settled_height: 0x3132_3334_3536_3738,
+            total_locked: 0x4142_4344_4546_4748_5152_5354_5556_5758,
+            is_active: true,
+        };
+        let encoded = s.encode();
+        assert_eq!(encoded.len(), SUBSCRIPTION_SIZE);
+        assert_eq!(encoded.len(), 114);
+        assert_eq!(
+            &encoded[0..32],
+            &[0x11u8; 32],
+            "subscriber_entity_id at 0..32"
+        );
+        assert_eq!(
+            &encoded[32..64],
+            &[0x22u8; 32],
+            "producer_entity_id at 32..64"
+        );
+        assert_eq!(encoded[64], 0x07, "covered_signal_type at 64");
+        assert_eq!(
+            &encoded[65..73],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "rate_per_block_be at 65..73"
+        );
+        assert_eq!(
+            &encoded[73..81],
+            &0x1112_1314_1516_1718u64.to_be_bytes(),
+            "start_height_be at 73..81"
+        );
+        assert_eq!(
+            &encoded[81..89],
+            &0x2122_2324_2526_2728u64.to_be_bytes(),
+            "end_height_be at 81..89"
+        );
+        assert_eq!(
+            &encoded[89..97],
+            &0x3132_3334_3536_3738u64.to_be_bytes(),
+            "last_settled_height_be at 89..97"
+        );
+        assert_eq!(
+            &encoded[97..113],
+            &0x4142_4344_4546_4748_5152_5354_5556_5758u128.to_be_bytes(),
+            "total_locked_be at 97..113"
+        );
+        assert_eq!(encoded[113], 1, "is_active at 113 (1 = true)");
+    }
+
+    #[test]
+    fn subscription_data_roundtrip() {
+        let cases = [
+            sample_subscription(),
+            SubscriptionData {
+                subscriber_entity_id: [0u8; 32],
+                producer_entity_id: [0u8; 32],
+                covered_signal_type: 0,
+                rate_per_block: 0,
+                start_height: 0,
+                end_height: 0,
+                last_settled_height: 0,
+                total_locked: 0,
+                is_active: false,
+            },
+            SubscriptionData {
+                subscriber_entity_id: [0xFFu8; 32],
+                producer_entity_id: [0xFFu8; 32],
+                covered_signal_type: u8::MAX,
+                rate_per_block: u64::MAX,
+                start_height: u64::MAX,
+                end_height: u64::MAX,
+                last_settled_height: u64::MAX,
+                total_locked: u128::MAX,
+                is_active: true,
+            },
+            SubscriptionData {
+                is_active: false,
+                ..sample_subscription()
+            },
+        ];
+        for s in cases {
+            let encoded = s.encode();
+            let decoded = SubscriptionData::decode(&encoded).expect("decode");
+            assert_eq!(s, decoded, "roundtrip {s:?}");
+        }
+    }
+
+    #[test]
+    fn subscription_data_decode_wrong_size() {
+        let too_short = vec![0u8; SUBSCRIPTION_SIZE - 1];
+        assert!(SubscriptionData::decode(&too_short).is_none());
+        let too_long = vec![0u8; SUBSCRIPTION_SIZE + 1];
+        assert!(SubscriptionData::decode(&too_long).is_none());
+        assert!(SubscriptionData::decode(&[]).is_none());
+    }
+
+    #[test]
+    fn subscription_data_decode_invalid_is_active_byte() {
+        let mut bytes = sample_subscription().encode();
+        bytes[113] = 2;
+        assert!(SubscriptionData::decode(&bytes).is_none());
+        bytes[113] = u8::MAX;
+        assert!(SubscriptionData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn subscription_data_settlable_blocks_inside_window() {
+        let mut s = sample_subscription();
+        s.last_settled_height = 1_000;
+        // Halfway through the 10_000-block window.
+        assert_eq!(s.settlable_blocks(6_000), 5_000);
+    }
+
+    #[test]
+    fn subscription_data_settlable_blocks_capped_at_end_height() {
+        let s = sample_subscription();
+        // current_height beyond end_height: settle no further than end_height.
+        assert_eq!(s.settlable_blocks(20_000), 10_000);
+    }
+
+    #[test]
+    fn subscription_data_settlable_blocks_zero_when_inactive() {
+        let s = SubscriptionData {
+            is_active: false,
+            ..sample_subscription()
+        };
+        assert_eq!(s.settlable_blocks(6_000), 0);
+    }
+
+    #[test]
+    fn subscription_data_settlable_blocks_saturating_when_height_below_settled() {
+        let mut s = sample_subscription();
+        s.last_settled_height = 5_000;
+        // current_height before last_settled_height: saturating_sub returns 0.
+        assert_eq!(s.settlable_blocks(2_000), 0);
+    }
+
+    #[test]
+    fn subscription_data_accrued_gross_basic() {
+        let mut s = sample_subscription();
+        s.last_settled_height = 1_000;
+        s.rate_per_block = 7;
+        // 1_000 blocks at rate 7 = 7_000.
+        assert_eq!(s.accrued_gross(2_000), Some(7_000));
+    }
+
+    #[test]
+    fn subscription_data_accrued_gross_extreme_values_fit_in_u128() {
+        let s = SubscriptionData {
+            rate_per_block: u64::MAX,
+            start_height: 0,
+            end_height: u64::MAX,
+            last_settled_height: 0,
+            ..sample_subscription()
+        };
+        // u64::MAX blocks * u64::MAX rate is (2^64 - 1)^2, which fits in u128
+        // (just under u128::MAX). The checked_mul therefore returns Some.
+        // This documents that accrued_gross cannot overflow in v1 because
+        // both operands are u64; the Option return type is defensive cover
+        // for future widening of either operand.
+        let blocks = u128::from(u64::MAX);
+        let rate = u128::from(u64::MAX);
+        let expected = blocks * rate;
+        assert_eq!(s.accrued_gross(u64::MAX), Some(expected));
+    }
+
+    #[test]
+    fn subscription_via_memory_object_envelope_roundtrip() {
+        let owner = [0x42u8; 32];
+        let sub = sample_subscription();
+        let obj = MemoryObject::new(
+            owner,
+            MemoryObjectType::Subscription,
+            sub.start_height,
+            sub.encode().to_vec(),
+        );
+        let encoded = encode_memory_object_v1(&obj);
+        let decoded = decode_memory_object_v1(&encoded).expect("envelope decode");
+        assert_eq!(decoded.object_type, MemoryObjectType::Subscription);
+        let payload = SubscriptionData::decode(&decoded.data).expect("payload decode");
+        assert_eq!(payload, sub);
+    }
+
+    #[test]
+    fn max_subscriptions_per_entity_constant() {
+        assert_eq!(MAX_SUBSCRIPTIONS_PER_ENTITY, 10);
+    }
+
+    #[test]
+    fn subscription_size_constant_matches_layout() {
+        assert_eq!(SUBSCRIPTION_SIZE, 114);
+        assert_eq!(SUBSCRIPTION_SIZE, 32 + 32 + 1 + 8 + 8 + 8 + 8 + 16 + 1);
     }
 }

@@ -59,6 +59,27 @@ pub enum AiSignalType {
     /// memory object owned by the issuer plus a `REP_EVENT_PROOF_VERIFIED`
     /// reputation event with delta +3.
     ProofSubmission = 13,
+    /// Recurring payment subscription create: the issuing entity (the
+    /// subscriber) locks `rate_per_block * duration_blocks` of its
+    /// `economic_balance` to a producer for a fixed covered signal type.
+    /// On success the handler creates a `MemoryObjectType::Subscription`
+    /// memory object owned by the subscriber, recording the active
+    /// agreement. Settlement is lazy and is performed when the
+    /// subscriber emits a matching `SubscriptionCancel` signal. Carries
+    /// a 49-byte tail: producer_entity_id:32 | covered_signal_type:1 |
+    /// rate_per_block_be:8 | duration_blocks_be:8.
+    SubscriptionCreate = 14,
+    /// Recurring payment subscription cancel: the original subscriber
+    /// terminates an active subscription early. The handler settles
+    /// accrued payment to the producer (less the standard 2% marketplace
+    /// fee), applies a 5% cancel fee on the remaining locked funds (paid
+    /// to the producer with no marketplace cut as compensation for early
+    /// termination), refunds the rest to the subscriber, and marks the
+    /// subscription record `is_active = false`. Only the original
+    /// subscriber may emit this signal. Carries a 32-byte tail:
+    /// subscription_id:32 (the memory object id of the `Subscription`
+    /// record being cancelled).
+    SubscriptionCancel = 15,
 }
 
 impl AiSignalType {
@@ -84,6 +105,8 @@ impl AiSignalType {
             11 => Some(AiSignalType::StakeSlash),
             12 => Some(AiSignalType::CompositionCheck),
             13 => Some(AiSignalType::ProofSubmission),
+            14 => Some(AiSignalType::SubscriptionCreate),
+            15 => Some(AiSignalType::SubscriptionCancel),
             _ => None,
         }
     }
@@ -180,11 +203,23 @@ mod tests {
         );
         assert_eq!(
             AiSignalType::from_byte(14),
+            Some(AiSignalType::SubscriptionCreate),
+            "14 must decode to SubscriptionCreate"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(15),
+            Some(AiSignalType::SubscriptionCancel),
+            "15 must decode to SubscriptionCancel"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(16),
             None,
-            "14 must be rejected as unknown signal type"
+            "16 must be rejected as unknown signal type"
         );
         assert_eq!(AiSignalType::CompositionCheck.to_byte(), 12);
         assert_eq!(AiSignalType::ProofSubmission.to_byte(), 13);
+        assert_eq!(AiSignalType::SubscriptionCreate.to_byte(), 14);
+        assert_eq!(AiSignalType::SubscriptionCancel.to_byte(), 15);
     }
 
     #[test]

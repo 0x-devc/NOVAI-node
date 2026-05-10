@@ -6,7 +6,7 @@ use crate::rpc_client::RpcClient;
 use clap::Args;
 use novai_ai_entities::AiSignalType;
 
-/// Optional extended-payload arguments for signal types 7-13.
+/// Optional extended-payload arguments for signal types 7-15.
 ///
 /// Required flags depend on signal type; see per-field docs for which
 /// signal type each flag applies to. Signal types 0-6 (the original seven)
@@ -68,6 +68,27 @@ pub struct ExtendedSignalArgs {
     /// Hex-encoded 32-byte computation hash (proof-submission).
     #[arg(long)]
     pub computation_hash: Option<String>,
+
+    /// Hex-encoded 32-byte producer entity ID (subscription-create).
+    #[arg(long)]
+    pub producer_entity_id: Option<String>,
+
+    /// Covered signal type byte (subscription-create); identifies which
+    /// producer signal type the subscription pays for.
+    #[arg(long)]
+    pub covered_signal_type: Option<u8>,
+
+    /// Per-block payment rate in base units (subscription-create).
+    #[arg(long)]
+    pub rate_per_block: Option<u64>,
+
+    /// Subscription duration in blocks (subscription-create).
+    #[arg(long)]
+    pub duration_blocks: Option<u64>,
+
+    /// Hex-encoded 32-byte subscription memory object ID (subscription-cancel).
+    #[arg(long)]
+    pub subscription_id: Option<String>,
 }
 
 /// Parse signal type string.
@@ -87,8 +108,10 @@ fn parse_signal_type(s: &str) -> Result<AiSignalType, String> {
         "stake-slash" => Ok(AiSignalType::StakeSlash),
         "composition-check" => Ok(AiSignalType::CompositionCheck),
         "proof-submission" => Ok(AiSignalType::ProofSubmission),
+        "subscription-create" => Ok(AiSignalType::SubscriptionCreate),
+        "subscription-cancel" => Ok(AiSignalType::SubscriptionCancel),
         _ => Err(format!(
-            "Unknown signal type '{s}'. Valid: anomaly, optimization, prediction, risk-score, audit-report, spam-risk, congestion-forecast, reputation-update, signal-purchase, stake-deposit, stake-withdraw, stake-slash, composition-check, proof-submission"
+            "Unknown signal type '{s}'. Valid: anomaly, optimization, prediction, risk-score, audit-report, spam-risk, congestion-forecast, reputation-update, signal-purchase, stake-deposit, stake-withdraw, stake-slash, composition-check, proof-submission, subscription-create, subscription-cancel"
         )),
     }
 }
@@ -229,6 +252,46 @@ fn build_signal_payload(
             payload.extend_from_slice(&code);
             payload.extend_from_slice(&computation);
         }
+        AiSignalType::SubscriptionCreate => {
+            let producer = parse_hex32(
+                require_str(
+                    &extra.producer_entity_id,
+                    "--producer-entity-id",
+                    "subscription-create",
+                )?,
+                "producer_entity_id",
+            )?;
+            let covered = require_some(
+                extra.covered_signal_type,
+                "--covered-signal-type",
+                "subscription-create",
+            )?;
+            let rate = require_some(
+                extra.rate_per_block,
+                "--rate-per-block",
+                "subscription-create",
+            )?;
+            let duration = require_some(
+                extra.duration_blocks,
+                "--duration-blocks",
+                "subscription-create",
+            )?;
+            payload.extend_from_slice(&producer);
+            payload.push(covered);
+            payload.extend_from_slice(&rate.to_be_bytes());
+            payload.extend_from_slice(&duration.to_be_bytes());
+        }
+        AiSignalType::SubscriptionCancel => {
+            let sub_id = parse_hex32(
+                require_str(
+                    &extra.subscription_id,
+                    "--subscription-id",
+                    "subscription-cancel",
+                )?,
+                "subscription_id",
+            )?;
+            payload.extend_from_slice(&sub_id);
+        }
     }
 
     Ok(payload)
@@ -360,11 +423,16 @@ mod tests {
             proof_type: Some(0),
             code_hash: Some("00".repeat(32)),
             computation_hash: Some("00".repeat(32)),
+            producer_entity_id: Some("00".repeat(32)),
+            covered_signal_type: Some(0),
+            rate_per_block: Some(0),
+            duration_blocks: Some(0),
+            subscription_id: Some("00".repeat(32)),
         }
     }
 
     #[test]
-    fn test_signal_payload_lengths_for_all_14_types() {
+    fn test_signal_payload_lengths_for_all_16_types() {
         let extra = full_extra();
         for (sig_type, expected_len) in [
             (AiSignalType::Anomaly, 66),
@@ -381,6 +449,8 @@ mod tests {
             (AiSignalType::StakeSlash, 117),
             (AiSignalType::CompositionCheck, 100),
             (AiSignalType::ProofSubmission, 131),
+            (AiSignalType::SubscriptionCreate, 115),
+            (AiSignalType::SubscriptionCancel, 98),
         ] {
             let payload = build_signal_payload([0u8; 32], sig_type, [0u8; 32], &extra).unwrap();
             assert_eq!(payload.len(), expected_len, "wrong length for {sig_type:?}");
@@ -388,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_signal_type_accepts_all_14_strings() {
+    fn test_parse_signal_type_accepts_all_16_strings() {
         let cases = [
             ("anomaly", AiSignalType::Anomaly),
             ("optimization", AiSignalType::Optimization),
@@ -404,6 +474,8 @@ mod tests {
             ("stake-slash", AiSignalType::StakeSlash),
             ("composition-check", AiSignalType::CompositionCheck),
             ("proof-submission", AiSignalType::ProofSubmission),
+            ("subscription-create", AiSignalType::SubscriptionCreate),
+            ("subscription-cancel", AiSignalType::SubscriptionCancel),
         ];
         for (s, expected) in cases {
             assert_eq!(parse_signal_type(s).unwrap(), expected, "for input '{s}'");
