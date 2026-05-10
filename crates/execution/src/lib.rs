@@ -3355,6 +3355,110 @@ pub fn lookup_ai_entity_by_address<K: Kv>(
     }
 }
 
+// ============================================================================
+// DELEGATION-AWARE CAPABILITY RESOLUTION (Feature 8)
+// ============================================================================
+
+use novai_ai_entities::{Capabilities, DelegationGrantData};
+use novai_state::ai_delegations_by_delegate_prefix;
+
+/// Resolve effective capabilities for an AI entity by merging its static
+/// capabilities with active delegation grants targeting it.
+///
+/// Walks `ai_delegations_by_delegate_prefix(entity.id)`. For each entry:
+///
+/// 1. Extracts the trailing 32-byte grant id from the key and reads the
+///    delegator id from the 32-byte value.
+/// 2. Loads the underlying `DelegationGrant` memory object from
+///    `ai_memory_object_key(delegator_id, grant_id)`.
+/// 3. Decodes its `DelegationGrantData` payload.
+/// 4. Skips the grant unless it is currently active (`is_active_at`) AND
+///    the delegator entity exists and is itself active.
+/// 5. ORs `granted_capabilities` into the accumulator on success.
+///
+/// Stale or corrupt index entries (missing primary, wrong object type,
+/// decode failure, malformed key/value lengths) are silently skipped,
+/// mirroring the policy in `get_memory_objects_by_entity_and_type`.
+///
+/// # Errors
+/// Returns `ExecError::Db` on DB I/O failure during the prefix scan or
+/// while loading delegator/grant records.
+pub fn resolve_effective_capabilities<K: Kv>(
+    db: &K,
+    entity: &AiEntity,
+    current_height: u64,
+) -> Result<Capabilities, ExecError<K::Error>> {
+    let mut effective = entity.capabilities;
+    let prefix = ai_delegations_by_delegate_prefix(&entity.id);
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+    for (key, value) in entries {
+        if key.len() < 32 || value.len() != 32 {
+            continue;
+        }
+        let mut grant_id = [0u8; 32];
+        grant_id.copy_from_slice(&key[key.len() - 32..]);
+        let mut delegator_id = [0u8; 32];
+        delegator_id.copy_from_slice(&value);
+
+        let Some(memobj) = read_memory_object(db, &delegator_id, &grant_id)? else {
+            continue;
+        };
+        if memobj.object_type != MemoryObjectType::DelegationGrant {
+            continue;
+        }
+        let Some(grant) = DelegationGrantData::decode(&memobj.data) else {
+            continue;
+        };
+        if !grant.is_active_at(current_height) {
+            continue;
+        }
+        let Some(delegator) = read_ai_entity(db, &delegator_id)? else {
+            continue;
+        };
+        if !delegator.is_active {
+            continue;
+        }
+
+        let granted = Capabilities::from_byte(grant.granted_capabilities);
+        effective = effective.or(&granted);
+    }
+    Ok(effective)
+}
+
+/// Verify that an entity satisfies a capability requirement either statically
+/// or via an active delegation grant.
+///
+/// Fast path: if `selector(&entity.capabilities)` is true, returns `Ok(())`
+/// without consulting the delegation index. Slow path: scans the by-delegate
+/// index, builds the merged effective set, and re-evaluates the selector.
+///
+/// # Errors
+/// Returns `ExecError::IssuerMissingCapability` when neither static nor
+/// delegated capabilities satisfy the selector. Propagates `ExecError::Db`
+/// or decode failures from the slow-path scan; corrupt individual entries
+/// are silently skipped (a delegate cannot be denied service by a single
+/// stale index row).
+pub fn requires_capability<K, F>(
+    db: &K,
+    entity: &AiEntity,
+    current_height: u64,
+    selector: F,
+) -> Result<(), ExecError<K::Error>>
+where
+    K: Kv,
+    F: Fn(&Capabilities) -> bool,
+{
+    if selector(&entity.capabilities) {
+        return Ok(());
+    }
+    let resolved = resolve_effective_capabilities(db, entity, current_height)?;
+    if selector(&resolved) {
+        Ok(())
+    } else {
+        Err(ExecError::IssuerMissingCapability)
+    }
+}
+
 /// Check if a transaction sender is an AI entity and enforce restrictions.
 ///
 /// Returns `Err` if the sender is an AI entity that is not allowed to submit this tx type.
@@ -6547,5 +6651,190 @@ mod tests {
         let addr = [0xFF; 32];
         let result = lookup_ai_entity_by_address(&db, &addr).unwrap();
         assert!(result.is_none());
+    }
+
+    // ========================================================================
+    // Delegation-aware capability resolution (Feature 8)
+    // ========================================================================
+
+    fn make_entity(code_byte: u8, creator_byte: u8, caps: Capabilities) -> AiEntity {
+        AiEntity::new(
+            [code_byte; 32],
+            [creator_byte; 32],
+            AutonomyMode::Gated,
+            caps,
+            0,
+        )
+    }
+
+    fn write_entity(db: &mut MemKv, entity: &AiEntity) {
+        db.apply_batch(&[write_ai_entity_op(entity)]).unwrap();
+    }
+
+    fn write_grant(
+        db: &mut MemKv,
+        delegator_id: &[u8; 32],
+        delegate_id: &[u8; 32],
+        granted_byte: u8,
+        expires_at: u64,
+        created_height: u64,
+    ) -> [u8; 32] {
+        let grant = DelegationGrantData {
+            version: novai_ai_entities::DELEGATION_GRANT_VERSION,
+            delegate_entity_id: *delegate_id,
+            granted_capabilities: granted_byte,
+            expires_at,
+        };
+        let payload = grant.encode().to_vec();
+        let memobj = MemoryObject::new(
+            *delegator_id,
+            MemoryObjectType::DelegationGrant,
+            created_height,
+            payload,
+        );
+        let grant_id = memobj.object_id;
+        let primary_key = ai_memory_object_key(delegator_id, &grant_id);
+        let primary_val = encode_memory_object_v1(&memobj);
+        let index_key = novai_state::ai_delegation_by_delegate_key(delegate_id, &grant_id);
+        db.apply_batch(&[
+            WriteOp::Put(primary_key, primary_val),
+            WriteOp::Put(index_key, delegator_id.to_vec()),
+        ])
+        .unwrap();
+        grant_id
+    }
+
+    #[test]
+    fn requires_capability_fast_path_when_static_present() {
+        let db = MemKv::new();
+        let entity = make_entity(0x10, 0x01, Capabilities::advisory());
+        let r = requires_capability(&db, &entity, 100, |c| c.emit_proposals);
+        assert!(r.is_ok(), "static capability should pass the fast path");
+    }
+
+    #[test]
+    fn requires_capability_rejects_when_static_missing_and_no_grants() {
+        let db = MemKv::new();
+        let entity = make_entity(0x11, 0x01, Capabilities::read_only());
+        let r = requires_capability(&db, &entity, 100, |c| c.emit_proposals);
+        assert!(matches!(r, Err(ExecError::IssuerMissingCapability)));
+    }
+
+    #[test]
+    fn resolve_returns_static_when_no_grants() {
+        let db = MemKv::new();
+        let entity = make_entity(0x12, 0x01, Capabilities::read_only());
+        let resolved = resolve_effective_capabilities(&db, &entity, 100).unwrap();
+        assert_eq!(resolved.to_byte(), entity.capabilities.to_byte());
+    }
+
+    #[test]
+    fn resolve_active_grant_extends_capability() {
+        let mut db = MemKv::new();
+        let delegator = make_entity(0x21, 0x01, Capabilities::advisory());
+        let delegate = make_entity(0x22, 0x02, Capabilities::read_only());
+        write_entity(&mut db, &delegator);
+        write_entity(&mut db, &delegate);
+        write_grant(&mut db, &delegator.id, &delegate.id, 0x04, 0, 1);
+
+        let resolved = resolve_effective_capabilities(&db, &delegate, 100).unwrap();
+        assert!(resolved.emit_proposals);
+        assert!(!delegate.capabilities.emit_proposals);
+    }
+
+    #[test]
+    fn resolve_expired_grant_does_not_extend() {
+        let mut db = MemKv::new();
+        let delegator = make_entity(0x31, 0x01, Capabilities::advisory());
+        let delegate = make_entity(0x32, 0x02, Capabilities::read_only());
+        write_entity(&mut db, &delegator);
+        write_entity(&mut db, &delegate);
+        write_grant(&mut db, &delegator.id, &delegate.id, 0x04, 50, 1);
+
+        let resolved = resolve_effective_capabilities(&db, &delegate, 50).unwrap();
+        assert!(
+            !resolved.emit_proposals,
+            "current_height >= expires_at must skip the grant"
+        );
+        let resolved_before = resolve_effective_capabilities(&db, &delegate, 49).unwrap();
+        assert!(resolved_before.emit_proposals);
+    }
+
+    #[test]
+    fn resolve_grant_from_inactive_delegator_is_skipped() {
+        let mut db = MemKv::new();
+        let mut delegator = make_entity(0x41, 0x01, Capabilities::advisory());
+        delegator.is_active = false;
+        let delegate = make_entity(0x42, 0x02, Capabilities::read_only());
+        write_entity(&mut db, &delegator);
+        write_entity(&mut db, &delegate);
+        write_grant(&mut db, &delegator.id, &delegate.id, 0x04, 0, 1);
+
+        let resolved = resolve_effective_capabilities(&db, &delegate, 100).unwrap();
+        assert!(!resolved.emit_proposals);
+    }
+
+    #[test]
+    fn resolve_combines_multiple_grants() {
+        let mut db = MemKv::new();
+        let delegator_a = make_entity(0x51, 0x01, Capabilities::advisory());
+        let sub_caps = Capabilities {
+            read_public_chain: true,
+            submit_reputation_updates: true,
+            ..Capabilities::default()
+        };
+        let delegator_b = make_entity(0x52, 0x02, sub_caps);
+        let delegate = make_entity(0x53, 0x03, Capabilities::read_only());
+        write_entity(&mut db, &delegator_a);
+        write_entity(&mut db, &delegator_b);
+        write_entity(&mut db, &delegate);
+        write_grant(&mut db, &delegator_a.id, &delegate.id, 0x04, 0, 1);
+        write_grant(&mut db, &delegator_b.id, &delegate.id, 0x20, 0, 2);
+
+        let resolved = resolve_effective_capabilities(&db, &delegate, 100).unwrap();
+        assert!(resolved.emit_proposals);
+        assert!(resolved.submit_reputation_updates);
+        assert!(resolved.read_public_chain, "static cap preserved");
+    }
+
+    #[test]
+    fn requires_capability_via_delegation_succeeds() {
+        let mut db = MemKv::new();
+        let delegator = make_entity(0x61, 0x01, Capabilities::advisory());
+        let delegate = make_entity(0x62, 0x02, Capabilities::read_only());
+        write_entity(&mut db, &delegator);
+        write_entity(&mut db, &delegate);
+        write_grant(&mut db, &delegator.id, &delegate.id, 0x04, 0, 1);
+
+        let r = requires_capability(&db, &delegate, 100, |c| c.emit_proposals);
+        assert!(r.is_ok(), "delegated emit_proposals should pass");
+    }
+
+    #[test]
+    fn resolve_skips_corrupt_index_value_length() {
+        let mut db = MemKv::new();
+        let delegate = make_entity(0x71, 0x02, Capabilities::read_only());
+        write_entity(&mut db, &delegate);
+
+        let mut bad_key = ai_delegations_by_delegate_prefix(&delegate.id);
+        bad_key.extend_from_slice(&[0xCDu8; 32]);
+        db.apply_batch(&[WriteOp::Put(bad_key, vec![0u8; 8])])
+            .unwrap();
+
+        let resolved = resolve_effective_capabilities(&db, &delegate, 100).unwrap();
+        assert_eq!(resolved.to_byte(), delegate.capabilities.to_byte());
+    }
+
+    #[test]
+    fn resolve_grant_for_no_expiry_remains_active_at_high_heights() {
+        let mut db = MemKv::new();
+        let delegator = make_entity(0x81, 0x01, Capabilities::advisory());
+        let delegate = make_entity(0x82, 0x02, Capabilities::read_only());
+        write_entity(&mut db, &delegator);
+        write_entity(&mut db, &delegate);
+        write_grant(&mut db, &delegator.id, &delegate.id, 0x04, 0, 1);
+
+        let resolved = resolve_effective_capabilities(&db, &delegate, u64::MAX - 1).unwrap();
+        assert!(resolved.emit_proposals);
     }
 }
