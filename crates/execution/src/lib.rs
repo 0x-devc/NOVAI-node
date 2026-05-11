@@ -231,14 +231,26 @@ pub enum ExecError<E> {
     /// `CompositionCheck` issuer attempted to check itself (prohibited).
     SelfCompositionCheck,
     /// `ProofSubmission` payload carries a `proof_type` byte above
-    /// `PROOF_TYPE_MAX` (only the stub verifier is accepted in v1).
+    /// `PROOF_TYPE_MAX`.
     UnsupportedProofType {
         proof_type: u8,
     },
+    /// `ProofSubmission` v2 payload declared a `vk_bytes` length above
+    /// `PROOF_SUBMISSION_MAX_VK_BYTES`.
+    VerifyingKeyTooLarge {
+        actual: usize,
+        max: usize,
+    },
+    /// `ProofSubmission` v2 payload declared a `proof_bytes` length above
+    /// `PROOF_SUBMISSION_MAX_PROOF_BYTES`.
+    ProofBytesTooLarge {
+        actual: usize,
+        max: usize,
+    },
     /// `ZkVerifier::verify_proof` returned `false` for a `ProofSubmission`
-    /// signal. Currently unreachable in v1 (the stub always returns
-    /// `true`); kept so the handler-side reject path is wired in advance
-    /// of plumbing in a real verifier.
+    /// signal. For `PROOF_TYPE_STUB` this is unreachable (stub always
+    /// returns `true`); for real verifiers (`PROOF_TYPE_GROTH16`+) this
+    /// fires on invalid proofs, mismatched VKs, malformed bytes, etc.
     ProofVerificationFailed,
     /// (Reserved.) Same `proof_hash` already recorded for this entity.
     /// v1 does not enforce dedup — every accepted proof produces its own
@@ -428,18 +440,35 @@ pub const COMPOSITION_CHECK_EXTRA_LEN: usize = 34;
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + COMPOSITION_CHECK_EXTRA_LEN;
 
-/// Inline-extra size for a `ProofSubmission` signal payload.
+/// Inline-extra size for a v1 `ProofSubmission` signal payload (stub layout).
 /// `proof_type:1 | code_hash:32 | computation_hash:32`
 ///
-/// Note: the proof bytes themselves are NOT carried inline (the
-/// `SignalCommitment` tail is fixed-size). When a real ZK verifier replaces
-/// the stub, proof bytes will be resolved off-chain via the artifact
-/// referenced by `signal_hash`.
+/// The v1 layout is used when `proof_type == PROOF_TYPE_STUB`. For
+/// `proof_type >= PROOF_TYPE_GROTH16` the encoder switches to the v2
+/// layout which appends length-prefixed `vk_bytes` and `proof_bytes`
+/// after this fixed tail (see `PROOF_SUBMISSION_MAX_VK_BYTES` and
+/// `PROOF_SUBMISSION_MAX_PROOF_BYTES`).
 pub const PROOF_SUBMISSION_EXTRA_LEN: usize = 1 + 32 + 32;
 
-/// Total size of a `ProofSubmission` signal payload (base + extra).
+/// Total size of a v1 `ProofSubmission` signal payload (stub layout).
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + PROOF_SUBMISSION_EXTRA_LEN;
+
+/// Maximum length of the `vk_bytes` field in a v2 `ProofSubmission` payload.
+///
+/// Set to 8 KiB. The canonical BN254 Groth16 VK for 4 public inputs is
+/// roughly 200-300 bytes compressed; the cap is a generous denial-of-service
+/// guard.
+pub const PROOF_SUBMISSION_MAX_VK_BYTES: usize = 8 * 1024;
+
+/// Maximum length of the `proof_bytes` field in a v2 `ProofSubmission`
+/// payload (1 KiB). BN254 Groth16 proofs are roughly 128 bytes compressed.
+pub const PROOF_SUBMISSION_MAX_PROOF_BYTES: usize = 1024;
+
+/// Minimum total size of a v2 `ProofSubmission` payload (empty vk + empty
+/// proof): base + extra + `vk_len`:4 + `proof_len`:4.
+pub const SIGNAL_COMMITMENT_PAYLOAD_V2_PROOF_MIN_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN + 4 + 4;
 
 /// Inline-extra size for a `SubscriptionCreate` signal payload.
 /// `producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 |
@@ -516,19 +545,23 @@ pub const COMPOSITION_FAILURE_REASON_MAX: u8 = COMPOSITION_FAILURE_SOURCE_NOT_FO
 
 // ProofSubmission proof_type discriminants (carried inline in the
 // `ProofSubmission` signal payload). The handler rejects any value above
-// `PROOF_TYPE_MAX` with `UnsupportedProofType`. In v1 only the stub
-// verifier is wired in, so only `PROOF_TYPE_STUB` is accepted; the
-// reserved discriminants are kept for forward-compat with future ZK
-// libraries.
-/// Stub verifier (v1, accepts everything — NOT for production).
+// `PROOF_TYPE_MAX` with `UnsupportedProofType`. The decoder/encoder pick
+// the wire layout from this byte: `PROOF_TYPE_STUB` uses the 131-byte v1
+// layout; any other accepted value uses the variable-length v2 layout
+// carrying length-prefixed `vk_bytes` and `proof_bytes`.
+/// Stub verifier (always accepts; NOT for production proofs).
 pub const PROOF_TYPE_STUB: u8 = 0;
-/// Reserved for a future Groth16 verifier integration.
+/// BN254 Groth16 verifier, served by `novai_crypto::Groth16Verifier`.
 pub const PROOF_TYPE_GROTH16: u8 = 1;
 /// Reserved for a future PLONK verifier integration.
 pub const PROOF_TYPE_PLONK: u8 = 2;
-/// Maximum `proof_type` discriminant accepted by the v1 handler. Bumping
-/// this value is the gate for activating a real verifier.
-pub const PROOF_TYPE_MAX: u8 = PROOF_TYPE_STUB;
+/// Maximum `proof_type` discriminant accepted by the handler.
+///
+/// The decoder rejects any higher value with `UnsupportedProofType` before
+/// the handler runs. Bumping this constant is the gate for activating each
+/// new verifier; activating PLONK would require both raising this and
+/// wiring the dispatch in `apply_signal_commitment_tx_inner`.
+pub const PROOF_TYPE_MAX: u8 = PROOF_TYPE_GROTH16;
 
 /// Inline reputation-update tail carried in `ReputationUpdate` signal payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -623,14 +656,22 @@ pub struct CompositionCheckExtraV1 {
 
 /// Inline proof-submission tail carried in `ProofSubmission` signal payloads.
 ///
-/// Wire layout (65 bytes): `proof_type:1 | code_hash:32 | computation_hash:32`.
-/// The decoder validates `proof_type <= PROOF_TYPE_MAX` (only stub accepted
-/// in v1). `code_hash` is the AI module/weight hash the proof attests to;
-/// `computation_hash` identifies the specific computation context. Both
-/// are passed to the verifier as public inputs. The proof bytes themselves
-/// are NOT carried inline (the `SignalCommitment` tail is fixed-size); a
-/// future real verifier would resolve them via the off-chain artifact
-/// referenced by `signal_hash`.
+/// The wire layout depends on `proof_type`:
+///
+/// - **v1 (stub, 65 bytes)** — used when `proof_type == PROOF_TYPE_STUB`.
+///   `proof_type:1 | code_hash:32 | computation_hash:32`. `vk_bytes` and
+///   `proof_bytes` MUST be empty.
+/// - **v2 (real verifier, variable)** — used when
+///   `proof_type >= PROOF_TYPE_GROTH16`.
+///   `proof_type:1 | code_hash:32 | computation_hash:32 | vk_len_be:4 |
+///   vk_bytes | proof_len_be:4 | proof_bytes`. `vk_bytes.len()` MUST be
+///   `<= PROOF_SUBMISSION_MAX_VK_BYTES`; `proof_bytes.len()` MUST be
+///   `<= PROOF_SUBMISSION_MAX_PROOF_BYTES`.
+///
+/// The decoder validates `proof_type <= PROOF_TYPE_MAX`. `code_hash` is
+/// the AI module/weight hash the proof attests to; `computation_hash`
+/// identifies the specific computation context. The verifier consumes both
+/// as 64 bytes of public inputs (`code_hash || computation_hash`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofSubmissionExtraV1 {
     /// Discriminant identifying the proof system (see `PROOF_TYPE_*`).
@@ -639,6 +680,14 @@ pub struct ProofSubmissionExtraV1 {
     pub code_hash: [u8; 32],
     /// Hash of the computation context (inputs/outputs) the proof asserts.
     pub computation_hash: [u8; 32],
+    /// Verifying-key bytes for real verifiers (v2 layout). Empty for
+    /// `PROOF_TYPE_STUB`. For `PROOF_TYPE_GROTH16` this is the
+    /// ark-serialize compressed `VerifyingKey<Bn254>`.
+    pub vk_bytes: Vec<u8>,
+    /// Proof bytes for real verifiers (v2 layout). Empty for
+    /// `PROOF_TYPE_STUB`. For `PROOF_TYPE_GROTH16` this is the
+    /// ark-serialize compressed `Proof<Bn254>`.
+    pub proof_bytes: Vec<u8>,
 }
 
 /// Inline subscription-create tail carried in `SubscriptionCreate` signal
@@ -742,6 +791,13 @@ pub struct SignalCommitmentPayloadV1 {
 /// `StakeWithdraw`, and 117 bytes for `StakeSlash`. Panics in debug if a
 /// tail is set inconsistently with `signal_type`; in release builds the
 /// inconsistency is silently fixed by zero-padding the active tail.
+///
+/// # Panics
+///
+/// Panics if a `ProofSubmission` v2 tail carries `vk_bytes` or `proof_bytes`
+/// whose lengths do not fit in a `u32`. Callers must keep these under
+/// `PROOF_SUBMISSION_MAX_VK_BYTES` and `PROOF_SUBMISSION_MAX_PROOF_BYTES`
+/// respectively; both caps are well below `u32::MAX`.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec<u8> {
@@ -828,7 +884,13 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
     } else if is_composition_check {
         SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN
     } else if is_proof_submission {
-        SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN
+        // v1 (131 bytes) for PROOF_TYPE_STUB; v2 (variable) otherwise.
+        match p.proof_submission.as_ref() {
+            Some(extra) if extra.proof_type != PROOF_TYPE_STUB => {
+                SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN + 4 + extra.vk_bytes.len() + 4 + extra.proof_bytes.len()
+            }
+            _ => SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN,
+        }
     } else if is_subscription_create {
         SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN
     } else if is_subscription_cancel {
@@ -898,6 +960,17 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             out.push(extra.proof_type);
             out.extend_from_slice(&extra.code_hash);
             out.extend_from_slice(&extra.computation_hash);
+            if extra.proof_type != PROOF_TYPE_STUB {
+                // v2 tail: vk_len_be:4 | vk_bytes | proof_len_be:4 | proof_bytes
+                let vk_len = u32::try_from(extra.vk_bytes.len())
+                    .expect("vk_bytes len fits in u32 (bounded by PROOF_SUBMISSION_MAX_VK_BYTES)");
+                out.extend_from_slice(&vk_len.to_be_bytes());
+                out.extend_from_slice(&extra.vk_bytes);
+                let proof_len = u32::try_from(extra.proof_bytes.len())
+                    .expect("proof_bytes len fits in u32 (bounded by PROOF_SUBMISSION_MAX_PROOF_BYTES)");
+                out.extend_from_slice(&proof_len.to_be_bytes());
+                out.extend_from_slice(&extra.proof_bytes);
+            }
         } else {
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; PROOF_SUBMISSION_EXTRA_LEN]);
@@ -938,17 +1011,11 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
 pub fn decode_signal_commitment_payload_v1(
     payload: &[u8],
 ) -> Result<SignalCommitmentPayloadV1, ExecError<()>> {
-    if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
-        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN
-        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PURCHASE_LEN
-        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN
-        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_WITHDRAW_LEN
-        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_SLASH_LEN
-        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN
-        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN
-        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN
-        && payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN
-    {
+    // Minimum: must be at least the base header so we can read signal_type.
+    // Each per-signal-type branch below enforces its own exact length. The
+    // ProofSubmission branch additionally accepts the variable-length v2
+    // layout for proof_type >= PROOF_TYPE_GROTH16.
+    if payload.len() < SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
         return Err(ExecError::BadPayloadLength {
             expected: SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN,
             got: payload.len(),
@@ -1159,7 +1226,9 @@ pub fn decode_signal_commitment_payload_v1(
             None,
         )
     } else if is_proof_submission {
-        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN {
+        // The fixed prefix (131 bytes) must always fit so we can read
+        // proof_type at offset 66 and decide between v1 and v2 layouts.
+        if payload.len() < SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN {
             return Err(ExecError::BadPayloadLength {
                 expected: SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN,
                 got: payload.len(),
@@ -1173,6 +1242,70 @@ pub fn decode_signal_commitment_payload_v1(
         code_hash.copy_from_slice(&payload[67..99]);
         let mut computation_hash = [0u8; 32];
         computation_hash.copy_from_slice(&payload[99..131]);
+
+        let (vk_bytes, proof_bytes) = if proof_type == PROOF_TYPE_STUB {
+            // v1 layout: exactly 131 bytes, no vk/proof tail.
+            if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN {
+                return Err(ExecError::BadPayloadLength {
+                    expected: SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN,
+                    got: payload.len(),
+                });
+            }
+            (Vec::new(), Vec::new())
+        } else {
+            // v2 layout: vk_len_be:4 | vk_bytes | proof_len_be:4 | proof_bytes
+            if payload.len() < SIGNAL_COMMITMENT_PAYLOAD_V2_PROOF_MIN_LEN {
+                return Err(ExecError::BadPayloadLength {
+                    expected: SIGNAL_COMMITMENT_PAYLOAD_V2_PROOF_MIN_LEN,
+                    got: payload.len(),
+                });
+            }
+            let vk_len = u32::from_be_bytes([
+                payload[131],
+                payload[132],
+                payload[133],
+                payload[134],
+            ]) as usize;
+            if vk_len > PROOF_SUBMISSION_MAX_VK_BYTES {
+                return Err(ExecError::VerifyingKeyTooLarge {
+                    actual: vk_len,
+                    max: PROOF_SUBMISSION_MAX_VK_BYTES,
+                });
+            }
+            let proof_len_off = 135 + vk_len;
+            if payload.len() < proof_len_off + 4 {
+                return Err(ExecError::BadPayloadLength {
+                    expected: proof_len_off + 4,
+                    got: payload.len(),
+                });
+            }
+            let mut vk = vec![0u8; vk_len];
+            vk.copy_from_slice(&payload[135..proof_len_off]);
+            let proof_len = u32::from_be_bytes([
+                payload[proof_len_off],
+                payload[proof_len_off + 1],
+                payload[proof_len_off + 2],
+                payload[proof_len_off + 3],
+            ]) as usize;
+            if proof_len > PROOF_SUBMISSION_MAX_PROOF_BYTES {
+                return Err(ExecError::ProofBytesTooLarge {
+                    actual: proof_len,
+                    max: PROOF_SUBMISSION_MAX_PROOF_BYTES,
+                });
+            }
+            let proof_data_off = proof_len_off + 4;
+            let expected_total = proof_data_off + proof_len;
+            if payload.len() != expected_total {
+                return Err(ExecError::BadPayloadLength {
+                    expected: expected_total,
+                    got: payload.len(),
+                });
+            }
+            let mut proof = vec![0u8; proof_len];
+            proof.copy_from_slice(&payload[proof_data_off..expected_total]);
+            (vk, proof)
+        };
+
         (
             None,
             None,
@@ -1184,6 +1317,8 @@ pub fn decode_signal_commitment_payload_v1(
                 proof_type,
                 code_hash,
                 computation_hash,
+                vk_bytes,
+                proof_bytes,
             }),
             None,
             None,
@@ -2212,7 +2347,7 @@ use novai_ai_entities::{
     VerificationRecordData, MAX_REPUTATION_SCORE, MAX_SUBSCRIPTIONS_PER_ENTITY,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
-use novai_crypto::{StubZkVerifier, ZkVerifier};
+use novai_crypto::{Groth16Verifier, StubZkVerifier, ZkVerifier};
 use novai_state::{
     ai_entity_key, ai_memory_by_type_key, ai_memory_key, ai_memory_object_key,
     ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
@@ -3142,18 +3277,35 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         public_inputs[..32].copy_from_slice(&extra.code_hash);
         public_inputs[32..].copy_from_slice(&extra.computation_hash);
 
-        // v1: empty proof bytes (see NOTE above). proof_hash is hashed over
-        // the same empty slice for now; Phase 4 wires real proof_bytes for
-        // PROOF_TYPE_GROTH16 via the v2 SignalCommitment payload.
-        let proof_bytes: &[u8] = &[];
-        let vk_bytes: &[u8] = &[];
-        if !StubZkVerifier::verify_proof(
-            proof_bytes,
-            vk_bytes,
-            &public_inputs,
-            extra.proof_type,
-            &extra.code_hash,
-        ) {
+        // Dispatch by proof_type. For PROOF_TYPE_STUB the v1 wire layout
+        // carries no proof bytes, so vk/proof slices are empty and the stub
+        // accepts unconditionally. For PROOF_TYPE_GROTH16 the v2 wire
+        // layout carries real vk_bytes and proof_bytes which Groth16Verifier
+        // deserialises and pairing-checks against `public_inputs`.
+        let proof_bytes: &[u8] = &extra.proof_bytes;
+        let vk_bytes: &[u8] = &extra.vk_bytes;
+        let ok = match extra.proof_type {
+            PROOF_TYPE_STUB => StubZkVerifier::verify_proof(
+                proof_bytes,
+                vk_bytes,
+                &public_inputs,
+                extra.proof_type,
+                &extra.code_hash,
+            ),
+            PROOF_TYPE_GROTH16 => Groth16Verifier::verify_proof(
+                proof_bytes,
+                vk_bytes,
+                &public_inputs,
+                extra.proof_type,
+                &extra.code_hash,
+            ),
+            // Decoder rejects proof_type > PROOF_TYPE_MAX, so any value
+            // arriving here is one of the dispatched discriminants above.
+            _ => unreachable!(
+                "proof_type validated against PROOF_TYPE_MAX at decode time"
+            ),
+        };
+        if !ok {
             return Err(ExecError::ProofVerificationFailed);
         }
 

@@ -28,8 +28,8 @@ use novai_crypto::{StubZkVerifier, ZkVerifier};
 use novai_execution::{
     apply_signal_commitment_tx, encode_signal_commitment_payload_v1,
     get_memory_objects_by_entity_and_type, read_ai_entity, write_ai_entity_op, ExecError,
-    ProofSubmissionExtraV1, SignalCommitmentPayloadV1, PROOF_TYPE_GROTH16, PROOF_TYPE_STUB,
-    SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN,
+    ProofSubmissionExtraV1, SignalCommitmentPayloadV1, PROOF_TYPE_GROTH16, PROOF_TYPE_PLONK,
+    PROOF_TYPE_STUB, SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN,
 };
 use novai_state::{ai_entity_by_address_key, KvBatch, MemKv, WriteOp};
 use novai_types::{TxV1, TxVersion};
@@ -87,6 +87,24 @@ fn build_proof_submission_payload(
     code_hash: [u8; 32],
     computation_hash: [u8; 32],
 ) -> Vec<u8> {
+    build_proof_submission_payload_v2(
+        issuer,
+        proof_type,
+        code_hash,
+        computation_hash,
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+fn build_proof_submission_payload_v2(
+    issuer: [u8; 32],
+    proof_type: u8,
+    code_hash: [u8; 32],
+    computation_hash: [u8; 32],
+    vk_bytes: Vec<u8>,
+    proof_bytes: Vec<u8>,
+) -> Vec<u8> {
     encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
         signal_hash: [0xC4u8; 32],
         signal_type: AiSignalType::ProofSubmission,
@@ -101,6 +119,8 @@ fn build_proof_submission_payload(
             proof_type,
             code_hash,
             computation_hash,
+            vk_bytes,
+            proof_bytes,
         }),
         subscription_create: None,
         subscription_cancel: None,
@@ -213,10 +233,11 @@ fn proof_submission_unsupported_type_rejected() {
     let mut db = MemKv::new();
     let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
 
-    // PROOF_TYPE_GROTH16 (= 1) is reserved but above PROOF_TYPE_MAX in v1.
+    // PROOF_TYPE_PLONK (= 2) is reserved but above PROOF_TYPE_MAX
+    // (PROOF_TYPE_GROTH16 = 1 is now activated).
     let payload = build_proof_submission_payload(
         issuer.id,
-        PROOF_TYPE_GROTH16,
+        PROOF_TYPE_PLONK,
         SAMPLE_CODE_HASH,
         SAMPLE_COMPUTATION_HASH,
     );
@@ -224,7 +245,7 @@ fn proof_submission_unsupported_type_rejected() {
         apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
             .expect_err("unsupported proof_type must reject");
     assert!(
-        matches!(err, ExecError::UnsupportedProofType { proof_type: 1 }),
+        matches!(err, ExecError::UnsupportedProofType { proof_type: 2 }),
         "got {err:?}"
     );
 
@@ -404,6 +425,141 @@ fn golden_vector_proof_payload_131_bytes() {
         &payload[99..131],
         &computation_hash,
         "computation_hash at 99..131"
+    );
+}
+
+#[test]
+fn golden_vector_proof_payload_v2_groth16() {
+    let issuer = [0x22u8; 32];
+    let code_hash = [0x55u8; 32];
+    let computation_hash = [0x77u8; 32];
+    // Arbitrary placeholder vk/proof bytes — the encoder does not validate
+    // cryptographic structure, only the wire layout.
+    let vk_bytes: Vec<u8> = (0u8..7).collect(); // 7 bytes
+    let proof_bytes: Vec<u8> = (0xF0u8..=0xF3).collect(); // 4 bytes
+
+    let payload = build_proof_submission_payload_v2(
+        issuer,
+        PROOF_TYPE_GROTH16,
+        code_hash,
+        computation_hash,
+        vk_bytes.clone(),
+        proof_bytes.clone(),
+    );
+
+    // Total = 131 (v1 prefix) + 4 (vk_len) + 7 (vk) + 4 (proof_len) + 4 (proof) = 150
+    assert_eq!(payload.len(), 150);
+
+    // Frozen v1 prefix — must remain bit-for-bit identical to the v1 golden
+    // vector so existing observers can parse it without branching.
+    assert_eq!(payload[0], 2, "version byte");
+    assert_eq!(&payload[1..33], &[0xC4u8; 32], "signal_hash at 1..33");
+    assert_eq!(
+        payload[33],
+        AiSignalType::ProofSubmission.to_byte(),
+        "signal_type byte at 33"
+    );
+    assert_eq!(&payload[34..66], &issuer, "issuer_entity_id at 34..66");
+    assert_eq!(payload[66], PROOF_TYPE_GROTH16, "proof_type at 66");
+    assert_eq!(&payload[67..99], &code_hash, "code_hash at 67..99");
+    assert_eq!(
+        &payload[99..131],
+        &computation_hash,
+        "computation_hash at 99..131"
+    );
+
+    // v2 tail: vk_len_be:4 | vk_bytes | proof_len_be:4 | proof_bytes.
+    assert_eq!(
+        &payload[131..135],
+        &7u32.to_be_bytes(),
+        "vk_len (big-endian u32) at 131..135"
+    );
+    assert_eq!(&payload[135..142], vk_bytes.as_slice(), "vk_bytes at 135..142");
+    assert_eq!(
+        &payload[142..146],
+        &4u32.to_be_bytes(),
+        "proof_len (big-endian u32) at 142..146"
+    );
+    assert_eq!(
+        &payload[146..150],
+        proof_bytes.as_slice(),
+        "proof_bytes at 146..150"
+    );
+}
+
+#[test]
+fn proof_payload_v2_roundtrip() {
+    use novai_execution::decode_signal_commitment_payload_v1;
+
+    let issuer = [0x33u8; 32];
+    let code_hash = [0x11u8; 32];
+    let computation_hash = [0x22u8; 32];
+    let vk_bytes: Vec<u8> = (0u8..200).collect();
+    let proof_bytes: Vec<u8> = (0u8..128).collect();
+
+    let payload = build_proof_submission_payload_v2(
+        issuer,
+        PROOF_TYPE_GROTH16,
+        code_hash,
+        computation_hash,
+        vk_bytes.clone(),
+        proof_bytes.clone(),
+    );
+
+    let decoded = decode_signal_commitment_payload_v1(&payload).expect("v2 roundtrip");
+    let extra = decoded.proof_submission.expect("proof_submission present");
+    assert_eq!(extra.proof_type, PROOF_TYPE_GROTH16);
+    assert_eq!(extra.code_hash, code_hash);
+    assert_eq!(extra.computation_hash, computation_hash);
+    assert_eq!(extra.vk_bytes, vk_bytes);
+    assert_eq!(extra.proof_bytes, proof_bytes);
+}
+
+#[test]
+fn proof_payload_v2_oversized_vk_rejected() {
+    use novai_execution::{
+        decode_signal_commitment_payload_v1, PROOF_SUBMISSION_MAX_VK_BYTES,
+    };
+
+    let payload = build_proof_submission_payload_v2(
+        [0u8; 32],
+        PROOF_TYPE_GROTH16,
+        [0u8; 32],
+        [0u8; 32],
+        vec![0u8; PROOF_SUBMISSION_MAX_VK_BYTES + 1],
+        Vec::new(),
+    );
+    let err =
+        decode_signal_commitment_payload_v1(&payload).expect_err("oversized vk must reject");
+    assert!(
+        matches!(err, ExecError::VerifyingKeyTooLarge { actual, max }
+            if actual == PROOF_SUBMISSION_MAX_VK_BYTES + 1
+            && max == PROOF_SUBMISSION_MAX_VK_BYTES),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn proof_payload_v2_oversized_proof_rejected() {
+    use novai_execution::{
+        decode_signal_commitment_payload_v1, PROOF_SUBMISSION_MAX_PROOF_BYTES,
+    };
+
+    let payload = build_proof_submission_payload_v2(
+        [0u8; 32],
+        PROOF_TYPE_GROTH16,
+        [0u8; 32],
+        [0u8; 32],
+        Vec::new(),
+        vec![0u8; PROOF_SUBMISSION_MAX_PROOF_BYTES + 1],
+    );
+    let err =
+        decode_signal_commitment_payload_v1(&payload).expect_err("oversized proof must reject");
+    assert!(
+        matches!(err, ExecError::ProofBytesTooLarge { actual, max }
+            if actual == PROOF_SUBMISSION_MAX_PROOF_BYTES + 1
+            && max == PROOF_SUBMISSION_MAX_PROOF_BYTES),
+        "got {err:?}"
     );
 }
 
