@@ -325,12 +325,13 @@ fn verification_record_max_size() {
 #[test]
 fn stub_verifier_always_passes() {
     let code_hash = [0u8; 32];
-    assert!(StubZkVerifier::verify_proof(&[], &[], 0, &code_hash));
+    assert!(StubZkVerifier::verify_proof(&[], &[], &[], 0, &code_hash));
     assert!(StubZkVerifier::verify_proof(
-        b"any", b"inputs", 0, &code_hash
+        b"any", b"vk", b"inputs", 0, &code_hash
     ));
     assert!(StubZkVerifier::verify_proof(
         &[0u8; 1024],
+        &[0u8; 256],
         &[0u8; 64],
         255,
         &[0xFFu8; 32]

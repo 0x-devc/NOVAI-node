@@ -3143,11 +3143,13 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         public_inputs[32..].copy_from_slice(&extra.computation_hash);
 
         // v1: empty proof bytes (see NOTE above). proof_hash is hashed over
-        // the same empty slice for now; future real-verifier path will
-        // hash actual off-chain proof bytes.
+        // the same empty slice for now; Phase 4 wires real proof_bytes for
+        // PROOF_TYPE_GROTH16 via the v2 SignalCommitment payload.
         let proof_bytes: &[u8] = &[];
+        let vk_bytes: &[u8] = &[];
         if !StubZkVerifier::verify_proof(
             proof_bytes,
+            vk_bytes,
             &public_inputs,
             extra.proof_type,
             &extra.code_hash,

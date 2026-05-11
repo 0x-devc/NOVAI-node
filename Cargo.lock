@@ -282,6 +282,7 @@ dependencies = [
  "ark-ff",
  "ark-std",
  "tracing",
+ "tracing-subscriber 0.2.25",
 ]
 
 [[package]]
@@ -988,7 +989,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.22",
 ]
 
 [[package]]
@@ -1807,7 +1808,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.22",
 ]
 
 [[package]]
@@ -2951,6 +2952,15 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
+version = "0.2.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e0d2eaa99c3c2e41547cfa109e910a68ea03823cccad4a0525dcbc9b01e8c71"
+dependencies = [
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-subscriber"
 version = "0.3.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f30143827ddab0d256fd843b7a66d164e9f271cfa0dde49142c5ca0ca291f1e"
@@ -2990,7 +3000,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.22",
 ]
 
 [[package]]

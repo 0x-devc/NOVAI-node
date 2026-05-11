@@ -6,9 +6,9 @@ use rand_core::OsRng;
 use novai_codec::{encode_tx_v1_unsigned, CodecError};
 use novai_types::{Address, SignatureBytes, TxV1};
 
-// ZK verification hooks (D20.4)
+// ZK verification hooks (D20.4 stub; real Groth16 in Groth16Verifier)
 pub mod zk;
-pub use zk::{StubZkVerifier, ZkVerifier};
+pub use zk::{Groth16Verifier, StubZkVerifier, ZkVerifier};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CryptoError {
