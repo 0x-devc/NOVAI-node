@@ -161,6 +161,10 @@ pub struct ConsensusState {
     /// Txs from the last block we proposed. Recovered to mempool if the
     /// block is abandoned (round change / view change before commit).
     pub last_proposed_txs: Vec<TxV1>,
+    /// Hash of the last block we proposed. Used by `apply_commits` to detect
+    /// whether our proposal was committed (clear buffered txs) or orphaned by
+    /// a sibling block (keep buffered txs so `take_abandoned_txs` can recover).
+    pub last_proposed_block_hash: Option<[u8; 32]>,
 }
 
 impl ConsensusState {
@@ -183,6 +187,7 @@ impl ConsensusState {
             timed_out_in_round: HashSet::new(),
             view_changes_total: 0,
             last_proposed_txs: Vec::new(),
+            last_proposed_block_hash: None,
         }
     }
 
@@ -277,18 +282,51 @@ impl ConsensusState {
             txs,
         };
 
-        // Mark as proposed and save txs for recovery if block is abandoned
+        // Mark as proposed and save txs (plus block hash) for abandonment-aware
+        // recovery. The hash lets `apply_commits` distinguish "our block was
+        // committed" (clear buffer) from "a sibling committed at our height,
+        // we were orphaned" (keep buffer for `take_abandoned_txs`).
+        let block_hash = novai_consensus_types::codec::hash_block_v1(&block)
+            .map_err(|e| ConsensusError::CodecError(format!("{e:?}")))?;
         self.last_proposed = Some((block.height, block.round));
         self.last_proposed_txs = block.txs.clone();
+        self.last_proposed_block_hash = Some(block_hash);
 
         Ok(block)
     }
 
-    /// Take txs from the last abandoned proposal for mempool recovery.
+    /// Take txs from the last *abandoned* proposal for mempool recovery.
     ///
-    /// Returns the txs and clears the buffer. The caller should reinsert
-    /// recoverable txs (nonce >= expected) back into the mempool.
+    /// Only returns txs when the proposal is provably abandoned:
+    ///   - The round has advanced past our proposed round (view change), or
+    ///   - `apply_commits` cleared `last_proposed` without matching our hash
+    ///     (sibling block committed at our height — we were orphaned).
+    ///
+    /// While the proposal is still in flight (no commit, no view change),
+    /// returns an empty Vec. Recovering in-flight txs would cause duplicate
+    /// inclusion across consecutive proposals during the 3-chain commit delay.
+    ///
+    /// The caller should still nonce-filter (reinsert iff
+    /// `tx.nonce >= expected_nonce`) as a defence-in-depth check.
     pub fn take_abandoned_txs(&mut self) -> Vec<TxV1> {
+        if self.last_proposed_txs.is_empty() {
+            return Vec::new();
+        }
+
+        // In-flight: same round as when we proposed and `apply_commits` has
+        // not run since (it would have cleared `last_proposed` or our hash).
+        // Returning txs here would re-include them in the next proposal while
+        // the original is still travelling toward commit.
+        if let Some((_, proposed_round)) = self.last_proposed {
+            if self.round == proposed_round {
+                return Vec::new();
+            }
+        }
+
+        // Either round advanced (view change) or `last_proposed` was cleared
+        // by `apply_commits` and our hash was not in the committed batch
+        // (orphan). Both are real abandonment — return the txs.
+        self.last_proposed_block_hash = None;
         std::mem::take(&mut self.last_proposed_txs)
     }
 
@@ -1329,6 +1367,29 @@ impl ConsensusState {
             );
         }
 
+        // Disambiguate self-commit vs orphan for `last_proposed_txs`:
+        // - If a committed block at our proposed height matches our hash, our
+        //   block committed — clear the buffer (executor will advance nonces,
+        //   nothing to recover).
+        // - Otherwise (no committed block at our height, or hash mismatch),
+        //   leave the buffer so `take_abandoned_txs` recovers the txs once
+        //   `last_proposed` is cleared below.
+        if let (Some((proposed_height, _)), Some(my_hash)) =
+            (self.last_proposed, self.last_proposed_block_hash)
+        {
+            for block in blocks {
+                if block.height == proposed_height {
+                    let committed_hash = novai_consensus_types::codec::hash_block_v1(block)
+                        .map_err(|e| ConsensusError::CodecError(format!("{e:?}")))?;
+                    if committed_hash == my_hash {
+                        self.last_proposed_txs.clear();
+                        self.last_proposed_block_hash = None;
+                    }
+                    break;
+                }
+            }
+        }
+
         // Clear pending votes and voted_in_round after commits
         if !blocks.is_empty() {
             self.pending_votes.clear();
@@ -1926,6 +1987,7 @@ impl ConsensusState {
             timed_out_in_round: HashSet::new(),
             view_changes_total: 0,
             last_proposed_txs: Vec::new(),
+            last_proposed_block_hash: None,
         })
     }
 }
