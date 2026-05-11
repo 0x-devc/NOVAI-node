@@ -597,3 +597,351 @@ fn multiple_proofs_same_entity_all_recorded() {
     let after = read_ai_entity(&db, &issuer.id).unwrap().unwrap();
     assert_eq!(after.reputation_events_count, 3, "+3 each time");
 }
+
+// ============================================================================
+// 9. End-to-end Groth16 verification (Phase 5)
+// ============================================================================
+//
+// Drives real BN254 Groth16 proofs through the full ProofSubmission signal
+// pipeline: trusted setup -> prove -> serialize -> build v2 payload ->
+// apply_signal_commitment_tx -> assert verifier outcome + state effects.
+// The circuit is a trivial 4-public-input sum circuit that matches the
+// verifier's hi/lo public-input mapping (see Groth16Verifier doc); it
+// proves nothing useful, but exercises every code path on the on-chain
+// side.
+
+use ark_bn254::{Bn254, Fr};
+use ark_groth16::Groth16;
+use ark_relations::{
+    lc,
+    r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable},
+};
+use ark_serialize::CanonicalSerialize;
+use ark_std::rand::{rngs::StdRng, SeedableRng};
+
+/// Trivial sum circuit (4 public inputs, 1 witness): `w * 1 = c0 + c1 + c2 + c3`.
+/// Mirrors the unit-test circuit in `crates/crypto/src/zk.rs` so the
+/// integration suite exercises the same constraint shape.
+struct SumCircuit {
+    public_inputs: [Option<Fr>; 4],
+    witness: Option<Fr>,
+}
+
+impl ConstraintSynthesizer<Fr> for SumCircuit {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        let c0 = cs.new_input_variable(|| {
+            self.public_inputs[0].ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let c1 = cs.new_input_variable(|| {
+            self.public_inputs[1].ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let c2 = cs.new_input_variable(|| {
+            self.public_inputs[2].ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let c3 = cs.new_input_variable(|| {
+            self.public_inputs[3].ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let w = cs
+            .new_witness_variable(|| self.witness.ok_or(SynthesisError::AssignmentMissing))?;
+        cs.enforce_constraint(
+            lc!() + w,
+            lc!() + Variable::One,
+            lc!() + c0 + c1 + c2 + c3,
+        )?;
+        Ok(())
+    }
+}
+
+/// Split a 64-byte buffer (`code_hash || computation_hash`) into 4 BN254
+/// scalars the same way `Groth16Verifier` does internally — big-endian
+/// 16-byte halves lifted into `Fr` via `u128::from_be_bytes`.
+fn split_public_inputs_64(bytes: &[u8; 64]) -> [Fr; 4] {
+    let mut out = [Fr::from(0u64); 4];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let mut chunk = [0u8; 16];
+        chunk.copy_from_slice(&bytes[i * 16..(i + 1) * 16]);
+        *slot = Fr::from(u128::from_be_bytes(chunk));
+    }
+    out
+}
+
+/// Generate a fresh valid `(vk_bytes, proof_bytes)` triple bound to the
+/// supplied `(code_hash, computation_hash)`. Seeded so test re-runs produce
+/// identical bytes — useful when diffing failures.
+fn gen_valid_groth16_proof(
+    seed: u64,
+    code_hash: [u8; 32],
+    computation_hash: [u8; 32],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let setup_circuit = SumCircuit {
+        public_inputs: [None; 4],
+        witness: None,
+    };
+    let pk =
+        Groth16::<Bn254>::generate_random_parameters_with_reduction(setup_circuit, &mut rng)
+            .expect("trusted setup");
+
+    let mut public_inputs_bytes = [0u8; 64];
+    public_inputs_bytes[..32].copy_from_slice(&code_hash);
+    public_inputs_bytes[32..].copy_from_slice(&computation_hash);
+    let fr_inputs = split_public_inputs_64(&public_inputs_bytes);
+    let witness = fr_inputs[0] + fr_inputs[1] + fr_inputs[2] + fr_inputs[3];
+
+    let prove_circuit = SumCircuit {
+        public_inputs: fr_inputs.map(Some),
+        witness: Some(witness),
+    };
+    let proof =
+        Groth16::<Bn254>::create_random_proof_with_reduction(prove_circuit, &pk, &mut rng)
+            .expect("prove");
+
+    let mut vk_bytes = Vec::new();
+    pk.vk
+        .serialize_compressed(&mut vk_bytes)
+        .expect("vk serialize");
+    let mut proof_bytes = Vec::new();
+    proof
+        .serialize_compressed(&mut proof_bytes)
+        .expect("proof serialize");
+
+    (vk_bytes, proof_bytes)
+}
+
+const G_CODE_HASH: [u8; 32] = [0xC0u8; 32];
+const G_COMP_HASH: [u8; 32] = [0xC1u8; 32];
+
+#[test]
+fn groth16_valid_proof_accepted() {
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+
+    let (vk, proof) = gen_valid_groth16_proof(0, G_CODE_HASH, G_COMP_HASH);
+    let payload = build_proof_submission_payload_v2(
+        issuer.id,
+        PROOF_TYPE_GROTH16,
+        G_CODE_HASH,
+        G_COMP_HASH,
+        vk,
+        proof,
+    );
+    apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+        .expect("valid Groth16 proof must be accepted");
+
+    let records = read_verification_records(&db, &issuer.id);
+    assert_eq!(records.len(), 1, "valid proof must create a record");
+}
+
+#[test]
+fn groth16_tampered_proof_rejected() {
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+
+    let (vk, mut proof) = gen_valid_groth16_proof(0, G_CODE_HASH, G_COMP_HASH);
+    proof[0] ^= 0x01; // flip one bit
+    let payload = build_proof_submission_payload_v2(
+        issuer.id,
+        PROOF_TYPE_GROTH16,
+        G_CODE_HASH,
+        G_COMP_HASH,
+        vk,
+        proof,
+    );
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("tampered proof must reject");
+    assert!(
+        matches!(err, ExecError::ProofVerificationFailed),
+        "got {err:?}"
+    );
+
+    let records = read_verification_records(&db, &issuer.id);
+    assert!(records.is_empty(), "rejection must not create a record");
+}
+
+#[test]
+fn groth16_invalid_proof_rejected() {
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+
+    // Valid VK but garbage proof bytes (not a serializable Proof).
+    let (vk, proof) = gen_valid_groth16_proof(0, G_CODE_HASH, G_COMP_HASH);
+    let mut bad_proof = proof;
+    bad_proof.fill(0xFF);
+    let payload = build_proof_submission_payload_v2(
+        issuer.id,
+        PROOF_TYPE_GROTH16,
+        G_CODE_HASH,
+        G_COMP_HASH,
+        vk,
+        bad_proof,
+    );
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("invalid proof must reject");
+    assert!(
+        matches!(err, ExecError::ProofVerificationFailed),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn groth16_wrong_vk_rejected() {
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+
+    let (_, proof) = gen_valid_groth16_proof(0, G_CODE_HASH, G_COMP_HASH);
+    // Different seed -> different trusted setup -> different VK.
+    let (other_vk, _) = gen_valid_groth16_proof(1, G_CODE_HASH, G_COMP_HASH);
+    let payload = build_proof_submission_payload_v2(
+        issuer.id,
+        PROOF_TYPE_GROTH16,
+        G_CODE_HASH,
+        G_COMP_HASH,
+        other_vk,
+        proof,
+    );
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("wrong VK must reject");
+    assert!(
+        matches!(err, ExecError::ProofVerificationFailed),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn groth16_wrong_public_inputs_rejected() {
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+
+    let (vk, proof) = gen_valid_groth16_proof(0, G_CODE_HASH, G_COMP_HASH);
+    // Proof was bound to G_COMP_HASH; submit with a different one — the
+    // verifier reconstructs public_inputs from the on-chain
+    // (code_hash || computation_hash), so this must reject.
+    let mut wrong_comp = G_COMP_HASH;
+    wrong_comp[0] ^= 0xFF;
+    let payload = build_proof_submission_payload_v2(
+        issuer.id,
+        PROOF_TYPE_GROTH16,
+        G_CODE_HASH,
+        wrong_comp,
+        vk,
+        proof,
+    );
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("wrong public inputs must reject");
+    assert!(
+        matches!(err, ExecError::ProofVerificationFailed),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn groth16_verification_record_created_on_success() {
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+
+    let (vk, proof) = gen_valid_groth16_proof(0, G_CODE_HASH, G_COMP_HASH);
+    let expected_proof_hash = *blake3::hash(&proof).as_bytes();
+    let payload = build_proof_submission_payload_v2(
+        issuer.id,
+        PROOF_TYPE_GROTH16,
+        G_CODE_HASH,
+        G_COMP_HASH,
+        vk,
+        proof,
+    );
+    apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+        .expect("valid Groth16 proof must be accepted");
+
+    let records = read_verification_records(&db, &issuer.id);
+    assert_eq!(records.len(), 1);
+    let decoded = VerificationRecordData::decode(&records[0].data).expect("decode record");
+    assert_eq!(decoded.proof_type, PROOF_TYPE_GROTH16);
+    assert_eq!(decoded.code_hash, G_CODE_HASH);
+    assert_eq!(decoded.computation_hash, G_COMP_HASH);
+    assert_eq!(
+        decoded.proof_hash, expected_proof_hash,
+        "proof_hash must be blake3 of the real proof bytes (not the empty slice)"
+    );
+    assert_eq!(decoded.height, HEIGHT);
+}
+
+#[test]
+fn groth16_reputation_updated_on_success() {
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+    let rep_before = issuer.reputation_score;
+    let events_before = issuer.reputation_events_count;
+
+    let (vk, proof) = gen_valid_groth16_proof(0, G_CODE_HASH, G_COMP_HASH);
+    let payload = build_proof_submission_payload_v2(
+        issuer.id,
+        PROOF_TYPE_GROTH16,
+        G_CODE_HASH,
+        G_COMP_HASH,
+        vk,
+        proof,
+    );
+    apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+        .expect("valid Groth16 proof must be accepted");
+
+    let after = read_ai_entity(&db, &issuer.id).unwrap().unwrap();
+    assert_eq!(after.reputation_score, rep_before + 3);
+    assert_eq!(after.reputation_events_count, events_before + 1);
+}
+
+#[test]
+fn groth16_proof_type_0_still_works() {
+    // Regression: the stub (PROOF_TYPE_STUB = 0) path must keep its v1
+    // wire layout and always-accept semantics after Groth16 is activated.
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+
+    let payload = build_proof_submission_payload(
+        issuer.id,
+        PROOF_TYPE_STUB,
+        SAMPLE_CODE_HASH,
+        SAMPLE_COMPUTATION_HASH,
+    );
+    assert_eq!(
+        payload.len(),
+        SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN,
+        "stub path keeps 131-byte v1 layout"
+    );
+    apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+        .expect("stub path still succeeds");
+
+    let records = read_verification_records(&db, &issuer.id);
+    assert_eq!(records.len(), 1);
+    let decoded = VerificationRecordData::decode(&records[0].data).unwrap();
+    assert_eq!(decoded.proof_type, PROOF_TYPE_STUB);
+    // Stub's "proof_bytes" is empty, so proof_hash is blake3 of the empty slice.
+    assert_eq!(decoded.proof_hash, *blake3::hash(&[]).as_bytes());
+}
+
+#[test]
+fn groth16_proof_type_2_still_rejected() {
+    // PLONK (proof_type = 2) remains above PROOF_TYPE_MAX after the
+    // Groth16 activation, so the decoder must still reject it. Mirrors
+    // proof_submission_unsupported_type_rejected; kept separately as a
+    // forward-looking guard against another premature PROOF_TYPE_MAX bump.
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+
+    let payload = build_proof_submission_payload(
+        issuer.id,
+        PROOF_TYPE_PLONK,
+        SAMPLE_CODE_HASH,
+        SAMPLE_COMPUTATION_HASH,
+    );
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("PLONK must still reject");
+    assert!(
+        matches!(err, ExecError::UnsupportedProofType { proof_type: 2 }),
+        "got {err:?}"
+    );
+}
