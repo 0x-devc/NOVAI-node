@@ -245,9 +245,9 @@ The subscription protocol promotes ad-hoc, off-chain "I'll pay you per call" rel
 
 ### `crypto`
 
-**Purpose.** Ed25519 signing and verification with NOVAI's domain-separation conventions, address derivation, and ZK verifier hooks (currently stubbed for `Autonomous` autonomy mode).
+**Purpose.** Ed25519 signing and verification with NOVAI's domain-separation conventions, address derivation, and ZK verifier backends (real BN254 Groth16 plus a development-only stub).
 
-**Key items.** `generate_keypair`, `address_from_pubkey` (= `blake3("NOVAI_ADDRESS_V1" || pubkey)`), `sign_tx_v1`, `verify_tx_v1`, `sign_bytes`, `verify_bytes`, `pubkey_from_bytes`, `ZkVerifier` trait, `StubZkVerifier`. All signing is detached and prefixed with `b"NOVAI_TX_V1"` to prevent cross-domain reuse.
+**Key items.** `generate_keypair`, `address_from_pubkey` (= `blake3("NOVAI_ADDRESS_V1" || pubkey)`), `sign_tx_v1`, `verify_tx_v1`, `sign_bytes`, `verify_bytes`, `pubkey_from_bytes`, `ZkVerifier` trait (v3 signature: `proof, vk, public_inputs, proof_type, code_hash`), `StubZkVerifier`, `Groth16Verifier`. All signing is detached and prefixed with `b"NOVAI_TX_V1"` to prevent cross-domain reuse. Arkworks crates pulled with `default-features = false` so rayon is excluded and verification stays deterministic.
 
 **Workspace deps.** `types`, `codec`.
 
@@ -436,33 +436,53 @@ flowchart LR
 
 NOVAI accepts on-chain attestations of off-chain computation integrity through the `ProofSubmission` signal (type `13`). An AI entity submits proof material plus context, the chain runs the proof through a `ZkVerifier` implementation, and on success it persists a `VerificationRecord` memory object owned by the issuer plus a `+3` reputation event.
 
+Two verifier backends are wired today: `StubZkVerifier` for `PROOF_TYPE_STUB = 0` (development only, accepts every input) and `Groth16Verifier` for `PROOF_TYPE_GROTH16 = 1` (real BN254 Groth16 SNARKs via the arkworks ecosystem). `PROOF_TYPE_PLONK = 2` is reserved but not yet wired.
+
 ### Wire formats
 
-**`ProofSubmission` signal payload — 131 bytes fixed.**
+The `ProofSubmission` signal supports two on-wire layouts, distinguished by `proof_type`:
+
+**v1 layout (`proof_type = PROOF_TYPE_STUB`), 131 bytes fixed.**
 
 ```
 [version:1=2][signal_hash:32][signal_type:1=13][issuer_entity_id:32]
-[proof_type:1][code_hash:32][computation_hash:32]
+[proof_type:1=0][code_hash:32][computation_hash:32]
 ```
 
-The first 66 bytes are the common `SignalCommitmentPayloadV1` header (shared with every other signal type). The 65-byte tail is the `ProofSubmissionExtraV1` struct: `proof_type` discriminates the proof system (`PROOF_TYPE_STUB = 0` is the only accepted value in v1; `PROOF_TYPE_GROTH16 = 1` and `PROOF_TYPE_PLONK = 2` are reserved). `code_hash` identifies the AI module/weights the proof attests to; `computation_hash` identifies the specific computation context.
+The first 66 bytes are the common `SignalCommitmentPayloadV1` header. The 65-byte tail is the `ProofSubmissionExtraV1` struct's `proof_type | code_hash | computation_hash`. `vk_bytes` and `proof_bytes` MUST be absent (the encoder rejects non-empty ones for `PROOF_TYPE_STUB` at the type level; the decoder enforces the exact 131-byte length).
 
-**`VerificationRecord` memory object payload — 105 bytes fixed.**
+**v2 layout (`proof_type >= PROOF_TYPE_GROTH16`), variable length.**
+
+```
+[version:1=2][signal_hash:32][signal_type:1=13][issuer_entity_id:32]
+[proof_type:1>=1][code_hash:32][computation_hash:32]
+[vk_len_be:4][vk_bytes...][proof_len_be:4][proof_bytes...]
+```
+
+The v1 prefix is preserved bit-for-bit. After the existing 65-byte tail the decoder reads a 4-byte big-endian `vk_len`, then that many `vk_bytes`, then a 4-byte big-endian `proof_len`, then that many `proof_bytes`. `vk_bytes` MUST be at most `PROOF_SUBMISSION_MAX_VK_BYTES = 8 KiB` and `proof_bytes` MUST be at most `PROOF_SUBMISSION_MAX_PROOF_BYTES = 1 KiB`. Both caps are well above canonical Groth16 sizes (a 4-public-input BN254 VK is roughly 200 to 300 bytes compressed; a Groth16 proof is roughly 128 bytes compressed) and exist only as denial-of-service guards. Length overruns raise `VerifyingKeyTooLarge { actual, max }` or `ProofBytesTooLarge { actual, max }` at decode time.
+
+For `PROOF_TYPE_GROTH16`, `vk_bytes` is the ark-serialize compressed form of `VerifyingKey<Bn254>` and `proof_bytes` is the ark-serialize compressed form of `Proof<Bn254>`.
+
+**`VerificationRecord` memory object payload, 105 bytes fixed.**
 
 ```
 [proof_type:1][code_hash:32][computation_hash:32][proof_hash:32][height_be:8]
 ```
 
-`proof_hash` is `blake3(proof_bytes)` over the proof material the verifier accepted. `height` is the block height at which the proof was verified.
+`proof_hash` is `blake3(proof_bytes)` over the actual proof material. For `PROOF_TYPE_STUB` (empty proof) it is `blake3(&[])`; for `PROOF_TYPE_GROTH16` it is the blake3 hash of the submitted proof bytes and serves as the stable per-proof identifier. `height` is the block height at which the proof was verified.
 
 ### Handler flow
 
-`apply_signal_commitment_tx_inner` in `crates/execution/src/lib.rs` routes signal type `13` through these steps (after the common gate checks — kill switch, `is_active`, `emit_proposals`, nonce, fee):
+`apply_signal_commitment_tx_inner` in `crates/execution/src/lib.rs` routes signal type `13` through these steps (after the common gate checks: kill switch, `is_active`, `emit_proposals`, nonce, fee):
 
-1. Decode validates `proof_type ≤ PROOF_TYPE_MAX`, raising `UnsupportedProofType { proof_type }` for any reserved discriminant.
-2. The handler builds public inputs as `code_hash || computation_hash` (64 bytes) and calls `StubZkVerifier::verify_proof(proof_bytes, public_inputs, proof_type, &code_hash)`. A `false` return raises `ProofVerificationFailed` and the transaction is rejected with no state changes (currently unreachable — the stub always returns `true`).
+1. Decode validates `proof_type <= PROOF_TYPE_MAX` (currently `PROOF_TYPE_GROTH16`), raising `UnsupportedProofType { proof_type }` for any higher discriminant. For the v2 layout it also enforces the vk/proof length caps before any allocation.
+2. The handler builds public inputs as `code_hash || computation_hash` (64 bytes) and dispatches on `extra.proof_type`:
+   - `PROOF_TYPE_STUB` calls `StubZkVerifier::verify_proof`, which always returns `true`.
+   - `PROOF_TYPE_GROTH16` calls `Groth16Verifier::verify_proof`, which deserialises the VK and proof and runs `ark_groth16::Groth16::<Bn254>::verify_proof` against the prepared VK.
+   - Any other accepted value (none today) falls through `unreachable!`; the decoder rejects everything above `PROOF_TYPE_MAX` before this point.
+   A `false` return raises `ProofVerificationFailed` and the transaction is rejected with no state changes.
 3. On success, the handler builds a `VerificationRecordData` (with `proof_hash = blake3(proof_bytes)` and `height = current_height`), wraps it in a `MemoryObject` owned by the issuer, and writes both the primary record key and the `by-type` index in the same atomic batch as the existing signal-commitment writes.
-4. The handler applies a `REP_EVENT_PROOF_VERIFIED` event (`delta = +3`) to the issuer's reputation, clamped to `[0, MAX_REPUTATION_SCORE]` like every other reputation update in the codebase. `REP_EVENT_PROOF_FAILED = 9` is defined for forward compatibility but never emitted by v1 (failure rejects the tx outright).
+4. The handler applies a `REP_EVENT_PROOF_VERIFIED` event (`delta = +3`) to the issuer's reputation, clamped to `[0, MAX_REPUTATION_SCORE]` like every other reputation update in the codebase. `REP_EVENT_PROOF_FAILED = 9` is defined for forward compatibility but never emitted (failure rejects the tx outright).
 
 There is no per-entity dedup. Each accepted submission produces its own record; an entity can re-submit the same `(code_hash, computation_hash)` and accumulate distinct records (see `multiple_proofs_same_entity_all_recorded` in `crates/execution/tests/verification_system.rs`). A future dedup index can raise the reserved `ProofAlreadySubmitted` error without another `ExecError` ABI change.
 
@@ -472,6 +492,7 @@ There is no per-entity dedup. Each accepted submission produces its own record; 
 pub trait ZkVerifier {
     fn verify_proof(
         proof: &[u8],
+        vk: &[u8],
         public_inputs: &[u8],
         proof_type: u8,
         code_hash: &[u8; 32],
@@ -479,15 +500,21 @@ pub trait ZkVerifier {
 }
 ```
 
-The trait lives in `crates/crypto/src/zk.rs`. It is intentionally pure — no chain-state access — so backends can route on `proof_type`, bind to `code_hash` for circuit-key selection, and otherwise treat verification as a stateless function of bytes. `StubZkVerifier` always returns `true` and is the only implementation in v1; replacing it with a real Groth16 / PLONK verifier is the activation step for `PROOF_TYPE_GROTH16` / `PROOF_TYPE_PLONK`.
+The trait lives in `crates/crypto/src/zk.rs`. It is intentionally pure (no chain-state access) so backends treat verification as a stateless function of bytes. `vk` was added in the v3 trait shape so per-submission verifying keys can flow through the signal payload; `StubZkVerifier` ignores it, `Groth16Verifier` deserialises it.
 
-### Future: off-chain proof bytes
+`Groth16Verifier` operates over the BN254 pairing curve. Public-input bytes (64 bytes, `code_hash || computation_hash`) are mapped into 4 BN254 scalar-field elements by splitting each 32-byte hash into a 16-byte high half and a 16-byte low half, then lifting each half into `Fr` via `u128::from_be_bytes`. The 128-bit values fit comfortably below the BN254 scalar-field modulus (about 2^254), so the mapping is bias-free and canonical. Any Groth16 circuit submitted for on-chain verification MUST be set up for exactly four public inputs in this canonical order.
 
-The 131-byte `ProofSubmission` tail does **not** carry the proof bytes themselves. In v1 the stub accepts an empty proof slice and the handler hashes that empty slice into `proof_hash`. When a real verifier is plumbed in, proof bytes will be resolved off-chain via the artifact referenced by the signal commitment hash (the same off-chain payload pipeline the existing AI signal types already use). At that point, `proof_hash` becomes the stable per-proof identifier across the on-chain record and the off-chain artifact, with no wire-format change required.
+Determinism is mandatory in the verify path. `Groth16Verifier` uses arkworks with `default-features = false`; the `parallel` feature is disabled across `ark-groth16`, `ark-ec`, `ark-ff`, `ark-std`, and `ark-serialize`, so rayon is excluded from the dependency tree and verification is single-threaded and reproducible across validator architectures (`cargo tree -p novai-crypto | grep rayon` is empty).
+
+### Verifying-key trust boundary (v1 limitation)
+
+In the current release the handler does NOT enforce a binding between `vk_bytes` and the entity's `code_hash`. A malicious entity could supply a trivial circuit's VK plus a corresponding trivial proof and claim it represents a meaningful computation. Off-chain observers can detect this by recomputing `vk_hash = blake3(vk_bytes)` and comparing against the entity's published expected VK; the on-chain `VerificationRecord` carries enough material to do so (the `proof_hash` field plus the submitted `code_hash` and `computation_hash` form an immutable trail).
+
+A future feature will tighten this either by (a) extending `AiEntity` with a `vk_commitment: [u8; 32]` field set at registration and checked at proof time, or (b) introducing a per-entity `VkRegistry` memory object the handler reads on each `PROOF_TYPE_GROTH16` submission. Both options are additive and do not change the on-wire `ProofSubmission` format.
 
 ### Path to Autonomous mode
 
-`AutonomyMode::Autonomous` is currently rejected at registration with `ExecError::AutonomousModeReserved` in both `apply_register_ai_entity_tx` and `apply_register_ai_entity_with_key_tx`. The proof-submission machinery in this section is the *prerequisite* for unlocking that mode — once an entity has accumulated enough verified proofs of its own correctness, registration can be permitted under a stricter governance gate. The activation policy itself (how many proofs over what window, which `proof_type`s qualify, who approves the lift) is out of scope for the v1 work and is tracked separately. The on-chain primitive needed to support that policy — a queryable, immutable history of verified proofs per entity — is in place after Phase 5.
+`AutonomyMode::Autonomous` is currently rejected at registration with `ExecError::AutonomousModeReserved` in both `apply_register_ai_entity_tx` and `apply_register_ai_entity_with_key_tx`. The proof-submission machinery in this section is the prerequisite for unlocking that mode: once an entity has accumulated enough verified Groth16 proofs of its own correctness, registration can be permitted under a stricter governance gate. The activation policy itself (how many proofs over what window, which `proof_type`s qualify, who approves the lift) is out of scope for this work and is tracked separately. The on-chain primitive needed to support that policy, a queryable immutable history of verified proofs per entity, is in place.
 
 ---
 

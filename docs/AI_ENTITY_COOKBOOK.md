@@ -329,46 +329,108 @@ A paused consumer cannot publish further signals or memory objects until reactiv
 
 ## Recipe 5: Prove Your Computation (ZK)
 
-Submit a `ProofSubmission` signal (type 13). The chain verifies the proof, creates a `VerificationRecord` memory object owned by the issuer, and applies `+3` reputation. In v1 the only supported `proof_type` is `0` (`PROOF_TYPE_STUB`). The stub verifier accepts every input and always returns true.
+Submit a `ProofSubmission` signal (type 13). The chain verifies the proof, creates a `VerificationRecord` memory object owned by the issuer, and applies `+3` reputation. Two `proof_type` values are accepted today:
 
-`[NOT YET IMPLEMENTED]` Real proof systems (`PROOF_TYPE_GROTH16 = 1`, `PROOF_TYPE_PLONK = 2`) are reserved but not wired. Submitting any proof_type other than `0` returns `UnsupportedProofType`.
+- `PROOF_TYPE_STUB = 0`: development-only path. The stub verifier returns true unconditionally. Use this for plumbing tests and to validate the on-chain side of your pipeline before you have real proofs.
+- `PROOF_TYPE_GROTH16 = 1`: real BN254 Groth16. Submit the verifying key and the proof inline in the signal payload; the chain runs `ark_groth16::Groth16::<Bn254>::verify_proof` and rejects on failure.
+
+`PROOF_TYPE_PLONK = 2` is reserved but not wired; submitting it returns `UnsupportedProofType { proof_type: 2 }`.
 
 ### What you need
-- A registered entity with `emit_proposals`.
-- The entity has at least 1,000 `economic_balance` for the signal fee.
+- A registered entity with `emit_proposals` (in the default `0x07` capabilities mask).
+- At least `1_000` `economic_balance` for the signal fee.
+- For Groth16: a BN254 trusted setup for your circuit and the ability to produce ark-serialize compressed bytes for the resulting `VerifyingKey<Bn254>` and `Proof<Bn254>`.
 
-### Step 1: Build the ProofSubmission payload
+### Path A: Stub submission (development)
 
-131-byte payload, 65-byte tail:
+Use this to exercise the on-chain side without producing real proofs.
+
+**Step 1: Build the v1 ProofSubmission payload.** 131 bytes, fixed:
 
 ```text
-[0x02][signal_hash:32][0x0D][issuer_id:32][proof_type:1][code_hash:32][computation_hash:32]
+[0x02][signal_hash:32][0x0D][issuer_id:32]
+[proof_type:1=0][code_hash:32][computation_hash:32]
 ```
 
-`signal_hash` is opaque (commits to your off-chain proof artifact, if any). `code_hash` should be the hash of the AI module that produced the result. `computation_hash` should bind the computation context (inputs, model version, timestamp). The chain stores both fields in the resulting `VerificationRecord` but does not interpret them.
+`signal_hash` is opaque (treat it as a commitment to your off-chain proof artifact if any). `code_hash` should be the hash of the AI module that produced the result; `computation_hash` should bind the computation context (inputs, model version, timestamp). The chain stores both in the resulting `VerificationRecord` but does not interpret them.
 
-### Step 2: Submit
+**Step 2: Submit.** Sign as a `TxV1` with the entity's key, fee `1_000`, then `client.submit_tx(&signed)`.
 
-Sign as a `TxV1` with the entity's key, fee `1_000`, then `client.submit_tx(&signed)`.
-
-### Step 3: Read back the VerificationRecord
-
-```bash
-curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"novai_getMemoryObjects","params":{"entity_id":"<issuer_id>"},"id":1}'
-```
-
-The new memory object has `object_type = 9` and `data` is a 105-byte hex blob:
+**Step 3: Read back the record.** The new memory object has `object_type = 9` and `data` is a 105-byte hex blob:
 
 ```text
 [proof_type:1][code_hash:32][computation_hash:32][proof_hash:32][height_be:8]
 ```
 
-In v1 `proof_hash` is `blake3(b"")` because the handler does not yet receive proof bytes. All v1 stub records share that proof_hash; do not rely on it as a uniqueness key.
+For stub submissions `proof_hash = blake3(b"")` (no inline proof bytes); all stub records share that hash, so do not use it as a uniqueness key. Each stub submission still produces a fresh memory object whose `object_id` is unique per `(owner, type, height, data)`.
 
-### Step 4: Confirm the reputation effect
+### Path B: Groth16 submission (production)
 
-The `+3` reputation bump is RPC-readable on the issuer:
+This is the real path. The signal payload carries the verifying key and the proof inline; the chain pairing-checks them on the way in.
+
+**Public-input contract.** The verifier computes `public_inputs = code_hash || computation_hash` (64 bytes) and splits the buffer into four BN254 scalar-field elements by big-endian 16-byte halves, lifting each half into `Fr` via `u128::from_be_bytes`:
+
+```
+fr[0] = Fr::from(u128::from_be_bytes(code_hash[0..16]))
+fr[1] = Fr::from(u128::from_be_bytes(code_hash[16..32]))
+fr[2] = Fr::from(u128::from_be_bytes(computation_hash[0..16]))
+fr[3] = Fr::from(u128::from_be_bytes(computation_hash[16..32]))
+```
+
+Your circuit MUST be set up for exactly four public inputs in this canonical order. The 128-bit values fit comfortably below the BN254 scalar-field modulus (about 2^254), so the mapping is bias-free.
+
+**Step 1: Produce VK and proof off-chain.** Using arkworks 0.5 with `default-features = false`:
+
+```rust
+use ark_bn254::{Bn254, Fr};
+use ark_groth16::Groth16;
+use ark_serialize::CanonicalSerialize;
+
+// 1. trusted setup (your circuit, your RNG)
+let pk = Groth16::<Bn254>::generate_random_parameters_with_reduction(
+    setup_circuit, &mut rng,
+).expect("setup");
+
+// 2. build the same 4 Fr public inputs the chain will compute
+let public_inputs_bytes = {
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(&code_hash);
+    buf[32..].copy_from_slice(&computation_hash);
+    buf
+};
+let fr_inputs: [Fr; 4] = /* hi/lo split as above */;
+
+// 3. prove
+let proof = Groth16::<Bn254>::create_random_proof_with_reduction(
+    prove_circuit_with(fr_inputs), &pk, &mut rng,
+).expect("prove");
+
+// 4. serialize for the wire
+let mut vk_bytes = Vec::new();
+pk.vk.serialize_compressed(&mut vk_bytes).unwrap();
+let mut proof_bytes = Vec::new();
+proof.serialize_compressed(&mut proof_bytes).unwrap();
+```
+
+The reference circuit and helper used in the NOVAI integration tests live in `crates/execution/tests/verification_system.rs` (search for `gen_valid_groth16_proof`). A canonical BN254 Groth16 VK for four public inputs is roughly 200 to 300 bytes compressed; a Groth16 proof is roughly 128 bytes compressed. Limits: `PROOF_SUBMISSION_MAX_VK_BYTES = 8 KiB`, `PROOF_SUBMISSION_MAX_PROOF_BYTES = 1 KiB`.
+
+**Step 2: Build the v2 ProofSubmission payload.** Variable length:
+
+```text
+[0x02][signal_hash:32][0x0D][issuer_id:32]
+[proof_type:1=1][code_hash:32][computation_hash:32]
+[vk_len_be:4][vk_bytes...][proof_len_be:4][proof_bytes...]
+```
+
+The 131-byte v1 prefix is preserved bit-for-bit. After it, big-endian `u32` length prefixes precede `vk_bytes` and `proof_bytes`. With a 280-byte VK and a 128-byte proof, total payload is `131 + 4 + 280 + 4 + 128 = 547` bytes.
+
+**Step 3: Submit.** Sign as a `TxV1`, fee `1_000`, then `client.submit_tx(&signed)`. The chain decodes, dispatches to `Groth16Verifier`, and either accepts (write record, bump rep) or rejects with `ProofVerificationFailed`.
+
+**Step 4: Read back the record.** Same memory object layout as Path A. For Groth16 submissions `proof_hash = blake3(proof_bytes)` and IS the stable per-proof identifier you can use as a uniqueness key.
+
+### Confirming the reputation effect
+
+The `+3` reputation bump applies to the issuer on success regardless of path:
 
 ```bash
 curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
@@ -385,12 +447,18 @@ curl -s -X POST http://localhost:3030 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"novai_getSignalsByType","params":{"signal_type":13,"start_height":0,"end_height":10000},"id":1}'
 ```
 
-If the issuer's submission appears and `reputation_score` has bumped by `3`, the proof verified.
+If the submission appears and `reputation_score` bumped by `3`, the proof verified.
+
+### VK-to-code binding (current limitation)
+
+The chain does NOT enforce a binding between the supplied `vk_bytes` and the entity's `code_hash`. Off-chain observers should recompute `vk_hash = blake3(vk_bytes)` and compare against the entity's published expected VK. A future feature will add either a `vk_commitment` field on `AiEntity` or a per-entity `VkRegistry` memory object; both options are additive to the current wire format.
 
 ### Common errors
-- `UnsupportedProofType`: `proof_type > 0` (only stub accepted in v1).
-- `ProofVerificationFailed`: never returned in v1 because the stub always passes; will appear once Groth16/PLONK land.
-- `IssuerMissingCapability`: rare; `emit_proposals` is part of the default 0x07.
+- `UnsupportedProofType { proof_type }`: `proof_type > PROOF_TYPE_MAX` (which is `1` today). Submitting `2` (PLONK) is the canonical example.
+- `ProofVerificationFailed`: Groth16 path only. Causes: tampered proof bytes, wrong VK, mismatched public inputs (the chain's reconstructed `code_hash || computation_hash` differs from what the proof was bound to), malformed ark-serialize bytes.
+- `VerifyingKeyTooLarge { actual, max }`: v2 `vk_bytes` length above 8 KiB.
+- `ProofBytesTooLarge { actual, max }`: v2 `proof_bytes` length above 1 KiB.
+- `IssuerMissingCapability`: rare; `emit_proposals` is part of the default `0x07`.
 
 ---
 

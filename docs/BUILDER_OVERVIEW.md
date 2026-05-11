@@ -62,9 +62,11 @@ A reputation oracle issues a `CompositionCheck` signal naming a `failed_dep_idx`
 
 ### Layer 5: ZK proofs
 
-A `ProofSubmission` signal carries `proof_type`, `code_hash`, and `computation_hash`. The chain runs the verifier; on success it creates a `VerificationRecord` memory object owned by the issuer (105 bytes fixed: `proof_type | code_hash | computation_hash | proof_hash | height_be`) and applies `+3` reputation to the issuer.
+A `ProofSubmission` signal carries `proof_type`, `code_hash`, `computation_hash`, and (for real proofs) a verifying key and proof bytes inline. The chain runs the verifier; on success it creates a `VerificationRecord` memory object owned by the issuer (105 bytes fixed: `proof_type | code_hash | computation_hash | proof_hash | height_be`) and applies `+3` reputation to the issuer.
 
-In v1, only `PROOF_TYPE_STUB = 0` is accepted. The stub verifier always returns true. `PROOF_TYPE_GROTH16 = 1` and `PROOF_TYPE_PLONK = 2` are reserved for future integration.
+Two verifier backends are active: `PROOF_TYPE_STUB = 0` (always accepts, for development) uses the v1 131-byte payload layout; `PROOF_TYPE_GROTH16 = 1` (real BN254 Groth16 via the arkworks ecosystem) uses the v2 variable-length layout that appends `vk_len_be:4 | vk_bytes | proof_len_be:4 | proof_bytes` after the existing 65-byte tail, with caps of 8 KiB for the VK and 1 KiB for the proof. `PROOF_TYPE_PLONK = 2` is reserved but not wired; submitting it returns `UnsupportedProofType`.
+
+Public inputs for Groth16 are the 64-byte concatenation `code_hash || computation_hash` split into four BN254 scalars (16-byte big-endian halves, lifted into `Fr`). The verifier is deterministic; arkworks runs with `default-features = false` so rayon is excluded from the dependency tree.
 
 ### Layer 6: Subscriptions
 
@@ -149,7 +151,7 @@ Three components, layered:
 
 1. **Reputation**: `[0, 100]` score, default 50. Mutated by oracle observation. Bounded so it cannot run away. Cheap to read (when the RPC schema bumps).
 2. **Stake**: `economic_balance` moved into `stake_balance`. Locked for 1,000 blocks. Slashable. Skin in the game.
-3. **ZK proofs**: cryptographic attestation of off-chain computation. Stub in v1, real in future. Earns `+3` per successful submission.
+3. **ZK proofs**: cryptographic attestation of off-chain computation. BN254 Groth16 is wired and active (`PROOF_TYPE_GROTH16 = 1`); the stub remains for development tests. Earns `+3` reputation per successful submission.
 
 The protocol does not enforce trust thresholds at the protocol layer for most operations. The exception is composition: `CompositionGraph` lets a consumer declare "I depend on entities with reputation >= R and stake >= S", and the chain validates failures of those declared minima before applying the auto-pause. That is the only place trust thresholds are protocol-enforced.
 
@@ -167,7 +169,7 @@ For everything else, the trust signal is advisory. Application logic (your reput
 | Reputation, stake, capabilities, autonomy mode | The reputation oracle's observation logic |
 | Transaction fees and account balances | Compute infrastructure (GPUs, inference servers) |
 | `code_hash` and `computation_hash` (32 B each) | The code and computation context they hash |
-| `VerificationRecord` (105 B) | Full ZK proof bytes |
+| `VerificationRecord` (105 B), `vk_bytes`, `proof_bytes` (inline) | Off-chain proof artifacts (if you publish them) |
 
 The chain stores commitments and lets you reconstruct, verify, or dispute the off-chain artifacts later. It does not store inference outputs, model weights, or compute results directly.
 
