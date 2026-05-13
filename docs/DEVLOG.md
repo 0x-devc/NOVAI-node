@@ -16078,3 +16078,331 @@ How we overcame them:
 Final results:
 * Drill 2 PASS: Validator killed at height 2058 → restarted → chunked sync caught up in 5 batches (1-500, 501-1000, 1001-1500, 1501-2000, 2001-2137) → fully recovered and committing at height 2701 within 30 seconds.
 
+## Week 28: Native x402 Payment Rail
+
+### 1. Overview - Objectives & Deliverables
+
+Week 28 makes NOVAI speak the same payment protocol AI agents already use.
+The x402 protocol (shipped by Coinbase on Base, integrated by Anthropic
+and Cloudflare, supported by AWS AgentCore) lets an HTTP client pay for
+an API call by attaching a payment proof to the request after the server
+returns 402 Payment Required. Week 28 adds two native signal types so an
+AI entity can pay another AI entity per request directly on NOVAI, with
+the payer's on-chain reputation and stake visible to the payee at
+acceptance time. No bridge to another chain, no off-chain settlement.
+
+**Goal Statement.** Ship two signal types (PaymentRequest, ServiceAttestation),
+a queryable on-chain payment record, and the RPC endpoint that surfaces
+it to operators and clients. Replay protection is signal-hash-level so a
+single payment cannot be settled twice under different transaction nonces.
+
+**Deliverables.**
+
+- D28.1: Signal type 16 (PaymentRequest) - 112-byte tail (payee, amount,
+  service_descriptor_hash, request_hash, max_block_height); 178-byte
+  total payload. Atomic settlement: debit payer by amount + fee, credit
+  payee by amount, route fee to KEY_MARKETPLACE_TREASURY.
+- D28.2: Signal type 17 (ServiceAttestation) - 65-byte tail
+  (payment_signal_hash, payee, status); 131-byte total payload. Payer
+  attests delivery; handler applies +1 or -3 reputation delta to the
+  payee and rewrites the PaymentRecord in place.
+- D28.3: PaymentRecord KV value (162 bytes) stored under
+  `ai/payments/by_hash/<signal_hash>`. Doubles as the per-payment
+  seen-set entry (the canonical replay guard) and the audit row for
+  later queries. Two scan indexes: `ai/payments/by_payer/<id>/<height_be>/<signal_hash>`
+  and `ai/payments/by_payee/<id>/<height_be>/<signal_hash>`.
+- D28.4: `get_payments_by_entity` helper plus `novai_getPaymentsByEntity`
+  RPC endpoint. Returns PaymentRecord list by payer or payee within an
+  inclusive height window, capped at MAX_SIGNAL_QUERY_RANGE = 10_000
+  heights.
+- D28.5: CLI dispatch for both signal types. `parse_signal_type` accepts
+  `payment-request` and `service-attestation`; ExtendedSignalArgs grew
+  seven new flags. Pulled forward from a later phase because the
+  exhaustive `match` on AiSignalType forced it (the alternative was a
+  stub branch, which violates the no-stubs rule).
+
+**Final Metrics.**
+
+- 53 new tests across 4 files (15 unit + 14 PaymentRequest integration +
+  11 ServiceAttestation integration + 6 query helper + 4 CLI + 3 RPC).
+- 1,404 tests passing total (1,351 baseline + 53 net new), 0 failing.
+- Zero clippy warnings under `--all-targets -- -D warnings`.
+- `cargo deny check licenses` passes.
+- One commit per phase, six phases, six pushes.
+
+### 2. Design Decisions (Pushbacks Against the Original Spec)
+
+The original spec had five rough edges. Each was raised before any code
+was written; the user accepted all five. They are documented here because
+they shape the rest of the implementation.
+
+**A. Payer-issued ServiceAttestation, not payee-issued PaymentReceipt.**
+The original design had the payee publish a receipt with status
+`acknowledged | delivered | disputed`. Three problems: "acknowledged" is
+theater (the payee already has the funds the instant PaymentRequest
+settles); payee-self-attesting "delivered" is reputation-gameable (no
+economic friction prevents lying); "disputed by payee" has no economic
+sense (the payee took the money). The replacement: signal type 17 is
+issued by the payer, references the payment by `signal_hash`, status is
+`Delivered (0)` or `Failed (1)`. The payer experienced the service so
+they are the truth source, and the payer has no incentive to lie
+positively (no upside) or negatively (already spent the money). Future
+weeks can layer a multisig-resolved dispute flow on top of `Failed`.
+
+**B. KV index, not a memory object, for PaymentRecord.**
+Original design called for a new MemoryObjectType. But
+MAX_MEMORY_OBJECTS_PER_ENTITY = 100, and an AI service provider
+processing 200 API calls per day fills the cap in half a day. Feature
+killer at any meaningful volume. Replacement: a dedicated KV index
+`ai/payments/by_hash/` carries the canonical 162-byte record; scan
+indexes `by_payer` and `by_payee` are zero-byte markers keyed for
+height-ordered prefix scans. The by_hash record doubles as the seen-set
+entry. No per-entity cap, identical audit value, lower storage churn.
+
+**C. Signal-hash-level dedup is mandatory.**
+`tx.nonce` prevents replay of the same transaction but not of the same
+signal under a different nonce. Concrete attack: payer signs an
+identical PaymentRequest in two transactions with consecutive nonces and
+the payee gets paid twice. The by_hash record's presence is the dedup
+guard: any subsequent PaymentRequest carrying the same signal_hash is
+rejected with PaymentAlreadySettled before any state mutation. No
+separate seen-set is needed because the audit record we are already
+keeping serves that role.
+
+**D. Separate `PAYMENT_FEE_BPS` constant, even though its initial value
+matches `MARKETPLACE_FEE_BPS`.** Payment volume will dwarf signal-purchase
+volume by orders of magnitude. Sharing the constant means tuning the
+payment-rail fee independently in the future requires a hard fork.
+Adding `PAYMENT_FEE_BPS = 200` next to MARKETPLACE_FEE_BPS = 200 costs
+nothing today and preserves the option. Fee still routes to
+KEY_MARKETPLACE_TREASURY (consistent destination).
+
+**E. Two reputation events, calibrated against existing magnitudes.**
+`REP_EVENT_PAYMENT_DELIVERED = 10` with delta `+1`, and
+`REP_EVENT_PAYMENT_FAILED = 11` with delta `-3`. The positive delta sits
+below `REP_EVENT_PROOF_VERIFIED` (+3) since attestation is self-reported
+without cryptographic proof; the negative magnitude exceeds
+`REP_EVENT_COMPOSITION_FAILURE` (-1) since a failed payment is a
+stronger quality signal than a composition mismatch. `REP_EVENT_MAX`
+bumped from 9 to 11. Reputation update uses the standard
+`(i32 + delta).clamp(0, MAX_REPUTATION_SCORE).try_into::<u16>()` pattern,
+same as every other handler-emitted reputation event.
+
+### 3. What Shipped
+
+**Wire layouts (locked by golden vector tests).**
+
+```
+PaymentRequest inline tail (112 bytes):
+  payee_entity_id          [u8; 32]   bytes 0..32
+  amount                   u64 BE     bytes 32..40
+  service_descriptor_hash  [u8; 32]   bytes 40..72
+  request_hash             [u8; 32]   bytes 72..104
+  max_block_height         u64 BE     bytes 104..112
+
+ServiceAttestation inline tail (65 bytes):
+  payment_signal_hash      [u8; 32]   bytes 0..32
+  payee_entity_id          [u8; 32]   bytes 32..64
+  status                   u8         byte  64
+
+PaymentRecord KV value (162 bytes):
+  version                  1 byte     byte  0   (PAYMENT_RECORD_V1 = 1)
+  payer                    [u8; 32]   bytes 1..33
+  payee                    [u8; 32]   bytes 33..65
+  amount                   u64 BE     bytes 65..73
+  service_descriptor_hash  [u8; 32]   bytes 73..105
+  request_hash             [u8; 32]   bytes 105..137
+  payment_height           u64 BE     bytes 137..145
+  max_block_height         u64 BE     bytes 145..153
+  attested_status          u8         byte  153  (NONE=0xFF | DELIVERED=0 | FAILED=1)
+  attested_height          u64 BE     bytes 154..162
+```
+
+Full signal payloads are 178 bytes (PaymentRequest) and 131 bytes
+(ServiceAttestation), in both cases base header (66 bytes) plus tail.
+
+**PaymentRequest handler validation order.**
+
+1. Decode tail (CodecDecode on missing extra).
+2. `payee != payer` else PaymentSelfReferential.
+3. `amount > 0` else PaymentAmountZero.
+4. `current_height <= max_block_height` else PaymentExpired.
+5. Load payee; reject PaymentPayeeNotFound, PaymentPayeeNotActive.
+6. Replay guard: `db.get(payment_by_hash_key(signal_hash))` must be None
+   else PaymentAlreadySettled. This check fires before any state
+   mutation; no balances move on a rejected replay.
+7. Fee math: `fee = amount * PAYMENT_FEE_BPS / BPS_DENOMINATOR`
+   (`checked_mul`).
+8. `total_debit = amount + fee` (`checked_add`); balance check else
+   PaymentInsufficientBalance.
+9. Mutate balances; credit treasury only when `fee > 0` (mirrors the
+   zero-fee skip used by SignalPurchase).
+10. Increment `total_transactions` on both parties (saturating).
+11. Persist PaymentRecord under by_hash; write by_payer and by_payee
+    markers; push payee entity. All ops accumulate into the shared vec
+    and commit via the outer `apply_batch`.
+
+**ServiceAttestation handler validation order.**
+
+1. Decode tail.
+2. Defensive `status <= PAYMENT_ATTESTATION_STATUS_MAX` check (the
+   decoder also enforces this and now passes through
+   ServiceAttestationInvalidStatus to the outer error mapper).
+3. Load PaymentRecord by hash; reject ServiceAttestationPaymentNotFound.
+4. `record.payer == issuer` else ServiceAttestationNotPayer.
+5. `record.payee == payload.payee_entity_id` else
+   ServiceAttestationPayeeMismatch (catches tampered tails).
+6. `record.attested_status == NONE` else
+   ServiceAttestationAlreadyAttested.
+7. Load payee entity (deliberately does not check `is_active` because
+   reputation events must still apply to deactivated entities).
+8. Apply +REP_DELTA_PAYMENT_DELIVERED or REP_DELTA_PAYMENT_FAILED with
+   the standard clamp.
+9. Rewrite PaymentRecord in place with new attested_status +
+   attested_height. The same by_hash key receives the updated bytes; a
+   future attestation against the same record will fail at step 6.
+
+**RPC method.** `novai_getPaymentsByEntity` with params `entity_id`
+(hex32), `role` ("payer" or "payee"), `start_height`, `end_height`. The
+height window is inclusive on both ends; the cap matches the other
+signal queries (MAX_SIGNAL_QUERY_RANGE = 10_000). Response carries a
+list of PaymentJson rows where `amount` is a decimal string (consistent
+with how the rest of the RPC surface returns u64 and u128 values to
+avoid JSON precision loss) and `attested_status` is a human-readable
+label (`"delivered"`, `"failed"`, or `null` while unattested). A
+corrupted status byte renders as `"unknown"` rather than panicking.
+
+**CLI invocations.**
+
+```bash
+novai-cli signal publish \
+  --key-file alice.key \
+  --signal-hash <hex32> \
+  --signal-type payment-request \
+  --issuer-entity-id <alice-hex32> \
+  --payee-entity-id <bob-hex32> \
+  --payment-amount 5000 \
+  --service-descriptor-hash <hex32> \
+  --request-hash <hex32> \
+  --max-block-height 12500 \
+  --fee 1000
+
+novai-cli signal publish \
+  --key-file alice.key \
+  --signal-hash <hex32> \
+  --signal-type service-attestation \
+  --issuer-entity-id <alice-hex32> \
+  --payee-entity-id <bob-hex32> \
+  --payment-signal-hash <hex32> \
+  --attestation-status 0 \
+  --fee 1000
+```
+
+### 4. What Got Surfaced By the Tests
+
+**The outer handler debits the tx_fee before the dedup branch fires.**
+Discovered while writing the duplicate-signal-hash test in Phase 2. A
+rejected replay still costs the payer the tx_fee. This is not unique to
+payments (every signal-level rejection has the same property) but it is
+the place a griefer could weaponize it. Mitigation is structural: the
+attacker needs a valid signature from the payer's key to burn the
+payer's tx_fees, so it is self-inflicted only. Documented in
+`payment_request_duplicate_signal_hash_rejected`.
+
+**The decoder's ServiceAttestationInvalidStatus needed an explicit
+pass-through in the outer error mapper.** The dispatch wrapper at
+`apply_signal_commitment_tx_inner`'s decode step had a known list of
+codec errors and mapped everything else to Overflow. The original Phase
+3 invalid-status test failed with `Overflow` instead of the specific
+error. Added the case to the match arm. If a future codec validation
+error is added, the same wrapper is the place to plumb it through.
+
+**Big-endian height in the scan index keys makes range queries free.**
+A plain `db.scan_prefix` returns entries in height-ascending order
+without any in-memory sort. The query helper relies on this and the
+test `payments_by_payer_returned_in_height_order` locks it.
+
+### 5. Code Surface
+
+```
+crates/ai_entities/src/signals.rs               +37
+crates/ai_entities/tests/signal_verification_vectors.rs  +2 -2
+crates/execution/src/lib.rs                     +1450
+crates/execution/tests/payment_system.rs        new, 567 lines, 14 tests
+crates/execution/tests/service_attestation_system.rs  new, 471 lines, 11 tests
+crates/execution/tests/payment_queries.rs       new, 287 lines, 6 tests
+crates/execution/tests/{...}.rs                 +60 (None placeholders for new fields)
+crates/node/src/rpc.rs                          +186
+tools/novai-cli/src/commands/signal.rs          +200
+```
+
+**Key constants and types added.**
+
+```rust
+// crates/ai_entities/src/signals.rs
+AiSignalType::PaymentRequest = 16
+AiSignalType::ServiceAttestation = 17
+
+// crates/execution/src/lib.rs - constants
+PAYMENT_REQUEST_EXTRA_LEN: usize = 112
+SERVICE_ATTESTATION_EXTRA_LEN: usize = 65
+SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN: usize = 178
+SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN: usize = 131
+PAYMENT_RECORD_LEN: usize = 162
+PAYMENT_RECORD_V1: u8 = 1
+PAYMENT_FEE_BPS: u128 = 200
+PAYMENT_ATTESTATION_STATUS_DELIVERED: u8 = 0
+PAYMENT_ATTESTATION_STATUS_FAILED: u8 = 1
+PAYMENT_ATTESTATION_STATUS_MAX: u8 = 1
+PAYMENT_ATTESTATION_STATUS_NONE: u8 = 0xFF
+KEY_PREFIX_AI_PAYMENTS_BY_HASH: &[u8] = b"ai/payments/by_hash/"
+KEY_PREFIX_AI_PAYMENTS_BY_PAYER: &[u8] = b"ai/payments/by_payer/"
+KEY_PREFIX_AI_PAYMENTS_BY_PAYEE: &[u8] = b"ai/payments/by_payee/"
+REP_EVENT_PAYMENT_DELIVERED: u8 = 10
+REP_EVENT_PAYMENT_FAILED: u8 = 11
+REP_EVENT_MAX: u8 = 11   // bumped from 9
+REP_DELTA_PAYMENT_DELIVERED: i32 = 1
+REP_DELTA_PAYMENT_FAILED: i32 = -3
+
+// crates/execution/src/lib.rs - types and helpers
+pub struct PaymentRequestExtraV1 { ... }
+pub struct ServiceAttestationExtraV1 { ... }
+pub struct PaymentRecord { ... }
+pub enum PaymentRole { Payer, Payee }
+pub fn encode_payment_record_v1(p: &PaymentRecord) -> [u8; 162]
+pub fn decode_payment_record_v1(bytes: &[u8]) -> Result<PaymentRecord, ExecError<()>>
+pub fn payment_by_hash_key(signal_hash: &[u8; 32]) -> Vec<u8>
+pub fn payment_by_payer_key(payer: &[u8; 32], height: u64, signal_hash: &[u8; 32]) -> Vec<u8>
+pub fn payment_by_payee_key(payee: &[u8; 32], height: u64, signal_hash: &[u8; 32]) -> Vec<u8>
+pub fn get_payments_by_entity<K: Kv>(db, entity_id, role, start_height, end_height) -> Result<Vec<PaymentRecord>, ExecError<K::Error>>
+
+// 12 new ExecError variants
+PaymentSelfReferential, PaymentAmountZero, PaymentExpired { current_height, max_block_height },
+PaymentPayeeNotFound, PaymentPayeeNotActive, PaymentAlreadySettled { signal_hash },
+PaymentInsufficientBalance { required, available }, PaymentRecordDecodeFailed,
+ServiceAttestationInvalidStatus { status }, ServiceAttestationPaymentNotFound,
+ServiceAttestationNotPayer, ServiceAttestationPayeeMismatch,
+ServiceAttestationAlreadyAttested
+```
+
+### 6. Outstanding Work Items
+
+- Storage pruning: v1 keeps every PaymentRecord forever. At scale this
+  is the obvious next optimization. The expiry index would be keyed by
+  max_block_height; a periodic sweep would delete entries where the
+  current height exceeds expiry and no attestation is pending.
+- Refund signal: out of scope for v1. The current rail is one-way; a
+  payee that fails to deliver eats a -3 reputation hit but the funds
+  stay. A future RefundRequest signal could trigger a multisig-resolved
+  dispute flow.
+- Stake-weighted attestation deltas: griefer pays the standard tx fee
+  to issue a Failed attestation against a high-value payee. The
+  magnitude could be scaled by the payer's stake to raise the cost of
+  weaponized attestations, but the +1/-3 magnitudes are small enough
+  that v1 accepts the risk.
+
+**Week 28 Status: COMPLETE.** Five deliverables shipped across six
+phases. All 1,404 tests passing, zero clippy warnings, cargo deny check
+licenses passes. The chain now speaks the same payment protocol AI
+agents already use, with the added benefit that the payer's on-chain
+reputation and stake are visible to the payee before acceptance.
