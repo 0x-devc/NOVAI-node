@@ -4099,6 +4099,121 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         ops.push(write_ai_entity_op(&producer));
     }
 
+    // PaymentRequest branch (Week 28): native x402-style settlement. The
+    // issuer (payer) pays `amount` to the payee and `fee = amount *
+    // PAYMENT_FEE_BPS / BPS_DENOMINATOR` to the marketplace treasury.
+    // Replay protection is enforced at signal-hash granularity by the
+    // by_hash record: any subsequent PaymentRequest carrying the same
+    // signal_hash is rejected with PaymentAlreadySettled.
+    if payload.signal_type == AiSignalType::PaymentRequest {
+        let extra = payload
+            .payment_request
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("PaymentRequest missing extra".into()))?;
+
+        if extra.payee_entity_id == entity.id {
+            return Err(ExecError::PaymentSelfReferential);
+        }
+        if extra.amount == 0 {
+            return Err(ExecError::PaymentAmountZero);
+        }
+        if current_height > extra.max_block_height {
+            return Err(ExecError::PaymentExpired {
+                current_height,
+                max_block_height: extra.max_block_height,
+            });
+        }
+
+        let mut payee = read_ai_entity(db, &extra.payee_entity_id)?
+            .ok_or(ExecError::PaymentPayeeNotFound)?;
+        if !payee.is_active {
+            return Err(ExecError::PaymentPayeeNotActive);
+        }
+
+        // Replay guard. The by_hash record is the canonical seen-set
+        // entry; its presence rejects every duplicate before any state
+        // mutation. Storing the record at the end of this branch closes
+        // the window for the same signal_hash going forward.
+        let by_hash_key = payment_by_hash_key(&payload.signal_hash);
+        if db.get(&by_hash_key).map_err(ExecError::Db)?.is_some() {
+            return Err(ExecError::PaymentAlreadySettled {
+                signal_hash: payload.signal_hash,
+            });
+        }
+
+        let amount_u128 = u128::from(extra.amount);
+        let fee = amount_u128
+            .checked_mul(PAYMENT_FEE_BPS)
+            .ok_or(ExecError::Overflow)?
+            / BPS_DENOMINATOR;
+        let total_debit = amount_u128.checked_add(fee).ok_or(ExecError::Overflow)?;
+
+        if entity.economic_balance < total_debit {
+            return Err(ExecError::PaymentInsufficientBalance {
+                required: total_debit,
+                available: entity.economic_balance,
+            });
+        }
+        entity.economic_balance = entity
+            .economic_balance
+            .checked_sub(total_debit)
+            .ok_or(ExecError::Overflow)?;
+        payee.economic_balance = payee
+            .economic_balance
+            .checked_add(amount_u128)
+            .ok_or(ExecError::Overflow)?;
+
+        // Treasury credit only when fee > 0. amount > 0 is already
+        // enforced, but the fee is still zero for amounts below
+        // BPS_DENOMINATOR / PAYMENT_FEE_BPS (i.e., below 50 base units).
+        // Skipping the treasury write in that case avoids dead state
+        // churn and mirrors the SignalPurchase pattern at line 3562.
+        if fee > 0 {
+            let new_treasury = read_treasury_balance(db, KEY_MARKETPLACE_TREASURY)?
+                .checked_add(fee)
+                .ok_or(ExecError::Overflow)?;
+            ops.push(WriteOp::Put(
+                KEY_MARKETPLACE_TREASURY.to_vec(),
+                encode_fee_pool_v1(&FeePoolV1 {
+                    balance: new_treasury,
+                })
+                .to_vec(),
+            ));
+        }
+
+        entity.total_transactions = entity.total_transactions.saturating_add(1);
+        payee.total_transactions = payee.total_transactions.saturating_add(1);
+
+        // Persist canonical payment record + two scan indexes. The by_hash
+        // value carries the full record; the by_payer / by_payee entries
+        // are zero-byte markers (the canonical data lives in by_hash).
+        let record = PaymentRecord {
+            payer: entity.id,
+            payee: payee.id,
+            amount: extra.amount,
+            service_descriptor_hash: extra.service_descriptor_hash,
+            request_hash: extra.request_hash,
+            payment_height: current_height,
+            max_block_height: extra.max_block_height,
+            attested_status: PAYMENT_ATTESTATION_STATUS_NONE,
+            attested_height: 0,
+        };
+        ops.push(WriteOp::Put(
+            by_hash_key,
+            encode_payment_record_v1(&record).to_vec(),
+        ));
+        ops.push(WriteOp::Put(
+            payment_by_payer_key(&entity.id, current_height, &payload.signal_hash),
+            Vec::new(),
+        ));
+        ops.push(WriteOp::Put(
+            payment_by_payee_key(&payee.id, current_height, &payload.signal_hash),
+            Vec::new(),
+        ));
+
+        ops.push(write_ai_entity_op(&payee));
+    }
+
     ops.push(write_ai_entity_op(&entity));
 
     // Apply all changes atomically
