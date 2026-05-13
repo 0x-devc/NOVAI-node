@@ -109,6 +109,8 @@ fn build_create_payload(
             duration_blocks: duration,
         }),
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     })
 }
 
@@ -126,6 +128,8 @@ fn build_cancel_payload(subscriber: [u8; 32], subscription_id: [u8; 32]) -> Vec<
         proof_submission: None,
         subscription_create: None,
         subscription_cancel: Some(SubscriptionCancelExtraV1 { subscription_id }),
+        payment_request: None,
+        service_attestation: None,
     })
 }
 
@@ -615,6 +619,8 @@ fn non_subscription_signals_still_work() {
         proof_submission: None,
         subscription_create: None,
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     });
     let tx = make_tx(issuer.id, 0, SIGNAL_FEE, payload);
     apply_signal_commitment_tx(&mut db, &tx, CREATE_HEIGHT)

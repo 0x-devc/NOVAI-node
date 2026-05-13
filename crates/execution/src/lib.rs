@@ -335,6 +335,68 @@ pub enum ExecError<E> {
     /// memory object is forbidden. Grants are immutable once issued; to
     /// change scope or duration, delete the grant and create a new one.
     DelegationGrantNotUpdatable,
+    // Week 28 - Native x402 payment rail errors.
+    /// `PaymentRequest`: payer and payee are the same entity. The
+    /// handler refuses to settle a payment to oneself.
+    PaymentSelfReferential,
+    /// `PaymentRequest`: `amount` field is zero. Zero-value payments
+    /// are rejected to keep replay-protection records meaningful and to
+    /// guarantee every accepted payment has economic substance.
+    PaymentAmountZero,
+    /// `PaymentRequest`: `current_height > max_block_height`. The
+    /// payment's validity window has elapsed and the signal is rejected.
+    PaymentExpired {
+        /// Block height at which the request was processed.
+        current_height: u64,
+        /// `max_block_height` field carried in the payload.
+        max_block_height: u64,
+    },
+    /// `PaymentRequest`: payee entity not found in state.
+    PaymentPayeeNotFound,
+    /// `PaymentRequest`: payee entity exists but `is_active == false`.
+    PaymentPayeeNotActive,
+    /// `PaymentRequest`: a `PaymentRecord` already exists for this
+    /// payment's `signal_hash`. The signal-level seen-set is the
+    /// per-payment replay guard. Resubmitting an identical signal (or
+    /// wrapping it in a fresh transaction with a different nonce) is
+    /// rejected here.
+    PaymentAlreadySettled {
+        /// `signal_hash` of the duplicate `PaymentRequest`.
+        signal_hash: [u8; 32],
+    },
+    /// `PaymentRequest`: payer's `economic_balance` does not cover
+    /// `amount + fee`.
+    PaymentInsufficientBalance {
+        /// `amount + fee` debited from the payer.
+        required: u128,
+        /// Payer's current `economic_balance`.
+        available: u128,
+    },
+    /// `PaymentRequest`: stored `PaymentRecord` bytes failed to decode.
+    /// Indicates state corruption; never returned for a freshly-built
+    /// signal.
+    PaymentRecordDecodeFailed,
+    /// `ServiceAttestation`: `status` byte is above
+    /// `PAYMENT_ATTESTATION_STATUS_MAX`.
+    ServiceAttestationInvalidStatus {
+        /// `status` field carried in the payload.
+        status: u8,
+    },
+    /// `ServiceAttestation`: no `PaymentRecord` exists under
+    /// `payment_signal_hash`. Either the payment was never made or the
+    /// hash was mis-typed.
+    ServiceAttestationPaymentNotFound,
+    /// `ServiceAttestation`: the issuer is not the payer recorded on
+    /// the referenced `PaymentRecord`. Only the payer may attest.
+    ServiceAttestationNotPayer,
+    /// `ServiceAttestation`: `payee_entity_id` in the payload does not
+    /// match the payee recorded on the `PaymentRecord`. Sanity check
+    /// that prevents tampered payloads from misdirecting reputation
+    /// effects.
+    ServiceAttestationPayeeMismatch,
+    /// `ServiceAttestation`: the referenced `PaymentRecord` has already
+    /// been attested. Attestation is a once-per-payment event.
+    ServiceAttestationAlreadyAttested,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -487,6 +549,61 @@ pub const SUBSCRIPTION_CANCEL_EXTRA_LEN: usize = 32;
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SUBSCRIPTION_CANCEL_EXTRA_LEN;
 
+/// Inline-extra size for a `PaymentRequest` signal payload.
+/// `payee_entity_id:32 | amount_be:8 | service_descriptor_hash:32 |
+/// request_hash:32 | max_block_height_be:8`.
+pub const PAYMENT_REQUEST_EXTRA_LEN: usize = 32 + 8 + 32 + 32 + 8;
+
+/// Total size of a `PaymentRequest` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + PAYMENT_REQUEST_EXTRA_LEN;
+
+/// Inline-extra size for a `ServiceAttestation` signal payload.
+/// `payment_signal_hash:32 | payee_entity_id:32 | status:1`.
+pub const SERVICE_ATTESTATION_EXTRA_LEN: usize = 32 + 32 + 1;
+
+/// Total size of a `ServiceAttestation` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SERVICE_ATTESTATION_EXTRA_LEN;
+
+/// `ServiceAttestation` status discriminant: service was delivered.
+pub const PAYMENT_ATTESTATION_STATUS_DELIVERED: u8 = 0;
+/// `ServiceAttestation` status discriminant: service was NOT delivered.
+pub const PAYMENT_ATTESTATION_STATUS_FAILED: u8 = 1;
+/// Maximum valid `ServiceAttestation` status discriminant.
+pub const PAYMENT_ATTESTATION_STATUS_MAX: u8 = PAYMENT_ATTESTATION_STATUS_FAILED;
+/// Sentinel stored in `PaymentRecord.attested_status` before any
+/// attestation has been recorded against the payment.
+pub const PAYMENT_ATTESTATION_STATUS_NONE: u8 = 0xFF;
+
+/// Fee basis points applied on every `PaymentRequest`.
+///
+/// Kept as a distinct constant (rather than reusing `MARKETPLACE_FEE_BPS`)
+/// so the payment-rail fee can be governance-tuned without affecting
+/// signal-purchase or subscription pricing.
+pub const PAYMENT_FEE_BPS: u128 = 200;
+
+/// `PaymentRecord` wire-format version byte.
+pub const PAYMENT_RECORD_V1: u8 = 1;
+
+/// Encoded size of a `PaymentRecord` (the value stored under
+/// `payment_by_hash_key`).
+///
+/// Layout: `version:1 | payer:32 | payee:32 | amount_be:8 |
+/// service_descriptor_hash:32 | request_hash:32 | payment_height_be:8 |
+/// max_block_height_be:8 | attested_status:1 | attested_height_be:8`.
+pub const PAYMENT_RECORD_LEN: usize = 1 + 32 + 32 + 8 + 32 + 32 + 8 + 8 + 1 + 8;
+
+/// KV-key prefix for the canonical payment record store indexed by the
+/// payment's signal hash. `b"ai/payments/by_hash/" || signal_hash[32]`.
+pub const KEY_PREFIX_AI_PAYMENTS_BY_HASH: &[u8] = b"ai/payments/by_hash/";
+/// KV-key prefix for the per-payer scan index.
+/// `b"ai/payments/by_payer/" || payer[32] || height_be[8] || signal_hash[32]`.
+pub const KEY_PREFIX_AI_PAYMENTS_BY_PAYER: &[u8] = b"ai/payments/by_payer/";
+/// KV-key prefix for the per-payee scan index.
+/// `b"ai/payments/by_payee/" || payee[32] || height_be[8] || signal_hash[32]`.
+pub const KEY_PREFIX_AI_PAYMENTS_BY_PAYEE: &[u8] = b"ai/payments/by_payee/";
+
 /// Block-count duration that newly deposited stake is locked for.
 /// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
 pub const STAKE_LOCK_PERIOD: u64 = 1000;
@@ -523,8 +640,32 @@ pub const REP_EVENT_PROOF_VERIFIED: u8 = 8;
 /// event. Defined here for forward compatibility with a future
 /// "record + slash" failure path.
 pub const REP_EVENT_PROOF_FAILED: u8 = 9;
+/// Payer-issued attestation of successful service delivery.
+///
+/// Applied to the payee of a prior `PaymentRequest` with delta
+/// `REP_DELTA_PAYMENT_DELIVERED`. Handler-emitted by the
+/// `ServiceAttestation` signal; never user-supplied with a custom delta.
+pub const REP_EVENT_PAYMENT_DELIVERED: u8 = 10;
+/// Payer-issued attestation of failed service delivery.
+///
+/// Applied to the payee of a prior `PaymentRequest` with delta
+/// `REP_DELTA_PAYMENT_FAILED`. Handler-emitted by the
+/// `ServiceAttestation` signal; never user-supplied with a custom delta.
+pub const REP_EVENT_PAYMENT_FAILED: u8 = 11;
 /// Maximum valid reputation `event_type` discriminant.
-pub const REP_EVENT_MAX: u8 = REP_EVENT_PROOF_FAILED;
+pub const REP_EVENT_MAX: u8 = REP_EVENT_PAYMENT_FAILED;
+
+/// Reputation delta on a `Delivered` attestation.
+///
+/// Calibrated below `REP_DELTA_PROOF_VERIFIED` (+3) because attestation
+/// is self-reported by the payer without cryptographic proof.
+pub const REP_DELTA_PAYMENT_DELIVERED: i32 = 1;
+/// Reputation delta on a `Failed` attestation.
+///
+/// Magnitude exceeds `REP_DELTA_COMPOSITION_FAILURE` (-1) because a
+/// failed payment is a stronger negative signal than a composition
+/// mismatch.
+pub const REP_DELTA_PAYMENT_FAILED: i32 = -3;
 
 // CompositionCheck failure_reason discriminants (carried inline in the
 // signal payload). The handler verifies the reported reason against the
@@ -729,6 +870,67 @@ pub struct SubscriptionCancelExtraV1 {
     pub subscription_id: [u8; 32],
 }
 
+/// Inline payment-request tail carried in `PaymentRequest` signal
+/// payloads (Week 28, native x402 rail).
+///
+/// Wire layout (112 bytes): `payee_entity_id:32 | amount_be:8 |
+/// service_descriptor_hash:32 | request_hash:32 | max_block_height_be:8`.
+/// The handler debits the issuer's `economic_balance` by `amount + fee`
+/// (where `fee = amount * PAYMENT_FEE_BPS / BPS_DENOMINATOR`), credits
+/// the payee's `economic_balance` by `amount`, and routes the fee to
+/// `KEY_MARKETPLACE_TREASURY`. Replay protection is enforced by writing a
+/// `PaymentRecord` under `payment_by_hash_key(signal_hash)` and refusing
+/// any subsequent `PaymentRequest` whose `signal_hash` already has a
+/// record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentRequestExtraV1 {
+    /// AI entity that receives the payment.
+    pub payee_entity_id: [u8; 32],
+    /// Payment amount, in base units of `economic_balance`. Must be
+    /// non-zero (the handler rejects zero-amount payments with
+    /// `PaymentAmountZero`).
+    pub amount: u64,
+    /// Opaque service identifier (caller-computed). Never decoded
+    /// on-chain. Useful for off-chain analytics (e.g., "all payments
+    /// to this API").
+    pub service_descriptor_hash: [u8; 32],
+    /// Opaque per-request identifier (caller-computed). Combined with
+    /// the rest of the envelope, this is what makes `signal_hash`
+    /// unique per request and is therefore what the seen-set in
+    /// `payment_by_hash_key` is keyed on.
+    pub request_hash: [u8; 32],
+    /// Absolute block height past which this payment is no longer
+    /// valid. The handler rejects with `PaymentExpired` if
+    /// `current_height > max_block_height`.
+    pub max_block_height: u64,
+}
+
+/// Inline service-attestation tail carried in `ServiceAttestation` signal
+/// payloads (Week 28).
+///
+/// Wire layout (65 bytes): `payment_signal_hash:32 | payee_entity_id:32 |
+/// status:1`. The issuer of this signal MUST be the payer recorded on
+/// the referenced `PaymentRecord`; otherwise the handler returns
+/// `ServiceAttestationNotPayer`. On success the handler applies
+/// `REP_EVENT_PAYMENT_DELIVERED` (delta `+REP_DELTA_PAYMENT_DELIVERED`)
+/// or `REP_EVENT_PAYMENT_FAILED` (delta `REP_DELTA_PAYMENT_FAILED`) to
+/// the payee depending on `status`, and rewrites the `PaymentRecord`
+/// with the attested status and height. A record can be attested at
+/// most once; resubmission fails with
+/// `ServiceAttestationAlreadyAttested`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceAttestationExtraV1 {
+    /// `signal_hash` of the `PaymentRequest` being attested.
+    pub payment_signal_hash: [u8; 32],
+    /// Payee recorded on the referenced `PaymentRecord`. Cross-checked
+    /// against the stored record to catch tampered payloads.
+    pub payee_entity_id: [u8; 32],
+    /// Attestation outcome. Must be one of the
+    /// `PAYMENT_ATTESTATION_STATUS_*` constants (validated at decode
+    /// time against `PAYMENT_ATTESTATION_STATUS_MAX`).
+    pub status: u8,
+}
+
 /// Canonical Signal Commitment payload (D14.1):
 /// - Base (signal types 0..=6): 66 bytes
 ///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
@@ -750,13 +952,17 @@ pub struct SubscriptionCancelExtraV1 {
 ///   `... [producer_id:32][covered_signal_type:1][rate_per_block_be:8][duration_blocks_be:8]`
 /// - `SubscriptionCancel` (signal type 15): 98 bytes (base + 32-byte tail)
 ///   `... [subscription_id:32]`
+/// - `PaymentRequest` (signal type 16): 178 bytes (base + 112-byte tail)
+///   `... [payee_id:32][amount_be:8][service_descriptor_hash:32][request_hash:32][max_block_height_be:8]`
+/// - `ServiceAttestation` (signal type 17): 131 bytes (base + 65-byte tail)
+///   `... [payment_signal_hash:32][payee_id:32][status:1]`
 ///
 /// At most one tail is populated; the active tail is determined by `signal_type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalCommitmentPayloadV1 {
     /// Commitment hash of the full signal.
     pub signal_hash: [u8; 32],
-    /// Signal type (0..=15).
+    /// Signal type (0..=17).
     pub signal_type: novai_ai_entities::AiSignalType,
     /// AI entity ID that issued this signal.
     pub issuer_entity_id: [u8; 32],
@@ -782,6 +988,12 @@ pub struct SignalCommitmentPayloadV1 {
     /// Inline subscription-cancel tail. MUST be `Some` iff
     /// `signal_type == SubscriptionCancel`.
     pub subscription_cancel: Option<SubscriptionCancelExtraV1>,
+    /// Inline payment-request tail. MUST be `Some` iff
+    /// `signal_type == PaymentRequest`.
+    pub payment_request: Option<PaymentRequestExtraV1>,
+    /// Inline service-attestation tail. MUST be `Some` iff
+    /// `signal_type == ServiceAttestation`.
+    pub service_attestation: Option<ServiceAttestationExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
@@ -812,6 +1024,9 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.signal_type == novai_ai_entities::AiSignalType::SubscriptionCreate;
     let is_subscription_cancel =
         p.signal_type == novai_ai_entities::AiSignalType::SubscriptionCancel;
+    let is_payment_request = p.signal_type == novai_ai_entities::AiSignalType::PaymentRequest;
+    let is_service_attestation =
+        p.signal_type == novai_ai_entities::AiSignalType::ServiceAttestation;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
@@ -857,6 +1072,16 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.subscription_cancel.is_some(),
         "subscription_cancel tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_payment_request,
+        p.payment_request.is_some(),
+        "payment_request tail presence must match signal_type"
+    );
+    debug_assert_eq!(
+        is_service_attestation,
+        p.service_attestation.is_some(),
+        "service_attestation tail presence must match signal_type"
+    );
     debug_assert!(
         u8::from(is_reputation)
             + u8::from(is_purchase)
@@ -867,6 +1092,8 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             + u8::from(is_proof_submission)
             + u8::from(is_subscription_create)
             + u8::from(is_subscription_cancel)
+            + u8::from(is_payment_request)
+            + u8::from(is_service_attestation)
             <= 1,
         "tails are mutually exclusive"
     );
@@ -887,7 +1114,11 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         // v1 (131 bytes) for PROOF_TYPE_STUB; v2 (variable) otherwise.
         match p.proof_submission.as_ref() {
             Some(extra) if extra.proof_type != PROOF_TYPE_STUB => {
-                SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN + 4 + extra.vk_bytes.len() + 4 + extra.proof_bytes.len()
+                SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN
+                    + 4
+                    + extra.vk_bytes.len()
+                    + 4
+                    + extra.proof_bytes.len()
             }
             _ => SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN,
         }
@@ -895,6 +1126,10 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN
     } else if is_subscription_cancel {
         SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN
+    } else if is_payment_request {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN
+    } else if is_service_attestation {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -966,8 +1201,9 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
                     .expect("vk_bytes len fits in u32 (bounded by PROOF_SUBMISSION_MAX_VK_BYTES)");
                 out.extend_from_slice(&vk_len.to_be_bytes());
                 out.extend_from_slice(&extra.vk_bytes);
-                let proof_len = u32::try_from(extra.proof_bytes.len())
-                    .expect("proof_bytes len fits in u32 (bounded by PROOF_SUBMISSION_MAX_PROOF_BYTES)");
+                let proof_len = u32::try_from(extra.proof_bytes.len()).expect(
+                    "proof_bytes len fits in u32 (bounded by PROOF_SUBMISSION_MAX_PROOF_BYTES)",
+                );
                 out.extend_from_slice(&proof_len.to_be_bytes());
                 out.extend_from_slice(&extra.proof_bytes);
             }
@@ -992,6 +1228,26 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; SUBSCRIPTION_CANCEL_EXTRA_LEN]);
         }
+    } else if is_payment_request {
+        if let Some(extra) = &p.payment_request {
+            out.extend_from_slice(&extra.payee_entity_id);
+            out.extend_from_slice(&extra.amount.to_be_bytes());
+            out.extend_from_slice(&extra.service_descriptor_hash);
+            out.extend_from_slice(&extra.request_hash);
+            out.extend_from_slice(&extra.max_block_height.to_be_bytes());
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; PAYMENT_REQUEST_EXTRA_LEN]);
+        }
+    } else if is_service_attestation {
+        if let Some(extra) = &p.service_attestation {
+            out.extend_from_slice(&extra.payment_signal_hash);
+            out.extend_from_slice(&extra.payee_entity_id);
+            out.push(extra.status);
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; SERVICE_ATTESTATION_EXTRA_LEN]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -1000,10 +1256,19 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
 
 /// Deterministically decode a signal commitment payload from `tx.payload`.
 ///
-/// Accepts 66 bytes for base signals, 101 bytes for `ReputationUpdate`,
-/// 107 bytes for `SignalPurchase`, 82 bytes for `StakeDeposit` /
-/// `StakeWithdraw`, and 117 bytes for `StakeSlash`. Length-vs-signal-type
-/// mismatch is rejected.
+/// Accepts the exact per-signal-type byte length:
+/// - 66 bytes for base signals (types 0..=6)
+/// - 101 bytes for `ReputationUpdate`
+/// - 107 bytes for `SignalPurchase`
+/// - 82 bytes for `StakeDeposit` / `StakeWithdraw`
+/// - 117 bytes for `StakeSlash`
+/// - 100 bytes for `CompositionCheck`
+/// - 131 bytes for `ProofSubmission` (stub) or variable for v2 layouts
+/// - 115 bytes for `SubscriptionCreate`, 98 bytes for `SubscriptionCancel`
+/// - 178 bytes for `PaymentRequest`
+/// - 131 bytes for `ServiceAttestation`
+///
+/// Length-vs-signal-type mismatch is rejected.
 ///
 /// # Errors
 /// Returns error if payload length, version, or signal type is invalid.
@@ -1034,7 +1299,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 15, // max valid signal type
+            expected: 17, // max valid signal type
             got: payload[33],
         },
     )?;
@@ -1051,6 +1316,8 @@ pub fn decode_signal_commitment_payload_v1(
     let is_proof_submission = signal_type == novai_ai_entities::AiSignalType::ProofSubmission;
     let is_subscription_create = signal_type == novai_ai_entities::AiSignalType::SubscriptionCreate;
     let is_subscription_cancel = signal_type == novai_ai_entities::AiSignalType::SubscriptionCancel;
+    let is_payment_request = signal_type == novai_ai_entities::AiSignalType::PaymentRequest;
+    let is_service_attestation = signal_type == novai_ai_entities::AiSignalType::ServiceAttestation;
     let (
         reputation,
         purchase,
@@ -1061,6 +1328,8 @@ pub fn decode_signal_commitment_payload_v1(
         proof_submission,
         subscription_create,
         subscription_cancel,
+        payment_request,
+        service_attestation,
     ) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -1078,6 +1347,8 @@ pub fn decode_signal_commitment_payload_v1(
                 event_type,
                 points_delta,
             }),
+            None,
+            None,
             None,
             None,
             None,
@@ -1121,6 +1392,8 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
+            None,
         )
     } else if is_stake_deposit {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN {
@@ -1136,6 +1409,8 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeDepositExtraV1 { amount }),
+            None,
+            None,
             None,
             None,
             None,
@@ -1158,6 +1433,8 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeWithdrawExtraV1 { amount }),
+            None,
+            None,
             None,
             None,
             None,
@@ -1193,6 +1470,8 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
+            None,
         )
     } else if is_composition_check {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN {
@@ -1221,6 +1500,8 @@ pub fn decode_signal_commitment_payload_v1(
                 failed_dependency_idx,
                 failure_reason,
             }),
+            None,
+            None,
             None,
             None,
             None,
@@ -1260,12 +1541,9 @@ pub fn decode_signal_commitment_payload_v1(
                     got: payload.len(),
                 });
             }
-            let vk_len = u32::from_be_bytes([
-                payload[131],
-                payload[132],
-                payload[133],
-                payload[134],
-            ]) as usize;
+            let vk_len =
+                u32::from_be_bytes([payload[131], payload[132], payload[133], payload[134]])
+                    as usize;
             if vk_len > PROOF_SUBMISSION_MAX_VK_BYTES {
                 return Err(ExecError::VerifyingKeyTooLarge {
                     actual: vk_len,
@@ -1322,6 +1600,8 @@ pub fn decode_signal_commitment_payload_v1(
             }),
             None,
             None,
+            None,
+            None,
         )
     } else if is_subscription_create {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN {
@@ -1368,6 +1648,8 @@ pub fn decode_signal_commitment_payload_v1(
                 duration_blocks,
             }),
             None,
+            None,
+            None,
         )
     } else if is_subscription_cancel {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN {
@@ -1388,6 +1670,92 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(SubscriptionCancelExtraV1 { subscription_id }),
+            None,
+            None,
+        )
+    } else if is_payment_request {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut payee_entity_id = [0u8; 32];
+        payee_entity_id.copy_from_slice(&payload[66..98]);
+        let amount = u64::from_be_bytes([
+            payload[98],
+            payload[99],
+            payload[100],
+            payload[101],
+            payload[102],
+            payload[103],
+            payload[104],
+            payload[105],
+        ]);
+        let mut service_descriptor_hash = [0u8; 32];
+        service_descriptor_hash.copy_from_slice(&payload[106..138]);
+        let mut request_hash = [0u8; 32];
+        request_hash.copy_from_slice(&payload[138..170]);
+        let max_block_height = u64::from_be_bytes([
+            payload[170],
+            payload[171],
+            payload[172],
+            payload[173],
+            payload[174],
+            payload[175],
+            payload[176],
+            payload[177],
+        ]);
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(PaymentRequestExtraV1 {
+                payee_entity_id,
+                amount,
+                service_descriptor_hash,
+                request_hash,
+                max_block_height,
+            }),
+            None,
+        )
+    } else if is_service_attestation {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut payment_signal_hash = [0u8; 32];
+        payment_signal_hash.copy_from_slice(&payload[66..98]);
+        let mut payee_entity_id = [0u8; 32];
+        payee_entity_id.copy_from_slice(&payload[98..130]);
+        let status = payload[130];
+        if status > PAYMENT_ATTESTATION_STATUS_MAX {
+            return Err(ExecError::ServiceAttestationInvalidStatus { status });
+        }
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(ServiceAttestationExtraV1 {
+                payment_signal_hash,
+                payee_entity_id,
+                status,
+            }),
         )
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
@@ -1396,7 +1764,9 @@ pub fn decode_signal_commitment_payload_v1(
                 got: payload.len(),
             });
         }
-        (None, None, None, None, None, None, None, None, None)
+        (
+            None, None, None, None, None, None, None, None, None, None, None,
+        )
     };
 
     Ok(SignalCommitmentPayloadV1 {
@@ -1412,7 +1782,165 @@ pub fn decode_signal_commitment_payload_v1(
         proof_submission,
         subscription_create,
         subscription_cancel,
+        payment_request,
+        service_attestation,
     })
+}
+
+// ============================================================================
+// PAYMENT RECORDS (Week 28 - native x402 rail)
+// ============================================================================
+
+/// Canonical payment record stored under `payment_by_hash_key`.
+///
+/// The same record doubles as the per-payment seen-set entry (its
+/// existence rejects replays of the same `signal_hash`) and as the audit
+/// row consulted by `novai_getPaymentsByEntity`. The `attested_*` fields
+/// are updated in-place when a matching `ServiceAttestation` is
+/// processed; until then `attested_status` is
+/// `PAYMENT_ATTESTATION_STATUS_NONE` and `attested_height` is `0`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentRecord {
+    /// AI entity that issued the `PaymentRequest`.
+    pub payer: [u8; 32],
+    /// AI entity that received the payment.
+    pub payee: [u8; 32],
+    /// Payment amount, in base units of `economic_balance`. Net of the
+    /// `PAYMENT_FEE_BPS` fee, the payee receives exactly this many units.
+    pub amount: u64,
+    /// Caller-supplied service identifier carried verbatim from the
+    /// `PaymentRequest` tail.
+    pub service_descriptor_hash: [u8; 32],
+    /// Caller-supplied per-request commitment carried verbatim from the
+    /// `PaymentRequest` tail.
+    pub request_hash: [u8; 32],
+    /// Block height at which the payment was settled.
+    pub payment_height: u64,
+    /// Absolute block height past which the payment would have been
+    /// rejected as expired. Preserved so attestation logic can be
+    /// expiry-aware in future versions.
+    pub max_block_height: u64,
+    /// `PAYMENT_ATTESTATION_STATUS_NONE` until an attestation lands;
+    /// otherwise one of the `PAYMENT_ATTESTATION_STATUS_*` discriminants.
+    pub attested_status: u8,
+    /// Block height at which the attestation was recorded. `0` while
+    /// `attested_status == PAYMENT_ATTESTATION_STATUS_NONE`.
+    pub attested_height: u64,
+}
+
+/// Deterministically encode a `PaymentRecord` (`PAYMENT_RECORD_LEN` bytes).
+#[must_use]
+pub fn encode_payment_record_v1(p: &PaymentRecord) -> [u8; PAYMENT_RECORD_LEN] {
+    let mut out = [0u8; PAYMENT_RECORD_LEN];
+    out[0] = PAYMENT_RECORD_V1;
+    out[1..33].copy_from_slice(&p.payer);
+    out[33..65].copy_from_slice(&p.payee);
+    out[65..73].copy_from_slice(&p.amount.to_be_bytes());
+    out[73..105].copy_from_slice(&p.service_descriptor_hash);
+    out[105..137].copy_from_slice(&p.request_hash);
+    out[137..145].copy_from_slice(&p.payment_height.to_be_bytes());
+    out[145..153].copy_from_slice(&p.max_block_height.to_be_bytes());
+    out[153] = p.attested_status;
+    out[154..162].copy_from_slice(&p.attested_height.to_be_bytes());
+    out
+}
+
+/// Deterministically decode a `PaymentRecord` from the bytes stored at
+/// `payment_by_hash_key`.
+///
+/// # Errors
+/// Returns `ExecError::BadPayloadLength` if the slice length does not
+/// equal `PAYMENT_RECORD_LEN`, or `ExecError::BadPayloadVersion` if the
+/// leading version byte does not equal `PAYMENT_RECORD_V1`.
+#[allow(clippy::similar_names)]
+pub fn decode_payment_record_v1(bytes: &[u8]) -> Result<PaymentRecord, ExecError<()>> {
+    if bytes.len() != PAYMENT_RECORD_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: PAYMENT_RECORD_LEN,
+            got: bytes.len(),
+        });
+    }
+    if bytes[0] != PAYMENT_RECORD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: PAYMENT_RECORD_V1,
+            got: bytes[0],
+        });
+    }
+    let mut payer = [0u8; 32];
+    payer.copy_from_slice(&bytes[1..33]);
+    let mut payee = [0u8; 32];
+    payee.copy_from_slice(&bytes[33..65]);
+    let amount = u64::from_be_bytes([
+        bytes[65], bytes[66], bytes[67], bytes[68], bytes[69], bytes[70], bytes[71], bytes[72],
+    ]);
+    let mut service_descriptor_hash = [0u8; 32];
+    service_descriptor_hash.copy_from_slice(&bytes[73..105]);
+    let mut request_hash = [0u8; 32];
+    request_hash.copy_from_slice(&bytes[105..137]);
+    let payment_height = u64::from_be_bytes([
+        bytes[137], bytes[138], bytes[139], bytes[140], bytes[141], bytes[142], bytes[143],
+        bytes[144],
+    ]);
+    let max_block_height = u64::from_be_bytes([
+        bytes[145], bytes[146], bytes[147], bytes[148], bytes[149], bytes[150], bytes[151],
+        bytes[152],
+    ]);
+    let attested_status = bytes[153];
+    let attested_height = u64::from_be_bytes([
+        bytes[154], bytes[155], bytes[156], bytes[157], bytes[158], bytes[159], bytes[160],
+        bytes[161],
+    ]);
+    Ok(PaymentRecord {
+        payer,
+        payee,
+        amount,
+        service_descriptor_hash,
+        request_hash,
+        payment_height,
+        max_block_height,
+        attested_status,
+        attested_height,
+    })
+}
+
+/// Build the canonical KV key for the by-hash payment record:
+/// `b"ai/payments/by_hash/" || signal_hash[32]`.
+#[must_use]
+pub fn payment_by_hash_key(signal_hash: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_PAYMENTS_BY_HASH.len() + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_PAYMENTS_BY_HASH);
+    out.extend_from_slice(signal_hash);
+    out
+}
+
+/// Build the canonical KV key for the per-payer scan index entry:
+/// `b"ai/payments/by_payer/" || payer[32] || height_be[8] || signal_hash[32]`.
+///
+/// `height` is encoded big-endian so prefix scans return entries in
+/// height order.
+#[must_use]
+pub fn payment_by_payer_key(payer: &[u8; 32], height: u64, signal_hash: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_PAYMENTS_BY_PAYER.len() + 32 + 8 + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_PAYMENTS_BY_PAYER);
+    out.extend_from_slice(payer);
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(signal_hash);
+    out
+}
+
+/// Build the canonical KV key for the per-payee scan index entry:
+/// `b"ai/payments/by_payee/" || payee[32] || height_be[8] || signal_hash[32]`.
+///
+/// `height` is encoded big-endian so prefix scans return entries in
+/// height order.
+#[must_use]
+pub fn payment_by_payee_key(payee: &[u8; 32], height: u64, signal_hash: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_PAYMENTS_BY_PAYEE.len() + 32 + 8 + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_PAYMENTS_BY_PAYEE);
+    out.extend_from_slice(payee);
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(signal_hash);
+    out
 }
 
 // ============================================================================
@@ -3301,9 +3829,7 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             ),
             // Decoder rejects proof_type > PROOF_TYPE_MAX, so any value
             // arriving here is one of the dispatched discriminants above.
-            _ => unreachable!(
-                "proof_type validated against PROOF_TYPE_MAX at decode time"
-            ),
+            _ => unreachable!("proof_type validated against PROOF_TYPE_MAX at decode time"),
         };
         if !ok {
             return Err(ExecError::ProofVerificationFailed);
@@ -7692,5 +8218,489 @@ mod tests {
             Err(ExecError::DelegationCountExceeded { current, max })
                 if current == MAX_DELEGATION_GRANTS && max == MAX_DELEGATION_GRANTS
         ));
+    }
+
+    // ========================================================================
+    // Week 28 - native x402 payment rail (Phase 1: types and constants)
+    // ========================================================================
+
+    fn make_payment_request_extra() -> PaymentRequestExtraV1 {
+        PaymentRequestExtraV1 {
+            payee_entity_id: [0xAAu8; 32],
+            amount: 0x0102_0304_0506_0708,
+            service_descriptor_hash: [0xBBu8; 32],
+            request_hash: [0xCCu8; 32],
+            max_block_height: 0x1112_1314_1516_1718,
+        }
+    }
+
+    fn make_payment_request_payload(issuer: [u8; 32], signal_hash: [u8; 32]) -> Vec<u8> {
+        let p = SignalCommitmentPayloadV1 {
+            signal_hash,
+            signal_type: novai_ai_entities::AiSignalType::PaymentRequest,
+            issuer_entity_id: issuer,
+            reputation: None,
+            purchase: None,
+            stake_deposit: None,
+            stake_withdraw: None,
+            stake_slash: None,
+            composition_check: None,
+            proof_submission: None,
+            subscription_create: None,
+            subscription_cancel: None,
+            payment_request: Some(make_payment_request_extra()),
+            service_attestation: None,
+        };
+        encode_signal_commitment_payload_v1(&p)
+    }
+
+    fn make_service_attestation_extra() -> ServiceAttestationExtraV1 {
+        ServiceAttestationExtraV1 {
+            payment_signal_hash: [0xDDu8; 32],
+            payee_entity_id: [0xEEu8; 32],
+            status: PAYMENT_ATTESTATION_STATUS_DELIVERED,
+        }
+    }
+
+    fn make_service_attestation_payload(issuer: [u8; 32], signal_hash: [u8; 32]) -> Vec<u8> {
+        let p = SignalCommitmentPayloadV1 {
+            signal_hash,
+            signal_type: novai_ai_entities::AiSignalType::ServiceAttestation,
+            issuer_entity_id: issuer,
+            reputation: None,
+            purchase: None,
+            stake_deposit: None,
+            stake_withdraw: None,
+            stake_slash: None,
+            composition_check: None,
+            proof_submission: None,
+            subscription_create: None,
+            subscription_cancel: None,
+            payment_request: None,
+            service_attestation: Some(make_service_attestation_extra()),
+        };
+        encode_signal_commitment_payload_v1(&p)
+    }
+
+    #[test]
+    fn payment_request_payload_roundtrip() {
+        let issuer = [0x11u8; 32];
+        let signal_hash = [0x22u8; 32];
+        let bytes = make_payment_request_payload(issuer, signal_hash);
+        assert_eq!(
+            bytes.len(),
+            SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN
+        );
+        assert_eq!(bytes.len(), 178);
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.signal_hash, signal_hash);
+        assert_eq!(
+            decoded.signal_type,
+            novai_ai_entities::AiSignalType::PaymentRequest
+        );
+        assert_eq!(decoded.issuer_entity_id, issuer);
+        let extra = decoded
+            .payment_request
+            .expect("payment_request tail present");
+        assert_eq!(extra, make_payment_request_extra());
+        assert!(decoded.service_attestation.is_none());
+    }
+
+    #[test]
+    fn service_attestation_payload_roundtrip() {
+        let issuer = [0x33u8; 32];
+        let signal_hash = [0x44u8; 32];
+        let bytes = make_service_attestation_payload(issuer, signal_hash);
+        assert_eq!(
+            bytes.len(),
+            SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN
+        );
+        assert_eq!(bytes.len(), 131);
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.signal_hash, signal_hash);
+        assert_eq!(
+            decoded.signal_type,
+            novai_ai_entities::AiSignalType::ServiceAttestation
+        );
+        assert_eq!(decoded.issuer_entity_id, issuer);
+        let extra = decoded
+            .service_attestation
+            .expect("service_attestation tail present");
+        assert_eq!(extra, make_service_attestation_extra());
+        assert!(decoded.payment_request.is_none());
+    }
+
+    #[test]
+    fn golden_vector_payment_request_payload_178_bytes() {
+        let issuer = [0x55u8; 32];
+        let signal_hash = [0x66u8; 32];
+        let bytes = make_payment_request_payload(issuer, signal_hash);
+        assert_eq!(bytes.len(), 178);
+        assert_eq!(bytes[0], SIGNAL_COMMITMENT_PAYLOAD_V1);
+        assert_eq!(&bytes[1..33], &signal_hash, "signal_hash at 1..33");
+        assert_eq!(
+            bytes[33],
+            novai_ai_entities::AiSignalType::PaymentRequest.to_byte(),
+            "signal_type byte = 16"
+        );
+        assert_eq!(bytes[33], 16);
+        assert_eq!(&bytes[34..66], &issuer, "issuer_entity_id at 34..66");
+        assert_eq!(&bytes[66..98], &[0xAAu8; 32], "payee_entity_id at 66..98");
+        assert_eq!(
+            &bytes[98..106],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "amount_be at 98..106"
+        );
+        assert_eq!(
+            &bytes[106..138],
+            &[0xBBu8; 32],
+            "service_descriptor_hash at 106..138"
+        );
+        assert_eq!(&bytes[138..170], &[0xCCu8; 32], "request_hash at 138..170");
+        assert_eq!(
+            &bytes[170..178],
+            &0x1112_1314_1516_1718u64.to_be_bytes(),
+            "max_block_height_be at 170..178"
+        );
+    }
+
+    #[test]
+    fn golden_vector_service_attestation_payload_131_bytes() {
+        let issuer = [0x77u8; 32];
+        let signal_hash = [0x88u8; 32];
+        let bytes = make_service_attestation_payload(issuer, signal_hash);
+        assert_eq!(bytes.len(), 131);
+        assert_eq!(bytes[0], SIGNAL_COMMITMENT_PAYLOAD_V1);
+        assert_eq!(&bytes[1..33], &signal_hash, "signal_hash at 1..33");
+        assert_eq!(
+            bytes[33],
+            novai_ai_entities::AiSignalType::ServiceAttestation.to_byte(),
+            "signal_type byte = 17"
+        );
+        assert_eq!(bytes[33], 17);
+        assert_eq!(&bytes[34..66], &issuer, "issuer_entity_id at 34..66");
+        assert_eq!(
+            &bytes[66..98],
+            &[0xDDu8; 32],
+            "payment_signal_hash at 66..98"
+        );
+        assert_eq!(&bytes[98..130], &[0xEEu8; 32], "payee_entity_id at 98..130");
+        assert_eq!(
+            bytes[130], PAYMENT_ATTESTATION_STATUS_DELIVERED,
+            "status byte at offset 130"
+        );
+    }
+
+    #[test]
+    fn payment_request_bad_length_rejected() {
+        let issuer = [0x99u8; 32];
+        let signal_hash = [0xAAu8; 32];
+        let mut bytes = make_payment_request_payload(issuer, signal_hash);
+        // Drop the last byte so length becomes 177 instead of 178.
+        bytes.pop();
+        let err = decode_signal_commitment_payload_v1(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExecError::BadPayloadLength {
+                    expected: SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN,
+                    got: 177
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn service_attestation_bad_length_rejected() {
+        let issuer = [0xBBu8; 32];
+        let signal_hash = [0xCCu8; 32];
+        let mut bytes = make_service_attestation_payload(issuer, signal_hash);
+        // Append a stray byte so length becomes 132 instead of 131.
+        bytes.push(0);
+        let err = decode_signal_commitment_payload_v1(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExecError::BadPayloadLength {
+                    expected: SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN,
+                    got: 132
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn service_attestation_invalid_status_rejected_at_decode() {
+        let issuer = [0xDDu8; 32];
+        let signal_hash = [0xEEu8; 32];
+        let mut bytes = make_service_attestation_payload(issuer, signal_hash);
+        // Force the status byte to a value above PAYMENT_ATTESTATION_STATUS_MAX.
+        bytes[130] = 99;
+        let err = decode_signal_commitment_payload_v1(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExecError::ServiceAttestationInvalidStatus { status: 99 }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn payment_record_roundtrip() {
+        let rec = PaymentRecord {
+            payer: [0x01u8; 32],
+            payee: [0x02u8; 32],
+            amount: 0xDEAD_BEEF_CAFE_BABE,
+            service_descriptor_hash: [0x03u8; 32],
+            request_hash: [0x04u8; 32],
+            payment_height: 12_345,
+            max_block_height: 12_500,
+            attested_status: PAYMENT_ATTESTATION_STATUS_NONE,
+            attested_height: 0,
+        };
+        let bytes = encode_payment_record_v1(&rec);
+        assert_eq!(bytes.len(), PAYMENT_RECORD_LEN);
+        assert_eq!(bytes.len(), 162);
+        let decoded = decode_payment_record_v1(&bytes).expect("decode succeeds");
+        assert_eq!(decoded, rec);
+    }
+
+    #[test]
+    fn payment_record_roundtrip_after_attestation() {
+        let rec = PaymentRecord {
+            payer: [0x05u8; 32],
+            payee: [0x06u8; 32],
+            amount: 1_000,
+            service_descriptor_hash: [0x07u8; 32],
+            request_hash: [0x08u8; 32],
+            payment_height: 500,
+            max_block_height: 600,
+            attested_status: PAYMENT_ATTESTATION_STATUS_FAILED,
+            attested_height: 510,
+        };
+        let bytes = encode_payment_record_v1(&rec);
+        let decoded = decode_payment_record_v1(&bytes).expect("decode succeeds");
+        assert_eq!(decoded, rec);
+        assert_eq!(decoded.attested_status, PAYMENT_ATTESTATION_STATUS_FAILED);
+        assert_eq!(decoded.attested_height, 510);
+    }
+
+    #[test]
+    fn golden_vector_payment_record_162_bytes() {
+        let rec = PaymentRecord {
+            payer: [0xA1u8; 32],
+            payee: [0xA2u8; 32],
+            amount: 0x1122_3344_5566_7788,
+            service_descriptor_hash: [0xA3u8; 32],
+            request_hash: [0xA4u8; 32],
+            payment_height: 0x01_02_03_04_05_06_07_08,
+            max_block_height: 0x11_12_13_14_15_16_17_18,
+            attested_status: PAYMENT_ATTESTATION_STATUS_DELIVERED,
+            attested_height: 0x21_22_23_24_25_26_27_28,
+        };
+        let bytes = encode_payment_record_v1(&rec);
+        assert_eq!(bytes.len(), 162);
+        assert_eq!(bytes[0], PAYMENT_RECORD_V1);
+        assert_eq!(&bytes[1..33], &[0xA1u8; 32], "payer at 1..33");
+        assert_eq!(&bytes[33..65], &[0xA2u8; 32], "payee at 33..65");
+        assert_eq!(
+            &bytes[65..73],
+            &0x1122_3344_5566_7788u64.to_be_bytes(),
+            "amount_be at 65..73"
+        );
+        assert_eq!(
+            &bytes[73..105],
+            &[0xA3u8; 32],
+            "service_descriptor_hash at 73..105"
+        );
+        assert_eq!(&bytes[105..137], &[0xA4u8; 32], "request_hash at 105..137");
+        assert_eq!(
+            &bytes[137..145],
+            &0x01_02_03_04_05_06_07_08u64.to_be_bytes(),
+            "payment_height_be at 137..145"
+        );
+        assert_eq!(
+            &bytes[145..153],
+            &0x11_12_13_14_15_16_17_18u64.to_be_bytes(),
+            "max_block_height_be at 145..153"
+        );
+        assert_eq!(
+            bytes[153], PAYMENT_ATTESTATION_STATUS_DELIVERED,
+            "attested_status at 153"
+        );
+        assert_eq!(
+            &bytes[154..162],
+            &0x21_22_23_24_25_26_27_28u64.to_be_bytes(),
+            "attested_height_be at 154..162"
+        );
+    }
+
+    #[test]
+    fn payment_record_decode_rejects_wrong_length() {
+        let mut bytes = encode_payment_record_v1(&PaymentRecord {
+            payer: [0u8; 32],
+            payee: [0u8; 32],
+            amount: 0,
+            service_descriptor_hash: [0u8; 32],
+            request_hash: [0u8; 32],
+            payment_height: 0,
+            max_block_height: 0,
+            attested_status: PAYMENT_ATTESTATION_STATUS_NONE,
+            attested_height: 0,
+        })
+        .to_vec();
+        bytes.push(0);
+        let err = decode_payment_record_v1(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExecError::BadPayloadLength {
+                    expected: PAYMENT_RECORD_LEN,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn payment_record_decode_rejects_wrong_version() {
+        let rec = PaymentRecord {
+            payer: [0u8; 32],
+            payee: [0u8; 32],
+            amount: 0,
+            service_descriptor_hash: [0u8; 32],
+            request_hash: [0u8; 32],
+            payment_height: 0,
+            max_block_height: 0,
+            attested_status: PAYMENT_ATTESTATION_STATUS_NONE,
+            attested_height: 0,
+        };
+        let mut bytes = encode_payment_record_v1(&rec);
+        bytes[0] = 99;
+        let err = decode_payment_record_v1(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExecError::BadPayloadVersion {
+                    expected: PAYMENT_RECORD_V1,
+                    got: 99
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::similar_names)]
+    fn payment_kv_keys_are_deterministic_and_prefixed() {
+        let payer = [0x11u8; 32];
+        let payee = [0x22u8; 32];
+        let signal_hash = [0x33u8; 32];
+        let height = 0x44_45_46_47_48_49_4A_4Bu64;
+
+        let by_hash = payment_by_hash_key(&signal_hash);
+        let by_payer = payment_by_payer_key(&payer, height, &signal_hash);
+        let by_payee = payment_by_payee_key(&payee, height, &signal_hash);
+
+        // Determinism: same inputs produce identical key bytes.
+        assert_eq!(by_hash, payment_by_hash_key(&signal_hash));
+        assert_eq!(by_payer, payment_by_payer_key(&payer, height, &signal_hash));
+        assert_eq!(by_payee, payment_by_payee_key(&payee, height, &signal_hash));
+
+        // Prefix correctness.
+        assert!(by_hash.starts_with(KEY_PREFIX_AI_PAYMENTS_BY_HASH));
+        assert!(by_payer.starts_with(KEY_PREFIX_AI_PAYMENTS_BY_PAYER));
+        assert!(by_payee.starts_with(KEY_PREFIX_AI_PAYMENTS_BY_PAYEE));
+
+        // Layout: by_hash is prefix + 32 bytes.
+        assert_eq!(by_hash.len(), KEY_PREFIX_AI_PAYMENTS_BY_HASH.len() + 32);
+        assert_eq!(
+            &by_hash[KEY_PREFIX_AI_PAYMENTS_BY_HASH.len()..],
+            &signal_hash
+        );
+
+        // Layout: by_payer / by_payee are prefix + 32 + 8 + 32 (entity || height_be || hash).
+        let by_payer_body = &by_payer[KEY_PREFIX_AI_PAYMENTS_BY_PAYER.len()..];
+        assert_eq!(by_payer_body.len(), 32 + 8 + 32);
+        assert_eq!(&by_payer_body[..32], &payer);
+        assert_eq!(&by_payer_body[32..40], &height.to_be_bytes());
+        assert_eq!(&by_payer_body[40..72], &signal_hash);
+
+        let by_payee_body = &by_payee[KEY_PREFIX_AI_PAYMENTS_BY_PAYEE.len()..];
+        assert_eq!(by_payee_body.len(), 32 + 8 + 32);
+        assert_eq!(&by_payee_body[..32], &payee);
+        assert_eq!(&by_payee_body[32..40], &height.to_be_bytes());
+        assert_eq!(&by_payee_body[40..72], &signal_hash);
+
+        // Scan-order property: same (entity, signal_hash), earlier height
+        // sorts before later height under lexicographic comparison.
+        let earlier = payment_by_payer_key(&payer, height - 1, &signal_hash);
+        assert!(earlier < by_payer, "earlier height must sort before later");
+    }
+
+    #[test]
+    fn payment_rail_constants_have_expected_values() {
+        // Lock the wire-level layout sizes so accidental encoding changes
+        // are caught at the type level.
+        assert_eq!(PAYMENT_REQUEST_EXTRA_LEN, 112);
+        assert_eq!(SERVICE_ATTESTATION_EXTRA_LEN, 65);
+        assert_eq!(SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN, 178);
+        assert_eq!(SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN, 131);
+        assert_eq!(PAYMENT_RECORD_LEN, 162);
+
+        // Fee identical to MARKETPLACE_FEE_BPS for v1, but tracked
+        // independently to allow future tuning.
+        assert_eq!(PAYMENT_FEE_BPS, 200);
+        assert_eq!(PAYMENT_FEE_BPS, MARKETPLACE_FEE_BPS);
+
+        // Reputation event discriminants and bounds.
+        assert_eq!(REP_EVENT_PAYMENT_DELIVERED, 10);
+        assert_eq!(REP_EVENT_PAYMENT_FAILED, 11);
+        assert_eq!(REP_EVENT_MAX, REP_EVENT_PAYMENT_FAILED);
+
+        // Calibrated against existing magnitudes: PROOF_VERIFIED inlines
+        // +3, COMPOSITION_FAILURE inlines -1. Payment attestations sit
+        // between these: smaller positive (+1) than a verified proof,
+        // larger negative (-3) than a composition failure.
+        assert_eq!(REP_DELTA_PAYMENT_DELIVERED, 1);
+        assert_eq!(REP_DELTA_PAYMENT_FAILED, -3);
+
+        // Status discriminants.
+        assert_eq!(PAYMENT_ATTESTATION_STATUS_DELIVERED, 0);
+        assert_eq!(PAYMENT_ATTESTATION_STATUS_FAILED, 1);
+        assert_eq!(
+            PAYMENT_ATTESTATION_STATUS_MAX,
+            PAYMENT_ATTESTATION_STATUS_FAILED
+        );
+        assert_eq!(PAYMENT_ATTESTATION_STATUS_NONE, 0xFF);
+        // 0xFF is unambiguously outside the valid status range
+        // [0, PAYMENT_ATTESTATION_STATUS_MAX=1], guaranteeing the
+        // "no-attestation" sentinel can never collide with a real status.
+
+        // Storage prefixes.
+        assert_eq!(KEY_PREFIX_AI_PAYMENTS_BY_HASH, b"ai/payments/by_hash/");
+        assert_eq!(KEY_PREFIX_AI_PAYMENTS_BY_PAYER, b"ai/payments/by_payer/");
+        assert_eq!(KEY_PREFIX_AI_PAYMENTS_BY_PAYEE, b"ai/payments/by_payee/");
+
+        assert_eq!(PAYMENT_RECORD_V1, 1);
+    }
+
+    #[test]
+    fn signal_type_byte_17_decodes_to_service_attestation_from_execution_view() {
+        // Smoke test that the execution crate's view of AiSignalType
+        // matches the ai_entities crate after the Phase 1 enum bump.
+        assert_eq!(
+            novai_ai_entities::AiSignalType::from_byte(16),
+            Some(novai_ai_entities::AiSignalType::PaymentRequest),
+        );
+        assert_eq!(
+            novai_ai_entities::AiSignalType::from_byte(17),
+            Some(novai_ai_entities::AiSignalType::ServiceAttestation),
+        );
+        assert_eq!(novai_ai_entities::AiSignalType::from_byte(18), None);
     }
 }

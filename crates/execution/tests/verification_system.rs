@@ -124,6 +124,8 @@ fn build_proof_submission_payload_v2(
         }),
         subscription_create: None,
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     })
 }
 
@@ -381,6 +383,8 @@ fn non_proof_signals_still_work() {
         proof_submission: None,
         subscription_create: None,
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     });
     apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, anomaly), HEIGHT)
         .expect("base anomaly still applies; ProofSubmission doesn't break it");
@@ -474,7 +478,11 @@ fn golden_vector_proof_payload_v2_groth16() {
         &7u32.to_be_bytes(),
         "vk_len (big-endian u32) at 131..135"
     );
-    assert_eq!(&payload[135..142], vk_bytes.as_slice(), "vk_bytes at 135..142");
+    assert_eq!(
+        &payload[135..142],
+        vk_bytes.as_slice(),
+        "vk_bytes at 135..142"
+    );
     assert_eq!(
         &payload[142..146],
         &4u32.to_be_bytes(),
@@ -517,9 +525,7 @@ fn proof_payload_v2_roundtrip() {
 
 #[test]
 fn proof_payload_v2_oversized_vk_rejected() {
-    use novai_execution::{
-        decode_signal_commitment_payload_v1, PROOF_SUBMISSION_MAX_VK_BYTES,
-    };
+    use novai_execution::{decode_signal_commitment_payload_v1, PROOF_SUBMISSION_MAX_VK_BYTES};
 
     let payload = build_proof_submission_payload_v2(
         [0u8; 32],
@@ -529,8 +535,7 @@ fn proof_payload_v2_oversized_vk_rejected() {
         vec![0u8; PROOF_SUBMISSION_MAX_VK_BYTES + 1],
         Vec::new(),
     );
-    let err =
-        decode_signal_commitment_payload_v1(&payload).expect_err("oversized vk must reject");
+    let err = decode_signal_commitment_payload_v1(&payload).expect_err("oversized vk must reject");
     assert!(
         matches!(err, ExecError::VerifyingKeyTooLarge { actual, max }
             if actual == PROOF_SUBMISSION_MAX_VK_BYTES + 1
@@ -541,9 +546,7 @@ fn proof_payload_v2_oversized_vk_rejected() {
 
 #[test]
 fn proof_payload_v2_oversized_proof_rejected() {
-    use novai_execution::{
-        decode_signal_commitment_payload_v1, PROOF_SUBMISSION_MAX_PROOF_BYTES,
-    };
+    use novai_execution::{decode_signal_commitment_payload_v1, PROOF_SUBMISSION_MAX_PROOF_BYTES};
 
     let payload = build_proof_submission_payload_v2(
         [0u8; 32],
@@ -641,13 +644,9 @@ impl ConstraintSynthesizer<Fr> for SumCircuit {
         let c3 = cs.new_input_variable(|| {
             self.public_inputs[3].ok_or(SynthesisError::AssignmentMissing)
         })?;
-        let w = cs
-            .new_witness_variable(|| self.witness.ok_or(SynthesisError::AssignmentMissing))?;
-        cs.enforce_constraint(
-            lc!() + w,
-            lc!() + Variable::One,
-            lc!() + c0 + c1 + c2 + c3,
-        )?;
+        let w =
+            cs.new_witness_variable(|| self.witness.ok_or(SynthesisError::AssignmentMissing))?;
+        cs.enforce_constraint(lc!() + w, lc!() + Variable::One, lc!() + c0 + c1 + c2 + c3)?;
         Ok(())
     }
 }
@@ -678,9 +677,8 @@ fn gen_valid_groth16_proof(
         public_inputs: [None; 4],
         witness: None,
     };
-    let pk =
-        Groth16::<Bn254>::generate_random_parameters_with_reduction(setup_circuit, &mut rng)
-            .expect("trusted setup");
+    let pk = Groth16::<Bn254>::generate_random_parameters_with_reduction(setup_circuit, &mut rng)
+        .expect("trusted setup");
 
     let mut public_inputs_bytes = [0u8; 64];
     public_inputs_bytes[..32].copy_from_slice(&code_hash);
@@ -692,9 +690,8 @@ fn gen_valid_groth16_proof(
         public_inputs: fr_inputs.map(Some),
         witness: Some(witness),
     };
-    let proof =
-        Groth16::<Bn254>::create_random_proof_with_reduction(prove_circuit, &pk, &mut rng)
-            .expect("prove");
+    let proof = Groth16::<Bn254>::create_random_proof_with_reduction(prove_circuit, &pk, &mut rng)
+        .expect("prove");
 
     let mut vk_bytes = Vec::new();
     pk.vk

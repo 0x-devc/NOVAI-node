@@ -80,6 +80,28 @@ pub enum AiSignalType {
     /// subscription_id:32 (the memory object id of the `Subscription`
     /// record being cancelled).
     SubscriptionCancel = 15,
+    /// Native x402-style per-request payment. The issuing entity (the
+    /// payer) debits its `economic_balance` by `amount + fee` and credits
+    /// the payee's `economic_balance` by `amount`; the fee is routed to
+    /// `KEY_MARKETPLACE_TREASURY`. The handler also writes a
+    /// `PaymentRecord` to `b"ai/payments/by_hash/" || signal_hash` plus
+    /// two scan indexes (by-payer, by-payee). Replay protection is
+    /// enforced by rejecting any payment whose `signal_hash` already has
+    /// a `by_hash` record. Carries a 112-byte tail: payee_entity_id:32 |
+    /// amount_be:8 | service_descriptor_hash:32 | request_hash:32 |
+    /// max_block_height_be:8.
+    PaymentRequest = 16,
+    /// Service-delivery attestation issued by the payer of a prior
+    /// `PaymentRequest`. The handler loads the referenced `PaymentRecord`
+    /// from `b"ai/payments/by_hash/" || payment_signal_hash`, verifies
+    /// the issuer of this signal equals the recorded payer, then applies
+    /// either `REP_EVENT_PAYMENT_DELIVERED` or `REP_EVENT_PAYMENT_FAILED`
+    /// to the payee depending on `status`. The payment record is rewritten
+    /// in place with `attested_status` and `attested_height`; the record
+    /// can be attested at most once. Carries a 65-byte tail:
+    /// payment_signal_hash:32 | payee_entity_id:32 | status:1
+    /// (0 = Delivered, 1 = Failed).
+    ServiceAttestation = 17,
 }
 
 impl AiSignalType {
@@ -107,6 +129,8 @@ impl AiSignalType {
             13 => Some(AiSignalType::ProofSubmission),
             14 => Some(AiSignalType::SubscriptionCreate),
             15 => Some(AiSignalType::SubscriptionCancel),
+            16 => Some(AiSignalType::PaymentRequest),
+            17 => Some(AiSignalType::ServiceAttestation),
             _ => None,
         }
     }
@@ -213,13 +237,25 @@ mod tests {
         );
         assert_eq!(
             AiSignalType::from_byte(16),
+            Some(AiSignalType::PaymentRequest),
+            "16 must decode to PaymentRequest"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(17),
+            Some(AiSignalType::ServiceAttestation),
+            "17 must decode to ServiceAttestation"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(18),
             None,
-            "16 must be rejected as unknown signal type"
+            "18 must be rejected as unknown signal type"
         );
         assert_eq!(AiSignalType::CompositionCheck.to_byte(), 12);
         assert_eq!(AiSignalType::ProofSubmission.to_byte(), 13);
         assert_eq!(AiSignalType::SubscriptionCreate.to_byte(), 14);
         assert_eq!(AiSignalType::SubscriptionCancel.to_byte(), 15);
+        assert_eq!(AiSignalType::PaymentRequest.to_byte(), 16);
+        assert_eq!(AiSignalType::ServiceAttestation.to_byte(), 17);
     }
 
     #[test]

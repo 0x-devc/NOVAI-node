@@ -118,6 +118,8 @@ fn signal_publish_lands_via_dispatcher() {
         proof_submission: None,
         subscription_create: None,
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     });
 
     let signal_tx = mk_tx(entity_addr, entity_pubkey, 0, 1_000, signal_payload);
@@ -280,6 +282,8 @@ fn signal_from_non_entity_address_returns_issuer_not_found() {
         proof_submission: None,
         subscription_create: None,
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     });
 
     let tx = mk_tx(
@@ -325,6 +329,8 @@ fn signal_with_mismatched_payload_issuer_returns_mismatch() {
         proof_submission: None,
         subscription_create: None,
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     });
 
     let tx = mk_tx(entity_addr, entity_pubkey, 0, 1_000, payload);

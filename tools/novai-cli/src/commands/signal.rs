@@ -89,6 +89,35 @@ pub struct ExtendedSignalArgs {
     /// Hex-encoded 32-byte subscription memory object ID (subscription-cancel).
     #[arg(long)]
     pub subscription_id: Option<String>,
+
+    /// Hex-encoded 32-byte payee entity ID (payment-request, service-attestation).
+    #[arg(long)]
+    pub payee_entity_id: Option<String>,
+
+    /// Payment amount in base units of `economic_balance` (payment-request).
+    #[arg(long)]
+    pub payment_amount: Option<u64>,
+
+    /// Hex-encoded 32-byte opaque service identifier (payment-request).
+    #[arg(long)]
+    pub service_descriptor_hash: Option<String>,
+
+    /// Hex-encoded 32-byte opaque per-request commitment (payment-request).
+    #[arg(long)]
+    pub request_hash: Option<String>,
+
+    /// Absolute block height past which the payment is invalid (payment-request).
+    #[arg(long)]
+    pub max_block_height: Option<u64>,
+
+    /// Hex-encoded 32-byte signal hash of the PaymentRequest being attested
+    /// (service-attestation).
+    #[arg(long)]
+    pub payment_signal_hash: Option<String>,
+
+    /// Attestation status byte (service-attestation): 0=delivered, 1=failed.
+    #[arg(long)]
+    pub attestation_status: Option<u8>,
 }
 
 /// Parse signal type string.
@@ -110,8 +139,10 @@ fn parse_signal_type(s: &str) -> Result<AiSignalType, String> {
         "proof-submission" => Ok(AiSignalType::ProofSubmission),
         "subscription-create" => Ok(AiSignalType::SubscriptionCreate),
         "subscription-cancel" => Ok(AiSignalType::SubscriptionCancel),
+        "payment-request" => Ok(AiSignalType::PaymentRequest),
+        "service-attestation" => Ok(AiSignalType::ServiceAttestation),
         _ => Err(format!(
-            "Unknown signal type '{s}'. Valid: anomaly, optimization, prediction, risk-score, audit-report, spam-risk, congestion-forecast, reputation-update, signal-purchase, stake-deposit, stake-withdraw, stake-slash, composition-check, proof-submission, subscription-create, subscription-cancel"
+            "Unknown signal type '{s}'. Valid: anomaly, optimization, prediction, risk-score, audit-report, spam-risk, congestion-forecast, reputation-update, signal-purchase, stake-deposit, stake-withdraw, stake-slash, composition-check, proof-submission, subscription-create, subscription-cancel, payment-request, service-attestation"
         )),
     }
 }
@@ -292,6 +323,67 @@ fn build_signal_payload(
             )?;
             payload.extend_from_slice(&sub_id);
         }
+        AiSignalType::PaymentRequest => {
+            let payee = parse_hex32(
+                require_str(&extra.payee_entity_id, "--payee-entity-id", "payment-request")?,
+                "payee_entity_id",
+            )?;
+            let amount =
+                require_some(extra.payment_amount, "--payment-amount", "payment-request")?;
+            let service_descriptor = parse_hex32(
+                require_str(
+                    &extra.service_descriptor_hash,
+                    "--service-descriptor-hash",
+                    "payment-request",
+                )?,
+                "service_descriptor_hash",
+            )?;
+            let request = parse_hex32(
+                require_str(&extra.request_hash, "--request-hash", "payment-request")?,
+                "request_hash",
+            )?;
+            let max_block_height = require_some(
+                extra.max_block_height,
+                "--max-block-height",
+                "payment-request",
+            )?;
+            payload.extend_from_slice(&payee);
+            payload.extend_from_slice(&amount.to_be_bytes());
+            payload.extend_from_slice(&service_descriptor);
+            payload.extend_from_slice(&request);
+            payload.extend_from_slice(&max_block_height.to_be_bytes());
+        }
+        AiSignalType::ServiceAttestation => {
+            let payment_signal_hash = parse_hex32(
+                require_str(
+                    &extra.payment_signal_hash,
+                    "--payment-signal-hash",
+                    "service-attestation",
+                )?,
+                "payment_signal_hash",
+            )?;
+            let payee = parse_hex32(
+                require_str(
+                    &extra.payee_entity_id,
+                    "--payee-entity-id",
+                    "service-attestation",
+                )?,
+                "payee_entity_id",
+            )?;
+            let status = require_some(
+                extra.attestation_status,
+                "--attestation-status",
+                "service-attestation",
+            )?;
+            if status > 1 {
+                return Err(format!(
+                    "--attestation-status must be 0 (delivered) or 1 (failed); got {status}"
+                ));
+            }
+            payload.extend_from_slice(&payment_signal_hash);
+            payload.extend_from_slice(&payee);
+            payload.push(status);
+        }
     }
 
     Ok(payload)
@@ -428,11 +520,18 @@ mod tests {
             rate_per_block: Some(0),
             duration_blocks: Some(0),
             subscription_id: Some("00".repeat(32)),
+            payee_entity_id: Some("00".repeat(32)),
+            payment_amount: Some(0),
+            service_descriptor_hash: Some("00".repeat(32)),
+            request_hash: Some("00".repeat(32)),
+            max_block_height: Some(0),
+            payment_signal_hash: Some("00".repeat(32)),
+            attestation_status: Some(0),
         }
     }
 
     #[test]
-    fn test_signal_payload_lengths_for_all_16_types() {
+    fn test_signal_payload_lengths_for_all_18_types() {
         let extra = full_extra();
         for (sig_type, expected_len) in [
             (AiSignalType::Anomaly, 66),
@@ -451,6 +550,8 @@ mod tests {
             (AiSignalType::ProofSubmission, 131),
             (AiSignalType::SubscriptionCreate, 115),
             (AiSignalType::SubscriptionCancel, 98),
+            (AiSignalType::PaymentRequest, 178),
+            (AiSignalType::ServiceAttestation, 131),
         ] {
             let payload = build_signal_payload([0u8; 32], sig_type, [0u8; 32], &extra).unwrap();
             assert_eq!(payload.len(), expected_len, "wrong length for {sig_type:?}");
@@ -458,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_signal_type_accepts_all_16_strings() {
+    fn test_parse_signal_type_accepts_all_18_strings() {
         let cases = [
             ("anomaly", AiSignalType::Anomaly),
             ("optimization", AiSignalType::Optimization),
@@ -476,6 +577,8 @@ mod tests {
             ("proof-submission", AiSignalType::ProofSubmission),
             ("subscription-create", AiSignalType::SubscriptionCreate),
             ("subscription-cancel", AiSignalType::SubscriptionCancel),
+            ("payment-request", AiSignalType::PaymentRequest),
+            ("service-attestation", AiSignalType::ServiceAttestation),
         ];
         for (s, expected) in cases {
             assert_eq!(parse_signal_type(s).unwrap(), expected, "for input '{s}'");
@@ -491,5 +594,93 @@ mod tests {
                 .unwrap_err();
         assert!(err.contains("--target-entity-id"), "err = {err}");
         assert!(err.contains("reputation-update"), "err = {err}");
+    }
+
+    #[test]
+    fn test_payment_request_missing_payee_returns_clear_error() {
+        let mut extra = full_extra();
+        extra.payee_entity_id = None;
+        let err =
+            build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+                .unwrap_err();
+        assert!(err.contains("--payee-entity-id"), "err = {err}");
+        assert!(err.contains("payment-request"), "err = {err}");
+    }
+
+    #[test]
+    fn test_payment_request_payload_bytes_match_expected_layout() {
+        // Verify the CLI-built payload matches the on-chain 178-byte layout
+        // byte-for-byte (signal_hash, signal_type, issuer, then tail).
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(0x0102_0304_0506_0708),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0x1112_1314_1516_1718),
+            ..full_extra()
+        };
+        let payload = build_signal_payload(
+            [0x66u8; 32],
+            AiSignalType::PaymentRequest,
+            [0x55u8; 32],
+            &extra,
+        )
+        .unwrap();
+        assert_eq!(payload.len(), 178);
+        assert_eq!(payload[0], 2);
+        assert_eq!(&payload[1..33], &[0x66u8; 32]);
+        assert_eq!(payload[33], 16);
+        assert_eq!(&payload[34..66], &[0x55u8; 32]);
+        assert_eq!(&payload[66..98], &[0xAAu8; 32]);
+        assert_eq!(
+            &payload[98..106],
+            &0x0102_0304_0506_0708u64.to_be_bytes()
+        );
+        assert_eq!(&payload[106..138], &[0xBBu8; 32]);
+        assert_eq!(&payload[138..170], &[0xCCu8; 32]);
+        assert_eq!(
+            &payload[170..178],
+            &0x1112_1314_1516_1718u64.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn test_service_attestation_rejects_status_above_one() {
+        let mut extra = full_extra();
+        extra.attestation_status = Some(99);
+        let err = build_signal_payload(
+            [0u8; 32],
+            AiSignalType::ServiceAttestation,
+            [0u8; 32],
+            &extra,
+        )
+        .unwrap_err();
+        assert!(err.contains("--attestation-status"), "err = {err}");
+        assert!(err.contains("99"), "err = {err}");
+    }
+
+    #[test]
+    fn test_service_attestation_payload_bytes_match_expected_layout() {
+        let extra = ExtendedSignalArgs {
+            payment_signal_hash: Some("dd".repeat(32)),
+            payee_entity_id: Some("ee".repeat(32)),
+            attestation_status: Some(0),
+            ..full_extra()
+        };
+        let payload = build_signal_payload(
+            [0x88u8; 32],
+            AiSignalType::ServiceAttestation,
+            [0x77u8; 32],
+            &extra,
+        )
+        .unwrap();
+        assert_eq!(payload.len(), 131);
+        assert_eq!(payload[0], 2);
+        assert_eq!(&payload[1..33], &[0x88u8; 32]);
+        assert_eq!(payload[33], 17);
+        assert_eq!(&payload[34..66], &[0x77u8; 32]);
+        assert_eq!(&payload[66..98], &[0xDDu8; 32]);
+        assert_eq!(&payload[98..130], &[0xEEu8; 32]);
+        assert_eq!(payload[130], 0);
     }
 }

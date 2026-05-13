@@ -57,6 +57,8 @@ fn create_signal_payload(
         proof_submission: None,
         subscription_create: None,
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }
@@ -497,6 +499,8 @@ fn subscription_create_payload_roundtrip() {
             duration_blocks: 0x1112_1314_1516_1718,
         }),
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     };
     let encoded = encode_signal_commitment_payload_v1(&original);
     assert_eq!(
@@ -528,6 +532,8 @@ fn subscription_cancel_payload_roundtrip() {
         subscription_cancel: Some(SubscriptionCancelExtraV1 {
             subscription_id: sub_id,
         }),
+        payment_request: None,
+        service_attestation: None,
     };
     let encoded = encode_signal_commitment_payload_v1(&original);
     assert_eq!(
@@ -559,6 +565,8 @@ fn subscription_create_byte_layout_locked() {
             duration_blocks: 0x1112_1314_1516_1718,
         }),
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     };
     let encoded = encode_signal_commitment_payload_v1(&original);
     // Base header lock (offsets 0..66 already covered by other roundtrip
@@ -602,6 +610,8 @@ fn subscription_cancel_byte_layout_locked() {
         subscription_cancel: Some(SubscriptionCancelExtraV1 {
             subscription_id: [0xEEu8; 32],
         }),
+        payment_request: None,
+        service_attestation: None,
     };
     let encoded = encode_signal_commitment_payload_v1(&original);
     assert_eq!(
@@ -632,6 +642,8 @@ fn subscription_create_with_wrong_length_rejected() {
             duration_blocks: 0,
         }),
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     });
     let mut truncated = payload.clone();
     truncated.truncate(payload.len() - 1);
@@ -658,6 +670,8 @@ fn subscription_cancel_with_wrong_length_rejected() {
         subscription_cancel: Some(SubscriptionCancelExtraV1 {
             subscription_id: [0u8; 32],
         }),
+        payment_request: None,
+        service_attestation: None,
     });
     let mut truncated = payload.clone();
     truncated.truncate(payload.len() - 1);
@@ -668,16 +682,17 @@ fn subscription_cancel_with_wrong_length_rejected() {
 }
 
 #[test]
-fn unknown_signal_type_byte_16_rejected_by_decoder() {
-    // Build a base-length (66 byte) payload with signal_type byte = 16.
-    // The decoder runs from_byte() at offset 33 and must reject with a
-    // version-style error (the "max valid signal type" guard).
+fn unknown_signal_type_byte_18_rejected_by_decoder() {
+    // Build a base-length (66 byte) payload with signal_type byte = 18
+    // (one past the current max, ServiceAttestation = 17). The decoder
+    // runs from_byte() at offset 33 and must reject with a version-style
+    // error (the "max valid signal type" guard).
     let mut payload = vec![0u8; 66];
     payload[0] = 2; // version
-    payload[33] = 16; // unknown signal_type
+    payload[33] = 18; // unknown signal_type
     let result = decode_signal_commitment_payload_v1(&payload);
     assert!(
         matches!(result, Err(ExecError::BadPayloadVersion { .. })),
-        "byte 16 must be rejected as unknown signal type, got {result:?}"
+        "byte 18 must be rejected as unknown signal type, got {result:?}"
     );
 }

@@ -112,6 +112,8 @@ fn create_signal_payload(
         proof_submission: None,
         subscription_create: None,
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }

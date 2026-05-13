@@ -23,13 +23,13 @@ use novai_execution::{
     apply_register_ai_entity_with_key_tx, dispatch_tx, encode_create_memory_object_payload_v1,
     encode_delete_memory_object_payload_v1, encode_register_ai_entity_with_key_payload_v1,
     encode_signal_commitment_payload_v1, encode_update_memory_object_payload_v1,
-    get_memory_objects_by_entity, read_ai_entity, write_ai_entity_op,
-    CreateMemoryObjectPayloadV1, DeleteMemoryObjectPayloadV1, ExecError,
-    RegisterAiEntityWithKeyPayloadV1, SignalCommitmentPayloadV1, UpdateMemoryObjectPayloadV1,
+    get_memory_objects_by_entity, read_ai_entity, write_ai_entity_op, CreateMemoryObjectPayloadV1,
+    DeleteMemoryObjectPayloadV1, ExecError, RegisterAiEntityWithKeyPayloadV1,
+    SignalCommitmentPayloadV1, UpdateMemoryObjectPayloadV1,
 };
 use novai_state::{
-    account_key, ai_delegations_by_delegate_prefix, encode_account_v1, AccountStateV1, Kv,
-    KvBatch, MemKv, WriteOp,
+    account_key, ai_delegations_by_delegate_prefix, encode_account_v1, AccountStateV1, Kv, KvBatch,
+    MemKv, WriteOp,
 };
 use novai_types::{TxV1, TxVersion};
 
@@ -129,6 +129,8 @@ fn signal_payload(issuer: [u8; 32], signal_type: AiSignalType) -> Vec<u8> {
         proof_submission: None,
         subscription_create: None,
         subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }
@@ -235,15 +237,7 @@ fn delegation_expired_not_effective() {
         setup_two_entities(&mut db, &creator, [0x25u8; 32], [0x26u8; 32]);
 
     // Grant expires at height 500.
-    let grant_tx = create_grant_tx(
-        delegator_addr,
-        [0x25u8; 32],
-        0,
-        500,
-        delegate_id,
-        0x04,
-        500,
-    );
+    let grant_tx = create_grant_tx(delegator_addr, [0x25u8; 32], 0, 500, delegate_id, 0x04, 500);
     dispatch_tx(&mut db, &grant_tx, 200).unwrap();
 
     let signal_tx = mk_tx(
@@ -514,8 +508,7 @@ fn max_delegation_grants_enforced() {
             0x04,
             10_000 + u64::from(i),
         );
-        dispatch_tx(&mut db, &tx, 200 + u64::from(i))
-            .expect("under-cap grant should land");
+        dispatch_tx(&mut db, &tx, 200 + u64::from(i)).expect("under-cap grant should land");
     }
 
     // The next grant trips the cap.
