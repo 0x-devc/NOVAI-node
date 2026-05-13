@@ -3378,6 +3378,9 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         ExecError::UnsupportedProofType { proof_type } => {
             ExecError::UnsupportedProofType { proof_type }
         }
+        ExecError::ServiceAttestationInvalidStatus { status } => {
+            ExecError::ServiceAttestationInvalidStatus { status }
+        }
         _ => ExecError::Overflow,
     })?;
 
@@ -4209,6 +4212,83 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         ops.push(WriteOp::Put(
             payment_by_payee_key(&payee.id, current_height, &payload.signal_hash),
             Vec::new(),
+        ));
+
+        ops.push(write_ai_entity_op(&payee));
+    }
+
+    // ServiceAttestation branch (Week 28): the payer of a prior
+    // PaymentRequest attests to delivery status. The handler loads the
+    // PaymentRecord from by_hash, pins the issuer to the recorded payer,
+    // and applies REP_DELTA_PAYMENT_DELIVERED (+1) or
+    // REP_DELTA_PAYMENT_FAILED (-3) to the payee with the standard
+    // [0, MAX_REPUTATION_SCORE] clamp. The record is rewritten in place
+    // with the attested status and height; a second attestation against
+    // the same record is rejected.
+    if payload.signal_type == AiSignalType::ServiceAttestation {
+        let extra = payload
+            .service_attestation
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("ServiceAttestation missing extra".into()))?;
+
+        // The decoder validates status <= PAYMENT_ATTESTATION_STATUS_MAX,
+        // but the handler-side check is kept as a defense-in-depth guard
+        // for any future path that constructs a SignalCommitmentPayloadV1
+        // without round-tripping through decode.
+        if extra.status > PAYMENT_ATTESTATION_STATUS_MAX {
+            return Err(ExecError::ServiceAttestationInvalidStatus {
+                status: extra.status,
+            });
+        }
+
+        let by_hash_key = payment_by_hash_key(&extra.payment_signal_hash);
+        let record_bytes = db
+            .get(&by_hash_key)
+            .map_err(ExecError::Db)?
+            .ok_or(ExecError::ServiceAttestationPaymentNotFound)?;
+        let mut record = decode_payment_record_v1(&record_bytes)
+            .map_err(|_| ExecError::PaymentRecordDecodeFailed)?;
+
+        if record.payer != entity.id {
+            return Err(ExecError::ServiceAttestationNotPayer);
+        }
+        if record.payee != extra.payee_entity_id {
+            return Err(ExecError::ServiceAttestationPayeeMismatch);
+        }
+        if record.attested_status != PAYMENT_ATTESTATION_STATUS_NONE {
+            return Err(ExecError::ServiceAttestationAlreadyAttested);
+        }
+
+        // The payee record MUST exist at this point: it was loaded
+        // successfully when the PaymentRequest was processed, and
+        // entities are not deleted (only deactivated). A miss here
+        // indicates state corruption and is surfaced as
+        // PaymentRecordDecodeFailed - the error variant most aligned
+        // with "the payment audit trail no longer matches the entity
+        // store".
+        let mut payee = read_ai_entity(db, &record.payee)?
+            .ok_or(ExecError::PaymentRecordDecodeFailed)?;
+
+        let delta = if extra.status == PAYMENT_ATTESTATION_STATUS_DELIVERED {
+            REP_DELTA_PAYMENT_DELIVERED
+        } else {
+            REP_DELTA_PAYMENT_FAILED
+        };
+        let new_score: u16 = (i32::from(payee.reputation_score) + delta)
+            .clamp(0, i32::from(MAX_REPUTATION_SCORE))
+            .try_into()
+            .map_err(|_| ExecError::Overflow)?;
+        payee.reputation_score = new_score;
+        payee.reputation_events_count = payee.reputation_events_count.saturating_add(1);
+
+        // Rewrite the record in place. The same by_hash key holds the
+        // updated bytes; future attestation attempts will see
+        // attested_status != NONE and be rejected.
+        record.attested_status = extra.status;
+        record.attested_height = current_height;
+        ops.push(WriteOp::Put(
+            by_hash_key,
+            encode_payment_record_v1(&record).to_vec(),
         ));
 
         ops.push(write_ai_entity_op(&payee));
