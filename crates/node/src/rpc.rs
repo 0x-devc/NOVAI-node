@@ -24,8 +24,10 @@ use novai_codec::{decode_tx_v1_signed, txid_v1};
 use novai_consensus_types;
 use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_execution::{
-    get_memory_objects_by_entity, get_signals_by_height, get_signals_by_issuer,
-    get_signals_by_type, read_account_or_default, read_ai_entity,
+    get_memory_objects_by_entity, get_payments_by_entity, get_signals_by_height,
+    get_signals_by_issuer, get_signals_by_type, read_account_or_default, read_ai_entity,
+    PaymentRecord, PaymentRole, PAYMENT_ATTESTATION_STATUS_DELIVERED,
+    PAYMENT_ATTESTATION_STATUS_FAILED, PAYMENT_ATTESTATION_STATUS_NONE,
 };
 use novai_p2p::{NetworkMessage, PeerManager};
 use novai_types::{Address, TxV1, TxVersion};
@@ -234,6 +236,81 @@ impl From<SignalCommitment> for SignalCommitmentJson {
 #[derive(Debug, Serialize)]
 struct SignalQueryResult {
     signals: Vec<SignalCommitmentJson>,
+}
+
+/// Parameters for novai_getPaymentsByEntity.
+#[derive(Debug, Deserialize)]
+struct GetPaymentsByEntityParams {
+    /// Hex-encoded 32-byte entity ID. Whose payments to return.
+    entity_id: String,
+    /// Either "payer" (outgoing payments) or "payee" (incoming).
+    role: String,
+    /// Inclusive lower bound on `payment_height`.
+    start_height: u64,
+    /// Inclusive upper bound on `payment_height`. Must not exceed
+    /// `start_height + MAX_SIGNAL_QUERY_RANGE`.
+    end_height: u64,
+}
+
+/// JSON-serializable PaymentRecord. Amount is rendered as a decimal
+/// string (consistent with the rest of the RPC surface where u64/u128
+/// values are returned as strings to avoid JSON precision loss);
+/// attested_status is rendered as a human-readable label.
+#[derive(Debug, Serialize)]
+struct PaymentJson {
+    /// Hex-encoded 32-byte payer entity id.
+    payer: String,
+    /// Hex-encoded 32-byte payee entity id.
+    payee: String,
+    /// Payment amount in base units, as a decimal string.
+    amount: String,
+    /// Hex-encoded 32-byte service identifier carried verbatim from the
+    /// `PaymentRequest` tail.
+    service_descriptor_hash: String,
+    /// Hex-encoded 32-byte per-request commitment.
+    request_hash: String,
+    /// Block height at which the payment settled.
+    payment_height: u64,
+    /// Absolute block height past which the payment would have been
+    /// rejected as expired.
+    max_block_height: u64,
+    /// Attestation status: `null` until a matching `ServiceAttestation`
+    /// is processed; otherwise `"delivered"` or `"failed"`.
+    attested_status: Option<&'static str>,
+    /// Block height at which the attestation was recorded; `null` when
+    /// no attestation has been recorded yet.
+    attested_height: Option<u64>,
+}
+
+impl From<PaymentRecord> for PaymentJson {
+    fn from(r: PaymentRecord) -> Self {
+        let (attested_status, attested_height) = match r.attested_status {
+            PAYMENT_ATTESTATION_STATUS_NONE => (None, None),
+            PAYMENT_ATTESTATION_STATUS_DELIVERED => (Some("delivered"), Some(r.attested_height)),
+            PAYMENT_ATTESTATION_STATUS_FAILED => (Some("failed"), Some(r.attested_height)),
+            // Unknown status bytes are impossible under the handler's
+            // validation, but if a corrupted record somehow lands in
+            // state we surface "unknown" rather than panicking.
+            _ => (Some("unknown"), Some(r.attested_height)),
+        };
+        Self {
+            payer: hex::encode(r.payer),
+            payee: hex::encode(r.payee),
+            amount: r.amount.to_string(),
+            service_descriptor_hash: hex::encode(r.service_descriptor_hash),
+            request_hash: hex::encode(r.request_hash),
+            payment_height: r.payment_height,
+            max_block_height: r.max_block_height,
+            attested_status,
+            attested_height,
+        }
+    }
+}
+
+/// Result for novai_getPaymentsByEntity.
+#[derive(Debug, Serialize)]
+struct GetPaymentsByEntityResult {
+    payments: Vec<PaymentJson>,
 }
 
 // ============================================================================
@@ -736,6 +813,27 @@ pub fn start_rpc_server_with_state(
                         json_response(response)
                     }
                 },
+                // Week 28: native x402 payment rail queries.
+                "novai_getPaymentsByEntity" => {
+                    match handle_get_payments_by_entity(&rpc_request, &db) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                    }
+                }
                 "novai_getBalance" => match handle_get_balance(&rpc_request, &db) {
                     Ok(result) => {
                         let response = RpcResponse {
@@ -1177,6 +1275,57 @@ fn handle_get_signals_by_type(
             .into_iter()
             .map(SignalCommitmentJson::from)
             .collect(),
+    })
+}
+
+/// Handle novai_getPaymentsByEntity RPC method (Week 28).
+///
+/// Returns every PaymentRecord where `entity_id` is either the payer
+/// or the payee (selected by `role`) and `payment_height` falls within
+/// `[start_height, end_height]`. The handler enforces the same range
+/// cap as the signal queries (`MAX_SIGNAL_QUERY_RANGE` heights).
+fn handle_get_payments_by_entity(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetPaymentsByEntityResult, RpcError> {
+    let params: GetPaymentsByEntityParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
+            ),
+        });
+    }
+
+    let role = match params.role.as_str() {
+        "payer" => PaymentRole::Payer,
+        "payee" => PaymentRole::Payee,
+        other => {
+            return Err(RpcError {
+                code: -32602,
+                message: format!("role must be \"payer\" or \"payee\", got {other:?}"),
+            });
+        }
+    };
+
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+
+    let db = db.lock_or_recover();
+    let payments =
+        get_payments_by_entity(&*db, &entity_id, role, params.start_height, params.end_height)
+            .map_err(|_| RpcError {
+                code: -32002,
+                message: "State query failed".to_string(),
+            })?;
+
+    Ok(GetPaymentsByEntityResult {
+        payments: payments.into_iter().map(PaymentJson::from).collect(),
     })
 }
 
@@ -1771,5 +1920,88 @@ mod tests {
         assert!(json["total_transactions"].is_number());
         assert!(json["reputation_events_count"].is_number());
         assert!(json["stake_locked_until"].is_number());
+    }
+
+    // ========================================================================
+    // Week 28 Phase 4 - novai_getPaymentsByEntity wire shape
+    // ========================================================================
+
+    #[test]
+    fn test_get_payments_by_entity_params_deserializes() {
+        let json = serde_json::json!({
+            "entity_id": "aa".repeat(32),
+            "role": "payer",
+            "start_height": 100u64,
+            "end_height": 200u64,
+        });
+        let params: GetPaymentsByEntityParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.entity_id.len(), 64);
+        assert_eq!(params.role, "payer");
+        assert_eq!(params.start_height, 100);
+        assert_eq!(params.end_height, 200);
+    }
+
+    #[test]
+    fn test_payment_json_serialization_none_status() {
+        // attested_status = NONE → JSON renders attested_status: null and
+        // attested_height: null. Amount is a decimal string.
+        let record = PaymentRecord {
+            payer: [0xA1u8; 32],
+            payee: [0xA2u8; 32],
+            amount: 12_345,
+            service_descriptor_hash: [0xA3u8; 32],
+            request_hash: [0xA4u8; 32],
+            payment_height: 500,
+            max_block_height: 600,
+            attested_status: PAYMENT_ATTESTATION_STATUS_NONE,
+            attested_height: 0,
+        };
+        let json = serde_json::to_value(PaymentJson::from(record)).unwrap();
+        assert_eq!(json["payer"], "a1".repeat(32));
+        assert_eq!(json["payee"], "a2".repeat(32));
+        assert_eq!(json["amount"], "12345");
+        assert_eq!(json["service_descriptor_hash"], "a3".repeat(32));
+        assert_eq!(json["request_hash"], "a4".repeat(32));
+        assert_eq!(json["payment_height"], 500);
+        assert_eq!(json["max_block_height"], 600);
+        assert!(json["attested_status"].is_null());
+        assert!(json["attested_height"].is_null());
+        assert!(json["amount"].is_string());
+    }
+
+    #[test]
+    fn test_payment_json_serialization_attested_statuses() {
+        let mk = |status: u8, attested_height: u64| PaymentRecord {
+            payer: [0u8; 32],
+            payee: [0u8; 32],
+            amount: 1,
+            service_descriptor_hash: [0u8; 32],
+            request_hash: [0u8; 32],
+            payment_height: 1,
+            max_block_height: 2,
+            attested_status: status,
+            attested_height,
+        };
+
+        let delivered = serde_json::to_value(PaymentJson::from(mk(
+            PAYMENT_ATTESTATION_STATUS_DELIVERED,
+            10,
+        )))
+        .unwrap();
+        assert_eq!(delivered["attested_status"], "delivered");
+        assert_eq!(delivered["attested_height"], 10);
+
+        let failed =
+            serde_json::to_value(PaymentJson::from(mk(PAYMENT_ATTESTATION_STATUS_FAILED, 20)))
+                .unwrap();
+        assert_eq!(failed["attested_status"], "failed");
+        assert_eq!(failed["attested_height"], 20);
+
+        // Corrupted-record fallback: an out-of-range status surfaces as
+        // "unknown" rather than panicking. attested_height is still
+        // emitted so operators can correlate it with the source record.
+        let unknown = serde_json::to_value(PaymentJson::from(mk(0x7Fu8, 30))).unwrap();
+        assert_eq!(unknown["attested_status"], "unknown");
+        assert_eq!(unknown["attested_height"], 30);
     }
 }

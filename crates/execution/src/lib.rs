@@ -1943,6 +1943,81 @@ pub fn payment_by_payee_key(payee: &[u8; 32], height: u64, signal_hash: &[u8; 32
     out
 }
 
+/// Role discriminator for `get_payments_by_entity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentRole {
+    /// Match payments where the entity is the payer (outgoing).
+    Payer,
+    /// Match payments where the entity is the payee (incoming).
+    Payee,
+}
+
+/// Query payment records by entity in height range
+/// `[start_height, end_height]` (inclusive on both ends).
+///
+/// Scans the appropriate `by_payer` / `by_payee` index and resolves
+/// each marker back to the canonical `PaymentRecord` stored under
+/// `by_hash`. Results are returned in big-endian-height-ascending
+/// order (the natural lex order of the scan index).
+///
+/// # Errors
+/// Returns `ExecError::Db` if the KV scan fails,
+/// `ExecError::PaymentRecordDecodeFailed` if a referenced `by_hash`
+/// value is malformed, or `ExecError::CodecDecode` if an index key
+/// is shorter than expected (would indicate state corruption).
+pub fn get_payments_by_entity<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+    role: PaymentRole,
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<PaymentRecord>, ExecError<K::Error>> {
+    let role_prefix: &[u8] = match role {
+        PaymentRole::Payer => KEY_PREFIX_AI_PAYMENTS_BY_PAYER,
+        PaymentRole::Payee => KEY_PREFIX_AI_PAYMENTS_BY_PAYEE,
+    };
+    let mut prefix = Vec::with_capacity(role_prefix.len() + 32);
+    prefix.extend_from_slice(role_prefix);
+    prefix.extend_from_slice(entity_id);
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+    let mut results = Vec::with_capacity(entries.len());
+
+    for (key, _value) in entries {
+        // Key layout (after the role_prefix || entity_id[32] portion):
+        // `height_be[8] || signal_hash[32]` — 40 bytes total.
+        if key.len() < prefix.len() + 8 + 32 {
+            return Err(ExecError::CodecDecode(format!(
+                "payment index key too short: {} bytes",
+                key.len()
+            )));
+        }
+        let tail = &key[prefix.len()..];
+        let mut height_bytes = [0u8; 8];
+        height_bytes.copy_from_slice(&tail[..8]);
+        let height = u64::from_be_bytes(height_bytes);
+        if height < start_height || height > end_height {
+            continue;
+        }
+        let mut signal_hash = [0u8; 32];
+        signal_hash.copy_from_slice(&tail[8..40]);
+
+        let record_bytes = db
+            .get(&payment_by_hash_key(&signal_hash))
+            .map_err(ExecError::Db)?
+            .ok_or_else(|| {
+                ExecError::CodecDecode(
+                    "payment index entry references missing by_hash record".into(),
+                )
+            })?;
+        let record = decode_payment_record_v1(&record_bytes)
+            .map_err(|_| ExecError::PaymentRecordDecodeFailed)?;
+        results.push(record);
+    }
+
+    Ok(results)
+}
+
 // ============================================================================
 // MEMORY OBJECT PAYLOADS (Week 21 - D21.4)
 // ============================================================================
