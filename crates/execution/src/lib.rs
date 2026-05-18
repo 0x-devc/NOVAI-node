@@ -397,6 +397,52 @@ pub enum ExecError<E> {
     /// `ServiceAttestation`: the referenced `PaymentRecord` has already
     /// been attested. Attestation is a once-per-payment event.
     ServiceAttestationAlreadyAttested,
+    // Week 29 - Agent Discovery Registry errors.
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: payload bytes for a
+    /// `ServiceDescriptor` could not be decoded as
+    /// `ServiceDescriptorData`, or the version byte does not match
+    /// `SERVICE_DESCRIPTOR_V1`, or the `reserved` bytes are non-zero.
+    /// The runtime treats malformed descriptors as invalid because the
+    /// `reserved` field is the forward-compatibility lock for future
+    /// schema fields.
+    InvalidServiceDescriptor,
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: `category` byte is
+    /// above `SERVICE_CATEGORY_RESERVED_MAX`. Values in that range are
+    /// reserved for future governance allocation.
+    ServiceDescriptorInvalidCategory {
+        /// `category` byte the payload carried.
+        byte: u8,
+    },
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: `status` byte is
+    /// above `SERVICE_STATUS_MAX`.
+    ServiceDescriptorInvalidStatus {
+        /// `status` byte the payload carried.
+        byte: u8,
+    },
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: `min_reputation_score`
+    /// exceeds `MAX_REPUTATION_SCORE`. Reputation is clamped into
+    /// `[0, MAX_REPUTATION_SCORE]` everywhere else, so requiring more
+    /// than the cap would be unsatisfiable by any caller.
+    ServiceDescriptorReputationOverMax {
+        /// Requested minimum reputation score.
+        score: u16,
+    },
+    /// `CreateMemoryObject`: publisher already holds the maximum
+    /// allowed `ServiceDescriptor` memory objects
+    /// (`MAX_SERVICE_DESCRIPTORS_PER_ENTITY`). Deleted descriptors do
+    /// not count toward the cap; only currently-published ones do.
+    ServiceDescriptorLimitExceeded {
+        /// Publisher's current `ServiceDescriptor` count.
+        current: u32,
+        /// Cap (`MAX_SERVICE_DESCRIPTORS_PER_ENTITY`).
+        max: u32,
+    },
+    /// `UpdateMemoryObject`: the new payload's `category` differs from
+    /// the stored descriptor's category. Category is immutable so the
+    /// `ai/service_descriptors/by_category/` index never needs to be
+    /// rewritten on update; publishers wanting a new category must
+    /// delete and re-create.
+    ServiceDescriptorCategoryImmutable,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -603,6 +649,15 @@ pub const KEY_PREFIX_AI_PAYMENTS_BY_PAYER: &[u8] = b"ai/payments/by_payer/";
 /// KV-key prefix for the per-payee scan index.
 /// `b"ai/payments/by_payee/" || payee[32] || height_be[8] || signal_hash[32]`.
 pub const KEY_PREFIX_AI_PAYMENTS_BY_PAYEE: &[u8] = b"ai/payments/by_payee/";
+
+/// KV-key prefix for the Agent Discovery Registry by-category index.
+///
+/// Each entry's value is a zero-byte marker; the canonical
+/// `ServiceDescriptorData` lives inside the memory object at
+/// `ai_memory_object_key(owner, object_id)`. Layout:
+/// `b"ai/service_descriptors/by_category/" || category[1] || owner[32] || object_id[32]`.
+pub const KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY: &[u8] =
+    b"ai/service_descriptors/by_category/";
 
 /// Block-count duration that newly deposited stake is locked for.
 /// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
@@ -1940,6 +1995,30 @@ pub fn payment_by_payee_key(payee: &[u8; 32], height: u64, signal_hash: &[u8; 32
     out.extend_from_slice(payee);
     out.extend_from_slice(&height.to_be_bytes());
     out.extend_from_slice(signal_hash);
+    out
+}
+
+/// Build the canonical KV key for the Agent Discovery Registry
+/// by-category scan index entry:
+/// `b"ai/service_descriptors/by_category/" || category[1] || owner[32] || object_id[32]`.
+///
+/// The value stored under this key is a zero-byte marker; the canonical
+/// `ServiceDescriptorData` lives inside the memory object at
+/// `ai_memory_object_key(owner, object_id)`. Scanning with prefix
+/// `b"ai/service_descriptors/by_category/" || category[1]` returns
+/// every published service in that category across all owners.
+#[must_use]
+pub fn service_descriptor_by_category_key(
+    category: u8,
+    owner: &[u8; 32],
+    object_id: &[u8; 32],
+) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY.len() + 1 + 32 + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY);
+    out.push(category);
+    out.extend_from_slice(owner);
+    out.extend_from_slice(object_id);
     out
 }
 
@@ -8972,5 +9051,71 @@ mod tests {
             Some(novai_ai_entities::AiSignalType::ServiceAttestation),
         );
         assert_eq!(novai_ai_entities::AiSignalType::from_byte(18), None);
+    }
+
+    // ========================================================================
+    // Week 29 Phase 1: Agent Discovery Registry KV key helpers
+    // ========================================================================
+
+    #[test]
+    fn service_descriptor_by_category_key_is_deterministic_and_prefixed() {
+        let owner = [0x11u8; 32];
+        let object_id = [0x22u8; 32];
+        let category = novai_ai_entities::SERVICE_CATEGORY_INFERENCE;
+
+        let key = service_descriptor_by_category_key(category, &owner, &object_id);
+
+        // Determinism: same inputs -> same bytes.
+        assert_eq!(
+            key,
+            service_descriptor_by_category_key(category, &owner, &object_id)
+        );
+
+        // Prefix correctness.
+        assert!(key.starts_with(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY));
+        assert_eq!(
+            KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY,
+            b"ai/service_descriptors/by_category/"
+        );
+
+        // Layout: prefix || category[1] || owner[32] || object_id[32].
+        let expected_len = KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY.len() + 1 + 32 + 32;
+        assert_eq!(key.len(), expected_len);
+        let body = &key[KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY.len()..];
+        assert_eq!(body[0], category);
+        assert_eq!(&body[1..33], &owner);
+        assert_eq!(&body[33..65], &object_id);
+
+        // Different categories produce keys that sort by category byte
+        // first - the property that lets a single prefix scan return
+        // all entries in one category.
+        let other_category = novai_ai_entities::SERVICE_CATEGORY_GATEWAY;
+        let other_key = service_descriptor_by_category_key(other_category, &owner, &object_id);
+        let category_prefix_a = KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY.len();
+        assert_ne!(key[category_prefix_a], other_key[category_prefix_a]);
+    }
+
+    #[test]
+    fn service_descriptor_constants_have_expected_values_from_execution_view() {
+        // Lock the wire-level constants from the execution crate's view
+        // so a refactor that reorders the ai_entities module is caught
+        // here as well.
+        use novai_ai_entities::{
+            MAX_SERVICE_DESCRIPTORS_PER_ENTITY, SERVICE_CATEGORY_GATEWAY,
+            SERVICE_CATEGORY_GENERIC, SERVICE_CATEGORY_MONITORING, SERVICE_CATEGORY_RESERVED_MAX,
+            SERVICE_DESCRIPTOR_SIZE, SERVICE_DESCRIPTOR_V1, SERVICE_STATUS_ACTIVE,
+            SERVICE_STATUS_DEPRECATED, SERVICE_STATUS_MAX, SERVICE_STATUS_PAUSED,
+        };
+        assert_eq!(SERVICE_DESCRIPTOR_SIZE, 144);
+        assert_eq!(SERVICE_DESCRIPTOR_V1, 1);
+        assert_eq!(MAX_SERVICE_DESCRIPTORS_PER_ENTITY, 16);
+        assert_eq!(SERVICE_CATEGORY_GENERIC, 0);
+        assert_eq!(SERVICE_CATEGORY_MONITORING, 8);
+        assert_eq!(SERVICE_CATEGORY_GATEWAY, 9);
+        assert_eq!(SERVICE_CATEGORY_RESERVED_MAX, 15);
+        assert_eq!(SERVICE_STATUS_ACTIVE, 0);
+        assert_eq!(SERVICE_STATUS_PAUSED, 1);
+        assert_eq!(SERVICE_STATUS_DEPRECATED, 2);
+        assert_eq!(SERVICE_STATUS_MAX, SERVICE_STATUS_DEPRECATED);
     }
 }

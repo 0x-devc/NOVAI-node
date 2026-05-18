@@ -52,6 +52,74 @@ pub const MAX_SUBSCRIPTIONS_PER_ENTITY: u32 = 10;
 /// is_active:1`.
 pub const SUBSCRIPTION_SIZE: usize = 32 + 32 + 1 + 8 + 8 + 8 + 8 + 16 + 1;
 
+/// Maximum number of `ServiceDescriptor` memory objects a single entity
+/// may publish (Week 29).
+///
+/// Counts against the global `MAX_MEMORY_OBJECTS_PER_ENTITY` cap. 16 was
+/// chosen to leave room for the other memory types an active entity
+/// typically holds (subscriptions, delegation grants, ratings, etc.)
+/// while still allowing a publisher to advertise a meaningful catalogue
+/// of services per category.
+pub const MAX_SERVICE_DESCRIPTORS_PER_ENTITY: u32 = 16;
+
+/// Wire-format version byte carried at offset 0 of every
+/// `ServiceDescriptorData` payload.
+pub const SERVICE_DESCRIPTOR_V1: u8 = 1;
+
+/// Canonical wire size of a `ServiceDescriptorData` payload (144 bytes).
+///
+/// Layout: `version:1 | service_name_hash:32 | service_url_hash:32 |
+/// description_hash:32 | category:1 | price_per_call_be:8 |
+/// subscription_rate_per_block_be:8 | min_reputation_score_be:2 |
+/// min_stake_be:16 | capability_tags_be:4 | status:1 | reserved:7`.
+pub const SERVICE_DESCRIPTOR_SIZE: usize =
+    1 + 32 + 32 + 32 + 1 + 8 + 8 + 2 + 16 + 4 + 1 + 7;
+
+/// `ServiceDescriptor` category discriminants. Values 0..=15 are
+/// well-known v1 categories; 16..=255 are reserved for governance
+/// allocation. The handler rejects creates whose `category` byte is
+/// above `SERVICE_CATEGORY_RESERVED_MAX`.
+pub const SERVICE_CATEGORY_GENERIC: u8 = 0;
+/// Real-world data feeds (e.g., prices, weather, sports scores).
+pub const SERVICE_CATEGORY_DATA_ORACLE: u8 = 1;
+/// LLM or ML model inference as a service.
+pub const SERVICE_CATEGORY_INFERENCE: u8 = 2;
+/// Computation as a service (e.g., proof generation, batch jobs).
+pub const SERVICE_CATEGORY_COMPUTE: u8 = 3;
+/// Off-chain data persistence (e.g., IPFS pinning, archival).
+pub const SERVICE_CATEGORY_STORAGE: u8 = 4;
+/// Chain or data indexing (e.g., GraphQL endpoints, search indexes).
+pub const SERVICE_CATEGORY_INDEXER: u8 = 5;
+/// On-chain signal producer (anomaly, prediction, congestion forecasting).
+pub const SERVICE_CATEGORY_SIGNAL_PROVIDER: u8 = 6;
+/// Proof verification or audit services.
+pub const SERVICE_CATEGORY_VERIFICATION: u8 = 7;
+/// Monitoring / observability services (uptime checks, log analysis,
+/// metric scraping).
+pub const SERVICE_CATEGORY_MONITORING: u8 = 8;
+/// Gateway / proxy services that route requests to other endpoints
+/// (e.g., HTTPS-to-x402 bridges, multi-chain RPC proxies).
+pub const SERVICE_CATEGORY_GATEWAY: u8 = 9;
+/// Maximum well-known service category discriminant. Values up to and
+/// including this are accepted at create time without governance
+/// approval. Values 16..=255 are reserved for future governance-
+/// allocated categories; bumping this constant is the gate.
+pub const SERVICE_CATEGORY_RESERVED_MAX: u8 = 15;
+
+/// `ServiceDescriptor` status discriminants. The handler rejects
+/// creates and updates whose `status` byte is above
+/// `SERVICE_STATUS_MAX`.
+pub const SERVICE_STATUS_ACTIVE: u8 = 0;
+/// Publisher has temporarily suspended the service. Discovery RPC
+/// surfaces it; clients SHOULD treat it as unavailable.
+pub const SERVICE_STATUS_PAUSED: u8 = 1;
+/// Service is no longer offered. Publisher SHOULD delete the
+/// descriptor; status is retained for callers tracking historical
+/// references.
+pub const SERVICE_STATUS_DEPRECATED: u8 = 2;
+/// Maximum valid `ServiceDescriptor` status discriminant.
+pub const SERVICE_STATUS_MAX: u8 = SERVICE_STATUS_DEPRECATED;
+
 // ============================================================================
 // MEMORY OBJECT TYPE ENUM (D21.1)
 // ============================================================================
@@ -119,6 +187,19 @@ pub enum MemoryObjectType {
     /// and `is_active` is set to false. Stored as a fixed 114-byte
     /// payload (`SubscriptionData`).
     Subscription = 11,
+    /// Agent Discovery Registry entry (Week 29): the memory object owner
+    /// is publishing a service description that other entities can
+    /// discover on-chain. The data field carries a fixed 144-byte
+    /// `ServiceDescriptorData` describing what the service is
+    /// (category + off-chain name / URL / description hashes), what it
+    /// charges (per-call price, optional subscription rate), and what
+    /// callers must satisfy (minimum reputation score, minimum stake).
+    /// `category` drives a dedicated `by_category` discovery index;
+    /// updates may change any field except the category (a category
+    /// change requires delete + recreate). The object's `object_id` is
+    /// the canonical handle a payer puts in the
+    /// `service_descriptor_hash` field of a Week 28 `PaymentRequest`.
+    ServiceDescriptor = 12,
 }
 
 impl MemoryObjectType {
@@ -144,6 +225,7 @@ impl MemoryObjectType {
             9 => Some(Self::VerificationRecord),
             10 => Some(Self::DelegationGrant),
             11 => Some(Self::Subscription),
+            12 => Some(Self::ServiceDescriptor),
             _ => None,
         }
     }
@@ -164,6 +246,7 @@ impl MemoryObjectType {
             Self::VerificationRecord => "VerificationRecord",
             Self::DelegationGrant => "DelegationGrant",
             Self::Subscription => "Subscription",
+            Self::ServiceDescriptor => "ServiceDescriptor",
         }
     }
 }
@@ -1107,6 +1190,134 @@ impl SubscriptionData {
 }
 
 // ============================================================================
+// Agent Discovery Registry payload (Week 29 - D29.2)
+// ============================================================================
+
+/// On-chain service descriptor carried in a `MemoryObjectType::ServiceDescriptor`
+/// memory object.
+///
+/// Publishers (AI entities offering a service) put one descriptor per
+/// service they offer. Discoverers query the chain by category to find
+/// services, then read off-chain documents committed to by the three
+/// 32-byte hash fields. The `object_id` of the containing memory object
+/// is the canonical handle to put in the `service_descriptor_hash`
+/// field of a Week 28 `PaymentRequest`.
+///
+/// The struct is fixed-size (`SERVICE_DESCRIPTOR_SIZE` = 144 bytes) and
+/// carries no free-form text on chain; descriptive content lives off-
+/// chain and is committed to via `service_name_hash`,
+/// `service_url_hash`, and `description_hash`. The `reserved` field is
+/// preserved verbatim by encode and decode; the runtime rejects creates
+/// whose `reserved` bytes are non-zero so a future field allocation can
+/// add semantics without ambiguity over old descriptors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceDescriptorData {
+    /// Wire-format version byte. Must equal `SERVICE_DESCRIPTOR_V1`.
+    pub version: u8,
+    /// `blake3` commitment to the off-chain canonical service name.
+    pub service_name_hash: [u8; 32],
+    /// `blake3` commitment to the off-chain canonical endpoint URL.
+    /// Clients resolve this to the actual HTTPS / on-chain target
+    /// address after reading the descriptor.
+    pub service_url_hash: [u8; 32],
+    /// `blake3` commitment to the off-chain long description (e.g.,
+    /// SLA, supported parameters, pricing schedule).
+    pub description_hash: [u8; 32],
+    /// Service category discriminant. Must be `<= SERVICE_CATEGORY_RESERVED_MAX`
+    /// at create time; values above the well-known range are reserved
+    /// for future governance allocation. The category is IMMUTABLE
+    /// after publish: updates that change it are rejected so the
+    /// `ai/service_descriptors/by_category/` discovery index does not
+    /// need to be rewritten on update.
+    pub category: u8,
+    /// Per-call price in base units of `economic_balance`. `0` means
+    /// the service is free.
+    pub price_per_call: u64,
+    /// Per-block subscription rate in base units of `economic_balance`.
+    /// `0` means no subscription pricing is offered for this service.
+    pub subscription_rate_per_block: u64,
+    /// Minimum reputation score the publisher requires from callers.
+    /// Clamped at creation/update to `[0, MAX_REPUTATION_SCORE]` (=100).
+    pub min_reputation_score: u16,
+    /// Minimum `stake_balance` the publisher requires from callers.
+    pub min_stake: u128,
+    /// Bitfield of cross-cutting service attributes (low-latency,
+    /// deterministic, requires-payment, etc.). No on-chain validation
+    /// of bit combinations; this is metadata for client filters.
+    pub capability_tags: u32,
+    /// Lifecycle status: `SERVICE_STATUS_ACTIVE` (0), `_PAUSED` (1),
+    /// or `_DEPRECATED` (2). Status is mutable via update.
+    pub status: u8,
+    /// 7 bytes reserved for future fields. MUST be zero at create/update
+    /// time; decode preserves them so a future field allocation is
+    /// forward-compatible with the v1 binary layout.
+    pub reserved: [u8; 7],
+}
+
+impl ServiceDescriptorData {
+    /// Encode this descriptor to its 144-byte canonical form.
+    #[must_use]
+    pub fn encode(&self) -> [u8; SERVICE_DESCRIPTOR_SIZE] {
+        let mut out = [0u8; SERVICE_DESCRIPTOR_SIZE];
+        out[0] = self.version;
+        out[1..33].copy_from_slice(&self.service_name_hash);
+        out[33..65].copy_from_slice(&self.service_url_hash);
+        out[65..97].copy_from_slice(&self.description_hash);
+        out[97] = self.category;
+        out[98..106].copy_from_slice(&self.price_per_call.to_be_bytes());
+        out[106..114].copy_from_slice(&self.subscription_rate_per_block.to_be_bytes());
+        out[114..116].copy_from_slice(&self.min_reputation_score.to_be_bytes());
+        out[116..132].copy_from_slice(&self.min_stake.to_be_bytes());
+        out[132..136].copy_from_slice(&self.capability_tags.to_be_bytes());
+        out[136] = self.status;
+        out[137..144].copy_from_slice(&self.reserved);
+        out
+    }
+
+    /// Decode a service descriptor from canonical bytes.
+    ///
+    /// Returns `None` if the slice length is not exactly
+    /// `SERVICE_DESCRIPTOR_SIZE`. Field-level validation (version,
+    /// category range, status range, reputation cap, zero-reserved) is
+    /// the handler's responsibility - decode preserves byte content
+    /// verbatim so the runtime can produce specific error variants for
+    /// each invalid field.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != SERVICE_DESCRIPTOR_SIZE {
+            return None;
+        }
+        let mut service_name_hash = [0u8; 32];
+        service_name_hash.copy_from_slice(&bytes[1..33]);
+        let mut service_url_hash = [0u8; 32];
+        service_url_hash.copy_from_slice(&bytes[33..65]);
+        let mut description_hash = [0u8; 32];
+        description_hash.copy_from_slice(&bytes[65..97]);
+        let price_per_call = u64::from_be_bytes(bytes[98..106].try_into().ok()?);
+        let subscription_rate_per_block = u64::from_be_bytes(bytes[106..114].try_into().ok()?);
+        let min_reputation_score = u16::from_be_bytes(bytes[114..116].try_into().ok()?);
+        let min_stake = u128::from_be_bytes(bytes[116..132].try_into().ok()?);
+        let capability_tags = u32::from_be_bytes(bytes[132..136].try_into().ok()?);
+        let mut reserved = [0u8; 7];
+        reserved.copy_from_slice(&bytes[137..144]);
+        Some(Self {
+            version: bytes[0],
+            service_name_hash,
+            service_url_hash,
+            description_hash,
+            category: bytes[97],
+            price_per_call,
+            subscription_rate_per_block,
+            min_reputation_score,
+            min_stake,
+            capability_tags,
+            status: bytes[136],
+            reserved,
+        })
+    }
+}
+
+// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -1128,6 +1339,7 @@ mod tests {
             MemoryObjectType::CompositionGraph,
             MemoryObjectType::DelegationGrant,
             MemoryObjectType::Subscription,
+            MemoryObjectType::ServiceDescriptor,
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
@@ -1137,7 +1349,15 @@ mod tests {
 
     #[test]
     fn memory_object_type_invalid_returns_none() {
-        assert!(MemoryObjectType::from_byte(12).is_none());
+        assert_eq!(
+            MemoryObjectType::from_byte(12),
+            Some(MemoryObjectType::ServiceDescriptor),
+            "byte 12 must decode to ServiceDescriptor (Week 29)"
+        );
+        assert!(
+            MemoryObjectType::from_byte(13).is_none(),
+            "13 is the first invalid byte after Week 29"
+        );
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
 
@@ -1162,6 +1382,11 @@ mod tests {
             "CompositionGraph"
         );
         assert_eq!(MemoryObjectType::DelegationGrant.name(), "DelegationGrant");
+        assert_eq!(MemoryObjectType::Subscription.name(), "Subscription");
+        assert_eq!(
+            MemoryObjectType::ServiceDescriptor.name(),
+            "ServiceDescriptor"
+        );
     }
 
     #[test]
@@ -1591,7 +1816,11 @@ mod tests {
             MemoryObjectType::from_byte(11),
             Some(MemoryObjectType::Subscription)
         );
-        assert_eq!(MemoryObjectType::from_byte(12), None);
+        assert_eq!(
+            MemoryObjectType::from_byte(12),
+            Some(MemoryObjectType::ServiceDescriptor)
+        );
+        assert_eq!(MemoryObjectType::from_byte(13), None);
         assert_eq!(
             MemoryObjectType::CompositionGraph.name(),
             "CompositionGraph"
@@ -2196,5 +2425,148 @@ mod tests {
     fn subscription_size_constant_matches_layout() {
         assert_eq!(SUBSCRIPTION_SIZE, 114);
         assert_eq!(SUBSCRIPTION_SIZE, 32 + 32 + 1 + 8 + 8 + 8 + 8 + 16 + 1);
+    }
+
+    // ========================================================================
+    // Week 29 Phase 1: Agent Discovery Registry types and codec
+    // ========================================================================
+
+    fn sample_service_descriptor() -> ServiceDescriptorData {
+        ServiceDescriptorData {
+            version: SERVICE_DESCRIPTOR_V1,
+            service_name_hash: [0xAAu8; 32],
+            service_url_hash: [0xBBu8; 32],
+            description_hash: [0xCCu8; 32],
+            category: SERVICE_CATEGORY_DATA_ORACLE,
+            price_per_call: 0x0102_0304_0506_0708,
+            subscription_rate_per_block: 0x1112_1314_1516_1718,
+            min_reputation_score: 50,
+            min_stake: 0x2122_2324_2526_2728_2A2B_2C2D_2E2F_3031,
+            capability_tags: 0x4142_4344,
+            status: SERVICE_STATUS_ACTIVE,
+            reserved: [0u8; 7],
+        }
+    }
+
+    #[test]
+    fn service_descriptor_size_constant_matches_layout() {
+        assert_eq!(SERVICE_DESCRIPTOR_SIZE, 144);
+        assert_eq!(
+            SERVICE_DESCRIPTOR_SIZE,
+            1 + 32 + 32 + 32 + 1 + 8 + 8 + 2 + 16 + 4 + 1 + 7
+        );
+    }
+
+    #[test]
+    fn service_descriptor_constants_are_stable() {
+        assert_eq!(MAX_SERVICE_DESCRIPTORS_PER_ENTITY, 16);
+        assert_eq!(SERVICE_DESCRIPTOR_V1, 1);
+
+        // Category enum is pinned so callers can rely on byte values.
+        assert_eq!(SERVICE_CATEGORY_GENERIC, 0);
+        assert_eq!(SERVICE_CATEGORY_DATA_ORACLE, 1);
+        assert_eq!(SERVICE_CATEGORY_INFERENCE, 2);
+        assert_eq!(SERVICE_CATEGORY_COMPUTE, 3);
+        assert_eq!(SERVICE_CATEGORY_STORAGE, 4);
+        assert_eq!(SERVICE_CATEGORY_INDEXER, 5);
+        assert_eq!(SERVICE_CATEGORY_SIGNAL_PROVIDER, 6);
+        assert_eq!(SERVICE_CATEGORY_VERIFICATION, 7);
+        assert_eq!(SERVICE_CATEGORY_MONITORING, 8);
+        assert_eq!(SERVICE_CATEGORY_GATEWAY, 9);
+        assert_eq!(SERVICE_CATEGORY_RESERVED_MAX, 15);
+
+        // Status enum is pinned so the handler's status checks line up
+        // with the constants regardless of refactor ordering.
+        assert_eq!(SERVICE_STATUS_ACTIVE, 0);
+        assert_eq!(SERVICE_STATUS_PAUSED, 1);
+        assert_eq!(SERVICE_STATUS_DEPRECATED, 2);
+        assert_eq!(SERVICE_STATUS_MAX, SERVICE_STATUS_DEPRECATED);
+    }
+
+    #[test]
+    fn service_descriptor_roundtrip() {
+        let sd = sample_service_descriptor();
+        let bytes = sd.encode();
+        assert_eq!(bytes.len(), SERVICE_DESCRIPTOR_SIZE);
+        let decoded = ServiceDescriptorData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded, sd);
+    }
+
+    #[test]
+    fn service_descriptor_roundtrip_preserves_arbitrary_reserved_bytes() {
+        // The decoder is byte-faithful: any value in `reserved` survives
+        // a roundtrip. Handler-level validation (zero-reserved on
+        // create/update) is a runtime rule, NOT a codec rule, so the
+        // decoder must not fail on a non-zero `reserved`. This test
+        // locks that contract so future schema additions stay backward
+        // compatible at the byte level.
+        let mut sd = sample_service_descriptor();
+        sd.reserved = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
+        let bytes = sd.encode();
+        let decoded = ServiceDescriptorData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.reserved, sd.reserved);
+    }
+
+    #[test]
+    fn service_descriptor_decode_rejects_wrong_length() {
+        let sd = sample_service_descriptor();
+        let mut bytes = sd.encode().to_vec();
+        bytes.push(0);
+        assert!(ServiceDescriptorData::decode(&bytes).is_none());
+        bytes.pop();
+        bytes.pop();
+        assert!(ServiceDescriptorData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn service_descriptor_decode_preserves_version_byte() {
+        // Handler validates version; decoder does not. Byte 0 is
+        // preserved verbatim so the runtime can surface a specific
+        // InvalidServiceDescriptor error on mismatch.
+        let mut sd = sample_service_descriptor();
+        sd.version = 99;
+        let bytes = sd.encode();
+        let decoded = ServiceDescriptorData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.version, 99);
+    }
+
+    #[test]
+    fn golden_vector_service_descriptor_144_bytes() {
+        let sd = sample_service_descriptor();
+        let bytes = sd.encode();
+        assert_eq!(bytes.len(), 144);
+
+        assert_eq!(bytes[0], SERVICE_DESCRIPTOR_V1, "version at 0");
+        assert_eq!(&bytes[1..33], &[0xAAu8; 32], "service_name_hash at 1..33");
+        assert_eq!(&bytes[33..65], &[0xBBu8; 32], "service_url_hash at 33..65");
+        assert_eq!(&bytes[65..97], &[0xCCu8; 32], "description_hash at 65..97");
+        assert_eq!(bytes[97], SERVICE_CATEGORY_DATA_ORACLE, "category at 97");
+        assert_eq!(
+            &bytes[98..106],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "price_per_call_be at 98..106"
+        );
+        assert_eq!(
+            &bytes[106..114],
+            &0x1112_1314_1516_1718u64.to_be_bytes(),
+            "subscription_rate_per_block_be at 106..114"
+        );
+        assert_eq!(
+            &bytes[114..116],
+            &50u16.to_be_bytes(),
+            "min_reputation_score_be at 114..116"
+        );
+        assert_eq!(
+            &bytes[116..132],
+            &0x2122_2324_2526_2728_2A2B_2C2D_2E2F_3031u128.to_be_bytes(),
+            "min_stake_be at 116..132"
+        );
+        assert_eq!(
+            &bytes[132..136],
+            &0x4142_4344u32.to_be_bytes(),
+            "capability_tags_be at 132..136"
+        );
+        assert_eq!(bytes[136], SERVICE_STATUS_ACTIVE, "status at 136");
+        assert_eq!(&bytes[137..144], &[0u8; 7], "reserved at 137..144 (zero)");
     }
 }
