@@ -277,10 +277,7 @@ mod tests {
     }
 
     impl ConstraintSynthesizer<Fr> for SumCircuit {
-        fn generate_constraints(
-            self,
-            cs: ConstraintSystemRef<Fr>,
-        ) -> Result<(), SynthesisError> {
+        fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
             let c0 = cs.new_input_variable(|| {
                 self.public_inputs[0].ok_or(SynthesisError::AssignmentMissing)
             })?;
@@ -293,14 +290,9 @@ mod tests {
             let c3 = cs.new_input_variable(|| {
                 self.public_inputs[3].ok_or(SynthesisError::AssignmentMissing)
             })?;
-            let w = cs.new_witness_variable(|| {
-                self.witness.ok_or(SynthesisError::AssignmentMissing)
-            })?;
-            cs.enforce_constraint(
-                lc!() + w,
-                lc!() + Variable::One,
-                lc!() + c0 + c1 + c2 + c3,
-            )?;
+            let w =
+                cs.new_witness_variable(|| self.witness.ok_or(SynthesisError::AssignmentMissing))?;
+            cs.enforce_constraint(lc!() + w, lc!() + Variable::One, lc!() + c0 + c1 + c2 + c3)?;
             Ok(())
         }
     }
@@ -314,11 +306,9 @@ mod tests {
             public_inputs: [None; 4],
             witness: None,
         };
-        let pk = Groth16::<Bn254>::generate_random_parameters_with_reduction(
-            setup_circuit,
-            &mut rng,
-        )
-        .expect("setup");
+        let pk =
+            Groth16::<Bn254>::generate_random_parameters_with_reduction(setup_circuit, &mut rng)
+                .expect("setup");
 
         let mut public_inputs_bytes = [0u8; 64];
         for (i, b) in public_inputs_bytes.iter_mut().enumerate() {
@@ -331,12 +321,9 @@ mod tests {
             public_inputs: fr_inputs.map(Some),
             witness: Some(witness),
         };
-        let proof = Groth16::<Bn254>::create_random_proof_with_reduction(
-            prove_circuit,
-            &pk,
-            &mut rng,
-        )
-        .expect("prove");
+        let proof =
+            Groth16::<Bn254>::create_random_proof_with_reduction(prove_circuit, &pk, &mut rng)
+                .expect("prove");
 
         let mut vk_bytes = Vec::new();
         pk.vk.serialize_compressed(&mut vk_bytes).expect("vk ser");

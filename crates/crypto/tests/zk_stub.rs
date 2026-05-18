@@ -46,7 +46,10 @@ fn stub_returns_true_for_proof_only() {
     let inputs: &[u8] = &[];
 
     let result = StubZkVerifier::verify_proof(proof, vk, inputs, 0, &ZERO_CODE_HASH);
-    assert!(result, "Stub must return true even with empty vk and inputs");
+    assert!(
+        result,
+        "Stub must return true even with empty vk and inputs"
+    );
 }
 
 #[test]
@@ -111,8 +114,7 @@ fn trait_can_be_used_as_bound() {
     let vk = b"trait_bound_vk";
     let inputs = b"trait_inputs";
 
-    let result =
-        verify_with_trait::<StubZkVerifier>(proof, vk, inputs, 0, &ZERO_CODE_HASH);
+    let result = verify_with_trait::<StubZkVerifier>(proof, vk, inputs, 0, &ZERO_CODE_HASH);
     assert!(
         result,
         "Trait bound function should work with StubZkVerifier"
@@ -193,17 +195,11 @@ fn custom_implementation_works() {
 
 #[test]
 fn trait_bound_works_with_custom_impl() {
-    let result = verify_with_trait::<MockRealVerifier>(
-        b"proof",
-        b"vk",
-        b"inputs",
-        0,
-        &ZERO_CODE_HASH,
-    );
+    let result =
+        verify_with_trait::<MockRealVerifier>(b"proof", b"vk", b"inputs", 0, &ZERO_CODE_HASH);
     assert!(result);
 
-    let result_empty =
-        verify_with_trait::<MockRealVerifier>(&[], &[], &[], 0, &ZERO_CODE_HASH);
+    let result_empty = verify_with_trait::<MockRealVerifier>(&[], &[], &[], 0, &ZERO_CODE_HASH);
     assert!(!result_empty);
 }
 
