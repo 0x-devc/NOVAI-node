@@ -5713,6 +5713,21 @@ fn apply_delete_memory_object_tx_inner<K: KvBatch>(
         }
     }
 
+    // Week 29: tear down the by-category discovery index when a
+    // ServiceDescriptor is deleted. The category is read out of the
+    // existing record's data (loaded above) so the canonical index key
+    // can be reconstructed without trusting payload bytes. A stale or
+    // malformed descriptor causes the index Delete to be skipped
+    // silently rather than failing the whole tx, mirroring the
+    // DelegationGrant tolerance policy directly above.
+    if memory_object.object_type == MemoryObjectType::ServiceDescriptor {
+        if let Some(sd) = ServiceDescriptorData::decode(&memory_object.data) {
+            let category_index_key =
+                service_descriptor_by_category_key(sd.category, &entity.id, &payload.object_id);
+            ops.push(WriteOp::Delete(category_index_key));
+        }
+    }
+
     // Update count (decrement, but don't go below 0)
     let count_key = ai_memory_count_key(&entity.id);
     ops.push(WriteOp::Put(
@@ -5794,6 +5809,68 @@ pub fn get_memory_objects_by_entity_and_type<K: Kv>(
         if let Some(obj) = read_memory_object(db, entity_id, &object_id)? {
             results.push(obj);
         }
+    }
+
+    Ok(results)
+}
+
+/// Query published `ServiceDescriptor` memory objects by category (Week 29).
+///
+/// Walks the `ai/service_descriptors/by_category/<category>/` index,
+/// lifts `(owner, object_id)` from each entry's 64-byte tail, reads
+/// the memory object via `read_memory_object`, and decodes the
+/// embedded `ServiceDescriptorData`. Stale index entries whose
+/// primary record is missing or whose descriptor bytes fail to decode
+/// are silently skipped so a partial index does not break callers -
+/// matching the resolver tolerance used by
+/// `get_memory_objects_by_entity_and_type` above.
+///
+/// Returns paired tuples so the RPC layer can render both the
+/// envelope (`created_at`, `updated_at`, `object_id`, `owner`) and the
+/// parsed descriptor fields in a single response without re-fetching.
+///
+/// Big-endian-height ordering is NOT a property of this index (the
+/// `by_category` key carries `owner` and `object_id`, not height);
+/// callers that want a chronological ordering must sort by
+/// `created_at` or `updated_at` themselves.
+///
+/// # Errors
+/// Returns error if DB read fails or if an indexed key has fewer
+/// than 64 trailing bytes after the category byte (state corruption).
+pub fn get_service_descriptors_by_category<K: Kv>(
+    db: &K,
+    category: u8,
+) -> Result<Vec<(MemoryObject, ServiceDescriptorData)>, ExecError<K::Error>> {
+    let mut prefix =
+        Vec::with_capacity(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY.len() + 1);
+    prefix.extend_from_slice(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY);
+    prefix.push(category);
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+    let mut results = Vec::with_capacity(entries.len());
+
+    for (key, _value) in entries {
+        // Key body after the (prefix || category[1]) header is
+        // `owner[32] || object_id[32]` = 64 bytes.
+        if key.len() < prefix.len() + 64 {
+            return Err(ExecError::CodecDecode(format!(
+                "service_descriptor by_category key too short: {} bytes",
+                key.len()
+            )));
+        }
+        let body = &key[prefix.len()..];
+        let mut owner = [0u8; 32];
+        owner.copy_from_slice(&body[..32]);
+        let mut object_id = [0u8; 32];
+        object_id.copy_from_slice(&body[32..64]);
+
+        let Some(obj) = read_memory_object(db, &owner, &object_id)? else {
+            continue;
+        };
+        let Some(sd) = ServiceDescriptorData::decode(&obj.data) else {
+            continue;
+        };
+        results.push((obj, sd));
     }
 
     Ok(results)

@@ -25,14 +25,17 @@
 use novai_ai_entities::{
     AiEntity, AutonomyMode, Capabilities, MemoryObjectType, ServiceDescriptorData,
     MAX_REPUTATION_SCORE, MAX_SERVICE_DESCRIPTORS_PER_ENTITY, SERVICE_CATEGORY_DATA_ORACLE,
-    SERVICE_CATEGORY_INFERENCE, SERVICE_CATEGORY_RESERVED_MAX, SERVICE_DESCRIPTOR_SIZE,
-    SERVICE_DESCRIPTOR_V1, SERVICE_STATUS_ACTIVE, SERVICE_STATUS_MAX,
+    SERVICE_CATEGORY_INFERENCE, SERVICE_CATEGORY_RESERVED_MAX, SERVICE_CATEGORY_STORAGE,
+    SERVICE_DESCRIPTOR_SIZE, SERVICE_DESCRIPTOR_V1, SERVICE_STATUS_ACTIVE,
+    SERVICE_STATUS_DEPRECATED, SERVICE_STATUS_MAX, SERVICE_STATUS_PAUSED,
 };
 use novai_execution::{
-    apply_create_memory_object_tx, apply_update_memory_object_tx,
-    encode_create_memory_object_payload_v1, encode_update_memory_object_payload_v1,
-    service_descriptor_by_category_key, write_ai_entity_op, CreateMemoryObjectPayloadV1, ExecError,
-    UpdateMemoryObjectPayloadV1, KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY,
+    apply_create_memory_object_tx, apply_delete_memory_object_tx, apply_update_memory_object_tx,
+    encode_create_memory_object_payload_v1, encode_delete_memory_object_payload_v1,
+    encode_update_memory_object_payload_v1, get_service_descriptors_by_category,
+    service_descriptor_by_category_key, write_ai_entity_op, CreateMemoryObjectPayloadV1,
+    DeleteMemoryObjectPayloadV1, ExecError, UpdateMemoryObjectPayloadV1,
+    KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY,
 };
 use novai_state::{
     ai_entity_by_address_key, ai_memory_by_type_key, ai_memory_object_key, Kv, KvBatch, MemKv,
@@ -137,6 +140,21 @@ fn make_update_tx(
         nonce,
         fee: CREATE_FEE,
         payload,
+        sig: [0u8; 64],
+    }
+}
+
+fn make_delete_tx(publisher: &AiEntity, nonce: u64, object_id: [u8; 32]) -> TxV1 {
+    let payload = encode_delete_memory_object_payload_v1(&DeleteMemoryObjectPayloadV1 {
+        object_id,
+    });
+    TxV1 {
+        version: TxVersion::V1,
+        from: publisher.id,
+        pubkey: publisher.id,
+        nonce,
+        fee: CREATE_FEE,
+        payload: payload.to_vec(),
         sig: [0u8; 64],
     }
 }
@@ -499,7 +517,6 @@ fn service_descriptor_update_price_preserves_object_id() {
 
 #[test]
 fn service_descriptor_update_status_preserves_object_id() {
-    use novai_ai_entities::SERVICE_STATUS_PAUSED;
     let mut db = MemKv::new();
     let publisher = make_publisher(&mut db, [0x32u8; 32], [0x42u8; 32]);
     let original = sample_descriptor(SERVICE_CATEGORY_INFERENCE, 100);
@@ -516,7 +533,6 @@ fn service_descriptor_update_status_preserves_object_id() {
 
 #[test]
 fn service_descriptor_update_all_mutable_fields_at_once() {
-    use novai_ai_entities::SERVICE_STATUS_DEPRECATED;
     let mut db = MemKv::new();
     let publisher = make_publisher(&mut db, [0x33u8; 32], [0x43u8; 32]);
     let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
@@ -713,4 +729,251 @@ fn service_descriptor_update_bad_length_rejected() {
         matches!(err, ExecError::InvalidServiceDescriptor),
         "got {err:?}"
     );
+}
+
+// ============================================================================
+// 16-17. Delete tears down all three indexes and decrements the count
+// ============================================================================
+
+#[test]
+fn service_descriptor_delete_removes_all_indexes() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x51u8; 32], [0x61u8; 32]);
+    let descriptor = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &descriptor);
+
+    // Sanity: all three indexes are present after the publish.
+    let primary_key = ai_memory_object_key(&publisher.id, &object_id);
+    let type_key = ai_memory_by_type_key(
+        MemoryObjectType::ServiceDescriptor.to_byte(),
+        &publisher.id,
+        &object_id,
+    );
+    let category_key = service_descriptor_by_category_key(
+        SERVICE_CATEGORY_DATA_ORACLE,
+        &publisher.id,
+        &object_id,
+    );
+    assert!(db.get(&primary_key).unwrap().is_some());
+    assert!(db.get(&type_key).unwrap().is_some());
+    assert!(db.get(&category_key).unwrap().is_some());
+
+    // Issue the delete.
+    let delete_tx = make_delete_tx(&publisher, 1, object_id);
+    apply_delete_memory_object_tx(&mut db, &delete_tx, HEIGHT + 1).expect("delete succeeds");
+
+    // All three index entries are gone.
+    assert!(
+        db.get(&primary_key).unwrap().is_none(),
+        "primary record removed"
+    );
+    assert!(
+        db.get(&type_key).unwrap().is_none(),
+        "by_type entry removed"
+    );
+    assert!(
+        db.get(&category_key).unwrap().is_none(),
+        "by_category entry removed (Week 29 wiring)"
+    );
+
+    // Prefix scan returns zero entries in that category.
+    let mut category_prefix = Vec::new();
+    category_prefix.extend_from_slice(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY);
+    category_prefix.push(SERVICE_CATEGORY_DATA_ORACLE);
+    let entries = db.scan_prefix(&category_prefix).unwrap();
+    assert_eq!(entries.len(), 0);
+}
+
+#[test]
+fn service_descriptor_delete_frees_cap_slot() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x52u8; 32], [0x62u8; 32]);
+
+    // Fill the cap.
+    let mut object_ids = Vec::new();
+    for i in 0..MAX_SERVICE_DESCRIPTORS_PER_ENTITY {
+        let descriptor = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100 + u64::from(i));
+        let object_id = publish_descriptor(&mut db, &publisher, u64::from(i), &descriptor);
+        object_ids.push(object_id);
+    }
+
+    // 17th publish at the cap is rejected (sanity check that the cap is
+    // really enforced before we delete).
+    let extra = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 9_999);
+    let extra_tx = make_create_tx(
+        &publisher,
+        u64::from(MAX_SERVICE_DESCRIPTORS_PER_ENTITY),
+        &extra,
+    );
+    let err = apply_create_memory_object_tx(
+        &mut db,
+        &extra_tx,
+        HEIGHT + u64::from(MAX_SERVICE_DESCRIPTORS_PER_ENTITY),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ExecError::ServiceDescriptorLimitExceeded { .. }),
+        "got {err:?}"
+    );
+
+    // Delete the first one. The publisher's nonce has been bumped 17
+    // times now (16 successful creates + 1 rejected create that the
+    // outer handler debited a nonce for... wait, that's wrong - the
+    // outer handler returns BEFORE the nonce bump on a rejected
+    // create, so the nonce sits at 16 after the 16 successful publishes
+    // and the rejected 17th does NOT advance it). Verify by using
+    // nonce=16 for the delete; a mismatch would surface here.
+    let delete_tx = make_delete_tx(
+        &publisher,
+        u64::from(MAX_SERVICE_DESCRIPTORS_PER_ENTITY),
+        object_ids[0],
+    );
+    apply_delete_memory_object_tx(
+        &mut db,
+        &delete_tx,
+        HEIGHT + u64::from(MAX_SERVICE_DESCRIPTORS_PER_ENTITY) + 1,
+    )
+    .expect("delete succeeds");
+
+    // Now a new publish under the freed slot succeeds.
+    let replacement = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 0x00C0_FFEE);
+    let replacement_tx = make_create_tx(
+        &publisher,
+        u64::from(MAX_SERVICE_DESCRIPTORS_PER_ENTITY) + 1,
+        &replacement,
+    );
+    apply_create_memory_object_tx(
+        &mut db,
+        &replacement_tx,
+        HEIGHT + u64::from(MAX_SERVICE_DESCRIPTORS_PER_ENTITY) + 2,
+    )
+    .expect("publish in freed slot succeeds");
+}
+
+// ============================================================================
+// 18-20. Cross-entity discovery query
+// ============================================================================
+
+#[test]
+fn service_descriptors_query_by_category_returns_all_owners() {
+    let mut db = MemKv::new();
+    let publisher_a = make_publisher(&mut db, [0x71u8; 32], [0x81u8; 32]);
+    let publisher_b = make_publisher(&mut db, [0x72u8; 32], [0x82u8; 32]);
+    let publisher_c = make_publisher(&mut db, [0x73u8; 32], [0x83u8; 32]);
+
+    // A: two inference services. B: one inference, one data-oracle.
+    // C: one inference, paused.
+    publish_descriptor(
+        &mut db,
+        &publisher_a,
+        0,
+        &sample_descriptor(SERVICE_CATEGORY_INFERENCE, 100),
+    );
+    publish_descriptor(
+        &mut db,
+        &publisher_a,
+        1,
+        &sample_descriptor(SERVICE_CATEGORY_INFERENCE, 200),
+    );
+    publish_descriptor(
+        &mut db,
+        &publisher_b,
+        0,
+        &sample_descriptor(SERVICE_CATEGORY_INFERENCE, 50),
+    );
+    publish_descriptor(
+        &mut db,
+        &publisher_b,
+        1,
+        &sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 500),
+    );
+    let mut paused = sample_descriptor(SERVICE_CATEGORY_INFERENCE, 999);
+    paused.status = SERVICE_STATUS_PAUSED;
+    publish_descriptor(&mut db, &publisher_c, 0, &paused);
+
+    let inference =
+        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_INFERENCE).unwrap();
+    assert_eq!(
+        inference.len(),
+        4,
+        "all 4 inference descriptors across 3 owners"
+    );
+
+    let oracle =
+        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_DATA_ORACLE).unwrap();
+    assert_eq!(oracle.len(), 1);
+    assert_eq!(oracle[0].0.owner_entity, publisher_b.id);
+    assert_eq!(oracle[0].1.price_per_call, 500);
+
+    // Spot-check that paused descriptors DO appear in discovery results
+    // (the discovery RPC surfaces all statuses; clients filter as they
+    // see fit).
+    let any_paused = inference
+        .iter()
+        .any(|(_, sd)| sd.status == SERVICE_STATUS_PAUSED);
+    assert!(any_paused, "paused descriptor visible to discovery");
+}
+
+#[test]
+fn service_descriptors_query_empty_category_returns_empty() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x74u8; 32], [0x84u8; 32]);
+    // Only one descriptor, in the Inference category.
+    publish_descriptor(
+        &mut db,
+        &publisher,
+        0,
+        &sample_descriptor(SERVICE_CATEGORY_INFERENCE, 100),
+    );
+
+    // Query a different category - the prefix scan finds nothing.
+    let storage = get_service_descriptors_by_category(&db, SERVICE_CATEGORY_STORAGE).unwrap();
+    assert!(storage.is_empty(), "no storage services published");
+
+    // And the Inference query still works.
+    let inference =
+        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_INFERENCE).unwrap();
+    assert_eq!(inference.len(), 1);
+}
+
+#[test]
+fn service_descriptors_query_reflects_updates() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x75u8; 32], [0x85u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    // Update the price; the descriptor stays under the same object_id.
+    let mut updated = original;
+    updated.price_per_call = 999;
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).expect("update succeeds");
+
+    // Discovery surfaces the updated price.
+    let results =
+        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_DATA_ORACLE).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0.object_id, object_id);
+    assert_eq!(results[0].1.price_per_call, 999);
+}
+
+#[test]
+fn service_descriptors_query_excludes_deleted() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x76u8; 32], [0x86u8; 32]);
+
+    // Publish two descriptors, delete one.
+    let sd_a = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let sd_b = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 200);
+    let object_id_a = publish_descriptor(&mut db, &publisher, 0, &sd_a);
+    let object_id_b = publish_descriptor(&mut db, &publisher, 1, &sd_b);
+
+    let delete_tx = make_delete_tx(&publisher, 2, object_id_a);
+    apply_delete_memory_object_tx(&mut db, &delete_tx, HEIGHT + 1).expect("delete succeeds");
+
+    let results =
+        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_DATA_ORACLE).unwrap();
+    assert_eq!(results.len(), 1, "only the surviving descriptor returned");
+    assert_eq!(results[0].0.object_id, object_id_b);
+    assert_eq!(results[0].1.price_per_call, 200);
 }
