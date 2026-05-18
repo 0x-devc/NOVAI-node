@@ -72,8 +72,7 @@ pub const SERVICE_DESCRIPTOR_V1: u8 = 1;
 /// description_hash:32 | category:1 | price_per_call_be:8 |
 /// subscription_rate_per_block_be:8 | min_reputation_score_be:2 |
 /// min_stake_be:16 | capability_tags_be:4 | status:1 | reserved:7`.
-pub const SERVICE_DESCRIPTOR_SIZE: usize =
-    1 + 32 + 32 + 32 + 1 + 8 + 8 + 2 + 16 + 4 + 1 + 7;
+pub const SERVICE_DESCRIPTOR_SIZE: usize = 1 + 32 + 32 + 32 + 1 + 8 + 8 + 2 + 16 + 4 + 1 + 7;
 
 /// `ServiceDescriptor` category discriminants. Values 0..=15 are
 /// well-known v1 categories; 16..=255 are reserved for governance
@@ -119,6 +118,36 @@ pub const SERVICE_STATUS_PAUSED: u8 = 1;
 pub const SERVICE_STATUS_DEPRECATED: u8 = 2;
 /// Maximum valid `ServiceDescriptor` status discriminant.
 pub const SERVICE_STATUS_MAX: u8 = SERVICE_STATUS_DEPRECATED;
+
+/// Maximum number of `VkRegistration` memory objects a single entity may
+/// publish (Week 30).
+///
+/// Counts against the global `MAX_MEMORY_OBJECTS_PER_ENTITY` cap. The cap
+/// is intentionally tight: verification keys are bulky (hundreds of bytes
+/// to several KB compressed for BN254 Groth16), and in v1 most entities
+/// will register one VK per circuit they own. The pattern mirrors the
+/// per-entity caps already in place for `DelegationGrant` and
+/// `ServiceDescriptor`.
+pub const MAX_VK_REGISTRATIONS_PER_ENTITY: u32 = 8;
+
+/// Wire-format version byte carried at offset 0 of every
+/// `VkRegistrationData` payload (Week 30).
+pub const VK_REGISTRATION_VERSION: u8 = 1;
+
+/// Maximum length of the optional `label` field carried by a
+/// `VkRegistrationData` payload, in bytes. The label is free-form UTF-8
+/// metadata for human-readable identification of registered VKs
+/// (e.g., `"sum-circuit-v1"`). Capping at 32 bytes keeps the per-object
+/// storage footprint bounded while leaving enough room for a meaningful
+/// tag.
+pub const VK_REGISTRATION_LABEL_MAX: usize = 32;
+
+/// Fixed-size header of a `VkRegistrationData` payload, in bytes.
+///
+/// Layout: `version:1 | proof_type:1 | code_hash:32 | label_len:1 |
+/// vk_len_be:4`. Total = 39 bytes. The full payload appends `label_len`
+/// UTF-8 label bytes followed by `vk_len` compressed VK bytes.
+pub const VK_REGISTRATION_HEADER_SIZE: usize = 1 + 1 + 32 + 1 + 4;
 
 // ============================================================================
 // MEMORY OBJECT TYPE ENUM (D21.1)
@@ -200,6 +229,18 @@ pub enum MemoryObjectType {
     /// the canonical handle a payer puts in the
     /// `service_descriptor_hash` field of a Week 28 `PaymentRequest`.
     ServiceDescriptor = 12,
+    /// VK Registry entry (Week 30): the memory object owner publishes
+    /// a zero-knowledge proof verification key on-chain so that future
+    /// `ProofSubmission` signals carrying
+    /// `PROOF_TYPE_GROTH16_REGISTERED` can reference the VK by the
+    /// containing memory object's 32-byte `object_id` instead of
+    /// inlining the full ~500-byte VK every time. The data field
+    /// carries a `VkRegistrationData` payload binding the VK to a
+    /// `code_hash` (the computation it verifies) and a proof_type
+    /// discriminant. The proof_type, code_hash, and vk_bytes fields
+    /// are IMMUTABLE on `UpdateMemoryObject`; only the free-form
+    /// `label` tag is mutable.
+    VkRegistration = 13,
 }
 
 impl MemoryObjectType {
@@ -226,6 +267,7 @@ impl MemoryObjectType {
             10 => Some(Self::DelegationGrant),
             11 => Some(Self::Subscription),
             12 => Some(Self::ServiceDescriptor),
+            13 => Some(Self::VkRegistration),
             _ => None,
         }
     }
@@ -247,6 +289,7 @@ impl MemoryObjectType {
             Self::DelegationGrant => "DelegationGrant",
             Self::Subscription => "Subscription",
             Self::ServiceDescriptor => "ServiceDescriptor",
+            Self::VkRegistration => "VkRegistration",
         }
     }
 }
@@ -1317,6 +1360,116 @@ impl ServiceDescriptorData {
     }
 }
 
+/// On-chain ZK verification key registration carried in a
+/// `MemoryObjectType::VkRegistration` memory object (Week 30).
+///
+/// Publishers (AI entities that own ZK circuits) register a VK once; future
+/// `ProofSubmission` signals carrying `PROOF_TYPE_GROTH16_REGISTERED` (and
+/// other registered-variants) reference this entry by the containing
+/// memory object's 32-byte `object_id` instead of inlining the full VK
+/// every time. The execution handler revalidates the proof against the
+/// stored VK at submission time.
+///
+/// Binding to a single `code_hash` means a registered entry can only be
+/// used by proofs claiming the matching computation; the
+/// `ProofSubmission` handler rejects mismatched `code_hash`.
+///
+/// Wire layout (variable, minimum `VK_REGISTRATION_HEADER_SIZE` + 1 byte):
+/// `version:1 | proof_type:1 | code_hash:32 | label_len:1 | vk_len_be:4 |
+/// label:label_len | vk_bytes:vk_len`. Length-prefixed because VKs are
+/// not fixed-size across proof systems; the `label_len` byte is forced
+/// into `[0, 255]` by its u8 type but the handler additionally enforces
+/// `label_len <= VK_REGISTRATION_LABEL_MAX`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VkRegistrationData {
+    /// Wire-format version byte. Must equal `VK_REGISTRATION_VERSION` at
+    /// create/update; decode preserves it verbatim so the handler can
+    /// surface a specific error on mismatch.
+    pub version: u8,
+    /// Proof-system discriminant identifying which verifier this VK
+    /// belongs to. Values use the `PROOF_TYPE_*` constants defined in
+    /// `crates/execution/src/lib.rs`. The create handler accepts only
+    /// supported variants; PLONK is reserved for a future activation.
+    pub proof_type: u8,
+    /// Canonical `code_hash` (AI module / circuit identity) this VK
+    /// verifies. Bound at registration; the `ProofSubmission` handler
+    /// requires the submitted proof's `code_hash` to equal this value
+    /// when it resolves the VK through the registry.
+    pub code_hash: [u8; 32],
+    /// Free-form UTF-8 label (max `VK_REGISTRATION_LABEL_MAX` bytes).
+    /// Empty by convention if the publisher chose not to annotate the
+    /// registration. Mutable via `UpdateMemoryObject` so publishers can
+    /// refine the human-readable tag without re-registering the key.
+    pub label: Vec<u8>,
+    /// Compressed verification-key bytes (ark-serialize compressed form
+    /// for the BN254 Groth16 verifier). Length is bounded by the
+    /// handler against the same per-payload cap that gates inline VK
+    /// bytes in v2 `ProofSubmission` payloads. Immutable via
+    /// `UpdateMemoryObject`.
+    pub vk_bytes: Vec<u8>,
+}
+
+impl VkRegistrationData {
+    /// Encode this registration to its canonical variable-length form.
+    ///
+    /// The encoder is total: oversized `label` or `vk_bytes` are
+    /// silently saturated at `u8::MAX` / `u32::MAX` respectively, which
+    /// matches the convention that handler-level validation runs before
+    /// encode. Callers must validate length caps via the handler before
+    /// trusting roundtrip equality.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let label_len = u8::try_from(self.label.len()).unwrap_or(u8::MAX);
+        let vk_len = u32::try_from(self.vk_bytes.len()).unwrap_or(u32::MAX);
+        let mut out =
+            Vec::with_capacity(VK_REGISTRATION_HEADER_SIZE + label_len as usize + vk_len as usize);
+        out.push(self.version);
+        out.push(self.proof_type);
+        out.extend_from_slice(&self.code_hash);
+        out.push(label_len);
+        out.extend_from_slice(&vk_len.to_be_bytes());
+        out.extend_from_slice(&self.label[..label_len as usize]);
+        out.extend_from_slice(&self.vk_bytes[..vk_len as usize]);
+        out
+    }
+
+    /// Decode a VK registration from canonical bytes.
+    ///
+    /// Returns `None` if the input is shorter than
+    /// `VK_REGISTRATION_HEADER_SIZE`, if `label_len + vk_len + header`
+    /// would overflow `usize`, or if the total length does not match
+    /// the prefixes exactly. Field-level validation (version, supported
+    /// proof_type, label cap, VK byte cap, VK deserializability) is the
+    /// handler's responsibility.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < VK_REGISTRATION_HEADER_SIZE {
+            return None;
+        }
+        let version = bytes[0];
+        let proof_type = bytes[1];
+        let mut code_hash = [0u8; 32];
+        code_hash.copy_from_slice(&bytes[2..34]);
+        let label_len = bytes[34] as usize;
+        let vk_len = u32::from_be_bytes(bytes[35..39].try_into().ok()?) as usize;
+        let label_start = VK_REGISTRATION_HEADER_SIZE;
+        let label_end = label_start.checked_add(label_len)?;
+        let vk_end = label_end.checked_add(vk_len)?;
+        if vk_end != bytes.len() {
+            return None;
+        }
+        let label = bytes[label_start..label_end].to_vec();
+        let vk_bytes = bytes[label_end..vk_end].to_vec();
+        Some(Self {
+            version,
+            proof_type,
+            code_hash,
+            label,
+            vk_bytes,
+        })
+    }
+}
+
 // ============================================================================
 // TESTS
 // ============================================================================
@@ -1340,6 +1493,7 @@ mod tests {
             MemoryObjectType::DelegationGrant,
             MemoryObjectType::Subscription,
             MemoryObjectType::ServiceDescriptor,
+            MemoryObjectType::VkRegistration,
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
@@ -1350,13 +1504,13 @@ mod tests {
     #[test]
     fn memory_object_type_invalid_returns_none() {
         assert_eq!(
-            MemoryObjectType::from_byte(12),
-            Some(MemoryObjectType::ServiceDescriptor),
-            "byte 12 must decode to ServiceDescriptor (Week 29)"
+            MemoryObjectType::from_byte(13),
+            Some(MemoryObjectType::VkRegistration),
+            "byte 13 must decode to VkRegistration (Week 30)"
         );
         assert!(
-            MemoryObjectType::from_byte(13).is_none(),
-            "13 is the first invalid byte after Week 29"
+            MemoryObjectType::from_byte(14).is_none(),
+            "14 is the first invalid byte after Week 30"
         );
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
@@ -1387,6 +1541,7 @@ mod tests {
             MemoryObjectType::ServiceDescriptor.name(),
             "ServiceDescriptor"
         );
+        assert_eq!(MemoryObjectType::VkRegistration.name(), "VkRegistration");
     }
 
     #[test]
@@ -1820,7 +1975,11 @@ mod tests {
             MemoryObjectType::from_byte(12),
             Some(MemoryObjectType::ServiceDescriptor)
         );
-        assert_eq!(MemoryObjectType::from_byte(13), None);
+        assert_eq!(
+            MemoryObjectType::from_byte(13),
+            Some(MemoryObjectType::VkRegistration)
+        );
+        assert_eq!(MemoryObjectType::from_byte(14), None);
         assert_eq!(
             MemoryObjectType::CompositionGraph.name(),
             "CompositionGraph"
@@ -2568,5 +2727,134 @@ mod tests {
         );
         assert_eq!(bytes[136], SERVICE_STATUS_ACTIVE, "status at 136");
         assert_eq!(&bytes[137..144], &[0u8; 7], "reserved at 137..144 (zero)");
+    }
+
+    // ========================================================================
+    // Week 30 Phase 1: VK Registry types and codec
+    // ========================================================================
+
+    fn sample_vk_registration() -> VkRegistrationData {
+        VkRegistrationData {
+            version: VK_REGISTRATION_VERSION,
+            // PROOF_TYPE_GROTH16 = 1 in crates/execution/src/lib.rs;
+            // duplicated here as a literal because the discriminant
+            // lives in the execution crate.
+            proof_type: 1,
+            code_hash: [0xC0u8; 32],
+            label: b"sum-v1".to_vec(),
+            vk_bytes: (0..16u8).collect(),
+        }
+    }
+
+    #[test]
+    fn vk_registration_constants_are_stable() {
+        assert_eq!(MAX_VK_REGISTRATIONS_PER_ENTITY, 8);
+        assert_eq!(VK_REGISTRATION_VERSION, 1);
+        assert_eq!(VK_REGISTRATION_LABEL_MAX, 32);
+        assert_eq!(VK_REGISTRATION_HEADER_SIZE, 39);
+        assert_eq!(VK_REGISTRATION_HEADER_SIZE, 1 + 1 + 32 + 1 + 4);
+    }
+
+    #[test]
+    fn vk_registration_roundtrip() {
+        let reg = sample_vk_registration();
+        let bytes = reg.encode();
+        let decoded = VkRegistrationData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded, reg);
+    }
+
+    #[test]
+    fn vk_registration_roundtrip_empty_label() {
+        let mut reg = sample_vk_registration();
+        reg.label = Vec::new();
+        let bytes = reg.encode();
+        assert_eq!(bytes[34], 0, "label_len byte must be 0 for empty label");
+        let decoded = VkRegistrationData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded, reg);
+    }
+
+    #[test]
+    fn vk_registration_roundtrip_max_label() {
+        let mut reg = sample_vk_registration();
+        reg.label = vec![0xABu8; VK_REGISTRATION_LABEL_MAX];
+        let bytes = reg.encode();
+        assert_eq!(bytes[34], VK_REGISTRATION_LABEL_MAX as u8);
+        let decoded = VkRegistrationData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.label.len(), VK_REGISTRATION_LABEL_MAX);
+        assert_eq!(decoded, reg);
+    }
+
+    #[test]
+    fn vk_registration_decode_rejects_too_short() {
+        // Anything shorter than the fixed header is rejected.
+        for len in 0..VK_REGISTRATION_HEADER_SIZE {
+            let bytes = vec![0u8; len];
+            assert!(
+                VkRegistrationData::decode(&bytes).is_none(),
+                "len {len} must be rejected (below header)"
+            );
+        }
+    }
+
+    #[test]
+    fn vk_registration_decode_rejects_trailing_bytes() {
+        let reg = sample_vk_registration();
+        let mut bytes = reg.encode();
+        bytes.push(0xFF);
+        assert!(VkRegistrationData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn vk_registration_decode_rejects_truncated_tail() {
+        let reg = sample_vk_registration();
+        let mut bytes = reg.encode();
+        bytes.pop();
+        assert!(VkRegistrationData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn vk_registration_decode_preserves_version_byte() {
+        // Handler validates version; decoder does not. Byte 0 is preserved
+        // verbatim so the runtime can surface a specific error variant on
+        // version mismatch.
+        let mut reg = sample_vk_registration();
+        reg.version = 99;
+        let bytes = reg.encode();
+        let decoded = VkRegistrationData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.version, 99);
+    }
+
+    #[test]
+    fn vk_registration_decode_preserves_proof_type_byte() {
+        // Handler validates proof_type; decoder does not. Byte 1 is
+        // preserved verbatim so the runtime can surface a specific
+        // unsupported-proof-type error.
+        let mut reg = sample_vk_registration();
+        reg.proof_type = 99;
+        let bytes = reg.encode();
+        let decoded = VkRegistrationData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.proof_type, 99);
+    }
+
+    #[test]
+    fn golden_vector_vk_registration_layout() {
+        // Locks the byte layout for VK_REGISTRATION_VERSION = 1 against
+        // accidental field reordering or width changes. The vk_bytes
+        // portion is dummy content (not a real Groth16 VK); the codec is
+        // byte-faithful and does not validate VK structure.
+        let reg = sample_vk_registration();
+        let bytes = reg.encode();
+
+        let expected_len = VK_REGISTRATION_HEADER_SIZE + reg.label.len() + reg.vk_bytes.len();
+        assert_eq!(bytes.len(), expected_len, "total length matches layout");
+
+        assert_eq!(bytes[0], VK_REGISTRATION_VERSION, "version at 0");
+        assert_eq!(bytes[1], 1, "proof_type (Groth16) at 1");
+        assert_eq!(&bytes[2..34], &[0xC0u8; 32], "code_hash at 2..34");
+        assert_eq!(bytes[34], 6u8, "label_len at 34");
+        assert_eq!(&bytes[35..39], &16u32.to_be_bytes(), "vk_len_be at 35..39");
+        assert_eq!(&bytes[39..45], b"sum-v1", "label at 39..45");
+        let vk_expected: Vec<u8> = (0..16u8).collect();
+        assert_eq!(&bytes[45..61], vk_expected.as_slice(), "vk_bytes at 45..61");
     }
 }

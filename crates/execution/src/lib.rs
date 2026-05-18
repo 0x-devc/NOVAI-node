@@ -443,6 +443,62 @@ pub enum ExecError<E> {
     /// rewritten on update; publishers wanting a new category must
     /// delete and re-create.
     ServiceDescriptorCategoryImmutable,
+    // Week 30 - VK Registry errors.
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: payload bytes for a
+    /// `VkRegistration` could not be decoded as `VkRegistrationData`,
+    /// or the version byte does not match `VK_REGISTRATION_VERSION`,
+    /// or the encoded length does not match the embedded prefixes.
+    InvalidVkRegistration,
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: `proof_type` byte
+    /// in the payload is not a supported VK-bearing verifier
+    /// discriminant. Phase 1 accepts only `PROOF_TYPE_GROTH16`;
+    /// `PROOF_TYPE_STUB` and reserved values (`PROOF_TYPE_PLONK`,
+    /// the registered variants) are rejected.
+    VkRegistrationUnsupportedProofType {
+        /// Offending `proof_type` byte the payload carried.
+        byte: u8,
+    },
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: `label` length in
+    /// the payload exceeds `VK_REGISTRATION_LABEL_MAX`. Labels are
+    /// free-form UTF-8 metadata bounded so the per-object footprint
+    /// stays predictable.
+    VkRegistrationLabelTooLong {
+        /// Length of the `label` field the payload carried.
+        len: usize,
+        /// Cap (`VK_REGISTRATION_LABEL_MAX`).
+        max: usize,
+    },
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: `vk_bytes` is empty
+    /// or exceeds `PROOF_SUBMISSION_MAX_VK_BYTES`. Mirrors the inline-
+    /// VK cap that already bounds v2 `ProofSubmission` payloads.
+    VkRegistrationBadVkLen {
+        /// Length of the `vk_bytes` field the payload carried.
+        len: usize,
+        /// Cap (`PROOF_SUBMISSION_MAX_VK_BYTES`).
+        max: usize,
+    },
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: `vk_bytes` did not
+    /// deserialize as a canonical compressed verification key for the
+    /// declared proof system. Caught at registration time so malformed
+    /// VKs cannot land in state and silently fail every future proof
+    /// submission referencing them.
+    VkRegistrationVkDeserializeFailed,
+    /// `CreateMemoryObject`: publisher already holds the maximum
+    /// allowed `VkRegistration` memory objects
+    /// (`MAX_VK_REGISTRATIONS_PER_ENTITY`). Deleted registrations do
+    /// not count toward the cap.
+    VkRegistrationLimitExceeded {
+        /// Publisher's current `VkRegistration` count.
+        current: u32,
+        /// Cap (`MAX_VK_REGISTRATIONS_PER_ENTITY`).
+        max: u32,
+    },
+    /// `UpdateMemoryObject`: the new payload mutates a field that is
+    /// IMMUTABLE on a registered VK. Per the Week 30 design, `version`,
+    /// `proof_type`, `code_hash`, and `vk_bytes` are frozen at create
+    /// time; only the human-readable `label` may change. Publishers
+    /// wanting different bindings must delete and re-create.
+    VkRegistrationImmutableFieldChanged,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -751,12 +807,25 @@ pub const PROOF_TYPE_STUB: u8 = 0;
 pub const PROOF_TYPE_GROTH16: u8 = 1;
 /// Reserved for a future PLONK verifier integration.
 pub const PROOF_TYPE_PLONK: u8 = 2;
+/// Groth16 verifier resolved against an on-chain `VkRegistration` (Week 30).
+///
+/// The `ProofSubmission` payload carries the 32-byte registry handle in
+/// place of inline `vk_bytes`. Reserved at the constant level in Phase 1;
+/// the dispatch path and `PROOF_TYPE_MAX` bump are wired in Phase 2.
+pub const PROOF_TYPE_GROTH16_REGISTERED: u8 = 3;
+/// Reserved PLONK verifier resolved against an on-chain `VkRegistration`.
+///
+/// Allocated alongside `PROOF_TYPE_GROTH16_REGISTERED` so the
+/// registered-VK proof-type range stays contiguous when PLONK ships.
+pub const PROOF_TYPE_PLONK_REGISTERED: u8 = 4;
 /// Maximum `proof_type` discriminant accepted by the handler.
 ///
 /// The decoder rejects any higher value with `UnsupportedProofType` before
 /// the handler runs. Bumping this constant is the gate for activating each
 /// new verifier; activating PLONK would require both raising this and
-/// wiring the dispatch in `apply_signal_commitment_tx_inner`.
+/// wiring the dispatch in `apply_signal_commitment_tx_inner`. Phase 2
+/// will bump this to `PROOF_TYPE_GROTH16_REGISTERED` once the registered-
+/// VK dispatch path lands.
 pub const PROOF_TYPE_MAX: u8 = PROOF_TYPE_GROTH16;
 
 /// Inline reputation-update tail carried in `ReputationUpdate` signal payloads.
@@ -4281,8 +4350,8 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             });
         }
 
-        let mut payee = read_ai_entity(db, &extra.payee_entity_id)?
-            .ok_or(ExecError::PaymentPayeeNotFound)?;
+        let mut payee =
+            read_ai_entity(db, &extra.payee_entity_id)?.ok_or(ExecError::PaymentPayeeNotFound)?;
         if !payee.is_active {
             return Err(ExecError::PaymentPayeeNotActive);
         }
@@ -4420,8 +4489,8 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         // PaymentRecordDecodeFailed - the error variant most aligned
         // with "the payment audit trail no longer matches the entity
         // store".
-        let mut payee = read_ai_entity(db, &record.payee)?
-            .ok_or(ExecError::PaymentRecordDecodeFailed)?;
+        let mut payee =
+            read_ai_entity(db, &record.payee)?.ok_or(ExecError::PaymentRecordDecodeFailed)?;
 
         let delta = if extra.status == PAYMENT_ATTESTATION_STATUS_DELIVERED {
             REP_DELTA_PAYMENT_DELIVERED
@@ -5029,9 +5098,10 @@ pub fn check_ai_entity_sender<K: Kv>(
 // ============================================================================
 
 use novai_ai_entities::{
-    decode_memory_object_v1, ServiceDescriptorData, MAX_DELEGATION_GRANTS,
+    decode_memory_object_v1, ServiceDescriptorData, VkRegistrationData, MAX_DELEGATION_GRANTS,
     MAX_MEMORY_OBJECTS_PER_ENTITY, MAX_MEMORY_OBJECT_SIZE, MAX_SERVICE_DESCRIPTORS_PER_ENTITY,
-    SERVICE_CATEGORY_RESERVED_MAX, SERVICE_DESCRIPTOR_V1, SERVICE_STATUS_MAX,
+    MAX_VK_REGISTRATIONS_PER_ENTITY, SERVICE_CATEGORY_RESERVED_MAX, SERVICE_DESCRIPTOR_V1,
+    SERVICE_STATUS_MAX, VK_REGISTRATION_LABEL_MAX, VK_REGISTRATION_VERSION,
 };
 use novai_state::{
     ai_delegation_by_delegate_key, ai_memory_count_key, decode_memory_count, encode_memory_count,
@@ -5309,6 +5379,146 @@ fn validate_service_descriptor_update<E>(
     Ok(())
 }
 
+/// Per-type structural and semantic validation for a `VkRegistration`
+/// memory object payload (Week 30). No-op for non-`VkRegistration`
+/// types so the CREATE handler can call it unconditionally alongside
+/// the existing per-type validators.
+///
+/// Validation rules:
+/// 1. Bytes decode cleanly to `VkRegistrationData`.
+/// 2. `version == VK_REGISTRATION_VERSION`.
+/// 3. `proof_type == PROOF_TYPE_GROTH16`. Stub, reserved PLONK, and the
+///    registered variants are rejected at registration; only proof
+///    systems with a real verifier wired in Phase 2 are allowed.
+/// 4. `label.len() <= VK_REGISTRATION_LABEL_MAX`.
+/// 5. `vk_bytes` is non-empty and `<= PROOF_SUBMISSION_MAX_VK_BYTES`.
+/// 6. `vk_bytes` deserializes as a canonical compressed VK via
+///    `Groth16Verifier::is_valid_vk`. Catches garbage at create time so
+///    every future proof submission referencing this registry id can
+///    rely on the VK parsing.
+/// 7. The publisher currently holds fewer than
+///    `MAX_VK_REGISTRATIONS_PER_ENTITY` `VkRegistration` memory
+///    objects. Deleted registrations do not count.
+fn validate_vk_registration_payload<K: Kv>(
+    db: &K,
+    object_type: MemoryObjectType,
+    data: &[u8],
+    publisher: &AiEntity,
+) -> Result<(), ExecError<K::Error>> {
+    if object_type != MemoryObjectType::VkRegistration {
+        return Ok(());
+    }
+    let reg = VkRegistrationData::decode(data).ok_or(ExecError::InvalidVkRegistration)?;
+    if reg.version != VK_REGISTRATION_VERSION {
+        return Err(ExecError::InvalidVkRegistration);
+    }
+    if reg.proof_type != PROOF_TYPE_GROTH16 {
+        return Err(ExecError::VkRegistrationUnsupportedProofType {
+            byte: reg.proof_type,
+        });
+    }
+    if reg.label.len() > VK_REGISTRATION_LABEL_MAX {
+        return Err(ExecError::VkRegistrationLabelTooLong {
+            len: reg.label.len(),
+            max: VK_REGISTRATION_LABEL_MAX,
+        });
+    }
+    if reg.vk_bytes.is_empty() || reg.vk_bytes.len() > PROOF_SUBMISSION_MAX_VK_BYTES {
+        return Err(ExecError::VkRegistrationBadVkLen {
+            len: reg.vk_bytes.len(),
+            max: PROOF_SUBMISSION_MAX_VK_BYTES,
+        });
+    }
+    if !Groth16Verifier::is_valid_vk(&reg.vk_bytes) {
+        return Err(ExecError::VkRegistrationVkDeserializeFailed);
+    }
+
+    // Count existing VkRegistration memory objects owned by this
+    // publisher via the ai_memory_by_type index. Bounded scan over the
+    // (type, publisher) prefix; the cap (8) is small so the linear walk
+    // is cheaper than maintaining a dedicated counter, mirroring the
+    // ServiceDescriptor and DelegationGrant cap patterns above.
+    let mut count_prefix = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1 + 32 + 1);
+    count_prefix.extend_from_slice(KEY_PREFIX_AI_MEMORY_BY_TYPE);
+    count_prefix.push(MemoryObjectType::VkRegistration.to_byte());
+    count_prefix.push(b'/');
+    count_prefix.extend_from_slice(&publisher.id);
+    count_prefix.push(b'/');
+    let entries = db.scan_prefix(&count_prefix).map_err(ExecError::Db)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let current = entries.len() as u32;
+    if current >= MAX_VK_REGISTRATIONS_PER_ENTITY {
+        return Err(ExecError::VkRegistrationLimitExceeded {
+            current,
+            max: MAX_VK_REGISTRATIONS_PER_ENTITY,
+        });
+    }
+    Ok(())
+}
+
+/// Per-type structural validation for `UPDATE_MEMORY_OBJECT` against a
+/// `VkRegistration` (Week 30). No-op for non-`VkRegistration` types so
+/// the UPDATE handler can call it unconditionally.
+///
+/// Update rules: the new payload must decode and pass every create-side
+/// rule that does not involve a per-entity cap, AND every immutable
+/// field (`version`, `proof_type`, `code_hash`, `vk_bytes`) must equal
+/// the stored value. Only `label` is mutable.
+///
+/// `InvalidVkRegistration` is also surfaced if the OLD data fails to
+/// decode. That case is unreachable in normal operation (the runtime
+/// wrote the old bytes itself at create time), but reusing the same
+/// error variant rather than introducing a `VkRegistrationOldDataCorrupt`
+/// variant keeps the error surface narrow.
+fn validate_vk_registration_update<E>(
+    object_type: MemoryObjectType,
+    old_data: &[u8],
+    new_data: &[u8],
+) -> Result<(), ExecError<E>> {
+    if object_type != MemoryObjectType::VkRegistration {
+        return Ok(());
+    }
+    let old = VkRegistrationData::decode(old_data).ok_or(ExecError::InvalidVkRegistration)?;
+    let new = VkRegistrationData::decode(new_data).ok_or(ExecError::InvalidVkRegistration)?;
+
+    if new.version != VK_REGISTRATION_VERSION {
+        return Err(ExecError::InvalidVkRegistration);
+    }
+    if new.proof_type != PROOF_TYPE_GROTH16 {
+        return Err(ExecError::VkRegistrationUnsupportedProofType {
+            byte: new.proof_type,
+        });
+    }
+    if new.label.len() > VK_REGISTRATION_LABEL_MAX {
+        return Err(ExecError::VkRegistrationLabelTooLong {
+            len: new.label.len(),
+            max: VK_REGISTRATION_LABEL_MAX,
+        });
+    }
+    if new.vk_bytes.is_empty() || new.vk_bytes.len() > PROOF_SUBMISSION_MAX_VK_BYTES {
+        return Err(ExecError::VkRegistrationBadVkLen {
+            len: new.vk_bytes.len(),
+            max: PROOF_SUBMISSION_MAX_VK_BYTES,
+        });
+    }
+    // Immutability: every field except `label` must match the stored
+    // record. `vk_bytes` immutability is what callers rely on when
+    // referencing a registered VK by id; allowing it to change would
+    // let a publisher swap the verified circuit out from under existing
+    // proof submissions.
+    if old.version != new.version
+        || old.proof_type != new.proof_type
+        || old.code_hash != new.code_hash
+        || old.vk_bytes != new.vk_bytes
+    {
+        return Err(ExecError::VkRegistrationImmutableFieldChanged);
+    }
+    // No `Groth16Verifier::is_valid_vk` re-check: vk_bytes equality
+    // above guarantees the stored (already-validated) bytes are
+    // preserved verbatim.
+    Ok(())
+}
+
 fn apply_create_memory_object_tx_inner<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -5355,6 +5565,13 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
     // below can use the category byte without redecoding the payload.
     let service_descriptor =
         validate_service_descriptor_payload(db, payload.object_type, &payload.data, &entity)?;
+
+    // Per-type structural validation for VkRegistration (Week 30).
+    // Enforces decode, version, supported proof_type, label cap, VK
+    // length cap, VK deserializability, and the per-entity cap. No
+    // secondary index is needed in Phase 1; lookup by 32-byte object_id
+    // is served by the existing ai_memory_object_key route.
+    validate_vk_registration_payload(db, payload.object_type, &payload.data, &entity)?;
 
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
@@ -5556,6 +5773,19 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
     // create checks AND enforce category-immutability so the
     // by_category discovery index does not need to be rewritten here.
     validate_service_descriptor_update::<K::Error>(
+        memory_object.object_type,
+        &memory_object.data,
+        &payload.new_data,
+    )?;
+
+    // Week 30: VkRegistration updates revalidate every field-level
+    // create rule and additionally enforce immutability of `version`,
+    // `proof_type`, `code_hash`, and `vk_bytes` (only `label` is
+    // mutable). Mutating `vk_bytes` would let a publisher swap the
+    // verified circuit out from under existing proof submissions, so
+    // force delete-and-recreate when the underlying VK needs to
+    // change.
+    validate_vk_registration_update::<K::Error>(
         memory_object.object_type,
         &memory_object.data,
         &payload.new_data,
@@ -5841,8 +6071,7 @@ pub fn get_service_descriptors_by_category<K: Kv>(
     db: &K,
     category: u8,
 ) -> Result<Vec<(MemoryObject, ServiceDescriptorData)>, ExecError<K::Error>> {
-    let mut prefix =
-        Vec::with_capacity(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY.len() + 1);
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY.len() + 1);
     prefix.extend_from_slice(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY);
     prefix.push(category);
 
@@ -9327,10 +9556,10 @@ mod tests {
         // so a refactor that reorders the ai_entities module is caught
         // here as well.
         use novai_ai_entities::{
-            MAX_SERVICE_DESCRIPTORS_PER_ENTITY, SERVICE_CATEGORY_GATEWAY,
-            SERVICE_CATEGORY_GENERIC, SERVICE_CATEGORY_MONITORING, SERVICE_CATEGORY_RESERVED_MAX,
-            SERVICE_DESCRIPTOR_SIZE, SERVICE_DESCRIPTOR_V1, SERVICE_STATUS_ACTIVE,
-            SERVICE_STATUS_DEPRECATED, SERVICE_STATUS_MAX, SERVICE_STATUS_PAUSED,
+            MAX_SERVICE_DESCRIPTORS_PER_ENTITY, SERVICE_CATEGORY_GATEWAY, SERVICE_CATEGORY_GENERIC,
+            SERVICE_CATEGORY_MONITORING, SERVICE_CATEGORY_RESERVED_MAX, SERVICE_DESCRIPTOR_SIZE,
+            SERVICE_DESCRIPTOR_V1, SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DEPRECATED,
+            SERVICE_STATUS_MAX, SERVICE_STATUS_PAUSED,
         };
         assert_eq!(SERVICE_DESCRIPTOR_SIZE, 144);
         assert_eq!(SERVICE_DESCRIPTOR_V1, 1);

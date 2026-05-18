@@ -154,6 +154,21 @@ impl ZkVerifier for Groth16Verifier {
     }
 }
 
+impl Groth16Verifier {
+    /// Structural validity check for a Groth16/BN254 verification key.
+    ///
+    /// Returns `true` iff `vk` deserializes as a `VerifyingKey<Bn254>` in
+    /// the canonical ark-serialize compressed form. Used by the VK
+    /// Registry create handler (Week 30) so malformed registrations are
+    /// rejected at publish time rather than failing on every future
+    /// proof submission. Pairing-level soundness is the verifier's
+    /// concern; this check only confirms the bytes parse.
+    #[must_use]
+    pub fn is_valid_vk(vk: &[u8]) -> bool {
+        VerifyingKey::<Bn254>::deserialize_compressed(vk).is_ok()
+    }
+}
+
 /// Split a 64-byte public-inputs buffer into 4 BN254 scalars.
 ///
 /// Each 32-byte hash is split into a 16-byte high half and a 16-byte low
