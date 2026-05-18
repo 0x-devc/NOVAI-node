@@ -5029,8 +5029,9 @@ pub fn check_ai_entity_sender<K: Kv>(
 // ============================================================================
 
 use novai_ai_entities::{
-    decode_memory_object_v1, MAX_DELEGATION_GRANTS, MAX_MEMORY_OBJECTS_PER_ENTITY,
-    MAX_MEMORY_OBJECT_SIZE,
+    decode_memory_object_v1, ServiceDescriptorData, MAX_DELEGATION_GRANTS,
+    MAX_MEMORY_OBJECTS_PER_ENTITY, MAX_MEMORY_OBJECT_SIZE, MAX_SERVICE_DESCRIPTORS_PER_ENTITY,
+    SERVICE_CATEGORY_RESERVED_MAX, SERVICE_DESCRIPTOR_V1, SERVICE_STATUS_MAX,
 };
 use novai_state::{
     ai_delegation_by_delegate_key, ai_memory_count_key, decode_memory_count, encode_memory_count,
@@ -5186,6 +5187,77 @@ fn validate_delegation_grant_payload<K: Kv>(
     Ok(Some(grant))
 }
 
+/// Per-type structural and semantic validation for a `ServiceDescriptor`
+/// memory object payload (Week 29). No-op for non-`ServiceDescriptor`
+/// types so the CREATE handler can call it unconditionally alongside
+/// the existing per-type validators.
+///
+/// Validation rules:
+/// 1. Bytes decode cleanly to `ServiceDescriptorData` (exact 144-byte
+///    length).
+/// 2. `version == SERVICE_DESCRIPTOR_V1`.
+/// 3. `category <= SERVICE_CATEGORY_RESERVED_MAX` (well-known range).
+/// 4. `status <= SERVICE_STATUS_MAX`.
+/// 5. `min_reputation_score <= MAX_REPUTATION_SCORE`.
+/// 6. All 7 `reserved` bytes are zero (forward-compatibility lock).
+/// 7. The publisher currently holds fewer than
+///    `MAX_SERVICE_DESCRIPTORS_PER_ENTITY` `ServiceDescriptor` memory
+///    objects. Deleted descriptors do not count.
+///
+/// Returns the decoded `ServiceDescriptorData` on success so the create
+/// handler can derive the `category` byte for the by-category secondary
+/// index without re-decoding the payload.
+fn validate_service_descriptor_payload<K: Kv>(
+    db: &K,
+    object_type: MemoryObjectType,
+    data: &[u8],
+    publisher: &AiEntity,
+) -> Result<Option<ServiceDescriptorData>, ExecError<K::Error>> {
+    if object_type != MemoryObjectType::ServiceDescriptor {
+        return Ok(None);
+    }
+    let sd = ServiceDescriptorData::decode(data).ok_or(ExecError::InvalidServiceDescriptor)?;
+    if sd.version != SERVICE_DESCRIPTOR_V1 {
+        return Err(ExecError::InvalidServiceDescriptor);
+    }
+    if sd.category > SERVICE_CATEGORY_RESERVED_MAX {
+        return Err(ExecError::ServiceDescriptorInvalidCategory { byte: sd.category });
+    }
+    if sd.status > SERVICE_STATUS_MAX {
+        return Err(ExecError::ServiceDescriptorInvalidStatus { byte: sd.status });
+    }
+    if sd.min_reputation_score > MAX_REPUTATION_SCORE {
+        return Err(ExecError::ServiceDescriptorReputationOverMax {
+            score: sd.min_reputation_score,
+        });
+    }
+    if sd.reserved != [0u8; 7] {
+        return Err(ExecError::InvalidServiceDescriptor);
+    }
+
+    // Count existing ServiceDescriptor memory objects owned by this
+    // publisher via the ai_memory_by_type index. Bounded scan over the
+    // (type, publisher) prefix; the cap (16) is small so the linear
+    // walk is cheaper than maintaining a dedicated counter, and mirrors
+    // the DelegationGrant cap pattern above.
+    let mut count_prefix = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1 + 32 + 1);
+    count_prefix.extend_from_slice(KEY_PREFIX_AI_MEMORY_BY_TYPE);
+    count_prefix.push(MemoryObjectType::ServiceDescriptor.to_byte());
+    count_prefix.push(b'/');
+    count_prefix.extend_from_slice(&publisher.id);
+    count_prefix.push(b'/');
+    let entries = db.scan_prefix(&count_prefix).map_err(ExecError::Db)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let current = entries.len() as u32;
+    if current >= MAX_SERVICE_DESCRIPTORS_PER_ENTITY {
+        return Err(ExecError::ServiceDescriptorLimitExceeded {
+            current,
+            max: MAX_SERVICE_DESCRIPTORS_PER_ENTITY,
+        });
+    }
+    Ok(Some(sd))
+}
+
 fn apply_create_memory_object_tx_inner<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -5226,6 +5298,12 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
     // can address the delegate without redecoding the payload.
     let delegation_grant =
         validate_delegation_grant_payload(db, payload.object_type, &payload.data, &entity)?;
+
+    // Per-type structural validation for ServiceDescriptor (Week 29).
+    // Decodes the descriptor once so the by-category secondary index Put
+    // below can use the category byte without redecoding the payload.
+    let service_descriptor =
+        validate_service_descriptor_payload(db, payload.object_type, &payload.data, &entity)?;
 
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
@@ -5294,6 +5372,17 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
         let delegate_index_key =
             ai_delegation_by_delegate_key(&grant.delegate_entity_id, &object_id);
         ops.push(WriteOp::Put(delegate_index_key, entity.id.to_vec()));
+    }
+
+    // Week 29: by-category discovery index. The descriptor's category
+    // is immutable after create, so this entry never needs rewriting on
+    // update. Deletion removes it (handled in the DELETE handler in
+    // Phase 4). Value is a zero-byte marker; canonical record lives
+    // inside the memory object at ai_memory_object_key.
+    if let Some(sd) = &service_descriptor {
+        let category_index_key =
+            service_descriptor_by_category_key(sd.category, &entity.id, &object_id);
+        ops.push(WriteOp::Put(category_index_key, Vec::new()));
     }
 
     let count_key = ai_memory_count_key(&entity.id);
