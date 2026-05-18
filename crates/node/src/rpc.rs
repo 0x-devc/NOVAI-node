@@ -20,12 +20,12 @@ use crate::consensus_node::Storage;
 use crate::MutexExt;
 use mempool::{NonceProvider, TxMempool};
 use novai_ai_entities::{
-    AiSignalType, MemoryObject, ServiceDescriptorData, SignalCommitment,
+    AiSignalType, MemoryObject, ServiceDescriptorData, SignalCommitment, SERVICE_CATEGORY_COMPUTE,
     SERVICE_CATEGORY_DATA_ORACLE, SERVICE_CATEGORY_GATEWAY, SERVICE_CATEGORY_GENERIC,
     SERVICE_CATEGORY_INDEXER, SERVICE_CATEGORY_INFERENCE, SERVICE_CATEGORY_MONITORING,
     SERVICE_CATEGORY_RESERVED_MAX, SERVICE_CATEGORY_SIGNAL_PROVIDER, SERVICE_CATEGORY_STORAGE,
-    SERVICE_CATEGORY_VERIFICATION, SERVICE_CATEGORY_COMPUTE, SERVICE_STATUS_ACTIVE,
-    SERVICE_STATUS_DEPRECATED, SERVICE_STATUS_PAUSED,
+    SERVICE_CATEGORY_VERIFICATION, SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DEPRECATED,
+    SERVICE_STATUS_PAUSED,
 };
 use novai_codec::{decode_tx_v1_signed, txid_v1};
 use novai_consensus_types;
@@ -1435,8 +1435,8 @@ fn handle_get_payments_by_entity(
     request: &RpcRequest,
     db: &Arc<Mutex<Storage>>,
 ) -> Result<GetPaymentsByEntityResult, RpcError> {
-    let params: GetPaymentsByEntityParams =
-        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+    let params: GetPaymentsByEntityParams = serde_json::from_value(request.params.clone())
+        .map_err(|e| RpcError {
             code: -32602,
             message: format!("Invalid params: {e}"),
         })?;
@@ -1464,12 +1464,17 @@ fn handle_get_payments_by_entity(
     let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
 
     let db = db.lock_or_recover();
-    let payments =
-        get_payments_by_entity(&*db, &entity_id, role, params.start_height, params.end_height)
-            .map_err(|_| RpcError {
-                code: -32002,
-                message: "State query failed".to_string(),
-            })?;
+    let payments = get_payments_by_entity(
+        &*db,
+        &entity_id,
+        role,
+        params.start_height,
+        params.end_height,
+    )
+    .map_err(|_| RpcError {
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
 
     Ok(GetPaymentsByEntityResult {
         payments: payments.into_iter().map(PaymentJson::from).collect(),
@@ -1495,12 +1500,11 @@ fn handle_get_service_descriptors_by_category(
         })?;
 
     let db = db.lock_or_recover();
-    let descriptors = get_service_descriptors_by_category(&*db, params.category).map_err(|_| {
-        RpcError {
+    let descriptors =
+        get_service_descriptors_by_category(&*db, params.category).map_err(|_| RpcError {
             code: -32002,
             message: "State query failed".to_string(),
-        }
-    })?;
+        })?;
 
     Ok(GetServiceDescriptorsByCategoryResult {
         descriptors: descriptors
@@ -2221,8 +2225,7 @@ mod tests {
     #[test]
     fn test_get_service_descriptors_by_category_params_deserialize() {
         let json = serde_json::json!({ "category": 1u8 });
-        let params: GetServiceDescriptorsByCategoryParams =
-            serde_json::from_value(json).unwrap();
+        let params: GetServiceDescriptorsByCategoryParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.category, SERVICE_CATEGORY_DATA_ORACLE);
     }
 

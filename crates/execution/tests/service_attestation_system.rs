@@ -59,7 +59,13 @@ fn payment_caps() -> Capabilities {
 }
 
 fn build_entity(code_hash: [u8; 32], creator: [u8; 32]) -> AiEntity {
-    AiEntity::new(code_hash, creator, AutonomyMode::Gated, payment_caps(), 1000)
+    AiEntity::new(
+        code_hash,
+        creator,
+        AutonomyMode::Gated,
+        payment_caps(),
+        1000,
+    )
 }
 
 fn store_entity(db: &mut MemKv, entity: &AiEntity) {
@@ -243,7 +249,10 @@ fn service_attestation_failed_decreases_payee_reputation() {
     let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
     // 50 + (-3) = 47.
     let expected: i32 = 50 + REP_DELTA_PAYMENT_FAILED;
-    assert_eq!(payee_after.reputation_score, u16::try_from(expected).unwrap());
+    assert_eq!(
+        payee_after.reputation_score,
+        u16::try_from(expected).unwrap()
+    );
 }
 
 // ============================================================================
@@ -601,7 +610,10 @@ fn service_attestation_updates_record_in_place() {
     assert_eq!(after.payer, before.payer);
     assert_eq!(after.payee, before.payee);
     assert_eq!(after.amount, before.amount);
-    assert_eq!(after.service_descriptor_hash, before.service_descriptor_hash);
+    assert_eq!(
+        after.service_descriptor_hash,
+        before.service_descriptor_hash
+    );
     assert_eq!(after.request_hash, before.request_hash);
     assert_eq!(after.payment_height, before.payment_height);
     assert_eq!(after.max_block_height, before.max_block_height);

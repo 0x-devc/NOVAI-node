@@ -170,8 +170,7 @@ fn payments_by_payer_returned_in_height_order() {
     seed_payment(&mut db, &payer, &payee_b, [0xA2u8; 32], 1, 200);
     seed_payment(&mut db, &payer, &payee_a, [0xA3u8; 32], 2, 300);
 
-    let payments =
-        get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 0, 1000).unwrap();
+    let payments = get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 0, 1000).unwrap();
     assert_eq!(payments.len(), 3);
 
     // Height-ascending order falls out of the big-endian-height index
@@ -208,8 +207,7 @@ fn payments_by_payee_returns_only_matching_incoming() {
     seed_payment(&mut db, &payer, &payee_a, [0xA2u8; 32], 1, 150);
     seed_payment(&mut db, &payer, &payee_b, [0xA3u8; 32], 2, 200);
 
-    let payments_a =
-        get_payments_by_entity(&db, &payee_a.id, PaymentRole::Payee, 0, 1000).unwrap();
+    let payments_a = get_payments_by_entity(&db, &payee_a.id, PaymentRole::Payee, 0, 1000).unwrap();
     assert_eq!(payments_a.len(), 2);
     for r in &payments_a {
         assert_eq!(r.payee, payee_a.id);
@@ -217,8 +215,7 @@ fn payments_by_payee_returns_only_matching_incoming() {
     assert_eq!(payments_a[0].payment_height, 100);
     assert_eq!(payments_a[1].payment_height, 150);
 
-    let payments_b =
-        get_payments_by_entity(&db, &payee_b.id, PaymentRole::Payee, 0, 1000).unwrap();
+    let payments_b = get_payments_by_entity(&db, &payee_b.id, PaymentRole::Payee, 0, 1000).unwrap();
     assert_eq!(payments_b.len(), 1);
     assert_eq!(payments_b[0].payee, payee_b.id);
     assert_eq!(payments_b[0].payment_height, 200);
@@ -240,22 +237,19 @@ fn payments_by_entity_height_filter_is_inclusive() {
     seed_payment(&mut db, &payer, &payee, [0xA4u8; 32], 3, 400);
 
     // Window [200, 300] must include both 200 and 300, exclude 100 and 400.
-    let in_window =
-        get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 200, 300).unwrap();
+    let in_window = get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 200, 300).unwrap();
     assert_eq!(in_window.len(), 2);
     assert_eq!(in_window[0].payment_height, 200);
     assert_eq!(in_window[1].payment_height, 300);
 
     // Tight singleton window: [200, 200] returns exactly the height-200
     // payment.
-    let single =
-        get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 200, 200).unwrap();
+    let single = get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 200, 200).unwrap();
     assert_eq!(single.len(), 1);
     assert_eq!(single[0].payment_height, 200);
 
     // Empty window: [250, 280] catches none of the four heights.
-    let empty =
-        get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 250, 280).unwrap();
+    let empty = get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 250, 280).unwrap();
     assert!(empty.is_empty());
 }
 
@@ -267,10 +261,8 @@ fn payments_by_entity_height_filter_is_inclusive() {
 fn payments_by_entity_unknown_id_returns_empty() {
     let db = MemKv::new();
     let stranger = [0xFFu8; 32];
-    let payer_view =
-        get_payments_by_entity(&db, &stranger, PaymentRole::Payer, 0, 1000).unwrap();
-    let payee_view =
-        get_payments_by_entity(&db, &stranger, PaymentRole::Payee, 0, 1000).unwrap();
+    let payer_view = get_payments_by_entity(&db, &stranger, PaymentRole::Payer, 0, 1000).unwrap();
+    let payee_view = get_payments_by_entity(&db, &stranger, PaymentRole::Payee, 0, 1000).unwrap();
     assert!(payer_view.is_empty());
     assert!(payee_view.is_empty());
 }
@@ -303,8 +295,7 @@ fn payments_by_entity_returns_attested_status_after_attestation() {
     );
     apply_signal_commitment_tx(&mut db, &tx, 110).expect("attestation succeeds");
 
-    let payments =
-        get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 0, 1000).unwrap();
+    let payments = get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 0, 1000).unwrap();
     assert_eq!(payments.len(), 1);
     let r = &payments[0];
     assert_eq!(r.attested_status, PAYMENT_ATTESTATION_STATUS_FAILED);
@@ -316,8 +307,7 @@ fn payments_by_entity_returns_attested_status_after_attestation() {
     assert_eq!(r.payment_height, 100);
 
     // Same record visible from the payee's side.
-    let from_payee =
-        get_payments_by_entity(&db, &payee.id, PaymentRole::Payee, 0, 1000).unwrap();
+    let from_payee = get_payments_by_entity(&db, &payee.id, PaymentRole::Payee, 0, 1000).unwrap();
     assert_eq!(from_payee.len(), 1);
     assert_eq!(
         from_payee[0].attested_status,
@@ -353,8 +343,7 @@ fn payments_by_entity_reports_delivered_attestation() {
     );
     apply_signal_commitment_tx(&mut db, &tx, 105).expect("attestation succeeds");
 
-    let payments =
-        get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 0, 1000).unwrap();
+    let payments = get_payments_by_entity(&db, &payer.id, PaymentRole::Payer, 0, 1000).unwrap();
     assert_eq!(payments.len(), 1);
     assert_eq!(
         payments[0].attested_status,

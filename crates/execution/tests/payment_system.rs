@@ -239,7 +239,10 @@ fn payment_request_with_subbasis_amount_skips_treasury_write() {
         PAYER_BALANCE - u128::from(amount) - u128::from(SIGNAL_FEE),
         "payer pays only the amount + tx_fee"
     );
-    assert_eq!(payee_after.economic_balance, PAYEE_BALANCE + u128::from(amount));
+    assert_eq!(
+        payee_after.economic_balance,
+        PAYEE_BALANCE + u128::from(amount)
+    );
     assert!(
         db.get(KEY_MARKETPLACE_TREASURY).unwrap().is_none(),
         "zero-fee payments must NOT touch the treasury record"
@@ -266,7 +269,10 @@ fn payment_request_self_payment_rejected() {
     );
     let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
     let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
-    assert!(matches!(err, ExecError::PaymentSelfReferential), "got {err:?}");
+    assert!(
+        matches!(err, ExecError::PaymentSelfReferential),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -335,7 +341,10 @@ fn payment_request_unknown_payee_rejected() {
     );
     let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
     let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
-    assert!(matches!(err, ExecError::PaymentPayeeNotFound), "got {err:?}");
+    assert!(
+        matches!(err, ExecError::PaymentPayeeNotFound),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -357,7 +366,10 @@ fn payment_request_inactive_payee_rejected() {
     );
     let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
     let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
-    assert!(matches!(err, ExecError::PaymentPayeeNotActive), "got {err:?}");
+    assert!(
+        matches!(err, ExecError::PaymentPayeeNotActive),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -429,13 +441,11 @@ fn payment_request_duplicate_signal_hash_rejected() {
     let payer_after_retry = read_ai_entity(&db, &payer.id).unwrap().unwrap();
     let payee_after_retry = read_ai_entity(&db, &payee.id).unwrap().unwrap();
     assert_eq!(
-        payer_after_retry.economic_balance,
-        payer_after_first.economic_balance,
+        payer_after_retry.economic_balance, payer_after_first.economic_balance,
         "duplicate payment must not move payer funds"
     );
     assert_eq!(
-        payee_after_retry.economic_balance,
-        payee_after_first.economic_balance,
+        payee_after_retry.economic_balance, payee_after_first.economic_balance,
         "duplicate payment must not move payee funds"
     );
 }
@@ -487,10 +497,7 @@ fn payment_request_two_distinct_payments_both_settle() {
         payer_after.economic_balance,
         PAYER_BALANCE - total_amount - total_fee - total_tx_fee,
     );
-    assert_eq!(
-        payee_after.economic_balance,
-        PAYEE_BALANCE + total_amount,
-    );
+    assert_eq!(payee_after.economic_balance, PAYEE_BALANCE + total_amount,);
     assert_eq!(read_treasury(&db), total_fee);
 }
 
@@ -650,7 +657,10 @@ fn payment_request_amount_overflow_in_fee_math_rejected() {
         .expect("u64::MAX amount fits in u128 fee math without overflow");
 
     let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
-    assert_eq!(payee_after.economic_balance, PAYEE_BALANCE + u128::from(u64::MAX));
+    assert_eq!(
+        payee_after.economic_balance,
+        PAYEE_BALANCE + u128::from(u64::MAX)
+    );
 }
 
 // ============================================================================
@@ -682,7 +692,10 @@ fn payment_request_record_bytes_lock_layout() {
         request,
         max,
     );
-    assert_eq!(payload.len(), SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN);
+    assert_eq!(
+        payload.len(),
+        SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN
+    );
     assert_eq!(payload.len(), 178);
 
     let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
@@ -703,7 +716,11 @@ fn payment_request_record_bytes_lock_layout() {
         &service,
         "service_descriptor_hash at 73..105"
     );
-    assert_eq!(&record_bytes[105..137], &request, "request_hash at 105..137");
+    assert_eq!(
+        &record_bytes[105..137],
+        &request,
+        "request_hash at 105..137"
+    );
     assert_eq!(
         &record_bytes[137..145],
         &PAYMENT_HEIGHT.to_be_bytes(),

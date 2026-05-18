@@ -325,11 +325,14 @@ fn build_signal_payload(
         }
         AiSignalType::PaymentRequest => {
             let payee = parse_hex32(
-                require_str(&extra.payee_entity_id, "--payee-entity-id", "payment-request")?,
+                require_str(
+                    &extra.payee_entity_id,
+                    "--payee-entity-id",
+                    "payment-request",
+                )?,
                 "payee_entity_id",
             )?;
-            let amount =
-                require_some(extra.payment_amount, "--payment-amount", "payment-request")?;
+            let amount = require_some(extra.payment_amount, "--payment-amount", "payment-request")?;
             let service_descriptor = parse_hex32(
                 require_str(
                     &extra.service_descriptor_hash,
@@ -600,9 +603,8 @@ mod tests {
     fn test_payment_request_missing_payee_returns_clear_error() {
         let mut extra = full_extra();
         extra.payee_entity_id = None;
-        let err =
-            build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
-                .unwrap_err();
+        let err = build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+            .unwrap_err();
         assert!(err.contains("--payee-entity-id"), "err = {err}");
         assert!(err.contains("payment-request"), "err = {err}");
     }
@@ -632,16 +634,10 @@ mod tests {
         assert_eq!(payload[33], 16);
         assert_eq!(&payload[34..66], &[0x55u8; 32]);
         assert_eq!(&payload[66..98], &[0xAAu8; 32]);
-        assert_eq!(
-            &payload[98..106],
-            &0x0102_0304_0506_0708u64.to_be_bytes()
-        );
+        assert_eq!(&payload[98..106], &0x0102_0304_0506_0708u64.to_be_bytes());
         assert_eq!(&payload[106..138], &[0xBBu8; 32]);
         assert_eq!(&payload[138..170], &[0xCCu8; 32]);
-        assert_eq!(
-            &payload[170..178],
-            &0x1112_1314_1516_1718u64.to_be_bytes()
-        );
+        assert_eq!(&payload[170..178], &0x1112_1314_1516_1718u64.to_be_bytes());
     }
 
     #[test]

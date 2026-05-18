@@ -145,9 +145,8 @@ fn make_update_tx(
 }
 
 fn make_delete_tx(publisher: &AiEntity, nonce: u64, object_id: [u8; 32]) -> TxV1 {
-    let payload = encode_delete_memory_object_payload_v1(&DeleteMemoryObjectPayloadV1 {
-        object_id,
-    });
+    let payload =
+        encode_delete_memory_object_payload_v1(&DeleteMemoryObjectPayloadV1 { object_id });
     TxV1 {
         version: TxVersion::V1,
         from: publisher.id,
@@ -169,7 +168,11 @@ fn publish_descriptor(
     apply_create_memory_object_tx(db, &tx, HEIGHT).expect("publish succeeds")
 }
 
-fn read_descriptor(db: &MemKv, publisher: &AiEntity, object_id: &[u8; 32]) -> ServiceDescriptorData {
+fn read_descriptor(
+    db: &MemKv,
+    publisher: &AiEntity,
+    object_id: &[u8; 32],
+) -> ServiceDescriptorData {
     let envelope_bytes = db
         .get(&ai_memory_object_key(&publisher.id, object_id))
         .unwrap()
@@ -192,11 +195,8 @@ fn service_descriptor_publish_lands_in_by_category_index() {
     let object_id = apply_create_memory_object_tx(&mut db, &tx, HEIGHT).expect("publish succeeds");
 
     // by_category index entry is present.
-    let category_key = service_descriptor_by_category_key(
-        SERVICE_CATEGORY_DATA_ORACLE,
-        &publisher.id,
-        &object_id,
-    );
+    let category_key =
+        service_descriptor_by_category_key(SERVICE_CATEGORY_DATA_ORACLE, &publisher.id, &object_id);
     assert!(
         db.get(&category_key).unwrap().is_some(),
         "by_category index entry must exist after publish"
@@ -458,14 +458,8 @@ fn service_descriptor_publish_record_bytes_match_golden_layout() {
     assert_eq!(&payload[33..65], &[0xB2u8; 32]);
     assert_eq!(&payload[65..97], &[0xB3u8; 32]);
     assert_eq!(payload[97], SERVICE_CATEGORY_INFERENCE);
-    assert_eq!(
-        &payload[98..106],
-        &0x0102_0304_0506_0708u64.to_be_bytes()
-    );
-    assert_eq!(
-        &payload[106..114],
-        &0x1112_1314_1516_1718u64.to_be_bytes()
-    );
+    assert_eq!(&payload[98..106], &0x0102_0304_0506_0708u64.to_be_bytes());
+    assert_eq!(&payload[106..114], &0x1112_1314_1516_1718u64.to_be_bytes());
     assert_eq!(&payload[114..116], &75u16.to_be_bytes());
     assert_eq!(
         &payload[116..132],
@@ -504,11 +498,8 @@ fn service_descriptor_update_price_preserves_object_id() {
 
     // by_category index entry under the SAME object_id is still present
     // (we did not need to rewrite it, since category did not change).
-    let category_key = service_descriptor_by_category_key(
-        original.category,
-        &publisher.id,
-        &object_id,
-    );
+    let category_key =
+        service_descriptor_by_category_key(original.category, &publisher.id, &object_id);
     assert!(
         db.get(&category_key).unwrap().is_some(),
         "by_category index entry survives update"
@@ -556,7 +547,10 @@ fn service_descriptor_update_all_mutable_fields_at_once() {
 
     let stored = read_descriptor(&db, &publisher, &object_id);
     assert_eq!(stored, updated);
-    assert_eq!(stored.category, original.category, "category MUST be unchanged");
+    assert_eq!(
+        stored.category, original.category,
+        "category MUST be unchanged"
+    );
 }
 
 // ============================================================================
@@ -573,8 +567,7 @@ fn service_descriptor_update_category_rejected() {
     let mut updated = original;
     updated.category = SERVICE_CATEGORY_INFERENCE; // valid category, but DIFFERENT
     let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
-    let err =
-        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    let err = apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
     assert!(
         matches!(err, ExecError::ServiceDescriptorCategoryImmutable),
         "got {err:?}"
@@ -586,16 +579,10 @@ fn service_descriptor_update_category_rejected() {
 
     // by_category index for the ORIGINAL category is still present;
     // no entry was created under the attempted-new category.
-    let original_key = service_descriptor_by_category_key(
-        SERVICE_CATEGORY_DATA_ORACLE,
-        &publisher.id,
-        &object_id,
-    );
-    let attempted_key = service_descriptor_by_category_key(
-        SERVICE_CATEGORY_INFERENCE,
-        &publisher.id,
-        &object_id,
-    );
+    let original_key =
+        service_descriptor_by_category_key(SERVICE_CATEGORY_DATA_ORACLE, &publisher.id, &object_id);
+    let attempted_key =
+        service_descriptor_by_category_key(SERVICE_CATEGORY_INFERENCE, &publisher.id, &object_id);
     assert!(db.get(&original_key).unwrap().is_some());
     assert!(db.get(&attempted_key).unwrap().is_none());
 }
@@ -617,8 +604,7 @@ fn service_descriptor_update_invalid_category_rejected() {
     let mut updated = original;
     updated.category = SERVICE_CATEGORY_RESERVED_MAX + 1;
     let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
-    let err =
-        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    let err = apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
     assert!(
         matches!(
             err,
@@ -639,8 +625,7 @@ fn service_descriptor_update_invalid_status_rejected() {
     let mut updated = original;
     updated.status = SERVICE_STATUS_MAX + 1;
     let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
-    let err =
-        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    let err = apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
     assert!(
         matches!(
             err,
@@ -661,8 +646,7 @@ fn service_descriptor_update_reputation_over_max_rejected() {
     let mut updated = original;
     updated.min_reputation_score = MAX_REPUTATION_SCORE + 1;
     let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
-    let err =
-        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    let err = apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
     assert!(
         matches!(
             err,
@@ -683,8 +667,7 @@ fn service_descriptor_update_non_zero_reserved_bytes_rejected() {
     let mut updated = original;
     updated.reserved[0] = 0xFF;
     let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
-    let err =
-        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    let err = apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
     assert!(
         matches!(err, ExecError::InvalidServiceDescriptor),
         "got {err:?}"
@@ -701,8 +684,7 @@ fn service_descriptor_update_bad_version_rejected() {
     let mut updated = original;
     updated.version = SERVICE_DESCRIPTOR_V1 + 1;
     let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
-    let err =
-        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    let err = apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
     assert!(
         matches!(err, ExecError::InvalidServiceDescriptor),
         "got {err:?}"
@@ -723,8 +705,7 @@ fn service_descriptor_update_bad_length_rejected() {
         object_id,
         vec![0u8; SERVICE_DESCRIPTOR_SIZE - 1],
     );
-    let err =
-        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    let err = apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
     assert!(
         matches!(err, ExecError::InvalidServiceDescriptor),
         "got {err:?}"
@@ -749,11 +730,8 @@ fn service_descriptor_delete_removes_all_indexes() {
         &publisher.id,
         &object_id,
     );
-    let category_key = service_descriptor_by_category_key(
-        SERVICE_CATEGORY_DATA_ORACLE,
-        &publisher.id,
-        &object_id,
-    );
+    let category_key =
+        service_descriptor_by_category_key(SERVICE_CATEGORY_DATA_ORACLE, &publisher.id, &object_id);
     assert!(db.get(&primary_key).unwrap().is_some());
     assert!(db.get(&type_key).unwrap().is_some());
     assert!(db.get(&category_key).unwrap().is_some());
@@ -891,16 +869,14 @@ fn service_descriptors_query_by_category_returns_all_owners() {
     paused.status = SERVICE_STATUS_PAUSED;
     publish_descriptor(&mut db, &publisher_c, 0, &paused);
 
-    let inference =
-        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_INFERENCE).unwrap();
+    let inference = get_service_descriptors_by_category(&db, SERVICE_CATEGORY_INFERENCE).unwrap();
     assert_eq!(
         inference.len(),
         4,
         "all 4 inference descriptors across 3 owners"
     );
 
-    let oracle =
-        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_DATA_ORACLE).unwrap();
+    let oracle = get_service_descriptors_by_category(&db, SERVICE_CATEGORY_DATA_ORACLE).unwrap();
     assert_eq!(oracle.len(), 1);
     assert_eq!(oracle[0].0.owner_entity, publisher_b.id);
     assert_eq!(oracle[0].1.price_per_call, 500);
@@ -931,8 +907,7 @@ fn service_descriptors_query_empty_category_returns_empty() {
     assert!(storage.is_empty(), "no storage services published");
 
     // And the Inference query still works.
-    let inference =
-        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_INFERENCE).unwrap();
+    let inference = get_service_descriptors_by_category(&db, SERVICE_CATEGORY_INFERENCE).unwrap();
     assert_eq!(inference.len(), 1);
 }
 
@@ -950,8 +925,7 @@ fn service_descriptors_query_reflects_updates() {
     apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).expect("update succeeds");
 
     // Discovery surfaces the updated price.
-    let results =
-        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_DATA_ORACLE).unwrap();
+    let results = get_service_descriptors_by_category(&db, SERVICE_CATEGORY_DATA_ORACLE).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0.object_id, object_id);
     assert_eq!(results[0].1.price_per_call, 999);
@@ -971,8 +945,7 @@ fn service_descriptors_query_excludes_deleted() {
     let delete_tx = make_delete_tx(&publisher, 2, object_id_a);
     apply_delete_memory_object_tx(&mut db, &delete_tx, HEIGHT + 1).expect("delete succeeds");
 
-    let results =
-        get_service_descriptors_by_category(&db, SERVICE_CATEGORY_DATA_ORACLE).unwrap();
+    let results = get_service_descriptors_by_category(&db, SERVICE_CATEGORY_DATA_ORACLE).unwrap();
     assert_eq!(results.len(), 1, "only the surviving descriptor returned");
     assert_eq!(results[0].0.object_id, object_id_b);
     assert_eq!(results[0].1.price_per_call, 200);

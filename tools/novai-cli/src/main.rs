@@ -585,9 +585,7 @@ async fn main() {
                 object_id,
                 fee,
             } => service::run_delete(&rpc, &key_file, &object_id, fee, cli.json).await,
-            ServiceCommand::List { category } => {
-                service::run_list(&rpc, &category, cli.json).await
-            }
+            ServiceCommand::List { category } => service::run_list(&rpc, &category, cli.json).await,
         },
     };
 

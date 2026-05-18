@@ -237,10 +237,8 @@ pub async fn run_list(rpc: &RpcClient, category_str: &str, json: bool) -> Result
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(
-                &serde_json::json!({ "descriptors": descriptors })
-            )
-            .unwrap()
+            serde_json::to_string_pretty(&serde_json::json!({ "descriptors": descriptors }))
+                .unwrap()
         );
     } else if descriptors.is_empty() {
         println!("No descriptors published in category '{category_str}'");
