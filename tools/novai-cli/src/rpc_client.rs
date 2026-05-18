@@ -276,4 +276,51 @@ impl RpcClient {
             .ok_or("missing descriptors in response")?;
         Ok(descriptors.clone())
     }
+
+    /// Query a single VK registration by its 32-byte memory object id
+    /// (Week 30).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn get_vk_registration(
+        &self,
+        id_hex: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_getVkRegistration",
+                serde_json::json!({ "id": id_hex }),
+            )
+            .await?;
+        let registration = &result["registration"];
+        if registration.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(registration.clone()))
+        }
+    }
+
+    /// Query all VK registrations owned by a given entity (Week 30).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn list_vk_registrations(
+        &self,
+        entity_id_hex: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_listVkRegistrations",
+                serde_json::json!({ "entity_id": entity_id_hex }),
+            )
+            .await?;
+        let registrations = result["registrations"]
+            .as_array()
+            .ok_or("missing registrations in response")?;
+        Ok(registrations.clone())
+    }
 }

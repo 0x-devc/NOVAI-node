@@ -6282,6 +6282,77 @@ pub fn get_service_descriptors_by_category<K: Kv>(
     Ok(results)
 }
 
+/// Resolve a single `VkRegistration` by its 32-byte memory object id
+/// (Week 30).
+///
+/// Looks up the owner via the global `ai/vk_registry/by_id/{id}`
+/// secondary index, loads the canonical memory object, validates the
+/// object type, and decodes the payload. Returns `Ok(None)` if the
+/// index entry is missing, the memory object is absent, the object
+/// type does not match, or the payload fails to decode — i.e., any
+/// state where the registration is not currently resolvable. Returns
+/// `Err` only on a real KV read failure.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the underlying KV read fails.
+pub fn get_vk_registration_by_id<K: Kv>(
+    db: &K,
+    object_id: &[u8; 32],
+) -> Result<Option<(MemoryObject, VkRegistrationData)>, ExecError<K::Error>> {
+    let Some(owner_bytes) = db
+        .get(&vk_registry_by_id_key(object_id))
+        .map_err(ExecError::Db)?
+    else {
+        return Ok(None);
+    };
+    if owner_bytes.len() != 32 {
+        // State corruption — index value should always be 32 bytes.
+        return Ok(None);
+    }
+    let mut owner = [0u8; 32];
+    owner.copy_from_slice(&owner_bytes);
+
+    let Some(obj) = read_memory_object(db, &owner, object_id)? else {
+        return Ok(None);
+    };
+    if obj.object_type != MemoryObjectType::VkRegistration {
+        return Ok(None);
+    }
+    let Some(reg) = VkRegistrationData::decode(&obj.data) else {
+        return Ok(None);
+    };
+    Ok(Some((obj, reg)))
+}
+
+/// Query all `VkRegistration` memory objects owned by `entity_id`
+/// (Week 30).
+///
+/// Walks the `ai/memory_by_type/13/{entity_id}/` index and decodes each
+/// payload. Stale index entries (object record missing, payload
+/// malformed) are silently skipped so a partial index does not break
+/// callers. Results are returned in big-endian-object-id-ascending
+/// order (the natural lex order of the by-type index).
+///
+/// # Errors
+/// Returns `ExecError::Db` if the underlying KV scan fails.
+pub fn get_vk_registrations_by_entity<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+) -> Result<Vec<(MemoryObject, VkRegistrationData)>, ExecError<K::Error>> {
+    let objects = get_memory_objects_by_entity_and_type(
+        db,
+        entity_id,
+        MemoryObjectType::VkRegistration.to_byte(),
+    )?;
+    let mut results = Vec::with_capacity(objects.len());
+    for obj in objects {
+        if let Some(reg) = VkRegistrationData::decode(&obj.data) {
+            results.push((obj, reg));
+        }
+    }
+    Ok(results)
+}
+
 // ============================================================================
 // SIGNAL QUERY FUNCTIONS (Week 14 - D14.5)
 // ============================================================================

@@ -118,6 +118,24 @@ pub struct ExtendedSignalArgs {
     /// Attestation status byte (service-attestation): 0=delivered, 1=failed.
     #[arg(long)]
     pub attestation_status: Option<u8>,
+
+    /// Hex-encoded 32-byte VK registry handle (proof-submission, when
+    /// proof_type = 3 = PROOF_TYPE_GROTH16_REGISTERED). Resolves the
+    /// VK bytes on-chain via the `ai/vk_registry/by_id/` index;
+    /// callers do not pass `--vk-file` in this mode.
+    #[arg(long)]
+    pub vk_id: Option<String>,
+
+    /// Path to compressed verification-key bytes (proof-submission,
+    /// when proof_type = 1 = PROOF_TYPE_GROTH16). Mutually exclusive
+    /// with `--vk-id`.
+    #[arg(long)]
+    pub vk_file: Option<String>,
+
+    /// Path to compressed proof bytes (proof-submission, for any
+    /// real verifier proof_type). Required for proof_type = 1 or 3.
+    #[arg(long)]
+    pub proof_file: Option<String>,
 }
 
 /// Parse signal type string.
@@ -159,6 +177,85 @@ fn require_str<'a>(
 
 fn require_some<T>(value: Option<T>, flag: &str, sig_type: &str) -> Result<T, String> {
     value.ok_or_else(|| format!("{flag} is required for signal type {sig_type}"))
+}
+
+/// Proof-system discriminants the CLI knows about. Duplicates the
+/// runtime constants in `novai_execution` so the signal binary does not
+/// have to depend on the execution crate just for three byte literals.
+const PROOF_TYPE_STUB: u8 = 0;
+const PROOF_TYPE_GROTH16: u8 = 1;
+const PROOF_TYPE_GROTH16_REGISTERED: u8 = 3;
+
+/// Append the v2 ProofSubmission tail (`vk_len_be:4 | vk_bytes |
+/// proof_len_be:4 | proof_bytes`) to `payload`, deriving the contents
+/// from `extra` according to `proof_type`.
+///
+/// - `PROOF_TYPE_STUB` (0): no tail (v1 layout); validates that the
+///   v2-only flags are not set so a typo surfaces early instead of
+///   producing a confusingly large v2 payload.
+/// - `PROOF_TYPE_GROTH16` (1): require `--vk-file` and `--proof-file`;
+///   inline the bytes verbatim.
+/// - `PROOF_TYPE_GROTH16_REGISTERED` (3): require `--vk-id` and
+///   `--proof-file`; vk_bytes is exactly the 32-byte registry handle.
+fn append_proof_submission_v2_tail(
+    payload: &mut Vec<u8>,
+    proof_type: u8,
+    extra: &ExtendedSignalArgs,
+) -> Result<(), String> {
+    match proof_type {
+        PROOF_TYPE_STUB => {
+            if extra.vk_id.is_some() || extra.vk_file.is_some() || extra.proof_file.is_some() {
+                return Err(
+                    "proof_type 0 (stub) does not accept --vk-id / --vk-file / --proof-file"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
+        PROOF_TYPE_GROTH16 => {
+            if extra.vk_id.is_some() {
+                return Err(
+                    "--vk-id only applies to proof_type 3 (groth16-registered); use --vk-file with proof_type 1"
+                        .to_string(),
+                );
+            }
+            let vk_path = require_str(&extra.vk_file, "--vk-file", "proof-submission")?;
+            let proof_path = require_str(&extra.proof_file, "--proof-file", "proof-submission")?;
+            let vk_bytes = std::fs::read(vk_path)
+                .map_err(|e| format!("Failed to read VK file '{vk_path}': {e}"))?;
+            let proof_bytes = std::fs::read(proof_path)
+                .map_err(|e| format!("Failed to read proof file '{proof_path}': {e}"))?;
+            append_v2_tail(payload, &vk_bytes, &proof_bytes)
+        }
+        PROOF_TYPE_GROTH16_REGISTERED => {
+            if extra.vk_file.is_some() {
+                return Err(
+                    "--vk-file does not apply to proof_type 3 (groth16-registered); use --vk-id"
+                        .to_string(),
+                );
+            }
+            let vk_id_hex = require_str(&extra.vk_id, "--vk-id", "proof-submission")?;
+            let vk_id = parse_hex32(vk_id_hex, "vk_id")?;
+            let proof_path = require_str(&extra.proof_file, "--proof-file", "proof-submission")?;
+            let proof_bytes = std::fs::read(proof_path)
+                .map_err(|e| format!("Failed to read proof file '{proof_path}': {e}"))?;
+            append_v2_tail(payload, &vk_id, &proof_bytes)
+        }
+        other => Err(format!(
+            "proof_type {other} is not supported. Valid: 0 (stub), 1 (groth16), 3 (groth16-registered)"
+        )),
+    }
+}
+
+fn append_v2_tail(payload: &mut Vec<u8>, vk: &[u8], proof: &[u8]) -> Result<(), String> {
+    let vk_len = u32::try_from(vk.len()).map_err(|_| "vk length overflows u32".to_string())?;
+    let proof_len =
+        u32::try_from(proof.len()).map_err(|_| "proof length overflows u32".to_string())?;
+    payload.extend_from_slice(&vk_len.to_be_bytes());
+    payload.extend_from_slice(vk);
+    payload.extend_from_slice(&proof_len.to_be_bytes());
+    payload.extend_from_slice(proof);
+    Ok(())
 }
 
 /// Build the signal commitment payload bytes.
@@ -282,6 +379,7 @@ fn build_signal_payload(
             payload.push(proof_type);
             payload.extend_from_slice(&code);
             payload.extend_from_slice(&computation);
+            append_proof_submission_v2_tail(&mut payload, proof_type, extra)?;
         }
         AiSignalType::SubscriptionCreate => {
             let producer = parse_hex32(
@@ -530,6 +628,9 @@ mod tests {
             max_block_height: Some(0),
             payment_signal_hash: Some("00".repeat(32)),
             attestation_status: Some(0),
+            vk_id: None,
+            vk_file: None,
+            proof_file: None,
         }
     }
 
@@ -678,5 +779,102 @@ mod tests {
         assert_eq!(&payload[66..98], &[0xDDu8; 32]);
         assert_eq!(&payload[98..130], &[0xEEu8; 32]);
         assert_eq!(payload[130], 0);
+    }
+
+    #[test]
+    fn test_proof_submission_registered_payload_layout() {
+        // proof_type = 3 (GROTH16_REGISTERED): vk_bytes carries the
+        // 32-byte registry handle from --vk-id; --vk-file must NOT be
+        // supplied. We use a dummy proof file via the proof_bytes
+        // field on extra (no actual file IO since the test bypasses
+        // append_proof_submission_v2_tail by setting proof_file=None,
+        // but the helper requires --proof-file). Use a temp file.
+        let proof_path = std::env::temp_dir().join("test_proof_bytes.bin");
+        std::fs::write(&proof_path, [0xABu8, 0xCD, 0xEF]).unwrap();
+
+        let extra = ExtendedSignalArgs {
+            proof_type: Some(3),
+            code_hash: Some("c0".repeat(32)),
+            computation_hash: Some("c2".repeat(32)),
+            vk_id: Some("d1".repeat(32)),
+            proof_file: Some(proof_path.to_string_lossy().into_owned()),
+            ..full_extra()
+        };
+        let payload = build_signal_payload(
+            [0xC4u8; 32],
+            AiSignalType::ProofSubmission,
+            [0xE1u8; 32],
+            &extra,
+        )
+        .expect("build registered ProofSubmission payload");
+
+        // Base header: 66 bytes (version + signal_hash + signal_type +
+        // issuer_entity_id).
+        assert_eq!(payload[0], 2);
+        assert_eq!(&payload[1..33], &[0xC4u8; 32]);
+        assert_eq!(payload[33], AiSignalType::ProofSubmission.to_byte());
+        assert_eq!(&payload[34..66], &[0xE1u8; 32]);
+
+        // ProofSubmission extra fixed part (65 bytes).
+        assert_eq!(payload[66], PROOF_TYPE_GROTH16_REGISTERED);
+        assert_eq!(&payload[67..99], &[0xC0u8; 32]);
+        assert_eq!(&payload[99..131], &[0xC2u8; 32]);
+
+        // v2 tail: vk_len_be(=32) | vk_id(32) | proof_len_be(=3) | proof(3).
+        assert_eq!(&payload[131..135], &32u32.to_be_bytes());
+        assert_eq!(&payload[135..167], &[0xD1u8; 32]);
+        assert_eq!(&payload[167..171], &3u32.to_be_bytes());
+        assert_eq!(&payload[171..174], &[0xABu8, 0xCD, 0xEF]);
+
+        let _ = std::fs::remove_file(&proof_path);
+    }
+
+    #[test]
+    fn test_proof_submission_registered_rejects_vk_file() {
+        let extra = ExtendedSignalArgs {
+            proof_type: Some(3),
+            code_hash: Some("c0".repeat(32)),
+            computation_hash: Some("c2".repeat(32)),
+            vk_id: Some("d1".repeat(32)),
+            vk_file: Some("/tmp/should-not-be-read".to_string()),
+            proof_file: Some("/tmp/anything".to_string()),
+            ..full_extra()
+        };
+        let err = build_signal_payload([0u8; 32], AiSignalType::ProofSubmission, [0u8; 32], &extra)
+            .unwrap_err();
+        assert!(err.contains("--vk-file"), "err = {err}");
+        assert!(err.contains("groth16-registered"), "err = {err}");
+    }
+
+    #[test]
+    fn test_proof_submission_groth16_rejects_vk_id() {
+        let extra = ExtendedSignalArgs {
+            proof_type: Some(1),
+            code_hash: Some("c0".repeat(32)),
+            computation_hash: Some("c2".repeat(32)),
+            vk_id: Some("d1".repeat(32)),
+            vk_file: Some("/tmp/anything".to_string()),
+            proof_file: Some("/tmp/anything".to_string()),
+            ..full_extra()
+        };
+        let err = build_signal_payload([0u8; 32], AiSignalType::ProofSubmission, [0u8; 32], &extra)
+            .unwrap_err();
+        assert!(err.contains("--vk-id"), "err = {err}");
+        assert!(err.contains("proof_type 3"), "err = {err}");
+    }
+
+    #[test]
+    fn test_proof_submission_stub_rejects_v2_flags() {
+        let extra = ExtendedSignalArgs {
+            proof_type: Some(0),
+            code_hash: Some("c0".repeat(32)),
+            computation_hash: Some("c2".repeat(32)),
+            proof_file: Some("/tmp/anything".to_string()),
+            ..full_extra()
+        };
+        let err = build_signal_payload([0u8; 32], AiSignalType::ProofSubmission, [0u8; 32], &extra)
+            .unwrap_err();
+        assert!(err.contains("stub"), "err = {err}");
+        assert!(err.contains("--proof-file"), "err = {err}");
     }
 }

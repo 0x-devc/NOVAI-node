@@ -20,21 +20,23 @@ use crate::consensus_node::Storage;
 use crate::MutexExt;
 use mempool::{NonceProvider, TxMempool};
 use novai_ai_entities::{
-    AiSignalType, MemoryObject, ServiceDescriptorData, SignalCommitment, SERVICE_CATEGORY_COMPUTE,
-    SERVICE_CATEGORY_DATA_ORACLE, SERVICE_CATEGORY_GATEWAY, SERVICE_CATEGORY_GENERIC,
-    SERVICE_CATEGORY_INDEXER, SERVICE_CATEGORY_INFERENCE, SERVICE_CATEGORY_MONITORING,
-    SERVICE_CATEGORY_RESERVED_MAX, SERVICE_CATEGORY_SIGNAL_PROVIDER, SERVICE_CATEGORY_STORAGE,
-    SERVICE_CATEGORY_VERIFICATION, SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DEPRECATED,
-    SERVICE_STATUS_PAUSED,
+    AiSignalType, MemoryObject, ServiceDescriptorData, SignalCommitment, VkRegistrationData,
+    SERVICE_CATEGORY_COMPUTE, SERVICE_CATEGORY_DATA_ORACLE, SERVICE_CATEGORY_GATEWAY,
+    SERVICE_CATEGORY_GENERIC, SERVICE_CATEGORY_INDEXER, SERVICE_CATEGORY_INFERENCE,
+    SERVICE_CATEGORY_MONITORING, SERVICE_CATEGORY_RESERVED_MAX, SERVICE_CATEGORY_SIGNAL_PROVIDER,
+    SERVICE_CATEGORY_STORAGE, SERVICE_CATEGORY_VERIFICATION, SERVICE_STATUS_ACTIVE,
+    SERVICE_STATUS_DEPRECATED, SERVICE_STATUS_PAUSED,
 };
 use novai_codec::{decode_tx_v1_signed, txid_v1};
 use novai_consensus_types;
 use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_execution::{
     get_memory_objects_by_entity, get_payments_by_entity, get_service_descriptors_by_category,
-    get_signals_by_height, get_signals_by_issuer, get_signals_by_type, read_account_or_default,
-    read_ai_entity, PaymentRecord, PaymentRole, PAYMENT_ATTESTATION_STATUS_DELIVERED,
-    PAYMENT_ATTESTATION_STATUS_FAILED, PAYMENT_ATTESTATION_STATUS_NONE,
+    get_signals_by_height, get_signals_by_issuer, get_signals_by_type, get_vk_registration_by_id,
+    get_vk_registrations_by_entity, read_account_or_default, read_ai_entity, PaymentRecord,
+    PaymentRole, PAYMENT_ATTESTATION_STATUS_DELIVERED, PAYMENT_ATTESTATION_STATUS_FAILED,
+    PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16, PROOF_TYPE_GROTH16_REGISTERED,
+    PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
 };
 use novai_p2p::{NetworkMessage, PeerManager};
 use novai_types::{Address, TxV1, TxVersion};
@@ -437,6 +439,106 @@ fn service_status_label(byte: u8) -> &'static str {
 #[derive(Debug, Serialize)]
 struct GetServiceDescriptorsByCategoryResult {
     descriptors: Vec<ServiceDescriptorJson>,
+}
+
+/// Parameters for novai_getVkRegistration (Week 30).
+#[derive(Debug, Deserialize)]
+struct GetVkRegistrationParams {
+    /// Hex-encoded 32-byte VK registry handle (the memory object id
+    /// of a published `VkRegistration`).
+    id: String,
+}
+
+/// Parameters for novai_listVkRegistrations (Week 30).
+#[derive(Debug, Deserialize)]
+struct ListVkRegistrationsParams {
+    /// Hex-encoded 32-byte entity id whose VK registrations to list.
+    entity_id: String,
+}
+
+/// JSON-serializable `VkRegistration` record (Week 30).
+///
+/// `vk_bytes_hex` carries the full compressed VK so clients have a
+/// complete record without a follow-up fetch. `label` is rendered as a
+/// raw UTF-8 string (lossy on non-UTF-8 — handler validation forces
+/// labels through the same 32-byte / UTF-8-ish cap, so lossy decoding
+/// is acceptable for display).
+#[derive(Debug, Serialize)]
+struct VkRegistrationJson {
+    /// Hex-encoded 32-byte memory object id (the canonical registry
+    /// handle a `ProofSubmission` carries in `vk_bytes` when
+    /// `proof_type == PROOF_TYPE_GROTH16_REGISTERED`).
+    object_id: String,
+    /// Hex-encoded 32-byte owner entity id.
+    owner_entity: String,
+    /// Block height at which the registration was first published.
+    created_at: u64,
+    /// Block height at which the registration was most recently updated.
+    /// Equals `created_at` if no update has landed. Only `label` may
+    /// change; the proof_type / code_hash / vk_bytes are immutable.
+    updated_at: u64,
+    /// Wire-format version byte.
+    version: u8,
+    /// Numeric proof-system discriminant.
+    proof_type: u8,
+    /// Human-readable proof-system label (`"groth16"`, `"stub"`,
+    /// `"plonk"`, ...). Unknown discriminants render as `"unknown"`.
+    proof_type_label: &'static str,
+    /// Hex-encoded 32-byte canonical `code_hash` the VK verifies.
+    /// `ProofSubmission` callers must match this exactly.
+    code_hash: String,
+    /// Free-form label as a lossily-decoded UTF-8 string.
+    label: String,
+    /// Length of the compressed VK in bytes (convenience field — equals
+    /// `hex::decode(vk_bytes_hex).len()`).
+    vk_len: usize,
+    /// Hex-encoded compressed verification key bytes.
+    vk_bytes_hex: String,
+}
+
+impl From<(MemoryObject, VkRegistrationData)> for VkRegistrationJson {
+    fn from(pair: (MemoryObject, VkRegistrationData)) -> Self {
+        let (obj, reg) = pair;
+        let label = String::from_utf8_lossy(&reg.label).into_owned();
+        Self {
+            object_id: hex::encode(obj.object_id),
+            owner_entity: hex::encode(obj.owner_entity),
+            created_at: obj.created_at,
+            updated_at: obj.updated_at,
+            version: reg.version,
+            proof_type: reg.proof_type,
+            proof_type_label: proof_type_label(reg.proof_type),
+            code_hash: hex::encode(reg.code_hash),
+            label,
+            vk_len: reg.vk_bytes.len(),
+            vk_bytes_hex: hex::encode(&reg.vk_bytes),
+        }
+    }
+}
+
+fn proof_type_label(byte: u8) -> &'static str {
+    match byte {
+        PROOF_TYPE_STUB => "stub",
+        PROOF_TYPE_GROTH16 => "groth16",
+        PROOF_TYPE_PLONK => "plonk",
+        PROOF_TYPE_GROTH16_REGISTERED => "groth16-registered",
+        PROOF_TYPE_PLONK_REGISTERED => "plonk-registered",
+        _ => "unknown",
+    }
+}
+
+/// Result for novai_getVkRegistration.
+#[derive(Debug, Serialize)]
+struct GetVkRegistrationResult {
+    /// `None` if no registration matches the supplied handle (either
+    /// it never existed or it was deleted).
+    registration: Option<VkRegistrationJson>,
+}
+
+/// Result for novai_listVkRegistrations.
+#[derive(Debug, Serialize)]
+struct ListVkRegistrationsResult {
+    registrations: Vec<VkRegistrationJson>,
 }
 
 // ============================================================================
@@ -963,6 +1065,45 @@ pub fn start_rpc_server_with_state(
                 // Week 29: Agent Discovery Registry queries.
                 "novai_getServiceDescriptorsByCategory" => {
                     match handle_get_service_descriptors_by_category(&rpc_request, &db) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                    }
+                }
+                // Week 30: VK Registry queries.
+                "novai_getVkRegistration" => match handle_get_vk_registration(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_listVkRegistrations" => {
+                    match handle_list_vk_registrations(&rpc_request, &db) {
                         Ok(result) => {
                             let response = RpcResponse {
                                 jsonrpc: "2.0",
@@ -1510,6 +1651,67 @@ fn handle_get_service_descriptors_by_category(
         descriptors: descriptors
             .into_iter()
             .map(ServiceDescriptorJson::from)
+            .collect(),
+    })
+}
+
+/// Handle novai_getVkRegistration RPC method (Week 30).
+///
+/// Resolves a single `VkRegistration` by its 32-byte memory object id.
+/// Returns `{ registration: null }` if the handle does not currently
+/// resolve (never existed, deleted, or stale state). The full
+/// compressed VK is included in the response so clients can use it
+/// directly for off-chain verification or replay.
+fn handle_get_vk_registration(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetVkRegistrationResult, RpcError> {
+    let params: GetVkRegistrationParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let id = parse_hex32(&params.id, "id")?;
+
+    let db = db.lock_or_recover();
+    let resolved = get_vk_registration_by_id(&*db, &id).map_err(|_| RpcError {
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
+
+    Ok(GetVkRegistrationResult {
+        registration: resolved.map(VkRegistrationJson::from),
+    })
+}
+
+/// Handle novai_listVkRegistrations RPC method (Week 30).
+///
+/// Returns every `VkRegistration` owned by `entity_id`, in
+/// big-endian-object-id-ascending order (the natural lex order of the
+/// memory-by-type index). The result list is bounded by
+/// `MAX_VK_REGISTRATIONS_PER_ENTITY` (= 8 in v1), so the response size
+/// is naturally small.
+fn handle_list_vk_registrations(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<ListVkRegistrationsResult, RpcError> {
+    let params: ListVkRegistrationsParams = serde_json::from_value(request.params.clone())
+        .map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+
+    let db = db.lock_or_recover();
+    let registrations = get_vk_registrations_by_entity(&*db, &entity_id).map_err(|_| RpcError {
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
+
+    Ok(ListVkRegistrationsResult {
+        registrations: registrations
+            .into_iter()
+            .map(VkRegistrationJson::from)
             .collect(),
     })
 }
@@ -2310,5 +2512,80 @@ mod tests {
         );
         // Corrupted-record fallback.
         assert_eq!(service_status_label(99), "unknown");
+    }
+
+    // ========================================================================
+    // Week 30 Phase 3 - novai_getVkRegistration / novai_listVkRegistrations
+    // ========================================================================
+
+    fn sample_vk_registration_pair() -> (MemoryObject, VkRegistrationData) {
+        let owner = [0xA1u8; 32];
+        let reg = VkRegistrationData {
+            version: 1,
+            proof_type: PROOF_TYPE_GROTH16,
+            code_hash: [0xC0u8; 32],
+            label: b"sum-v1".to_vec(),
+            vk_bytes: (0..16u8).collect(),
+        };
+        let data = reg.encode();
+        let obj = MemoryObject {
+            object_id: [0xD1u8; 32],
+            object_type: novai_ai_entities::MemoryObjectType::VkRegistration,
+            owner_entity: owner,
+            created_at: 200,
+            updated_at: 210,
+            data,
+        };
+        (obj, reg)
+    }
+
+    #[test]
+    fn test_get_vk_registration_params_deserialize() {
+        let json = serde_json::json!({ "id": "d1".repeat(32) });
+        let params: GetVkRegistrationParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.id, "d1".repeat(32));
+    }
+
+    #[test]
+    fn test_list_vk_registrations_params_deserialize() {
+        let json = serde_json::json!({ "entity_id": "a1".repeat(32) });
+        let params: ListVkRegistrationsParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.entity_id, "a1".repeat(32));
+    }
+
+    #[test]
+    fn test_vk_registration_json_layout() {
+        let (obj, reg) = sample_vk_registration_pair();
+        let json = serde_json::to_value(VkRegistrationJson::from((obj, reg))).unwrap();
+
+        assert_eq!(json["object_id"], "d1".repeat(32));
+        assert_eq!(json["owner_entity"], "a1".repeat(32));
+        assert_eq!(json["created_at"], 200);
+        assert_eq!(json["updated_at"], 210);
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["proof_type"], PROOF_TYPE_GROTH16);
+        assert_eq!(json["proof_type_label"], "groth16");
+        assert_eq!(json["code_hash"], "c0".repeat(32));
+        assert_eq!(json["label"], "sum-v1");
+        assert_eq!(json["vk_len"], 16);
+        // Compressed VK bytes round-trip as hex.
+        let expected_hex: String = (0..16u8).map(|b| format!("{b:02x}")).collect();
+        assert_eq!(json["vk_bytes_hex"], expected_hex);
+    }
+
+    #[test]
+    fn test_proof_type_label_covers_known_and_unknown() {
+        assert_eq!(proof_type_label(PROOF_TYPE_STUB), "stub");
+        assert_eq!(proof_type_label(PROOF_TYPE_GROTH16), "groth16");
+        assert_eq!(proof_type_label(PROOF_TYPE_PLONK), "plonk");
+        assert_eq!(
+            proof_type_label(PROOF_TYPE_GROTH16_REGISTERED),
+            "groth16-registered"
+        );
+        assert_eq!(
+            proof_type_label(PROOF_TYPE_PLONK_REGISTERED),
+            "plonk-registered"
+        );
+        assert_eq!(proof_type_label(99), "unknown");
     }
 }

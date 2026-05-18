@@ -3,7 +3,7 @@ mod rpc_client;
 
 use clap::{Parser, Subcommand};
 use commands::signal::ExtendedSignalArgs;
-use commands::{account, ai, keygen, memory, service, signal};
+use commands::{account, ai, keygen, memory, service, signal, vk};
 use rpc_client::RpcClient;
 
 /// NOVAI CLI — interact with NOVAI blockchain nodes.
@@ -89,6 +89,12 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
+    },
+    /// VK Registry operations (Week 30): publish, update label, delete,
+    /// show, and list zero-knowledge proof verification keys on chain.
+    Vk {
+        #[command(subcommand)]
+        command: VkCommand,
     },
 }
 
@@ -315,6 +321,73 @@ enum ServiceCommand {
         /// Category name (see Publish for valid values).
         #[arg(long)]
         category: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum VkCommand {
+    /// Register a Groth16 verification key on chain.
+    Register {
+        /// Path to publisher entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte canonical code hash the VK verifies.
+        #[arg(long)]
+        code_hash: String,
+        /// Path to the compressed VK bytes (ark-serialize format).
+        #[arg(long)]
+        vk_file: String,
+        /// Proof system name. Only 'groth16' is wired in v1.
+        #[arg(long, default_value = "groth16")]
+        proof_type: String,
+        /// Optional free-form label (max 32 bytes UTF-8).
+        #[arg(long, default_value = "")]
+        label: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Update only the `label` field of an existing VK registration.
+    /// `proof_type`, `code_hash`, and `vk_bytes` are immutable; use
+    /// `Delete` + `Register` to change them.
+    UpdateLabel {
+        /// Path to publisher entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte object id of the registration to update.
+        #[arg(long)]
+        object_id: String,
+        /// New label (max 32 bytes UTF-8). Pass `""` to clear it.
+        #[arg(long)]
+        label: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Delete a VK registration. Subsequent ProofSubmission signals
+    /// referencing this handle will fail with `VkRegistrationNotFound`.
+    Delete {
+        /// Path to publisher entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte object id of the registration to delete.
+        #[arg(long)]
+        object_id: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Show a single VK registration by id.
+    Show {
+        /// Hex-encoded 32-byte object id.
+        #[arg(long)]
+        id: String,
+    },
+    /// List all VK registrations owned by an entity.
+    List {
+        /// Hex-encoded 32-byte entity id.
+        #[arg(long)]
+        entity_id: String,
     },
 }
 
@@ -586,6 +659,41 @@ async fn main() {
                 fee,
             } => service::run_delete(&rpc, &key_file, &object_id, fee, cli.json).await,
             ServiceCommand::List { category } => service::run_list(&rpc, &category, cli.json).await,
+        },
+        Command::Vk { command } => match command {
+            VkCommand::Register {
+                key_file,
+                code_hash,
+                vk_file,
+                proof_type,
+                label,
+                fee,
+            } => {
+                vk::run_register(
+                    &rpc,
+                    &key_file,
+                    &code_hash,
+                    &vk_file,
+                    &proof_type,
+                    &label,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            VkCommand::UpdateLabel {
+                key_file,
+                object_id,
+                label,
+                fee,
+            } => vk::run_update_label(&rpc, &key_file, &object_id, &label, fee, cli.json).await,
+            VkCommand::Delete {
+                key_file,
+                object_id,
+                fee,
+            } => vk::run_delete(&rpc, &key_file, &object_id, fee, cli.json).await,
+            VkCommand::Show { id } => vk::run_show(&rpc, &id, cli.json).await,
+            VkCommand::List { entity_id } => vk::run_list(&rpc, &entity_id, cli.json).await,
         },
     };
 
