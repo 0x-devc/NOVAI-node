@@ -499,6 +499,48 @@ pub enum ExecError<E> {
     /// time; only the human-readable `label` may change. Publishers
     /// wanting different bindings must delete and re-create.
     VkRegistrationImmutableFieldChanged,
+    /// `ProofSubmission` with `proof_type == PROOF_TYPE_GROTH16_REGISTERED`:
+    /// the v2 `vk_bytes` field carries the 32-byte registry handle, but the
+    /// decoded length is not exactly 32. Distinguishes a registered-VK
+    /// payload from the inline-VK shape so the runtime can surface a
+    /// specific decoder error rather than reusing `VerifyingKeyTooLarge`.
+    RegisteredVkBadIdLength {
+        /// Actual length of `vk_bytes` in the payload (registry id must
+        /// be exactly 32 bytes).
+        actual: usize,
+    },
+    /// `ProofSubmission` with `proof_type == PROOF_TYPE_GROTH16_REGISTERED`:
+    /// no `VkRegistration` memory object exists for the 32-byte handle.
+    /// Either the handle is wrong, the owner has deleted the
+    /// registration, or it never existed. Callers must keep the
+    /// registration alive for as long as they want to reference it.
+    VkRegistrationNotFound {
+        /// The 32-byte memory object id the submission referenced.
+        id: [u8; 32],
+    },
+    /// `ProofSubmission` with `proof_type == PROOF_TYPE_GROTH16_REGISTERED`:
+    /// the memory object resolved through the by-id index exists but is
+    /// not a `VkRegistration`. State corruption or an attacker forging
+    /// an arbitrary object id. The error is surfaced verbatim so the
+    /// underlying mismatch is debuggable from logs.
+    VkRegistrationTypeMismatch {
+        /// The `MemoryObjectType` discriminant the resolved record carries.
+        found: u8,
+    },
+    /// `ProofSubmission` with `proof_type == PROOF_TYPE_GROTH16_REGISTERED`:
+    /// the `code_hash` carried in the submission does not match the
+    /// `code_hash` bound in the registered VK. Prevents a publisher
+    /// from registering a VK for circuit A and then claiming it
+    /// verifies a proof for circuit B.
+    VkRegistrationCodeHashMismatch,
+    /// `ProofSubmission` with `proof_type == PROOF_TYPE_GROTH16_REGISTERED`:
+    /// the resolved `VkRegistration` carries a non-`PROOF_TYPE_GROTH16`
+    /// system. Unreachable in normal operation (registration validation
+    /// already rejects non-Groth16) but surfaced for defence in depth.
+    VkRegistrationProofTypeMismatch {
+        /// `proof_type` byte the stored registration carried.
+        registered: u8,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -715,6 +757,17 @@ pub const KEY_PREFIX_AI_PAYMENTS_BY_PAYEE: &[u8] = b"ai/payments/by_payee/";
 pub const KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY: &[u8] =
     b"ai/service_descriptors/by_category/";
 
+/// KV-key prefix for the VK Registry global by-id index (Week 30).
+///
+/// Each entry's value is the 32-byte owner entity id; the canonical
+/// `VkRegistrationData` lives inside the memory object at
+/// `ai_memory_object_key(owner, object_id)`. The index lets a
+/// `ProofSubmission` handler resolve `(owner, object_id)` from the
+/// 32-byte registry handle alone without scanning every entity's
+/// memory namespace. Layout:
+/// `b"ai/vk_registry/by_id/" || object_id[32]`.
+pub const KEY_PREFIX_AI_VK_REGISTRY_BY_ID: &[u8] = b"ai/vk_registry/by_id/";
+
 /// Block-count duration that newly deposited stake is locked for.
 /// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
 pub const STAKE_LOCK_PERIOD: u64 = 1000;
@@ -818,15 +871,31 @@ pub const PROOF_TYPE_GROTH16_REGISTERED: u8 = 3;
 /// Allocated alongside `PROOF_TYPE_GROTH16_REGISTERED` so the
 /// registered-VK proof-type range stays contiguous when PLONK ships.
 pub const PROOF_TYPE_PLONK_REGISTERED: u8 = 4;
-/// Maximum `proof_type` discriminant accepted by the handler.
+/// Highest contiguous `proof_type` discriminant accepted by the handler.
 ///
-/// The decoder rejects any higher value with `UnsupportedProofType` before
-/// the handler runs. Bumping this constant is the gate for activating each
-/// new verifier; activating PLONK would require both raising this and
-/// wiring the dispatch in `apply_signal_commitment_tx_inner`. Phase 2
-/// will bump this to `PROOF_TYPE_GROTH16_REGISTERED` once the registered-
-/// VK dispatch path lands.
+/// Retained for backward compatibility, but the decoder no longer uses a
+/// monotonic "<=" check: the supported set is non-contiguous because
+/// `PROOF_TYPE_PLONK` (= 2) is reserved-but-unwired between
+/// `PROOF_TYPE_GROTH16` (= 1) and `PROOF_TYPE_GROTH16_REGISTERED` (= 3).
+/// Wired support is gated by `is_supported_proof_type`; this constant is
+/// kept so existing callers and doc references stay valid.
 pub const PROOF_TYPE_MAX: u8 = PROOF_TYPE_GROTH16;
+
+/// Returns `true` iff `proof_type` is a wired verifier discriminant.
+///
+/// The set is non-contiguous: `PROOF_TYPE_PLONK` (= 2) and
+/// `PROOF_TYPE_PLONK_REGISTERED` (= 4) are reserved at the constant
+/// level but have no verifier implementation, so they remain rejected
+/// at decode time. Adding a new proof system means adding its
+/// discriminant here AND wiring the dispatch branch in
+/// `apply_signal_commitment_tx_inner`.
+#[must_use]
+pub const fn is_supported_proof_type(proof_type: u8) -> bool {
+    matches!(
+        proof_type,
+        PROOF_TYPE_STUB | PROOF_TYPE_GROTH16 | PROOF_TYPE_GROTH16_REGISTERED
+    )
+}
 
 /// Inline reputation-update tail carried in `ReputationUpdate` signal payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1640,7 +1709,7 @@ pub fn decode_signal_commitment_payload_v1(
             });
         }
         let proof_type = payload[66];
-        if proof_type > PROOF_TYPE_MAX {
+        if !is_supported_proof_type(proof_type) {
             return Err(ExecError::UnsupportedProofType { proof_type });
         }
         let mut code_hash = [0u8; 32];
@@ -1668,7 +1737,16 @@ pub fn decode_signal_commitment_payload_v1(
             let vk_len =
                 u32::from_be_bytes([payload[131], payload[132], payload[133], payload[134]])
                     as usize;
-            if vk_len > PROOF_SUBMISSION_MAX_VK_BYTES {
+            if proof_type == PROOF_TYPE_GROTH16_REGISTERED {
+                // Registered-VK shape: vk_bytes carries the 32-byte
+                // memory object id of a previously-published
+                // `VkRegistration`, NOT inline VK bytes. Reject any
+                // other length up front so the dispatch path can
+                // unconditionally interpret the field as an id.
+                if vk_len != 32 {
+                    return Err(ExecError::RegisteredVkBadIdLength { actual: vk_len });
+                }
+            } else if vk_len > PROOF_SUBMISSION_MAX_VK_BYTES {
                 return Err(ExecError::VerifyingKeyTooLarge {
                     actual: vk_len,
                     max: PROOF_SUBMISSION_MAX_VK_BYTES,
@@ -2087,6 +2165,26 @@ pub fn service_descriptor_by_category_key(
     out.extend_from_slice(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY);
     out.push(category);
     out.extend_from_slice(owner);
+    out.extend_from_slice(object_id);
+    out
+}
+
+/// Build the canonical KV key for the VK Registry global by-id index
+/// entry (Week 30):
+/// `b"ai/vk_registry/by_id/" || object_id[32]`.
+///
+/// The value stored under this key is the 32-byte owner entity id; the
+/// canonical `VkRegistrationData` lives inside the memory object at
+/// `ai_memory_object_key(owner, object_id)`. The index is the resolution
+/// path used by the `ProofSubmission` handler when `proof_type ==
+/// PROOF_TYPE_GROTH16_REGISTERED`: the wire carries only the 32-byte
+/// registry handle (in place of inline `vk_bytes`), and this index
+/// recovers the owning entity so the primary memory object record can be
+/// loaded.
+#[must_use]
+pub fn vk_registry_by_id_key(object_id: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_VK_REGISTRY_BY_ID.len() + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_VK_REGISTRY_BY_ID);
     out.extend_from_slice(object_id);
     out
 }
@@ -3095,7 +3193,7 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
 use novai_ai_entities::{
     encode_memory_object_v1, AiEntity, AiSignalType, CompositionGraphData, MemoryObject,
     MemoryObjectType, SignalCatalogData, SignalCommitment, SubscriptionData,
-    VerificationRecordData, MAX_REPUTATION_SCORE, MAX_SUBSCRIPTIONS_PER_ENTITY,
+    VerificationRecordData, VkRegistrationData, MAX_REPUTATION_SCORE, MAX_SUBSCRIPTIONS_PER_ENTITY,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
 use novai_crypto::{Groth16Verifier, StubZkVerifier, ZkVerifier};
@@ -3604,6 +3702,9 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         ExecError::ServiceAttestationInvalidStatus { status } => {
             ExecError::ServiceAttestationInvalidStatus { status }
         }
+        ExecError::RegisteredVkBadIdLength { actual } => {
+            ExecError::RegisteredVkBadIdLength { actual }
+        }
         _ => ExecError::Overflow,
     })?;
 
@@ -4035,27 +4136,80 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         // carries no proof bytes, so vk/proof slices are empty and the stub
         // accepts unconditionally. For PROOF_TYPE_GROTH16 the v2 wire
         // layout carries real vk_bytes and proof_bytes which Groth16Verifier
-        // deserialises and pairing-checks against `public_inputs`.
+        // deserialises and pairing-checks against `public_inputs`. For
+        // PROOF_TYPE_GROTH16_REGISTERED the wire vk_bytes is exactly 32
+        // bytes (enforced by decoder) carrying the memory object id of a
+        // previously-published VkRegistration; we resolve owner via the
+        // global by-id index, load the VkRegistration, validate proof_type
+        // and code_hash binding, then pass the stored compressed VK bytes
+        // to Groth16Verifier as if they had been inlined.
         let proof_bytes: &[u8] = &extra.proof_bytes;
-        let vk_bytes: &[u8] = &extra.vk_bytes;
+        let resolved_vk_bytes: Vec<u8>;
+        let effective_vk_bytes: &[u8] = if extra.proof_type == PROOF_TYPE_GROTH16_REGISTERED {
+            // Decoder guarantees vk_bytes.len() == 32 here. Defensive
+            // copy into a sized array for the index lookup.
+            let mut registry_id = [0u8; 32];
+            registry_id.copy_from_slice(&extra.vk_bytes);
+            let owner_bytes = db
+                .get(&vk_registry_by_id_key(&registry_id))
+                .map_err(ExecError::Db)?
+                .ok_or(ExecError::VkRegistrationNotFound { id: registry_id })?;
+            if owner_bytes.len() != 32 {
+                return Err(ExecError::CodecDecode(
+                    "VK registry by-id index value is not 32 bytes".into(),
+                ));
+            }
+            let mut owner = [0u8; 32];
+            owner.copy_from_slice(&owner_bytes);
+            let mem_obj = read_memory_object(db, &owner, &registry_id)?
+                .ok_or(ExecError::VkRegistrationNotFound { id: registry_id })?;
+            if mem_obj.object_type != MemoryObjectType::VkRegistration {
+                return Err(ExecError::VkRegistrationTypeMismatch {
+                    found: mem_obj.object_type.to_byte(),
+                });
+            }
+            let registration = VkRegistrationData::decode(&mem_obj.data)
+                .ok_or(ExecError::InvalidVkRegistration)?;
+            // Defensive check: the create-side validator already
+            // rejects non-Groth16 proof_type at registration. Recheck
+            // here so a future relaxation of the validator cannot
+            // silently widen what the dispatch accepts.
+            if registration.proof_type != PROOF_TYPE_GROTH16 {
+                return Err(ExecError::VkRegistrationProofTypeMismatch {
+                    registered: registration.proof_type,
+                });
+            }
+            // Binding check: the proof's claimed code_hash must match
+            // the code_hash bound at registration time. Without this,
+            // a publisher could register a VK for circuit A and then
+            // claim it verifies a proof for circuit B.
+            if registration.code_hash != extra.code_hash {
+                return Err(ExecError::VkRegistrationCodeHashMismatch);
+            }
+            resolved_vk_bytes = registration.vk_bytes;
+            &resolved_vk_bytes
+        } else {
+            &extra.vk_bytes
+        };
         let ok = match extra.proof_type {
             PROOF_TYPE_STUB => StubZkVerifier::verify_proof(
                 proof_bytes,
-                vk_bytes,
+                effective_vk_bytes,
                 &public_inputs,
                 extra.proof_type,
                 &extra.code_hash,
             ),
-            PROOF_TYPE_GROTH16 => Groth16Verifier::verify_proof(
+            PROOF_TYPE_GROTH16 | PROOF_TYPE_GROTH16_REGISTERED => Groth16Verifier::verify_proof(
                 proof_bytes,
-                vk_bytes,
+                effective_vk_bytes,
                 &public_inputs,
-                extra.proof_type,
+                PROOF_TYPE_GROTH16,
                 &extra.code_hash,
             ),
-            // Decoder rejects proof_type > PROOF_TYPE_MAX, so any value
-            // arriving here is one of the dispatched discriminants above.
-            _ => unreachable!("proof_type validated against PROOF_TYPE_MAX at decode time"),
+            // Decoder gates on is_supported_proof_type, which is the
+            // same wired set the match above covers exhaustively. Any
+            // value arriving here would be a decoder/dispatch drift bug.
+            _ => unreachable!("proof_type validated by is_supported_proof_type at decode time"),
         };
         if !ok {
             return Err(ExecError::ProofVerificationFailed);
@@ -5098,7 +5252,7 @@ pub fn check_ai_entity_sender<K: Kv>(
 // ============================================================================
 
 use novai_ai_entities::{
-    decode_memory_object_v1, ServiceDescriptorData, VkRegistrationData, MAX_DELEGATION_GRANTS,
+    decode_memory_object_v1, ServiceDescriptorData, MAX_DELEGATION_GRANTS,
     MAX_MEMORY_OBJECTS_PER_ENTITY, MAX_MEMORY_OBJECT_SIZE, MAX_SERVICE_DESCRIPTORS_PER_ENTITY,
     MAX_VK_REGISTRATIONS_PER_ENTITY, SERVICE_CATEGORY_RESERVED_MAX, SERVICE_DESCRIPTOR_V1,
     SERVICE_STATUS_MAX, VK_REGISTRATION_LABEL_MAX, VK_REGISTRATION_VERSION,
@@ -5568,9 +5722,11 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
 
     // Per-type structural validation for VkRegistration (Week 30).
     // Enforces decode, version, supported proof_type, label cap, VK
-    // length cap, VK deserializability, and the per-entity cap. No
-    // secondary index is needed in Phase 1; lookup by 32-byte object_id
-    // is served by the existing ai_memory_object_key route.
+    // length cap, VK deserializability, and the per-entity cap. The
+    // by-id secondary index is written further down so the Phase 2
+    // ProofSubmission dispatch can resolve (owner, object_id) from a
+    // 32-byte handle alone.
+    let is_vk_registration = payload.object_type == MemoryObjectType::VkRegistration;
     validate_vk_registration_payload(db, payload.object_type, &payload.data, &entity)?;
 
     // W5-06: Reject operations from deactivated entities
@@ -5651,6 +5807,16 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
         let category_index_key =
             service_descriptor_by_category_key(sd.category, &entity.id, &object_id);
         ops.push(WriteOp::Put(category_index_key, Vec::new()));
+    }
+
+    // Week 30: VK Registry global by-id index. Lets a ProofSubmission
+    // with proof_type == PROOF_TYPE_GROTH16_REGISTERED resolve
+    // (owner, object_id) from the 32-byte handle alone. Value is the
+    // 32-byte owner entity id; deletion removes it (handled in the
+    // DELETE handler below).
+    if is_vk_registration {
+        let registry_index_key = vk_registry_by_id_key(&object_id);
+        ops.push(WriteOp::Put(registry_index_key, entity.id.to_vec()));
     }
 
     let count_key = ai_memory_count_key(&entity.id);
@@ -5956,6 +6122,17 @@ fn apply_delete_memory_object_tx_inner<K: KvBatch>(
                 service_descriptor_by_category_key(sd.category, &entity.id, &payload.object_id);
             ops.push(WriteOp::Delete(category_index_key));
         }
+    }
+
+    // Week 30: tear down the VK Registry global by-id index when a
+    // VkRegistration is deleted. The index key is reconstructed from
+    // payload.object_id alone (no decode required), so a stale or
+    // malformed VkRegistrationData payload does not block deletion.
+    // After delete, subsequent ProofSubmissions referencing this
+    // handle surface `VkRegistrationNotFound`.
+    if memory_object.object_type == MemoryObjectType::VkRegistration {
+        let registry_index_key = vk_registry_by_id_key(&payload.object_id);
+        ops.push(WriteOp::Delete(registry_index_key));
     }
 
     // Update count (decrement, but don't go below 0)
