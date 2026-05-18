@@ -19,14 +19,21 @@
 use crate::consensus_node::Storage;
 use crate::MutexExt;
 use mempool::{NonceProvider, TxMempool};
-use novai_ai_entities::{AiSignalType, SignalCommitment};
+use novai_ai_entities::{
+    AiSignalType, MemoryObject, ServiceDescriptorData, SignalCommitment,
+    SERVICE_CATEGORY_DATA_ORACLE, SERVICE_CATEGORY_GATEWAY, SERVICE_CATEGORY_GENERIC,
+    SERVICE_CATEGORY_INDEXER, SERVICE_CATEGORY_INFERENCE, SERVICE_CATEGORY_MONITORING,
+    SERVICE_CATEGORY_RESERVED_MAX, SERVICE_CATEGORY_SIGNAL_PROVIDER, SERVICE_CATEGORY_STORAGE,
+    SERVICE_CATEGORY_VERIFICATION, SERVICE_CATEGORY_COMPUTE, SERVICE_STATUS_ACTIVE,
+    SERVICE_STATUS_DEPRECATED, SERVICE_STATUS_PAUSED,
+};
 use novai_codec::{decode_tx_v1_signed, txid_v1};
 use novai_consensus_types;
 use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_execution::{
-    get_memory_objects_by_entity, get_payments_by_entity, get_signals_by_height,
-    get_signals_by_issuer, get_signals_by_type, read_account_or_default, read_ai_entity,
-    PaymentRecord, PaymentRole, PAYMENT_ATTESTATION_STATUS_DELIVERED,
+    get_memory_objects_by_entity, get_payments_by_entity, get_service_descriptors_by_category,
+    get_signals_by_height, get_signals_by_issuer, get_signals_by_type, read_account_or_default,
+    read_ai_entity, PaymentRecord, PaymentRole, PAYMENT_ATTESTATION_STATUS_DELIVERED,
     PAYMENT_ATTESTATION_STATUS_FAILED, PAYMENT_ATTESTATION_STATUS_NONE,
 };
 use novai_p2p::{NetworkMessage, PeerManager};
@@ -311,6 +318,125 @@ impl From<PaymentRecord> for PaymentJson {
 #[derive(Debug, Serialize)]
 struct GetPaymentsByEntityResult {
     payments: Vec<PaymentJson>,
+}
+
+/// Parameters for novai_getServiceDescriptorsByCategory (Week 29).
+#[derive(Debug, Deserialize)]
+struct GetServiceDescriptorsByCategoryParams {
+    /// Service category discriminant (0..=15 well-known; 16..=255 reserved
+    /// for governance allocation).
+    category: u8,
+}
+
+/// JSON-serializable `ServiceDescriptor` record (Week 29).
+///
+/// `price_per_call`, `subscription_rate_per_block`, and `min_stake` are
+/// rendered as decimal strings to avoid JSON precision loss on large
+/// u64 / u128 values (matching the rest of the RPC surface).
+/// `category` and `status` carry both their numeric byte and a
+/// human-readable label so clients do not need a side-channel mapping.
+#[derive(Debug, Serialize)]
+struct ServiceDescriptorJson {
+    /// Hex-encoded 32-byte memory object id.
+    object_id: String,
+    /// Hex-encoded 32-byte publisher entity id.
+    owner_entity: String,
+    /// Block height at which the descriptor was first published.
+    created_at: u64,
+    /// Block height at which the descriptor was most recently updated.
+    /// Equals `created_at` if no update has landed.
+    updated_at: u64,
+    /// Wire-format version byte.
+    version: u8,
+    /// Hex-encoded 32-byte off-chain canonical service name commitment.
+    service_name_hash: String,
+    /// Hex-encoded 32-byte off-chain endpoint URL commitment.
+    service_url_hash: String,
+    /// Hex-encoded 32-byte off-chain long description commitment.
+    description_hash: String,
+    /// Numeric category discriminant.
+    category: u8,
+    /// Human-readable category label. Well-known values render their
+    /// canonical name (`"data-oracle"`, `"inference"`, ...); reserved
+    /// values render as `"reserved"`; governance-allocated values
+    /// (currently impossible) would render as `"governance"`.
+    category_label: &'static str,
+    /// Per-call price in base units, as a decimal string. `"0"` means
+    /// the service is free.
+    price_per_call: String,
+    /// Per-block subscription rate as a decimal string. `"0"` means no
+    /// subscription pricing is offered.
+    subscription_rate_per_block: String,
+    /// Minimum caller reputation score.
+    min_reputation_score: u16,
+    /// Minimum caller stake balance, as a decimal string.
+    min_stake: String,
+    /// Capability-tag bitfield (u32; bit semantics defined off-chain).
+    capability_tags: u32,
+    /// Numeric status discriminant.
+    status: u8,
+    /// Human-readable status label (`"active"`, `"paused"`,
+    /// `"deprecated"`). Unknown status bytes render as `"unknown"`
+    /// rather than panicking, mirroring the `attested_status` fallback
+    /// on `PaymentJson`.
+    status_label: &'static str,
+}
+
+impl From<(MemoryObject, ServiceDescriptorData)> for ServiceDescriptorJson {
+    fn from(pair: (MemoryObject, ServiceDescriptorData)) -> Self {
+        let (obj, sd) = pair;
+        Self {
+            object_id: hex::encode(obj.object_id),
+            owner_entity: hex::encode(obj.owner_entity),
+            created_at: obj.created_at,
+            updated_at: obj.updated_at,
+            version: sd.version,
+            service_name_hash: hex::encode(sd.service_name_hash),
+            service_url_hash: hex::encode(sd.service_url_hash),
+            description_hash: hex::encode(sd.description_hash),
+            category: sd.category,
+            category_label: service_category_label(sd.category),
+            price_per_call: sd.price_per_call.to_string(),
+            subscription_rate_per_block: sd.subscription_rate_per_block.to_string(),
+            min_reputation_score: sd.min_reputation_score,
+            min_stake: sd.min_stake.to_string(),
+            capability_tags: sd.capability_tags,
+            status: sd.status,
+            status_label: service_status_label(sd.status),
+        }
+    }
+}
+
+fn service_category_label(byte: u8) -> &'static str {
+    match byte {
+        SERVICE_CATEGORY_GENERIC => "generic",
+        SERVICE_CATEGORY_DATA_ORACLE => "data-oracle",
+        SERVICE_CATEGORY_INFERENCE => "inference",
+        SERVICE_CATEGORY_COMPUTE => "compute",
+        SERVICE_CATEGORY_STORAGE => "storage",
+        SERVICE_CATEGORY_INDEXER => "indexer",
+        SERVICE_CATEGORY_SIGNAL_PROVIDER => "signal-provider",
+        SERVICE_CATEGORY_VERIFICATION => "verification",
+        SERVICE_CATEGORY_MONITORING => "monitoring",
+        SERVICE_CATEGORY_GATEWAY => "gateway",
+        b if b <= SERVICE_CATEGORY_RESERVED_MAX => "reserved",
+        _ => "governance",
+    }
+}
+
+fn service_status_label(byte: u8) -> &'static str {
+    match byte {
+        SERVICE_STATUS_ACTIVE => "active",
+        SERVICE_STATUS_PAUSED => "paused",
+        SERVICE_STATUS_DEPRECATED => "deprecated",
+        _ => "unknown",
+    }
+}
+
+/// Result for novai_getServiceDescriptorsByCategory.
+#[derive(Debug, Serialize)]
+struct GetServiceDescriptorsByCategoryResult {
+    descriptors: Vec<ServiceDescriptorJson>,
 }
 
 // ============================================================================
@@ -834,6 +960,27 @@ pub fn start_rpc_server_with_state(
                         }
                     }
                 }
+                // Week 29: Agent Discovery Registry queries.
+                "novai_getServiceDescriptorsByCategory" => {
+                    match handle_get_service_descriptors_by_category(&rpc_request, &db) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                    }
+                }
                 "novai_getBalance" => match handle_get_balance(&rpc_request, &db) {
                     Ok(result) => {
                         let response = RpcResponse {
@@ -1326,6 +1473,40 @@ fn handle_get_payments_by_entity(
 
     Ok(GetPaymentsByEntityResult {
         payments: payments.into_iter().map(PaymentJson::from).collect(),
+    })
+}
+
+/// Handle novai_getServiceDescriptorsByCategory RPC method (Week 29).
+///
+/// Returns every published `ServiceDescriptor` whose `category` byte
+/// matches the request. Stale index entries are skipped by the
+/// underlying helper. No height windowing: the by_category index does
+/// not carry a height key, and descriptor counts are bounded by the
+/// per-entity cap and the number of publishing entities so a single
+/// scan fits comfortably under the RPC response size limit.
+fn handle_get_service_descriptors_by_category(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetServiceDescriptorsByCategoryResult, RpcError> {
+    let params: GetServiceDescriptorsByCategoryParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+
+    let db = db.lock_or_recover();
+    let descriptors = get_service_descriptors_by_category(&*db, params.category).map_err(|_| {
+        RpcError {
+            code: -32002,
+            message: "State query failed".to_string(),
+        }
+    })?;
+
+    Ok(GetServiceDescriptorsByCategoryResult {
+        descriptors: descriptors
+            .into_iter()
+            .map(ServiceDescriptorJson::from)
+            .collect(),
     })
 }
 
@@ -2003,5 +2184,128 @@ mod tests {
         let unknown = serde_json::to_value(PaymentJson::from(mk(0x7Fu8, 30))).unwrap();
         assert_eq!(unknown["attested_status"], "unknown");
         assert_eq!(unknown["attested_height"], 30);
+    }
+
+    // ========================================================================
+    // Week 29 Phase 5 - novai_getServiceDescriptorsByCategory wire shape
+    // ========================================================================
+
+    fn sample_service_descriptor_pair() -> (MemoryObject, ServiceDescriptorData) {
+        let owner = [0xA1u8; 32];
+        let sd = ServiceDescriptorData {
+            version: 1,
+            service_name_hash: [0xB1u8; 32],
+            service_url_hash: [0xB2u8; 32],
+            description_hash: [0xB3u8; 32],
+            category: SERVICE_CATEGORY_DATA_ORACLE,
+            price_per_call: 0xDEAD_BEEFu64,
+            subscription_rate_per_block: 42,
+            min_reputation_score: 50,
+            min_stake: 1_000_000_000_000_u128,
+            capability_tags: 0x0F,
+            status: SERVICE_STATUS_ACTIVE,
+            reserved: [0u8; 7],
+        };
+        let data = sd.encode().to_vec();
+        let obj = MemoryObject {
+            object_id: [0xC1u8; 32],
+            object_type: novai_ai_entities::MemoryObjectType::ServiceDescriptor,
+            owner_entity: owner,
+            created_at: 100,
+            updated_at: 110,
+            data,
+        };
+        (obj, sd)
+    }
+
+    #[test]
+    fn test_get_service_descriptors_by_category_params_deserialize() {
+        let json = serde_json::json!({ "category": 1u8 });
+        let params: GetServiceDescriptorsByCategoryParams =
+            serde_json::from_value(json).unwrap();
+        assert_eq!(params.category, SERVICE_CATEGORY_DATA_ORACLE);
+    }
+
+    #[test]
+    fn test_service_descriptor_json_renders_amounts_as_strings_and_labels() {
+        let (obj, sd) = sample_service_descriptor_pair();
+        let json = serde_json::to_value(ServiceDescriptorJson::from((obj, sd))).unwrap();
+
+        // Hex-encoded ids and hashes.
+        assert_eq!(json["object_id"], "c1".repeat(32));
+        assert_eq!(json["owner_entity"], "a1".repeat(32));
+        assert_eq!(json["service_name_hash"], "b1".repeat(32));
+        assert_eq!(json["service_url_hash"], "b2".repeat(32));
+        assert_eq!(json["description_hash"], "b3".repeat(32));
+
+        // Envelope timestamps preserved.
+        assert_eq!(json["created_at"], 100);
+        assert_eq!(json["updated_at"], 110);
+
+        // Amounts as decimal strings.
+        assert_eq!(json["price_per_call"], 0xDEAD_BEEFu64.to_string());
+        assert_eq!(json["subscription_rate_per_block"], "42");
+        assert_eq!(json["min_stake"], "1000000000000");
+        assert!(json["price_per_call"].is_string());
+        assert!(json["subscription_rate_per_block"].is_string());
+        assert!(json["min_stake"].is_string());
+
+        // Category and status get both numeric and label.
+        assert_eq!(json["category"], SERVICE_CATEGORY_DATA_ORACLE);
+        assert_eq!(json["category_label"], "data-oracle");
+        assert_eq!(json["status"], SERVICE_STATUS_ACTIVE);
+        assert_eq!(json["status_label"], "active");
+    }
+
+    #[test]
+    fn test_service_category_label_covers_known_and_reserved_ranges() {
+        assert_eq!(service_category_label(SERVICE_CATEGORY_GENERIC), "generic");
+        assert_eq!(
+            service_category_label(SERVICE_CATEGORY_DATA_ORACLE),
+            "data-oracle"
+        );
+        assert_eq!(
+            service_category_label(SERVICE_CATEGORY_INFERENCE),
+            "inference"
+        );
+        assert_eq!(service_category_label(SERVICE_CATEGORY_COMPUTE), "compute");
+        assert_eq!(service_category_label(SERVICE_CATEGORY_STORAGE), "storage");
+        assert_eq!(service_category_label(SERVICE_CATEGORY_INDEXER), "indexer");
+        assert_eq!(
+            service_category_label(SERVICE_CATEGORY_SIGNAL_PROVIDER),
+            "signal-provider"
+        );
+        assert_eq!(
+            service_category_label(SERVICE_CATEGORY_VERIFICATION),
+            "verification"
+        );
+        assert_eq!(
+            service_category_label(SERVICE_CATEGORY_MONITORING),
+            "monitoring"
+        );
+        assert_eq!(service_category_label(SERVICE_CATEGORY_GATEWAY), "gateway");
+
+        // 10..=15 fall through to "reserved" (no v1 well-known name yet).
+        assert_eq!(service_category_label(10), "reserved");
+        assert_eq!(
+            service_category_label(SERVICE_CATEGORY_RESERVED_MAX),
+            "reserved"
+        );
+
+        // 16 and above are the governance-allocation range.
+        assert_eq!(service_category_label(16), "governance");
+        assert_eq!(service_category_label(255), "governance");
+    }
+
+    #[test]
+    fn test_service_status_label_paused_deprecated_and_unknown() {
+        assert_eq!(service_status_label(SERVICE_STATUS_ACTIVE), "active");
+        assert_eq!(service_status_label(SERVICE_STATUS_PAUSED), "paused");
+        assert_eq!(
+            service_status_label(SERVICE_STATUS_DEPRECATED),
+            "deprecated"
+        );
+        // Corrupted-record fallback.
+        assert_eq!(service_status_label(99), "unknown");
     }
 }

@@ -3,7 +3,7 @@ mod rpc_client;
 
 use clap::{Parser, Subcommand};
 use commands::signal::ExtendedSignalArgs;
-use commands::{account, ai, keygen, memory, signal};
+use commands::{account, ai, keygen, memory, service, signal};
 use rpc_client::RpcClient;
 
 /// NOVAI CLI — interact with NOVAI blockchain nodes.
@@ -84,6 +84,11 @@ enum Command {
     Signal {
         #[command(subcommand)]
         command: SignalCommand,
+    },
+    /// Agent Discovery Registry operations (Week 29).
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
     },
 }
 
@@ -214,6 +219,102 @@ enum MemoryCommand {
         /// Hex-encoded 32-byte entity ID.
         #[arg(long)]
         entity_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+enum ServiceCommand {
+    /// Publish a new service descriptor in the Agent Discovery Registry.
+    Publish {
+        /// Path to publisher entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte off-chain service name commitment.
+        #[arg(long)]
+        service_name_hash: String,
+        /// Hex-encoded 32-byte off-chain endpoint URL commitment.
+        #[arg(long)]
+        service_url_hash: String,
+        /// Hex-encoded 32-byte off-chain long description commitment.
+        #[arg(long)]
+        description_hash: String,
+        /// Service category: generic, data-oracle, inference, compute,
+        /// storage, indexer, signal-provider, verification, monitoring,
+        /// gateway.
+        #[arg(long)]
+        category: String,
+        /// Per-call price in base units (0 = free).
+        #[arg(long)]
+        price_per_call: u64,
+        /// Per-block subscription rate (0 = no subscription offered).
+        #[arg(long, default_value_t = 0)]
+        subscription_rate: u64,
+        /// Minimum caller reputation score (0..=100).
+        #[arg(long, default_value_t = 0)]
+        min_reputation: u16,
+        /// Minimum caller stake balance (0 = no stake required).
+        #[arg(long, default_value_t = 0)]
+        min_stake: u128,
+        /// Capability tags bitfield.
+        #[arg(long, default_value_t = 0)]
+        capability_tags: u32,
+        /// Initial status: active, paused, or deprecated.
+        #[arg(long, default_value = "active")]
+        status: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Update an existing service descriptor. All fields must be re-
+    /// supplied; `category` is immutable and must match the published
+    /// value.
+    Update {
+        /// Path to publisher entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte object id of the descriptor to update.
+        #[arg(long)]
+        object_id: String,
+        #[arg(long)]
+        service_name_hash: String,
+        #[arg(long)]
+        service_url_hash: String,
+        #[arg(long)]
+        description_hash: String,
+        #[arg(long)]
+        category: String,
+        #[arg(long)]
+        price_per_call: u64,
+        #[arg(long, default_value_t = 0)]
+        subscription_rate: u64,
+        #[arg(long, default_value_t = 0)]
+        min_reputation: u16,
+        #[arg(long, default_value_t = 0)]
+        min_stake: u128,
+        #[arg(long, default_value_t = 0)]
+        capability_tags: u32,
+        #[arg(long, default_value = "active")]
+        status: String,
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Delete a service descriptor.
+    Delete {
+        /// Path to publisher entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte object id of the descriptor to delete.
+        #[arg(long)]
+        object_id: String,
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// List all service descriptors in a category.
+    List {
+        /// Category name (see Publish for valid values).
+        #[arg(long)]
+        category: String,
     },
 }
 
@@ -411,6 +512,82 @@ async fn main() {
                 start,
                 end,
             } => signal::run_by_type(&rpc, &signal_type, start, end, cli.json).await,
+        },
+        Command::Service { command } => match command {
+            ServiceCommand::Publish {
+                key_file,
+                service_name_hash,
+                service_url_hash,
+                description_hash,
+                category,
+                price_per_call,
+                subscription_rate,
+                min_reputation,
+                min_stake,
+                capability_tags,
+                status,
+                fee,
+            } => {
+                service::run_publish(
+                    &rpc,
+                    &key_file,
+                    &service_name_hash,
+                    &service_url_hash,
+                    &description_hash,
+                    &category,
+                    price_per_call,
+                    subscription_rate,
+                    min_reputation,
+                    min_stake,
+                    capability_tags,
+                    &status,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            ServiceCommand::Update {
+                key_file,
+                object_id,
+                service_name_hash,
+                service_url_hash,
+                description_hash,
+                category,
+                price_per_call,
+                subscription_rate,
+                min_reputation,
+                min_stake,
+                capability_tags,
+                status,
+                fee,
+            } => {
+                service::run_update(
+                    &rpc,
+                    &key_file,
+                    &object_id,
+                    &service_name_hash,
+                    &service_url_hash,
+                    &description_hash,
+                    &category,
+                    price_per_call,
+                    subscription_rate,
+                    min_reputation,
+                    min_stake,
+                    capability_tags,
+                    &status,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            ServiceCommand::Delete {
+                key_file,
+                object_id,
+                fee,
+            } => service::run_delete(&rpc, &key_file, &object_id, fee, cli.json).await,
+            ServiceCommand::List { category } => {
+                service::run_list(&rpc, &category, cli.json).await
+            }
         },
     };
 

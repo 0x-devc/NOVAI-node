@@ -16406,3 +16406,303 @@ phases. All 1,404 tests passing, zero clippy warnings, cargo deny check
 licenses passes. The chain now speaks the same payment protocol AI
 agents already use, with the added benefit that the payer's on-chain
 reputation and stake are visible to the payee before acceptance.
+
+## Week 29: Agent Discovery Registry
+
+### 1. Overview - Objectives & Deliverables
+
+Week 29 makes AI services discoverable on-chain. After Week 28 wired up
+the native x402 payment rail, the obvious follow-up question was: how
+does an AI agent find the service it wants to pay for? The answer
+shipped this week is a new memory object type that lets publishers
+declare what their service does, what it charges, and what callers
+must satisfy; other entities discover services through a category-
+indexed RPC query. The new on-chain handle is the natural value to put
+in a `PaymentRequest`'s `service_descriptor_hash` field.
+
+**Goal Statement.** Ship a memory object type carrying service
+descriptors, a category-indexed discovery surface, full CRUD via the
+existing memory object signal payloads, the cross-entity discovery
+RPC, and a typed CLI subcommand.
+
+**Deliverables.**
+
+- D29.1: `MemoryObjectType::ServiceDescriptor` (type byte 12) + the
+  144-byte `ServiceDescriptorData` codec + golden vector.
+- D29.2: Field set covering off-chain name/URL/description commitments,
+  category, per-call price + optional subscription rate, minimum caller
+  reputation + stake, capability-tag bitfield, status, and 7 reserved
+  bytes for forward compatibility.
+- D29.3: Discovery index `ai/service_descriptors/by_category/` written
+  on create and torn down on delete inside the same atomic batch as
+  the existing memory-object writes.
+- D29.4: CRUD wired through the existing `CreateMemoryObject` (payload
+  v3), `UpdateMemoryObject` (v4), and `DeleteMemoryObject` (v5) signal
+  handlers. No new signal types.
+- D29.5: `novai_getServiceDescriptorsByCategory` RPC method + the
+  `get_service_descriptors_by_category` execution helper that backs
+  it.
+- D29.6: `novai-cli service publish/update/delete/list` subcommand
+  with typed flags. Category and status are accepted as
+  human-readable strings; the CLI translates to the canonical byte
+  before encoding the 144-byte payload.
+
+**Final Metrics.**
+
+- 35 new tests across 4 files (9 unit tests in `ai_entities` and
+  `execution`, 26 integration tests in `service_descriptor_system.rs`,
+  4 RPC inline tests in `node`, 4 CLI parser tests in `service.rs`;
+  some tests do double duty so the exact split varies).
+- 1,448 tests passing total (1,404 baseline + 44 net new across the
+  five Week 29 phases), 0 failing.
+- Zero clippy warnings under `--all-targets -- -D warnings`.
+- `cargo deny check licenses` passes.
+- One commit per phase across five phases.
+
+### 2. Design Decisions (Pushbacks Against the Original Prompt)
+
+The original prompt was "publish what they do, what they charge, and
+what capabilities they require." Four pushbacks reshaped that into the
+final design.
+
+**A. Categories + off-chain content hashes, not free-form text.**
+"What they do" cannot be on-chain free-form text in this codebase -
+every other memory object stores structured numeric or hash data only
+and references human-readable content off-chain. The replacement: a
+1-byte category discriminant drives discovery, and three 32-byte
+`blake3` commitments point to off-chain name/URL/description
+documents.
+
+**B. Just `min_reputation_score` and `min_stake` for v1.** "What they
+require" was open-ended. The narrow v1 set is exactly the two filters
+a payee already uses to accept Week 28 `PaymentRequest` payments. Six
+of the seven reserved bytes are kept as the forward-compat seam for
+future filters (caller autonomy tier, required caller capability
+flags, etc.) - a schema bump lights them up by changing the validation
+rule, not the byte layout.
+
+**C. One descriptor per service, not one catalog per entity.** The
+catalog model (used by `SignalCatalog` at type 7) makes every update
+rewrite the whole list and gives the entire catalog one `object_id`.
+For Week 28 integration we wanted a stable per-service handle that a
+payer can put in `PaymentRequest.service_descriptor_hash`, so the
+unit of publication is a single memory object per service. Per-entity
+cap `MAX_SERVICE_DESCRIPTORS_PER_ENTITY = 16` counts toward the
+existing 100-per-entity total and leaves room for the typical mix of
+subscriptions, delegations, and ratings.
+
+**D. Category is immutable on update.** Mutating category would force
+the update handler to rewrite the `by_category` index, which is a new
+wrinkle on top of an existing handler we want to keep narrow. The
+rule: `UpdateMemoryObject` can change any descriptor field except
+`category`; wrong category goes through delete + recreate. The
+discovery index never needs rewriting on update and the `object_id`
+stays stable through every other field change.
+
+### 3. Wire Layout (Locked by Golden Vector Tests)
+
+```
+ServiceDescriptorData (144 bytes):
+  version                        u8     byte  0    (SERVICE_DESCRIPTOR_V1 = 1)
+  service_name_hash              [u8;32] bytes 1..33
+  service_url_hash               [u8;32] bytes 33..65
+  description_hash               [u8;32] bytes 65..97
+  category                       u8     byte  97   (0..=15 well-known, 16..=255 governance)
+  price_per_call_be              u64    bytes 98..106
+  subscription_rate_per_block_be u64    bytes 106..114
+  min_reputation_score_be        u16    bytes 114..116
+  min_stake_be                   u128   bytes 116..132
+  capability_tags_be             u32    bytes 132..136
+  status                         u8     byte  136  (0=Active, 1=Paused, 2=Deprecated)
+  reserved                       [u8;7] bytes 137..144  (must be zero on create/update)
+```
+
+Full byte layout: `1 + 32 + 32 + 32 + 1 + 8 + 8 + 2 + 16 + 4 + 1 + 7
+= 144`. Stored inside an 86-byte `MemoryObject` envelope, so on-chain
+footprint is **230 bytes per descriptor**.
+
+### 4. Category and Status Enums
+
+```
+Categories (0..=9 well-known, 10..=15 reserved for v1 extension,
+            16..=255 reserved for governance allocation):
+
+  0  generic           Uncategorized.
+  1  data-oracle       Real-world data feeds (prices, weather, ...).
+  2  inference         LLM / ML model inference as a service.
+  3  compute           Computation as a service (proof generation, batch jobs).
+  4  storage           Off-chain data persistence (IPFS pinning, archival).
+  5  indexer           Chain or data indexing (GraphQL, search).
+  6  signal-provider   On-chain signal producer (anomaly, prediction, ...).
+  7  verification      Proof verification or audit.
+  8  monitoring        Observability services (uptime, log analysis, metrics).
+  9  gateway           Gateway or proxy services (HTTPS-to-x402 bridges, ...).
+
+Statuses:
+
+  0  active
+  1  paused
+  2  deprecated
+```
+
+The original prompt's category brainstorm included Translation and
+Aggregation; both were dropped during review in favour of Monitoring
+and Gateway, which fit the AI agent workload more directly.
+
+### 5. Storage Layout
+
+```
+Primary record (existing memory object layout):
+  ai/memory_objects/<owner>/<object_id>  ->  encoded MemoryObject{type=12, ...}
+
+Per-entity type index (existing, written by create handler):
+  ai/memory_by_type/12/<owner>/<object_id>  ->  empty marker
+
+NEW per-category discovery index:
+  ai/service_descriptors/by_category/<category>/<owner>/<object_id>  ->  empty marker
+
+Per-entity count index (existing):
+  ai/memory_count/<owner>  ->  u32_be
+```
+
+The by_category prefix lives alongside the Week 28 `ai/payments/by_*`
+indexes and the Week 4 `ai/signals/by_*` indexes. Both the create and
+delete handlers maintain it in the same atomic batch as the existing
+writes; the update handler does not touch it because category is
+immutable.
+
+### 6. Handler Validation Order
+
+`CreateMemoryObject` (apply_create_memory_object_tx_inner):
+
+```
+1. validate_service_descriptor_payload (no-op for non-ServiceDescriptor
+   types so the call sits alongside the existing per-type hooks):
+   - Decode the 144-byte payload (InvalidServiceDescriptor on length
+     mismatch).
+   - version == SERVICE_DESCRIPTOR_V1.
+   - category <= SERVICE_CATEGORY_RESERVED_MAX (15).
+   - status <= SERVICE_STATUS_MAX (2).
+   - min_reputation_score <= MAX_REPUTATION_SCORE (100).
+   - reserved[..7] all zero (forward-compat lock).
+   - Existing descriptor count for this publisher <
+     MAX_SERVICE_DESCRIPTORS_PER_ENTITY (16). Counted via a bounded
+     prefix scan over the by_type index, mirroring the
+     MAX_DELEGATION_GRANTS pattern at type 10.
+2. Standard create writes: primary memory object, by_type marker,
+   count increment.
+3. NEW: by_category marker.
+4. All ops commit through the existing atomic batch.
+```
+
+`UpdateMemoryObject` (apply_update_memory_object_tx_inner):
+
+```
+1. Existing DelegationGrantNotUpdatable check (unchanged).
+2. Existing validate_composition_graph_payload (unchanged).
+3. NEW: validate_service_descriptor_update:
+   - Re-runs every create-side field check on the new payload.
+   - Additionally rejects category changes with
+     ServiceDescriptorCategoryImmutable.
+4. Standard update writes: primary memory object only (data + updated_at
+   change, object_id is preserved). NO index rewrites because category
+   is immutable.
+```
+
+`DeleteMemoryObject` (apply_delete_memory_object_tx_inner):
+
+```
+1. Existing primary + by_type + count deletes (unchanged).
+2. NEW: when the deleted object is a ServiceDescriptor, decode the
+   category from its existing data and push a Delete for the
+   by_category entry into the same atomic batch. A malformed
+   descriptor causes the Delete to be skipped silently, mirroring the
+   DelegationGrant tolerance pattern.
+```
+
+### 7. RPC
+
+```
+Method: novai_getServiceDescriptorsByCategory
+Params: { category: u8 }
+Response: { descriptors: [ServiceDescriptorJson, ...] }
+
+ServiceDescriptorJson {
+  object_id, owner_entity (hex),
+  created_at, updated_at,
+  version,
+  service_name_hash, service_url_hash, description_hash (hex),
+  category, category_label (e.g. "data-oracle"),
+  price_per_call, subscription_rate_per_block, min_stake (decimal strings),
+  min_reputation_score, capability_tags,
+  status, status_label (e.g. "active")
+}
+```
+
+Decimal strings for u64 and u128 values match the rest of the RPC
+surface. `category_label` and `status_label` cover both well-known and
+reserved ranges; out-of-range bytes render as `"governance"` or
+`"unknown"` rather than panicking.
+
+### 8. CLI
+
+```
+novai-cli service publish \
+  --key-file alice.key \
+  --service-name-hash <hex32> \
+  --service-url-hash <hex32> \
+  --description-hash <hex32> \
+  --category data-oracle \
+  --price-per-call 100 \
+  --subscription-rate 0 \
+  --min-reputation 50 \
+  --min-stake 1000000 \
+  --capability-tags 0x0F \
+  --status active
+
+novai-cli service update --key-file alice.key --object-id <hex32> ...
+novai-cli service delete --key-file alice.key --object-id <hex32>
+novai-cli service list --category data-oracle
+```
+
+`service publish/update` wrap the existing `CreateMemoryObject` and
+`UpdateMemoryObject` signal payloads so operators do not have to
+hand-roll the 144-byte descriptor. Category and status are accepted
+as human-readable strings and translated to canonical bytes.
+`service list` calls the new RPC and renders a table with object id,
+owner, price, and status label.
+
+### 9. Test Surface
+
+| File | Tests | What it covers |
+|------|-------|---------------|
+| crates/ai_entities/src/memory.rs | 9 (4 new) | Type enum byte, codec roundtrip, reserved-byte preservation, golden 144-byte layout, size + category + status constants. |
+| crates/execution/src/lib.rs | 2 new | by_category KV key determinism + prefix + category-byte separation; cross-crate constant smoke test. |
+| crates/execution/tests/service_descriptor_system.rs | 26 | Full create/update/delete handler suite + cross-entity query. |
+| crates/node/src/rpc.rs | 4 new inline | Params deserialize, JSON shape with decimal-string amounts + labels, label coverage for known/reserved/governance ranges, status label including the "unknown" fallback. |
+| tools/novai-cli/src/commands/service.rs | 4 unit | Category and status string parsers, build-descriptor roundtrip, bad-hex rejection. |
+
+### 10. Outstanding Work Items
+
+- Discovery filters: a single category is the only filter v1 supports
+  on chain. Clients fetch all descriptors in a category and filter
+  client-side by price, reputation, stake, etc. A future
+  category-and-status index could narrow the scan if discovery
+  volume warrants it.
+- Per-status indexes: deprecated services still surface in discovery
+  queries (intentional - the audit trail matters). If operators want
+  "active only" filtering at the RPC level, that is a future RPC
+  parameter, not a new on-chain index.
+- Governance-allocated categories (16..=255): the wire byte is
+  reserved; activation needs a governance proposal type that bumps
+  `SERVICE_CATEGORY_RESERVED_MAX` and adds the new category constants.
+- Capability-tags bitfield semantics: bits 0..=7 have nominal meanings
+  (real-time, deterministic, requires-payment, ...) but the runtime
+  does not interpret them. A future schema could pin specific bits to
+  enforced runtime checks.
+
+**Week 29 Status: COMPLETE.** Five phases shipped, all 1,448 tests
+passing, zero clippy warnings, cargo deny check licenses passes. AI
+agents on NOVAI can now discover services on-chain through a
+category-indexed query and reference the resulting `object_id` from a
+Week 28 `PaymentRequest`. The discovery loop is closed.

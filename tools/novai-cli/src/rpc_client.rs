@@ -254,4 +254,26 @@ impl RpcClient {
             .ok_or("missing signals in response")?;
         Ok(signals.clone())
     }
+
+    /// Query published ServiceDescriptors by category (Week 29).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn get_service_descriptors_by_category(
+        &self,
+        category: u8,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_getServiceDescriptorsByCategory",
+                serde_json::json!({ "category": category }),
+            )
+            .await?;
+        let descriptors = result["descriptors"]
+            .as_array()
+            .ok_or("missing descriptors in response")?;
+        Ok(descriptors.clone())
+    }
 }
