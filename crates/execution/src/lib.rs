@@ -5258,6 +5258,57 @@ fn validate_service_descriptor_payload<K: Kv>(
     Ok(Some(sd))
 }
 
+/// Per-type structural validation for `UPDATE_MEMORY_OBJECT` against a
+/// `ServiceDescriptor` (Week 29). No-op for non-`ServiceDescriptor`
+/// types so the UPDATE handler can call it unconditionally.
+///
+/// Mirrors `validate_service_descriptor_payload` for all field-level
+/// rules (version, category range, status range, reputation cap, zero-
+/// reserved) and adds the update-specific category-immutability check:
+/// the new payload's category MUST equal the stored descriptor's
+/// category. Category drives the `by_category` discovery index, and
+/// keeping it immutable on update means the index never needs to be
+/// rewritten here.
+///
+/// `InvalidServiceDescriptor` is also surfaced if the OLD data fails
+/// to decode. That case is unreachable in normal operation (the runtime
+/// wrote the old bytes itself at create time), but reusing the same
+/// error rather than introducing a `ServiceDescriptorOldDataCorrupt`
+/// variant keeps the error surface narrow.
+fn validate_service_descriptor_update<E>(
+    object_type: MemoryObjectType,
+    old_data: &[u8],
+    new_data: &[u8],
+) -> Result<(), ExecError<E>> {
+    if object_type != MemoryObjectType::ServiceDescriptor {
+        return Ok(());
+    }
+    let old = ServiceDescriptorData::decode(old_data).ok_or(ExecError::InvalidServiceDescriptor)?;
+    let new = ServiceDescriptorData::decode(new_data).ok_or(ExecError::InvalidServiceDescriptor)?;
+
+    if new.version != SERVICE_DESCRIPTOR_V1 {
+        return Err(ExecError::InvalidServiceDescriptor);
+    }
+    if new.category > SERVICE_CATEGORY_RESERVED_MAX {
+        return Err(ExecError::ServiceDescriptorInvalidCategory { byte: new.category });
+    }
+    if new.status > SERVICE_STATUS_MAX {
+        return Err(ExecError::ServiceDescriptorInvalidStatus { byte: new.status });
+    }
+    if new.min_reputation_score > MAX_REPUTATION_SCORE {
+        return Err(ExecError::ServiceDescriptorReputationOverMax {
+            score: new.min_reputation_score,
+        });
+    }
+    if new.reserved != [0u8; 7] {
+        return Err(ExecError::InvalidServiceDescriptor);
+    }
+    if old.category != new.category {
+        return Err(ExecError::ServiceDescriptorCategoryImmutable);
+    }
+    Ok(())
+}
+
 fn apply_create_memory_object_tx_inner<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -5500,6 +5551,15 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
     // CompositionGraph rejects self-dependencies even when introduced via
     // update, not just at create time.
     validate_composition_graph_payload(memory_object.object_type, &payload.new_data, &entity.id)?;
+
+    // Week 29: ServiceDescriptor updates revalidate every field that
+    // create checks AND enforce category-immutability so the
+    // by_category discovery index does not need to be rewritten here.
+    validate_service_descriptor_update::<K::Error>(
+        memory_object.object_type,
+        &memory_object.data,
+        &payload.new_data,
+    )?;
 
     // Update memory object
     memory_object.data = payload.new_data;

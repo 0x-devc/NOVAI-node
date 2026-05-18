@@ -29,9 +29,10 @@ use novai_ai_entities::{
     SERVICE_DESCRIPTOR_V1, SERVICE_STATUS_ACTIVE, SERVICE_STATUS_MAX,
 };
 use novai_execution::{
-    apply_create_memory_object_tx, encode_create_memory_object_payload_v1,
+    apply_create_memory_object_tx, apply_update_memory_object_tx,
+    encode_create_memory_object_payload_v1, encode_update_memory_object_payload_v1,
     service_descriptor_by_category_key, write_ai_entity_op, CreateMemoryObjectPayloadV1, ExecError,
-    KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY,
+    UpdateMemoryObjectPayloadV1, KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY,
 };
 use novai_state::{
     ai_entity_by_address_key, ai_memory_by_type_key, ai_memory_object_key, Kv, KvBatch, MemKv,
@@ -117,6 +118,46 @@ fn make_create_tx(publisher: &AiEntity, nonce: u64, descriptor: &ServiceDescript
         payload,
         sig: [0u8; 64],
     }
+}
+
+fn make_update_tx(
+    publisher: &AiEntity,
+    nonce: u64,
+    object_id: [u8; 32],
+    new_data: Vec<u8>,
+) -> TxV1 {
+    let payload = encode_update_memory_object_payload_v1(&UpdateMemoryObjectPayloadV1 {
+        object_id,
+        new_data,
+    });
+    TxV1 {
+        version: TxVersion::V1,
+        from: publisher.id,
+        pubkey: publisher.id,
+        nonce,
+        fee: CREATE_FEE,
+        payload,
+        sig: [0u8; 64],
+    }
+}
+
+fn publish_descriptor(
+    db: &mut MemKv,
+    publisher: &AiEntity,
+    nonce: u64,
+    descriptor: &ServiceDescriptorData,
+) -> [u8; 32] {
+    let tx = make_create_tx(publisher, nonce, descriptor);
+    apply_create_memory_object_tx(db, &tx, HEIGHT).expect("publish succeeds")
+}
+
+fn read_descriptor(db: &MemKv, publisher: &AiEntity, object_id: &[u8; 32]) -> ServiceDescriptorData {
+    let envelope_bytes = db
+        .get(&ai_memory_object_key(&publisher.id, object_id))
+        .unwrap()
+        .unwrap();
+    let payload_start = envelope_bytes.len() - SERVICE_DESCRIPTOR_SIZE;
+    ServiceDescriptorData::decode(&envelope_bytes[payload_start..]).expect("stored bytes decode")
 }
 
 // ============================================================================
@@ -415,4 +456,261 @@ fn service_descriptor_publish_record_bytes_match_golden_layout() {
     assert_eq!(&payload[132..136], &0x4142_4344u32.to_be_bytes());
     assert_eq!(payload[136], SERVICE_STATUS_ACTIVE);
     assert_eq!(&payload[137..144], &[0u8; 7]);
+}
+
+// ============================================================================
+// 9. Update preserves object_id and reflects new field values
+// ============================================================================
+
+#[test]
+fn service_descriptor_update_price_preserves_object_id() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x31u8; 32], [0x41u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    // Update only the price; everything else stays the same.
+    let mut updated = original;
+    updated.price_per_call = 999_999;
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).expect("update succeeds");
+
+    // object_id must be the same key after the update.
+    let stored = read_descriptor(&db, &publisher, &object_id);
+    assert_eq!(stored.price_per_call, 999_999, "new price persisted");
+    assert_eq!(stored.category, original.category, "category unchanged");
+    assert_eq!(
+        stored.service_url_hash, original.service_url_hash,
+        "url hash unchanged"
+    );
+
+    // by_category index entry under the SAME object_id is still present
+    // (we did not need to rewrite it, since category did not change).
+    let category_key = service_descriptor_by_category_key(
+        original.category,
+        &publisher.id,
+        &object_id,
+    );
+    assert!(
+        db.get(&category_key).unwrap().is_some(),
+        "by_category index entry survives update"
+    );
+}
+
+#[test]
+fn service_descriptor_update_status_preserves_object_id() {
+    use novai_ai_entities::SERVICE_STATUS_PAUSED;
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x32u8; 32], [0x42u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_INFERENCE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    let mut updated = original;
+    updated.status = SERVICE_STATUS_PAUSED;
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).expect("update succeeds");
+
+    let stored = read_descriptor(&db, &publisher, &object_id);
+    assert_eq!(stored.status, SERVICE_STATUS_PAUSED);
+}
+
+#[test]
+fn service_descriptor_update_all_mutable_fields_at_once() {
+    use novai_ai_entities::SERVICE_STATUS_DEPRECATED;
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x33u8; 32], [0x43u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    // Every field except `category` and `reserved` can change in one
+    // update. This locks the boundary between mutable and immutable
+    // fields end-to-end.
+    let mut updated = original;
+    updated.service_name_hash = [0xD1u8; 32];
+    updated.service_url_hash = [0xD2u8; 32];
+    updated.description_hash = [0xD3u8; 32];
+    updated.price_per_call = 12_345;
+    updated.subscription_rate_per_block = 42;
+    updated.min_reputation_score = 80;
+    updated.min_stake = 5_000_000;
+    updated.capability_tags = 0xFF;
+    updated.status = SERVICE_STATUS_DEPRECATED;
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).expect("update succeeds");
+
+    let stored = read_descriptor(&db, &publisher, &object_id);
+    assert_eq!(stored, updated);
+    assert_eq!(stored.category, original.category, "category MUST be unchanged");
+}
+
+// ============================================================================
+// 10. Category-immutability is enforced
+// ============================================================================
+
+#[test]
+fn service_descriptor_update_category_rejected() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x34u8; 32], [0x44u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    let mut updated = original;
+    updated.category = SERVICE_CATEGORY_INFERENCE; // valid category, but DIFFERENT
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    let err =
+        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    assert!(
+        matches!(err, ExecError::ServiceDescriptorCategoryImmutable),
+        "got {err:?}"
+    );
+
+    // Stored descriptor is unchanged.
+    let stored = read_descriptor(&db, &publisher, &object_id);
+    assert_eq!(stored.category, SERVICE_CATEGORY_DATA_ORACLE);
+
+    // by_category index for the ORIGINAL category is still present;
+    // no entry was created under the attempted-new category.
+    let original_key = service_descriptor_by_category_key(
+        SERVICE_CATEGORY_DATA_ORACLE,
+        &publisher.id,
+        &object_id,
+    );
+    let attempted_key = service_descriptor_by_category_key(
+        SERVICE_CATEGORY_INFERENCE,
+        &publisher.id,
+        &object_id,
+    );
+    assert!(db.get(&original_key).unwrap().is_some());
+    assert!(db.get(&attempted_key).unwrap().is_none());
+}
+
+// ============================================================================
+// 11-15. Update path revalidates every field create checks
+// ============================================================================
+
+#[test]
+fn service_descriptor_update_invalid_category_rejected() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x35u8; 32], [0x45u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    // Try to set a category in the governance-reserved range. The
+    // bad-category check fires BEFORE the category-immutability check
+    // (we want the more specific error first).
+    let mut updated = original;
+    updated.category = SERVICE_CATEGORY_RESERVED_MAX + 1;
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    let err =
+        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::ServiceDescriptorInvalidCategory { byte }
+                if byte == SERVICE_CATEGORY_RESERVED_MAX + 1
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn service_descriptor_update_invalid_status_rejected() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x36u8; 32], [0x46u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    let mut updated = original;
+    updated.status = SERVICE_STATUS_MAX + 1;
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    let err =
+        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::ServiceDescriptorInvalidStatus { byte }
+                if byte == SERVICE_STATUS_MAX + 1
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn service_descriptor_update_reputation_over_max_rejected() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x37u8; 32], [0x47u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    let mut updated = original;
+    updated.min_reputation_score = MAX_REPUTATION_SCORE + 1;
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    let err =
+        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::ServiceDescriptorReputationOverMax { score }
+                if score == MAX_REPUTATION_SCORE + 1
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn service_descriptor_update_non_zero_reserved_bytes_rejected() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x38u8; 32], [0x48u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    let mut updated = original;
+    updated.reserved[0] = 0xFF;
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    let err =
+        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    assert!(
+        matches!(err, ExecError::InvalidServiceDescriptor),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn service_descriptor_update_bad_version_rejected() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x39u8; 32], [0x49u8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    let mut updated = original;
+    updated.version = SERVICE_DESCRIPTOR_V1 + 1;
+    let update_tx = make_update_tx(&publisher, 1, object_id, updated.encode().to_vec());
+    let err =
+        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    assert!(
+        matches!(err, ExecError::InvalidServiceDescriptor),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn service_descriptor_update_bad_length_rejected() {
+    let mut db = MemKv::new();
+    let publisher = make_publisher(&mut db, [0x3Au8; 32], [0x4Au8; 32]);
+    let original = sample_descriptor(SERVICE_CATEGORY_DATA_ORACLE, 100);
+    let object_id = publish_descriptor(&mut db, &publisher, 0, &original);
+
+    // Hand-roll a 143-byte new_data field.
+    let update_tx = make_update_tx(
+        &publisher,
+        1,
+        object_id,
+        vec![0u8; SERVICE_DESCRIPTOR_SIZE - 1],
+    );
+    let err =
+        apply_update_memory_object_tx(&mut db, &update_tx, HEIGHT + 1).unwrap_err();
+    assert!(
+        matches!(err, ExecError::InvalidServiceDescriptor),
+        "got {err:?}"
+    );
 }
