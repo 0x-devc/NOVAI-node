@@ -149,6 +149,88 @@ pub const VK_REGISTRATION_LABEL_MAX: usize = 32;
 /// UTF-8 label bytes followed by `vk_len` compressed VK bytes.
 pub const VK_REGISTRATION_HEADER_SIZE: usize = 1 + 1 + 32 + 1 + 4;
 
+/// Maximum number of `SlaAgreement` memory objects a single buyer may
+/// open (Week 31). Counted against the global
+/// `MAX_MEMORY_OBJECTS_PER_ENTITY` cap and against this per-type cap by
+/// the create handler via a bounded prefix scan of
+/// `ai/memory_by_type/14/<buyer>/`.
+///
+/// The cap is per BUYER (memory-object owner). Sellers are not capped
+/// in v1: they appear in arbitrarily many SLAs but never own the
+/// underlying memory object. Cap value mirrors
+/// `MAX_VK_REGISTRATIONS_PER_ENTITY` (a deliberately tight v1 cap that
+/// can be raised by future governance once usage patterns are known).
+pub const MAX_SLAS_PER_ENTITY: u32 = 8;
+
+/// Wire-format version byte carried at offset 0 of every
+/// `SlaAgreementData` payload.
+pub const SLA_AGREEMENT_V1: u8 = 1;
+
+/// Canonical wire size of a `SlaAgreementData` payload, in bytes.
+///
+/// Layout: `version:1 | buyer_entity_id:32 | seller_entity_id:32 |
+/// service_descriptor_hash:32 | status:1 | created_at_height_be:8 |
+/// accepted_at_height_be:8 | start_height_be:8 | end_height_be:8 |
+/// violation_count_be:4 | violation_threshold_be:4 |
+/// max_response_time_blocks_be:4 | min_uptime_bps_be:2 |
+/// min_delivery_success_bps_be:2 | price_per_call_be:8 |
+/// slash_amount_be:16 | terminated_at_height_be:8 | slashed_amount_be:16 |
+/// reserved:16`. Total = 210 bytes.
+pub const SLA_AGREEMENT_SIZE: usize =
+    1 + 32 + 32 + 32 + 1 + 8 + 8 + 8 + 8 + 4 + 4 + 4 + 2 + 2 + 8 + 16 + 8 + 16 + 16;
+
+/// `SlaAgreement` lifecycle status discriminants. Mutations between
+/// statuses are runtime-controlled by the create / `SlaAccept` /
+/// `ServiceAttestation` (auto-slash) / `DeleteMemoryObject` handlers;
+/// the v1 wire format reserves `SLA_STATUS_COMPLETED` for a future
+/// explicit-finalize signal.
+pub const SLA_STATUS_PROPOSED: u8 = 0;
+/// Seller has accepted the SLA; violations counted while
+/// `current_height` is in `[start_height, end_height]`.
+pub const SLA_STATUS_ACTIVE: u8 = 1;
+/// RESERVED in v1: no on-chain transition writes this byte. Expired
+/// SLAs stay in `SLA_STATUS_ACTIVE` and surface `is_expired = true`
+/// at the RPC layer. Defined here so a future `SlaFinalize` signal
+/// can land without a schema bump.
+pub const SLA_STATUS_COMPLETED: u8 = 2;
+/// Auto-slash fired (violation count reached threshold); seller's
+/// stake was debited and the active-between index entry removed. The
+/// SLA persists in this terminal state for audit until the buyer
+/// deletes the memory object.
+pub const SLA_STATUS_VIOLATED: u8 = 3;
+/// Buyer deleted a `SLA_STATUS_PROPOSED` SLA before acceptance.
+/// RESERVED in v1: the byte is never written to storage (cancellation
+/// just deletes the memory object). Defined for the RPC label
+/// surface in case a future variant retains a deleted-but-not-purged
+/// record.
+pub const SLA_STATUS_CANCELLED: u8 = 4;
+/// Maximum valid `SlaAgreement` status discriminant.
+pub const SLA_STATUS_MAX: u8 = SLA_STATUS_CANCELLED;
+
+/// Number of trailing reserved bytes carried by every
+/// `SlaAgreementData` payload. MUST be zero on create / update; decode
+/// preserves them so future field allocations are forward-compatible
+/// with the v1 binary layout.
+pub const SLA_RESERVED_LEN: usize = 16;
+
+/// Maximum allowed value of the `min_uptime_bps` field (10000 bps =
+/// 100%). The runtime does NOT enforce uptime in v1; the field is
+/// validated for forward-compat range correctness only.
+pub const SLA_MIN_UPTIME_BPS_MAX: u16 = 10_000;
+
+/// Maximum allowed value of the `min_delivery_success_bps` field
+/// (10000 bps = 100%). The runtime does NOT enforce delivery success
+/// rate in v1; the field is validated for range correctness only.
+pub const SLA_MIN_DELIVERY_SUCCESS_BPS_MAX: u16 = 10_000;
+
+/// Maximum span in blocks between `start_height` and `end_height` for
+/// a newly created `SlaAgreement` (`end_height - start_height <=
+/// SLA_MAX_DURATION_BLOCKS`). Default = 604 800 blocks (~1 week at
+/// 1 block/s). Bounds the time a memory-object slot can remain locked
+/// to a single SLA and limits the worst-case scan cost of the lazy
+/// `StakeWithdraw` collateral check shipped in Phase 4.
+pub const SLA_MAX_DURATION_BLOCKS: u64 = 604_800;
+
 // ============================================================================
 // MEMORY OBJECT TYPE ENUM (D21.1)
 // ============================================================================
@@ -241,6 +323,22 @@ pub enum MemoryObjectType {
     /// are IMMUTABLE on `UpdateMemoryObject`; only the free-form
     /// `label` tag is mutable.
     VkRegistration = 13,
+    /// On-chain Service Level Agreement between two AI entities
+    /// (Week 31). The memory object owner is the BUYER who proposed
+    /// the agreement; the embedded `seller_entity_id` is the
+    /// counterparty that accepts (via the `SlaAccept` signal) and
+    /// whose stake is at risk on threshold breach. Violations are
+    /// counted from `PAYMENT_ATTESTATION_STATUS_FAILED`
+    /// `ServiceAttestation` signals issued by the buyer while
+    /// `current_height` is in `[start_height, end_height]`; when
+    /// `violation_count >= violation_threshold` the runtime auto-
+    /// slashes `slash_amount` from the seller's `stake_balance`
+    /// (saturating, mirroring `StakeSlash`), credits
+    /// `KEY_SLASH_TREASURY`, applies an additional
+    /// `REP_DELTA_SLA_VIOLATION_TRIGGERED` to the seller, and
+    /// transitions the SLA to `SLA_STATUS_VIOLATED`. The agreement
+    /// is binding once accepted: no mutual cancel signal in v1.
+    SlaAgreement = 14,
 }
 
 impl MemoryObjectType {
@@ -268,6 +366,7 @@ impl MemoryObjectType {
             11 => Some(Self::Subscription),
             12 => Some(Self::ServiceDescriptor),
             13 => Some(Self::VkRegistration),
+            14 => Some(Self::SlaAgreement),
             _ => None,
         }
     }
@@ -290,6 +389,7 @@ impl MemoryObjectType {
             Self::Subscription => "Subscription",
             Self::ServiceDescriptor => "ServiceDescriptor",
             Self::VkRegistration => "VkRegistration",
+            Self::SlaAgreement => "SlaAgreement",
         }
     }
 }
@@ -1470,6 +1570,220 @@ impl VkRegistrationData {
     }
 }
 
+/// On-chain Service Level Agreement carried in a
+/// `MemoryObjectType::SlaAgreement` memory object (Week 31).
+///
+/// Two-party agreement. The memory object owner is the BUYER who
+/// proposed the agreement (via `CREATE_MEMORY_OBJECT`); the embedded
+/// `seller_entity_id` accepts the agreement (via the `SlaAccept`
+/// signal) and is the entity whose stake is at risk on threshold
+/// breach. Once accepted the agreement is binding: there is no mutual
+/// cancel signal in v1; the SLA runs until expiry or auto-termination
+/// via threshold breach.
+///
+/// Wire layout (fixed 210 bytes; locked by golden vector test):
+///
+/// ```text
+/// version:1
+/// buyer_entity_id:32
+/// seller_entity_id:32
+/// service_descriptor_hash:32     (informational; zero = no reference)
+/// status:1                       (SLA_STATUS_PROPOSED/ACTIVE/COMPLETED/VIOLATED/CANCELLED)
+/// created_at_height_be:8
+/// accepted_at_height_be:8        (0 until accepted)
+/// start_height_be:8              (>= accepted_at_height; violation window opens here)
+/// end_height_be:8                (> start_height; violation window closes here)
+/// violation_count_be:4           (incremented on FAILED in-window attestations)
+/// violation_threshold_be:4       (>= 1; immutable after create)
+/// max_response_time_blocks_be:4  (RESERVED v1 - not enforced)
+/// min_uptime_bps_be:2            (RESERVED v1 - not enforced; <= 10000)
+/// min_delivery_success_bps_be:2  (RESERVED v1 - not enforced; <= 10000)
+/// price_per_call_be:8            (informational; NAP enforces actual payments)
+/// slash_amount_be:16             (single-shot penalty on threshold breach)
+/// terminated_at_height_be:8      (0 until terminated)
+/// slashed_amount_be:16           (actual debit; 0 until breach)
+/// reserved:16                    (MUST be zero on create/update)
+/// ```
+///
+/// Reserved fields (`max_response_time_blocks`, `min_uptime_bps`,
+/// `min_delivery_success_bps`, `reserved[..16]`) reserve wire-format
+/// real estate for future enforcement (response-time, uptime, success-
+/// rate). The v1 runtime treats them as informational and validates
+/// only that they decode within their type bounds and that `reserved`
+/// is all-zero at create/update time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlaAgreementData {
+    /// Wire-format version byte. Must equal `SLA_AGREEMENT_V1` at
+    /// create / update; decode preserves it verbatim so the handler
+    /// can surface a specific error on mismatch.
+    pub version: u8,
+    /// Buyer (memory object owner). Initiates the SLA via
+    /// `CREATE_MEMORY_OBJECT`; can also issue
+    /// `DELETE_MEMORY_OBJECT` on a still-Proposed agreement to
+    /// cancel before acceptance.
+    pub buyer_entity_id: [u8; 32],
+    /// Seller (counterparty). Accepts the SLA via the `SlaAccept`
+    /// signal (transitioning `SLA_STATUS_PROPOSED` -> `_ACTIVE`).
+    /// Stake-bearer for the auto-slash path.
+    pub seller_entity_id: [u8; 32],
+    /// Optional reference to a Week 29 `ServiceDescriptor` memory
+    /// object id describing the service being agreed on. Zero
+    /// (all-zero bytes) signals "no reference". Informational only;
+    /// the runtime does NOT verify that the hash resolves to a real
+    /// `ServiceDescriptor`.
+    pub service_descriptor_hash: [u8; 32],
+    /// Lifecycle status discriminant. Must be `SLA_STATUS_PROPOSED`
+    /// at create time; transitions to `_ACTIVE` on `SlaAccept` and
+    /// to `_VIOLATED` on threshold breach. `_COMPLETED` and
+    /// `_CANCELLED` are reserved discriminants that no v1 handler
+    /// writes (expiry stays in `_ACTIVE` with `is_expired` derived
+    /// at the RPC layer; cancellation deletes the memory object).
+    pub status: u8,
+    /// Block height the proposal landed on chain (set by the
+    /// create handler from the block context).
+    pub created_at_height: u64,
+    /// Block height the seller's `SlaAccept` signal landed. 0
+    /// while `status == SLA_STATUS_PROPOSED`. Set verbatim from
+    /// the block context on acceptance.
+    pub accepted_at_height: u64,
+    /// Inclusive lower bound of the violation window. Must be
+    /// `>= accepted_at_height` at acceptance time (enforced by the
+    /// `SlaAccept` handler when set).
+    pub start_height: u64,
+    /// Inclusive upper bound of the violation window. Must be
+    /// `> start_height` at create. `end_height - start_height
+    /// <= SLA_MAX_DURATION_BLOCKS`.
+    pub end_height: u64,
+    /// Cumulative count of in-window `PAYMENT_ATTESTATION_STATUS_FAILED`
+    /// `ServiceAttestation` signals seen against this SLA. Initial
+    /// 0; saturating-increment. Auto-slash fires when this value
+    /// `>= violation_threshold` (one-shot terminal transition).
+    pub violation_count: u32,
+    /// Number of in-window FAILED attestations that must accumulate
+    /// before auto-slash fires. Immutable after create. `>= 1`.
+    pub violation_threshold: u32,
+    /// RESERVED v1. Maximum acceptable response time in blocks.
+    /// Not enforced by the v1 runtime; included for forward
+    /// compatibility with a future off-chain response-time oracle.
+    pub max_response_time_blocks: u32,
+    /// RESERVED v1. Minimum acceptable uptime ratio in basis points
+    /// (10 000 = 100%). Not enforced by the v1 runtime; validated
+    /// only against the bps range cap.
+    pub min_uptime_bps: u16,
+    /// RESERVED v1. Minimum acceptable delivery success ratio in
+    /// basis points. Not enforced by the v1 runtime; validated
+    /// only against the bps range cap.
+    pub min_delivery_success_bps: u16,
+    /// Informational: per-call price the buyer expects to pay for
+    /// services covered by this SLA. The actual payment flow is
+    /// handled by Week 28 `PaymentRequest` signals; this field is
+    /// metadata for off-chain consumers.
+    pub price_per_call: u64,
+    /// Penalty debited from the seller's `stake_balance` on
+    /// auto-slash (`min(stake_balance, slash_amount)` to mirror
+    /// `StakeSlash` semantics). Must be `> 0` at create.
+    pub slash_amount: u128,
+    /// Block height the SLA transitioned to a terminal state. 0
+    /// until breach or cancellation. Set verbatim from the block
+    /// context.
+    pub terminated_at_height: u64,
+    /// Actual debit applied on auto-slash. 0 until breach. May be
+    /// less than `slash_amount` if the seller's stake balance was
+    /// below `slash_amount` at breach time (saturating).
+    pub slashed_amount: u128,
+    /// 16 bytes reserved for future field allocation. MUST be zero
+    /// on create / update; decode preserves verbatim so future
+    /// schema additions are forward-compatible with the v1 binary
+    /// layout.
+    pub reserved: [u8; SLA_RESERVED_LEN],
+}
+
+impl SlaAgreementData {
+    /// Encode this SLA agreement to its 210-byte canonical form.
+    #[must_use]
+    pub fn encode(&self) -> [u8; SLA_AGREEMENT_SIZE] {
+        let mut out = [0u8; SLA_AGREEMENT_SIZE];
+        out[0] = self.version;
+        out[1..33].copy_from_slice(&self.buyer_entity_id);
+        out[33..65].copy_from_slice(&self.seller_entity_id);
+        out[65..97].copy_from_slice(&self.service_descriptor_hash);
+        out[97] = self.status;
+        out[98..106].copy_from_slice(&self.created_at_height.to_be_bytes());
+        out[106..114].copy_from_slice(&self.accepted_at_height.to_be_bytes());
+        out[114..122].copy_from_slice(&self.start_height.to_be_bytes());
+        out[122..130].copy_from_slice(&self.end_height.to_be_bytes());
+        out[130..134].copy_from_slice(&self.violation_count.to_be_bytes());
+        out[134..138].copy_from_slice(&self.violation_threshold.to_be_bytes());
+        out[138..142].copy_from_slice(&self.max_response_time_blocks.to_be_bytes());
+        out[142..144].copy_from_slice(&self.min_uptime_bps.to_be_bytes());
+        out[144..146].copy_from_slice(&self.min_delivery_success_bps.to_be_bytes());
+        out[146..154].copy_from_slice(&self.price_per_call.to_be_bytes());
+        out[154..170].copy_from_slice(&self.slash_amount.to_be_bytes());
+        out[170..178].copy_from_slice(&self.terminated_at_height.to_be_bytes());
+        out[178..194].copy_from_slice(&self.slashed_amount.to_be_bytes());
+        out[194..210].copy_from_slice(&self.reserved);
+        out
+    }
+
+    /// Decode an SLA agreement from canonical bytes.
+    ///
+    /// Returns `None` if the slice length is not exactly
+    /// `SLA_AGREEMENT_SIZE`. Field-level validation (version,
+    /// status range, window ordering, bps range, zero-reserved,
+    /// threshold non-zero, slash-amount non-zero) is the handler's
+    /// responsibility; decode preserves byte content verbatim so
+    /// the runtime can produce specific error variants for each
+    /// invalid field.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != SLA_AGREEMENT_SIZE {
+            return None;
+        }
+        let mut buyer_entity_id = [0u8; 32];
+        buyer_entity_id.copy_from_slice(&bytes[1..33]);
+        let mut seller_entity_id = [0u8; 32];
+        seller_entity_id.copy_from_slice(&bytes[33..65]);
+        let mut service_descriptor_hash = [0u8; 32];
+        service_descriptor_hash.copy_from_slice(&bytes[65..97]);
+        let created_at_height = u64::from_be_bytes(bytes[98..106].try_into().ok()?);
+        let accepted_at_height = u64::from_be_bytes(bytes[106..114].try_into().ok()?);
+        let start_height = u64::from_be_bytes(bytes[114..122].try_into().ok()?);
+        let end_height = u64::from_be_bytes(bytes[122..130].try_into().ok()?);
+        let violation_count = u32::from_be_bytes(bytes[130..134].try_into().ok()?);
+        let violation_threshold = u32::from_be_bytes(bytes[134..138].try_into().ok()?);
+        let max_response_time_blocks = u32::from_be_bytes(bytes[138..142].try_into().ok()?);
+        let min_uptime_bps = u16::from_be_bytes(bytes[142..144].try_into().ok()?);
+        let min_delivery_success_bps = u16::from_be_bytes(bytes[144..146].try_into().ok()?);
+        let price_per_call = u64::from_be_bytes(bytes[146..154].try_into().ok()?);
+        let slash_amount = u128::from_be_bytes(bytes[154..170].try_into().ok()?);
+        let terminated_at_height = u64::from_be_bytes(bytes[170..178].try_into().ok()?);
+        let slashed_amount = u128::from_be_bytes(bytes[178..194].try_into().ok()?);
+        let mut reserved = [0u8; SLA_RESERVED_LEN];
+        reserved.copy_from_slice(&bytes[194..210]);
+        Some(Self {
+            version: bytes[0],
+            buyer_entity_id,
+            seller_entity_id,
+            service_descriptor_hash,
+            status: bytes[97],
+            created_at_height,
+            accepted_at_height,
+            start_height,
+            end_height,
+            violation_count,
+            violation_threshold,
+            max_response_time_blocks,
+            min_uptime_bps,
+            min_delivery_success_bps,
+            price_per_call,
+            slash_amount,
+            terminated_at_height,
+            slashed_amount,
+            reserved,
+        })
+    }
+}
+
 // ============================================================================
 // TESTS
 // ============================================================================
@@ -1494,6 +1808,7 @@ mod tests {
             MemoryObjectType::Subscription,
             MemoryObjectType::ServiceDescriptor,
             MemoryObjectType::VkRegistration,
+            MemoryObjectType::SlaAgreement,
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
@@ -1508,9 +1823,14 @@ mod tests {
             Some(MemoryObjectType::VkRegistration),
             "byte 13 must decode to VkRegistration (Week 30)"
         );
+        assert_eq!(
+            MemoryObjectType::from_byte(14),
+            Some(MemoryObjectType::SlaAgreement),
+            "byte 14 must decode to SlaAgreement (Week 31)"
+        );
         assert!(
-            MemoryObjectType::from_byte(14).is_none(),
-            "14 is the first invalid byte after Week 30"
+            MemoryObjectType::from_byte(15).is_none(),
+            "15 is the first invalid byte after Week 31"
         );
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
@@ -1542,6 +1862,7 @@ mod tests {
             "ServiceDescriptor"
         );
         assert_eq!(MemoryObjectType::VkRegistration.name(), "VkRegistration");
+        assert_eq!(MemoryObjectType::SlaAgreement.name(), "SlaAgreement");
     }
 
     #[test]
@@ -1979,7 +2300,11 @@ mod tests {
             MemoryObjectType::from_byte(13),
             Some(MemoryObjectType::VkRegistration)
         );
-        assert_eq!(MemoryObjectType::from_byte(14), None);
+        assert_eq!(
+            MemoryObjectType::from_byte(14),
+            Some(MemoryObjectType::SlaAgreement)
+        );
+        assert_eq!(MemoryObjectType::from_byte(15), None);
         assert_eq!(
             MemoryObjectType::CompositionGraph.name(),
             "CompositionGraph"
@@ -2856,5 +3181,204 @@ mod tests {
         assert_eq!(&bytes[39..45], b"sum-v1", "label at 39..45");
         let vk_expected: Vec<u8> = (0..16u8).collect();
         assert_eq!(&bytes[45..61], vk_expected.as_slice(), "vk_bytes at 45..61");
+    }
+
+    // ========================================================================
+    // Week 31 Phase 1: SLA Agreement types and codec
+    // ========================================================================
+
+    fn sample_sla_agreement() -> SlaAgreementData {
+        SlaAgreementData {
+            version: SLA_AGREEMENT_V1,
+            buyer_entity_id: [0x11u8; 32],
+            seller_entity_id: [0x22u8; 32],
+            service_descriptor_hash: [0x33u8; 32],
+            status: SLA_STATUS_PROPOSED,
+            created_at_height: 0x1234_5678_9ABC_DEF0,
+            accepted_at_height: 0,
+            start_height: 1_000,
+            end_height: 5_000,
+            violation_count: 0,
+            violation_threshold: 3,
+            max_response_time_blocks: 60,
+            min_uptime_bps: 9_500,
+            min_delivery_success_bps: 9_000,
+            price_per_call: 0x0102_0304_0506_0708,
+            slash_amount: 0x4142_4344_4546_4748_4A4B_4C4D_4E4F_5051,
+            terminated_at_height: 0,
+            slashed_amount: 0,
+            reserved: [0u8; SLA_RESERVED_LEN],
+        }
+    }
+
+    #[test]
+    fn sla_agreement_constants_are_stable() {
+        assert_eq!(MAX_SLAS_PER_ENTITY, 8);
+        assert_eq!(SLA_AGREEMENT_V1, 1);
+        assert_eq!(SLA_RESERVED_LEN, 16);
+        assert_eq!(SLA_STATUS_PROPOSED, 0);
+        assert_eq!(SLA_STATUS_ACTIVE, 1);
+        assert_eq!(SLA_STATUS_COMPLETED, 2);
+        assert_eq!(SLA_STATUS_VIOLATED, 3);
+        assert_eq!(SLA_STATUS_CANCELLED, 4);
+        assert_eq!(SLA_STATUS_MAX, SLA_STATUS_CANCELLED);
+        assert_eq!(SLA_MIN_UPTIME_BPS_MAX, 10_000);
+        assert_eq!(SLA_MIN_DELIVERY_SUCCESS_BPS_MAX, 10_000);
+        assert_eq!(SLA_MAX_DURATION_BLOCKS, 604_800);
+    }
+
+    #[test]
+    fn sla_agreement_size_constant_matches_layout() {
+        assert_eq!(SLA_AGREEMENT_SIZE, 210);
+        assert_eq!(
+            SLA_AGREEMENT_SIZE,
+            1 + 32 + 32 + 32 + 1 + 8 + 8 + 8 + 8 + 4 + 4 + 4 + 2 + 2 + 8 + 16 + 8 + 16 + 16
+        );
+    }
+
+    #[test]
+    fn sla_agreement_roundtrip() {
+        let sla = sample_sla_agreement();
+        let bytes = sla.encode();
+        assert_eq!(bytes.len(), SLA_AGREEMENT_SIZE);
+        let decoded = SlaAgreementData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded, sla);
+    }
+
+    #[test]
+    fn sla_agreement_roundtrip_preserves_arbitrary_reserved_bytes() {
+        // Decoder is byte-faithful: any non-zero `reserved` survives a
+        // roundtrip. Handler-level validation rejects non-zero `reserved`
+        // at create/update; the codec contract is to preserve bytes.
+        let mut sla = sample_sla_agreement();
+        sla.reserved = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+            0xFF, 0x10,
+        ];
+        let bytes = sla.encode();
+        let decoded = SlaAgreementData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.reserved, sla.reserved);
+    }
+
+    #[test]
+    fn sla_agreement_decode_rejects_wrong_length() {
+        let sla = sample_sla_agreement();
+        let mut bytes = sla.encode().to_vec();
+        bytes.push(0);
+        assert!(SlaAgreementData::decode(&bytes).is_none());
+        bytes.pop();
+        bytes.pop();
+        assert!(SlaAgreementData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn sla_agreement_decode_preserves_version_byte() {
+        // Handler validates version; decoder does not. Byte 0 is
+        // preserved verbatim so the runtime can surface a specific
+        // SlaAgreementVersionInvalid error on mismatch.
+        let mut sla = sample_sla_agreement();
+        sla.version = 99;
+        let bytes = sla.encode();
+        let decoded = SlaAgreementData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.version, 99);
+    }
+
+    #[test]
+    fn sla_agreement_decode_preserves_status_byte() {
+        // Handler validates the status discriminant; decoder does not.
+        // Byte 97 is preserved verbatim so the runtime can surface a
+        // specific SlaAgreementStatusInvalid error on out-of-range values.
+        let mut sla = sample_sla_agreement();
+        sla.status = 99;
+        let bytes = sla.encode();
+        let decoded = SlaAgreementData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.status, 99);
+    }
+
+    #[test]
+    fn golden_vector_sla_agreement_210_bytes() {
+        // Locks the byte layout for SLA_AGREEMENT_V1 = 1 against
+        // accidental field reordering or width changes. Sample uses
+        // distinctive byte values per field so a one-byte offset error
+        // surfaces immediately.
+        let sla = sample_sla_agreement();
+        let bytes = sla.encode();
+        assert_eq!(bytes.len(), 210);
+
+        assert_eq!(bytes[0], SLA_AGREEMENT_V1, "version at 0");
+        assert_eq!(&bytes[1..33], &[0x11u8; 32], "buyer_entity_id at 1..33");
+        assert_eq!(&bytes[33..65], &[0x22u8; 32], "seller_entity_id at 33..65");
+        assert_eq!(
+            &bytes[65..97],
+            &[0x33u8; 32],
+            "service_descriptor_hash at 65..97"
+        );
+        assert_eq!(bytes[97], SLA_STATUS_PROPOSED, "status at 97");
+        assert_eq!(
+            &bytes[98..106],
+            &0x1234_5678_9ABC_DEF0u64.to_be_bytes(),
+            "created_at_height_be at 98..106"
+        );
+        assert_eq!(
+            &bytes[106..114],
+            &0u64.to_be_bytes(),
+            "accepted_at_height_be at 106..114 (zero before acceptance)"
+        );
+        assert_eq!(
+            &bytes[114..122],
+            &1_000u64.to_be_bytes(),
+            "start_height_be at 114..122"
+        );
+        assert_eq!(
+            &bytes[122..130],
+            &5_000u64.to_be_bytes(),
+            "end_height_be at 122..130"
+        );
+        assert_eq!(
+            &bytes[130..134],
+            &0u32.to_be_bytes(),
+            "violation_count_be at 130..134 (zero on create)"
+        );
+        assert_eq!(
+            &bytes[134..138],
+            &3u32.to_be_bytes(),
+            "violation_threshold_be at 134..138"
+        );
+        assert_eq!(
+            &bytes[138..142],
+            &60u32.to_be_bytes(),
+            "max_response_time_blocks_be at 138..142 (reserved v1)"
+        );
+        assert_eq!(
+            &bytes[142..144],
+            &9_500u16.to_be_bytes(),
+            "min_uptime_bps_be at 142..144 (reserved v1)"
+        );
+        assert_eq!(
+            &bytes[144..146],
+            &9_000u16.to_be_bytes(),
+            "min_delivery_success_bps_be at 144..146 (reserved v1)"
+        );
+        assert_eq!(
+            &bytes[146..154],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "price_per_call_be at 146..154"
+        );
+        assert_eq!(
+            &bytes[154..170],
+            &0x4142_4344_4546_4748_4A4B_4C4D_4E4F_5051u128.to_be_bytes(),
+            "slash_amount_be at 154..170"
+        );
+        assert_eq!(
+            &bytes[170..178],
+            &0u64.to_be_bytes(),
+            "terminated_at_height_be at 170..178 (zero on create)"
+        );
+        assert_eq!(
+            &bytes[178..194],
+            &0u128.to_be_bytes(),
+            "slashed_amount_be at 178..194 (zero on create)"
+        );
+        assert_eq!(&bytes[194..210], &[0u8; 16], "reserved at 194..210 (zero)");
     }
 }

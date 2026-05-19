@@ -541,6 +541,121 @@ pub enum ExecError<E> {
         /// `proof_type` byte the stored registration carried.
         registered: u8,
     },
+    // Week 31 - SLA Agreement errors (Phase 1: create-side validation).
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: payload bytes for a
+    /// `SlaAgreement` could not be decoded as `SlaAgreementData`. Either
+    /// the payload length is not exactly `SLA_AGREEMENT_SIZE` or an
+    /// internal length-prefixed field has an inconsistent shape.
+    InvalidSlaAgreement,
+    /// `CreateMemoryObject` / `UpdateMemoryObject`: payload version byte
+    /// does not equal `SLA_AGREEMENT_V1`. Surfaced verbatim so audit
+    /// consumers can detect attempts to land a future schema version
+    /// on the v1 wire format.
+    SlaAgreementVersionInvalid {
+        /// Offending `version` byte the payload carried.
+        byte: u8,
+    },
+    /// `CreateMemoryObject`: payload `status` byte is not
+    /// `SLA_STATUS_PROPOSED`. New SLAs MUST start in the Proposed state;
+    /// transitions to Active / Violated are runtime-controlled (via the
+    /// `SlaAccept` signal and the auto-slash hook respectively).
+    SlaAgreementStatusInvalid {
+        /// Offending `status` byte the payload carried.
+        byte: u8,
+    },
+    /// `CreateMemoryObject`: payload pre-seeds one of the runtime-only
+    /// fields (`accepted_at_height`, `violation_count`,
+    /// `terminated_at_height`, `slashed_amount`). Those fields are set
+    /// by the runtime on lifecycle transitions, not by the proposer.
+    SlaAgreementInitialFieldsNotZero,
+    /// `CreateMemoryObject`: `buyer_entity_id` in the payload does not
+    /// equal the issuing entity's id. The memory-object owner is the
+    /// buyer; the embedded `buyer_entity_id` is for off-chain consumers
+    /// and the per-buyer index, and the runtime requires both to agree.
+    SlaAgreementBuyerMustBeIssuer,
+    /// `CreateMemoryObject`: `seller_entity_id` equals `buyer_entity_id`.
+    /// SLAs are two-party agreements; self-SLAs are economically
+    /// meaningless and structurally would self-deadlock the active-pair
+    /// singleton.
+    SlaAgreementBuyerSellerSame,
+    /// `CreateMemoryObject`: the seller entity does not exist in state.
+    /// The handler must be able to (a) load the seller's stake balance
+    /// at acceptance time and (b) mutate the seller on auto-slash; a
+    /// non-existent seller breaks both.
+    SlaAgreementSellerNotFound,
+    /// `CreateMemoryObject`: the seller entity exists but
+    /// `is_active == false`. Inactive sellers cannot accept the SLA
+    /// (the `SlaAccept` signal requires `is_active`), so the proposal
+    /// would be unaccepted indefinitely; rejecting at create surfaces
+    /// the problem to the buyer immediately.
+    SlaAgreementSellerNotActive,
+    /// `CreateMemoryObject`: `end_height` is not strictly greater than
+    /// `start_height`. The violation window is closed at both ends; a
+    /// zero-width or inverted window would deny attestations any
+    /// chance to fall inside.
+    SlaAgreementInvalidWindow {
+        /// `start_height` the payload carried.
+        start: u64,
+        /// `end_height` the payload carried.
+        end: u64,
+    },
+    /// `CreateMemoryObject`: `start_height` is in the past relative to
+    /// the block landing the create transaction. The runtime cannot
+    /// retroactively count violations that occurred before the SLA
+    /// existed, so a back-dated start is rejected.
+    SlaAgreementStartInPast {
+        /// Current block height.
+        current: u64,
+        /// `start_height` the payload carried.
+        start: u64,
+    },
+    /// `CreateMemoryObject`: `end_height - start_height` exceeds
+    /// `SLA_MAX_DURATION_BLOCKS`. Bounds the memory-object slot lifetime
+    /// and limits the worst case scan cost of the Phase 4 lazy
+    /// `StakeWithdraw` collateral check.
+    SlaAgreementDurationExceedsMax {
+        /// Span the payload carried (`end_height - start_height`).
+        span: u64,
+        /// Cap (`SLA_MAX_DURATION_BLOCKS`).
+        max: u64,
+    },
+    /// `CreateMemoryObject`: `violation_threshold` is zero. A
+    /// zero-threshold SLA would auto-slash on the first FAILED
+    /// attestation regardless of intent; reject so the buyer must
+    /// state the threshold explicitly.
+    SlaAgreementThresholdZero,
+    /// `CreateMemoryObject`: `slash_amount` is zero. A zero-slash SLA
+    /// has no enforcement teeth; reject so the buyer must commit to a
+    /// non-trivial penalty.
+    SlaAgreementSlashAmountZero,
+    /// `CreateMemoryObject`: a reserved bps field exceeds its 10 000
+    /// cap (`min_uptime_bps` or `min_delivery_success_bps`). The
+    /// fields are not enforced in v1 but are validated for range
+    /// correctness so a future activation cannot reinterpret invalid
+    /// historical bytes.
+    SlaAgreementInvalidReservedField,
+    /// `CreateMemoryObject`: the trailing `reserved` bytes are not all
+    /// zero. Forward-compat lock; future schema additions claim these
+    /// bytes via a version bump and rely on existing records having
+    /// zero in those positions.
+    SlaAgreementReservedNotZero,
+    /// `CreateMemoryObject`: an open SLA already exists between the
+    /// proposer (buyer) and the named seller. The
+    /// `ai/slas/active_between/<buyer>/<seller>` singleton index makes
+    /// attestation matching unambiguous; a second open SLA between the
+    /// same pair would require the runtime to pick a winner, which is
+    /// avoided by the one-per-pair invariant.
+    SlaAgreementPairAlreadyOpen,
+    /// `CreateMemoryObject`: the issuing entity already holds the
+    /// maximum allowed `SlaAgreement` memory objects
+    /// (`MAX_SLAS_PER_ENTITY`). The cap is per BUYER; sellers have no
+    /// cap in v1.
+    SlaAgreementLimitExceeded {
+        /// Buyer's current `SlaAgreement` count (as owner).
+        current: u32,
+        /// Cap (`MAX_SLAS_PER_ENTITY`).
+        max: u32,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -768,6 +883,44 @@ pub const KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY: &[u8] =
 /// `b"ai/vk_registry/by_id/" || object_id[32]`.
 pub const KEY_PREFIX_AI_VK_REGISTRY_BY_ID: &[u8] = b"ai/vk_registry/by_id/";
 
+/// KV-key prefix for the SLA active-pair singleton index (Week 31).
+///
+/// Layout: `b"ai/slas/active_between/" || buyer[32] || seller[32]`.
+/// Value is the 32-byte SLA `object_id`. Written by the
+/// `CREATE_MEMORY_OBJECT` handler when the new memory object is a
+/// `SlaAgreement`; deleted when the SLA transitions to a terminal
+/// state (auto-slash to `SLA_STATUS_VIOLATED`) or when the buyer
+/// deletes the memory object. Enforces the "one open SLA per
+/// (buyer, seller) pair" invariant: a second proposal between the
+/// same pair is rejected with `SlaAgreementPairAlreadyOpen` until
+/// the existing one resolves.
+pub const KEY_PREFIX_AI_SLAS_ACTIVE_BETWEEN: &[u8] = b"ai/slas/active_between/";
+
+/// KV-key prefix for the SLA per-buyer scan index (Week 31).
+///
+/// Layout:
+/// `b"ai/slas/by_buyer/" || buyer[32] || created_at_height_be[8] || object_id[32]`.
+/// Each entry's value is a zero-byte marker; the canonical
+/// `SlaAgreementData` lives inside the memory object at
+/// `ai_memory_object_key(buyer, object_id)`. Big-endian
+/// `created_at_height` keeps `scan_prefix` results in height-ascending
+/// order without an in-memory sort, matching the Week 28 payment
+/// query indexes.
+pub const KEY_PREFIX_AI_SLAS_BY_BUYER: &[u8] = b"ai/slas/by_buyer/";
+
+/// KV-key prefix for the SLA per-seller scan index (Week 31).
+///
+/// Layout:
+/// `b"ai/slas/by_seller/" || seller[32] || created_at_height_be[8] || object_id[32]`.
+/// Each entry's value is a zero-byte marker; the canonical
+/// `SlaAgreementData` lives inside the memory object at
+/// `ai_memory_object_key(buyer, object_id)` (the BUYER is the memory
+/// object owner, not the seller). The seller-side scan is required
+/// by both the Phase 4 lazy `StakeWithdraw` collateral check (sum
+/// active-SLA `slash_amount` to gate withdrawals) and the
+/// `novai_listSlasBySeller` RPC.
+pub const KEY_PREFIX_AI_SLAS_BY_SELLER: &[u8] = b"ai/slas/by_seller/";
+
 /// Block-count duration that newly deposited stake is locked for.
 /// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
 pub const STAKE_LOCK_PERIOD: u64 = 1000;
@@ -816,8 +969,19 @@ pub const REP_EVENT_PAYMENT_DELIVERED: u8 = 10;
 /// `REP_DELTA_PAYMENT_FAILED`. Handler-emitted by the
 /// `ServiceAttestation` signal; never user-supplied with a custom delta.
 pub const REP_EVENT_PAYMENT_FAILED: u8 = 11;
+/// SLA auto-slash threshold breach (Week 31).
+///
+/// Applied to the seller of an `SlaAgreement` whose `violation_count`
+/// reaches `violation_threshold` from accumulating
+/// `PAYMENT_ATTESTATION_STATUS_FAILED` `ServiceAttestation` signals
+/// inside the violation window. Handler-emitted by the auto-slash
+/// branch of the `ServiceAttestation` handler; never user-supplied
+/// with a custom delta. Applied IN ADDITION TO the standard
+/// `REP_DELTA_PAYMENT_FAILED` (-3) that the same FAILED attestation
+/// triggers.
+pub const REP_EVENT_SLA_VIOLATION_TRIGGERED: u8 = 12;
 /// Maximum valid reputation `event_type` discriminant.
-pub const REP_EVENT_MAX: u8 = REP_EVENT_PAYMENT_FAILED;
+pub const REP_EVENT_MAX: u8 = REP_EVENT_SLA_VIOLATION_TRIGGERED;
 
 /// Reputation delta on a `Delivered` attestation.
 ///
@@ -830,6 +994,17 @@ pub const REP_DELTA_PAYMENT_DELIVERED: i32 = 1;
 /// failed payment is a stronger negative signal than a composition
 /// mismatch.
 pub const REP_DELTA_PAYMENT_FAILED: i32 = -3;
+/// Reputation delta on an SLA threshold breach (Week 31).
+///
+/// Magnitude exceeds `REP_DELTA_PAYMENT_FAILED` (-3): an SLA breach
+/// is a stronger negative signal than an isolated failed payment
+/// because the breach represents an accumulated pattern AND the
+/// counterparty had pre-accepted the violation threshold. Applied
+/// in addition to (not in place of) `REP_DELTA_PAYMENT_FAILED` on
+/// the breaching attestation: the seller absorbs -3 from the
+/// FAILED attestation itself plus -5 from the SLA breach for -8
+/// total on the breach event.
+pub const REP_DELTA_SLA_VIOLATION_TRIGGERED: i32 = -5;
 
 // CompositionCheck failure_reason discriminants (carried inline in the
 // signal payload). The handler verifies the reported reason against the
@@ -2189,6 +2364,70 @@ pub fn vk_registry_by_id_key(object_id: &[u8; 32]) -> Vec<u8> {
     out
 }
 
+/// Build the canonical KV key for the SLA active-pair singleton index
+/// entry (Week 31):
+/// `b"ai/slas/active_between/" || buyer[32] || seller[32]`.
+///
+/// The value stored under this key is the 32-byte SLA `object_id`;
+/// the canonical `SlaAgreementData` lives inside the memory object
+/// at `ai_memory_object_key(buyer, object_id)`. Presence of this key
+/// is the "one open SLA per (buyer, seller) pair" invariant: the
+/// `CREATE_MEMORY_OBJECT` handler rejects a new `SlaAgreement` if a
+/// value is already present, and any terminal transition (auto-slash
+/// to `SLA_STATUS_VIOLATED`, buyer delete of a still-Proposed
+/// agreement) deletes this key.
+#[must_use]
+pub fn sla_active_between_key(buyer: &[u8; 32], seller: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_SLAS_ACTIVE_BETWEEN.len() + 32 + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_SLAS_ACTIVE_BETWEEN);
+    out.extend_from_slice(buyer);
+    out.extend_from_slice(seller);
+    out
+}
+
+/// Build the canonical KV key for the SLA per-buyer scan index entry
+/// (Week 31):
+/// `b"ai/slas/by_buyer/" || buyer[32] || created_at_height_be[8] || object_id[32]`.
+///
+/// Value is a zero-byte marker; the canonical `SlaAgreementData`
+/// lives inside the memory object at
+/// `ai_memory_object_key(buyer, object_id)`. Big-endian
+/// `created_at_height` keeps a `scan_prefix` over
+/// `KEY_PREFIX_AI_SLAS_BY_BUYER || buyer[32]` in height-ascending
+/// order without an in-memory sort.
+#[must_use]
+pub fn sla_by_buyer_key(buyer: &[u8; 32], height: u64, object_id: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_SLAS_BY_BUYER.len() + 32 + 8 + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_SLAS_BY_BUYER);
+    out.extend_from_slice(buyer);
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(object_id);
+    out
+}
+
+/// Build the canonical KV key for the SLA per-seller scan index
+/// entry (Week 31):
+/// `b"ai/slas/by_seller/" || seller[32] || created_at_height_be[8] || object_id[32]`.
+///
+/// Value is a zero-byte marker; the canonical `SlaAgreementData`
+/// lives inside the memory object at
+/// `ai_memory_object_key(buyer, object_id)`. (Buyer owns the memory
+/// object; the per-seller index lets `novai_listSlasBySeller` and
+/// the Phase 4 lazy `StakeWithdraw` collateral check find every SLA
+/// where a given entity is the seller.) The buyer's `entity_id` is
+/// embedded inside the `SlaAgreementData` payload so the per-seller
+/// scan can resolve the primary memory object key after reading the
+/// payload.
+#[must_use]
+pub fn sla_by_seller_key(seller: &[u8; 32], height: u64, object_id: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_SLAS_BY_SELLER.len() + 32 + 8 + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_SLAS_BY_SELLER);
+    out.extend_from_slice(seller);
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(object_id);
+    out
+}
+
 /// Role discriminator for `get_payments_by_entity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaymentRole {
@@ -3192,8 +3431,11 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
 
 use novai_ai_entities::{
     encode_memory_object_v1, AiEntity, AiSignalType, CompositionGraphData, MemoryObject,
-    MemoryObjectType, SignalCatalogData, SignalCommitment, SubscriptionData,
-    VerificationRecordData, VkRegistrationData, MAX_REPUTATION_SCORE, MAX_SUBSCRIPTIONS_PER_ENTITY,
+    MemoryObjectType, SignalCatalogData, SignalCommitment, SlaAgreementData, SubscriptionData,
+    VerificationRecordData, VkRegistrationData, MAX_REPUTATION_SCORE, MAX_SLAS_PER_ENTITY,
+    MAX_SUBSCRIPTIONS_PER_ENTITY, SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS,
+    SLA_MIN_DELIVERY_SUCCESS_BPS_MAX, SLA_MIN_UPTIME_BPS_MAX, SLA_RESERVED_LEN,
+    SLA_STATUS_PROPOSED,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
 use novai_crypto::{Groth16Verifier, StubZkVerifier, ZkVerifier};
@@ -5673,6 +5915,144 @@ fn validate_vk_registration_update<E>(
     Ok(())
 }
 
+/// Per-type structural and semantic validation for a `SlaAgreement`
+/// memory object payload (Week 31). No-op for non-`SlaAgreement` types
+/// so the CREATE handler can call it unconditionally alongside the
+/// existing per-type validators.
+///
+/// Validation rules (full list):
+/// 1. Bytes decode cleanly to `SlaAgreementData`.
+/// 2. `version == SLA_AGREEMENT_V1`.
+/// 3. `status == SLA_STATUS_PROPOSED` (proposer cannot pre-seed Active).
+/// 4. Runtime-only fields are zero on create: `accepted_at_height`,
+///    `violation_count`, `terminated_at_height`, `slashed_amount`.
+/// 5. `buyer_entity_id == proposer.id` (memory-object owner is the
+///    buyer; the embedded id must agree).
+/// 6. `seller_entity_id != buyer_entity_id`.
+/// 7. Seller exists in state and `is_active == true`.
+/// 8. `end_height > start_height`.
+/// 9. `start_height >= current_height`.
+/// 10. `end_height - start_height <= SLA_MAX_DURATION_BLOCKS`.
+/// 11. `violation_threshold >= 1`.
+/// 12. `slash_amount > 0`.
+/// 13. `min_uptime_bps <= 10000` and `min_delivery_success_bps <= 10000`.
+/// 14. `reserved[..16]` all zero.
+/// 15. No existing open SLA between `(buyer, seller)`: the
+///     `sla_active_between_key` singleton must be vacant.
+/// 16. Buyer's open `SlaAgreement` count
+///     `< MAX_SLAS_PER_ENTITY`. Bounded prefix scan over the
+///     `(SlaAgreement, buyer)` slice of `ai_memory_by_type`.
+///
+/// Returns the decoded `SlaAgreementData` on success so the create
+/// handler can derive `seller_entity_id` and `created_at_height` for
+/// the secondary indexes without re-decoding the payload.
+fn validate_sla_agreement_payload<K: Kv>(
+    db: &K,
+    object_type: MemoryObjectType,
+    data: &[u8],
+    proposer: &AiEntity,
+    current_height: u64,
+) -> Result<Option<SlaAgreementData>, ExecError<K::Error>> {
+    if object_type != MemoryObjectType::SlaAgreement {
+        return Ok(None);
+    }
+    let sla = SlaAgreementData::decode(data).ok_or(ExecError::InvalidSlaAgreement)?;
+
+    if sla.version != SLA_AGREEMENT_V1 {
+        return Err(ExecError::SlaAgreementVersionInvalid { byte: sla.version });
+    }
+    if sla.status != SLA_STATUS_PROPOSED {
+        return Err(ExecError::SlaAgreementStatusInvalid { byte: sla.status });
+    }
+    if sla.accepted_at_height != 0
+        || sla.violation_count != 0
+        || sla.terminated_at_height != 0
+        || sla.slashed_amount != 0
+    {
+        return Err(ExecError::SlaAgreementInitialFieldsNotZero);
+    }
+    if sla.buyer_entity_id != proposer.id {
+        return Err(ExecError::SlaAgreementBuyerMustBeIssuer);
+    }
+    if sla.seller_entity_id == sla.buyer_entity_id {
+        return Err(ExecError::SlaAgreementBuyerSellerSame);
+    }
+    if sla.end_height <= sla.start_height {
+        return Err(ExecError::SlaAgreementInvalidWindow {
+            start: sla.start_height,
+            end: sla.end_height,
+        });
+    }
+    if sla.start_height < current_height {
+        return Err(ExecError::SlaAgreementStartInPast {
+            current: current_height,
+            start: sla.start_height,
+        });
+    }
+    // Subtraction is safe: `end > start` checked above.
+    let span = sla.end_height - sla.start_height;
+    if span > SLA_MAX_DURATION_BLOCKS {
+        return Err(ExecError::SlaAgreementDurationExceedsMax {
+            span,
+            max: SLA_MAX_DURATION_BLOCKS,
+        });
+    }
+    if sla.violation_threshold == 0 {
+        return Err(ExecError::SlaAgreementThresholdZero);
+    }
+    if sla.slash_amount == 0 {
+        return Err(ExecError::SlaAgreementSlashAmountZero);
+    }
+    if sla.min_uptime_bps > SLA_MIN_UPTIME_BPS_MAX
+        || sla.min_delivery_success_bps > SLA_MIN_DELIVERY_SUCCESS_BPS_MAX
+    {
+        return Err(ExecError::SlaAgreementInvalidReservedField);
+    }
+    if sla.reserved != [0u8; SLA_RESERVED_LEN] {
+        return Err(ExecError::SlaAgreementReservedNotZero);
+    }
+
+    // Seller must exist and be active. The handler also needs to be able
+    // to load the seller again at acceptance and on every FAILED
+    // attestation; a missing-now seller fails fast here so the buyer
+    // does not waste fees on an unfunded counterparty proposal.
+    let seller =
+        read_ai_entity(db, &sla.seller_entity_id)?.ok_or(ExecError::SlaAgreementSellerNotFound)?;
+    if !seller.is_active {
+        return Err(ExecError::SlaAgreementSellerNotActive);
+    }
+
+    // One-open-SLA-per-pair invariant. The singleton index entry is the
+    // canonical "open" marker; presence means a still-Proposed or
+    // Active SLA exists between this (buyer, seller) pair.
+    let pair_key = sla_active_between_key(&sla.buyer_entity_id, &sla.seller_entity_id);
+    if db.get(&pair_key).map_err(ExecError::Db)?.is_some() {
+        return Err(ExecError::SlaAgreementPairAlreadyOpen);
+    }
+
+    // Per-entity cap (buyer side only). Bounded scan over the SLA slice
+    // of ai_memory_by_type owned by this buyer; same pattern used by
+    // ServiceDescriptor and VkRegistration.
+    let mut count_prefix = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1 + 32 + 1);
+    count_prefix.extend_from_slice(KEY_PREFIX_AI_MEMORY_BY_TYPE);
+    count_prefix.push(MemoryObjectType::SlaAgreement.to_byte());
+    count_prefix.push(b'/');
+    count_prefix.extend_from_slice(&proposer.id);
+    count_prefix.push(b'/');
+    let entries = db.scan_prefix(&count_prefix).map_err(ExecError::Db)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let current = entries.len() as u32;
+    if current >= MAX_SLAS_PER_ENTITY {
+        return Err(ExecError::SlaAgreementLimitExceeded {
+            current,
+            max: MAX_SLAS_PER_ENTITY,
+        });
+    }
+
+    Ok(Some(sla))
+}
+
+#[allow(clippy::too_many_lines)]
 fn apply_create_memory_object_tx_inner<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -5728,6 +6108,19 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
     // 32-byte handle alone.
     let is_vk_registration = payload.object_type == MemoryObjectType::VkRegistration;
     validate_vk_registration_payload(db, payload.object_type, &payload.data, &entity)?;
+
+    // Week 31: Per-type structural and semantic validation for
+    // SlaAgreement. Decodes the agreement once so the create handler
+    // can write the active-between singleton, by-buyer, and by-seller
+    // index entries below without redecoding. Also enforces the
+    // one-open-SLA-per-pair invariant and the per-buyer cap.
+    let sla_agreement = validate_sla_agreement_payload(
+        db,
+        payload.object_type,
+        &payload.data,
+        &entity,
+        current_height,
+    )?;
 
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
@@ -5817,6 +6210,27 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
     if is_vk_registration {
         let registry_index_key = vk_registry_by_id_key(&object_id);
         ops.push(WriteOp::Put(registry_index_key, entity.id.to_vec()));
+    }
+
+    // Week 31: SLA index writes. Three keys go in atomically:
+    //   - active_between/<buyer>/<seller>  -> object_id  (singleton,
+    //     enforces one-open-SLA-per-pair; the create handler already
+    //     rejected duplicates earlier).
+    //   - by_buyer/<buyer>/<created_at_be>/<object_id>  -> empty.
+    //   - by_seller/<seller>/<created_at_be>/<object_id>  -> empty.
+    // The active_between key is removed on terminal transitions (auto-
+    // slash, buyer delete of a still-Proposed SLA, buyer delete of an
+    // expired Active SLA). The by_buyer and by_seller markers persist
+    // until the memory object is deleted.
+    if let Some(sla) = &sla_agreement {
+        let pair_key = sla_active_between_key(&sla.buyer_entity_id, &sla.seller_entity_id);
+        ops.push(WriteOp::Put(pair_key, object_id.to_vec()));
+
+        let by_buyer = sla_by_buyer_key(&sla.buyer_entity_id, current_height, &object_id);
+        ops.push(WriteOp::Put(by_buyer, Vec::new()));
+
+        let by_seller = sla_by_seller_key(&sla.seller_entity_id, current_height, &object_id);
+        ops.push(WriteOp::Put(by_seller, Vec::new()));
     }
 
     let count_key = ai_memory_count_key(&entity.id);
@@ -9709,10 +10123,14 @@ mod tests {
         assert_eq!(PAYMENT_FEE_BPS, 200);
         assert_eq!(PAYMENT_FEE_BPS, MARKETPLACE_FEE_BPS);
 
-        // Reputation event discriminants and bounds.
+        // Reputation event discriminants and bounds. REP_EVENT_MAX was
+        // bumped from REP_EVENT_PAYMENT_FAILED (= 11) to
+        // REP_EVENT_SLA_VIOLATION_TRIGGERED (= 12) in Week 31; the
+        // PaymentFailed event itself stays at byte 11.
         assert_eq!(REP_EVENT_PAYMENT_DELIVERED, 10);
         assert_eq!(REP_EVENT_PAYMENT_FAILED, 11);
-        assert_eq!(REP_EVENT_MAX, REP_EVENT_PAYMENT_FAILED);
+        assert_eq!(REP_EVENT_SLA_VIOLATION_TRIGGERED, 12);
+        assert_eq!(REP_EVENT_MAX, REP_EVENT_SLA_VIOLATION_TRIGGERED);
 
         // Calibrated against existing magnitudes: PROOF_VERIFIED inlines
         // +3, COMPOSITION_FAILURE inlines -1. Payment attestations sit
