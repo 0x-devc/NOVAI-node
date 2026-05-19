@@ -17094,3 +17094,459 @@ registered VK by a 32-byte handle instead of carrying the full
 ~500-byte VK every time, and the dispatch path enforces the
 `code_hash` binding so registered handles cannot be aliased across
 circuits.
+
+## Week 31: SLAs with Auto-Slash
+
+### 1. Overview - Objectives & Deliverables
+
+Week 31 adds binding two-party Service Level Agreements between AI
+entities. After Week 28 wired up the native x402 payment rail and
+Week 29 made services discoverable, the natural next question was:
+how does a buyer get on-chain enforcement when a seller fails to
+deliver? Week 31 answers that with `SlaAgreement` memory objects
+(type 14), a one-shot auto-slash hook on the existing
+`ServiceAttestation` handler, and a lazy `StakeWithdraw` collateral
+check that prevents the seller from draining stake out from under
+an open SLA.
+
+**Goal Statement.** Ship a memory object type carrying the SLA
+terms, a new acceptance signal (`SlaAccept`, type 18), an
+auto-slash trigger on threshold breach inside the existing
+attestation flow, a collateral check that gates seller withdrawals
+against committed SLA penalty amounts, and the RPC + CLI surface
+that makes the lifecycle visible to operators.
+
+**Deliverables.**
+
+- D31.1: `MemoryObjectType::SlaAgreement` (type byte 14) + the
+  fixed 210-byte `SlaAgreementData` codec + golden vector. Stored
+  inside the existing 86-byte memory-object envelope, so on-chain
+  footprint is ~296 bytes per SLA.
+- D31.2: Three new indexes:
+    * `ai/slas/active_between/<buyer>/<seller>` (singleton; value
+      is the SLA's `object_id`) enforces one-open-SLA-per-pair.
+    * `ai/slas/by_buyer/<buyer>/<created_at_be>/<object_id>` and
+      `ai/slas/by_seller/<seller>/<created_at_be>/<object_id>`
+      are zero-byte scan markers backing the height-windowed list
+      RPCs and the collateral check.
+- D31.3: `AiSignalType::SlaAccept = 18` with a 64-byte tail
+  (`sla_object_id || buyer_entity_id`); total signal payload 130
+  bytes. Transitions the SLA from `SLA_STATUS_PROPOSED` to
+  `_ACTIVE`, gated on `seller.stake_balance >= sla.slash_amount`
+  at acceptance time (Q2).
+- D31.4: Auto-slash hook in the `ServiceAttestation` handler. On a
+  FAILED attestation in-window, increments `violation_count`; on
+  threshold breach, debits `min(stake_balance, slash_amount)` from
+  the seller (saturating, mirroring `StakeSlash`), credits
+  `KEY_SLASH_TREASURY`, applies an additional
+  `REP_DELTA_SLA_VIOLATION_TRIGGERED = -5` to the seller (in
+  addition to the standard -3 from PaymentFailed), flips the SLA
+  to `SLA_STATUS_VIOLATED`, and tears down the active-between
+  singleton.
+- D31.5: Lazy collateral check on `StakeWithdraw` (Q1 Option B).
+  The handler sums `slash_amount` across the issuer's active SLAs
+  as seller and rejects any withdrawal that would drop
+  `stake_balance` below that sum with
+  `StakeWithdrawWouldUnderfundSlaCollateral`.
+- D31.6: `validate_sla_agreement_update` rejects every
+  `UpdateMemoryObject` against type 14 with
+  `SlaAgreementImmutableOnUpdate`. SLAs are not field-mutable; the
+  state machine is runtime-controlled.
+- D31.7: `DeleteMemoryObject` SLA teardown: tears down all three
+  indexes, with status gating (Proposed / Violated / Active-expired
+  allowed; Active-in-window rejected with
+  `SlaAgreementDeleteWhileActive`).
+- D31.8: Four RPC methods (`novai_getSlaAgreement`,
+  `novai_getActiveSla`, `novai_listSlasByBuyer`,
+  `novai_listSlasBySeller`) + CLI subcommand `novai-cli sla` with
+  seven verbs (`propose`, `accept`, `cancel`, `show`, `active`,
+  `list-by-buyer`, `list-by-seller`).
+
+**Final Metrics.**
+
+- 71 new tests across the five phases (8 codec / unit in
+  `ai_entities`, 21 create-side integration, 11 accept signal
+  integration, 11 auto-slash integration, 13 lifecycle +
+  collateral integration, 4 end-to-end smoke, 3 CLI parser).
+- 1,564 tests passing total (1,493 baseline + 71 net new), 0
+  failing.
+- Zero clippy warnings under `--all-targets -- -D warnings`.
+- `cargo deny check licenses` passes.
+- Five commits, one per phase.
+
+### 2. Design Decisions (Pushbacks Against the Original Prompt)
+
+The original prompt described a rich SLA model with response-time
+limits, uptime ratios, delivery-success rates, per-violation
+slashing, multiple cancellation paths, and ambiguity about where
+slashed funds go. Nine pushbacks reshaped that into a tighter v1.
+
+**P1. Drop response-time / uptime / delivery-rate enforcement.**
+The runtime has no on-chain oracle for any of these. Implementing
+fields the runtime cannot enforce would ship dead code. The wire
+layout reserves the bytes (`max_response_time_blocks`,
+`min_uptime_bps`, `min_delivery_success_bps`) for a future
+activation but the v1 runtime treats them as informational.
+Violation source in v1 is exactly one event type: a NAP
+`ServiceAttestation` with `status = FAILED` issued by the SLA's
+buyer against the SLA's seller, inside the
+`[start_height, end_height]` window.
+
+**P2. One-shot auto-slash + immediate termination.**
+Per-violation slashing is gameable (buyer spams FAILED
+attestations) and harder to test. Single shot is auditable: each
+FAILED attestation in-window increments `violation_count`, and the
+moment `violation_count >= violation_threshold` the SLA terminates
+with a single slash. No further violations count against an
+already-Violated SLA.
+
+**P3. Do NOT lock stake; use a lazy `StakeWithdraw` collateral
+check (Q1 Option B).** Adding a `locked_stake_for_slas` field to
+`AiEntity` would break the canonical encoding shipped in retrofit
+Week 4 (V5 golden vectors). The alternative: at withdrawal time,
+sum `slash_amount` across active SLAs where the issuer is seller,
+and reject any withdrawal that would drop `stake_balance` below
+that sum. Implemented via `sla_committed_collateral_as_seller`,
+bounded by the per-buyer cap of 8.
+
+**P4. Use `CreateMemoryObject` for proposal, `DeleteMemoryObject`
+for cancellation; introduce only ONE new signal type
+(`SlaAccept`).** Proposal is just a typed memory object create.
+Cancellation is just a delete of a still-Proposed SLA.
+Acceptance is the only flow that mutates an object owned by a
+different entity (the buyer owns the SLA, the seller accepts),
+which `UpdateMemoryObject` cannot do; hence the new signal.
+
+**P5. One open SLA per `(buyer, seller)` pair.** Without this
+invariant, FAILED-attestation matching becomes ambiguous (multiple
+candidate SLAs to count violations against). With the singleton
+`active_between` key, matching is O(1) and unambiguous. Mild
+operational cost: a buyer wanting a second SLA with the same
+seller waits for the existing one to expire / violate, or deletes
+a still-Proposed one.
+
+**P6. Auto-slash routes to `KEY_SLASH_TREASURY`, not to the
+buyer.** Routing to the buyer creates a direct incentive to fake
+violations. Routing to the treasury matches existing `StakeSlash`
+semantics and removes the incentive entirely. A future dispute-
+resolved partial-refund flow can split it later.
+
+**P7. Do NOT extend `PaymentRecord` or `VerificationRecord` with
+an `sla_object_id` field.** Both are wire-locked by golden
+vectors. The audit trail is recoverable: the SLA carries
+`violation_count` and `slashed_amount`; signals are persisted by
+height; off-chain consumers can join.
+
+**P8. `service_descriptor_hash` is optional and informational.**
+A zero-byte 32-byte field signals "no reference." The runtime does
+not verify that the hash resolves to a real ServiceDescriptor;
+that's a discovery concern, not an enforcement concern.
+
+**P9. Two reputation events on threshold breach.** A FAILED
+attestation already applies `REP_DELTA_PAYMENT_FAILED = -3`
+regardless of SLA context. The breach event applies an additional
+`REP_DELTA_SLA_VIOLATION_TRIGGERED = -5` on top, for a total of
+-8 on the breach event. This makes "SLA violator" a more severe
+reputation event than "a single failed payment."
+
+### 3. Wire Layout (locked by golden vector tests)
+
+```
+SlaAgreementData (fixed, 210 bytes):
+  version                       u8     byte  0       (SLA_AGREEMENT_V1 = 1)
+  buyer_entity_id               [u8;32] bytes 1..33
+  seller_entity_id              [u8;32] bytes 33..65
+  service_descriptor_hash       [u8;32] bytes 65..97  (zero = no reference)
+  status                        u8     byte  97      (0=Proposed, 1=Active, 2=Completed (reserved),
+                                                      3=Violated, 4=Cancelled (reserved))
+  created_at_height_be          u64    bytes 98..106  (informational; envelope `created_at` is canonical)
+  accepted_at_height_be         u64    bytes 106..114 (0 until acceptance)
+  start_height_be               u64    bytes 114..122
+  end_height_be                 u64    bytes 122..130
+  violation_count_be            u32    bytes 130..134
+  violation_threshold_be        u32    bytes 134..138
+  max_response_time_blocks_be   u32    bytes 138..142 (RESERVED v1)
+  min_uptime_bps_be             u16    bytes 142..144 (RESERVED v1; <= 10000)
+  min_delivery_success_bps_be   u16    bytes 144..146 (RESERVED v1; <= 10000)
+  price_per_call_be             u64    bytes 146..154
+  slash_amount_be               u128   bytes 154..170
+  terminated_at_height_be       u64    bytes 170..178
+  slashed_amount_be             u128   bytes 178..194
+  reserved                      [u8;16] bytes 194..210 (MUST be zero on create/update)
+
+SlaAcceptExtraV1 (signal type 18 inline tail, 64 bytes):
+  sla_object_id                 [u8;32] bytes 0..32
+  buyer_entity_id               [u8;32] bytes 32..64
+```
+
+Full SLA Accept signal payload: `BASE_PAYLOAD_LEN (66) + 64 = 130`
+bytes.
+
+### 4. Constants
+
+```rust
+// crates/ai_entities/src/memory.rs
+MemoryObjectType::SlaAgreement = 14
+pub const SLA_AGREEMENT_V1: u8 = 1;
+pub const SLA_AGREEMENT_SIZE: usize = 210;
+pub const MAX_SLAS_PER_ENTITY: u32 = 8;
+pub const SLA_STATUS_PROPOSED: u8 = 0;
+pub const SLA_STATUS_ACTIVE: u8 = 1;
+pub const SLA_STATUS_COMPLETED: u8 = 2;   // reserved
+pub const SLA_STATUS_VIOLATED: u8 = 3;
+pub const SLA_STATUS_CANCELLED: u8 = 4;   // reserved
+pub const SLA_STATUS_MAX: u8 = SLA_STATUS_CANCELLED;
+pub const SLA_RESERVED_LEN: usize = 16;
+pub const SLA_MIN_UPTIME_BPS_MAX: u16 = 10_000;
+pub const SLA_MIN_DELIVERY_SUCCESS_BPS_MAX: u16 = 10_000;
+pub const SLA_MAX_DURATION_BLOCKS: u64 = 604_800;   // ~1 week at 1s/block
+
+// crates/ai_entities/src/signals.rs
+AiSignalType::SlaAccept = 18
+
+// crates/execution/src/lib.rs
+pub const SLA_ACCEPT_EXTRA_LEN: usize = 64;
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SLA_ACCEPT_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SLA_ACCEPT_EXTRA_LEN;        // 130
+
+pub const KEY_PREFIX_AI_SLAS_ACTIVE_BETWEEN: &[u8] = b"ai/slas/active_between/";
+pub const KEY_PREFIX_AI_SLAS_BY_BUYER: &[u8]       = b"ai/slas/by_buyer/";
+pub const KEY_PREFIX_AI_SLAS_BY_SELLER: &[u8]      = b"ai/slas/by_seller/";
+
+pub const REP_EVENT_SLA_VIOLATION_TRIGGERED: u8 = 12;   // bumps REP_EVENT_MAX from 11 to 12
+pub const REP_EVENT_MAX: u8 = REP_EVENT_SLA_VIOLATION_TRIGGERED;
+pub const REP_DELTA_SLA_VIOLATION_TRIGGERED: i32 = -5;  // additive, on top of PaymentFailed -3
+```
+
+### 5. Storage Layout
+
+```
+Primary record (existing memory-object layout):
+  ai/memory_objects/<buyer>/<object_id>  ->  encoded MemoryObject{type=14, data=210-byte SlaAgreementData}
+
+Per-entity type index (existing, written by create handler):
+  ai/memory_by_type/14/<buyer>/<object_id>  ->  empty marker
+
+NEW singleton ("one open SLA per pair"):
+  ai/slas/active_between/<buyer>/<seller>  ->  <object_id (32 bytes)>
+    Written at SLA propose; deleted at auto-slash (Violated) or at
+    DeleteMemoryObject of a still-Proposed / Active-expired SLA.
+
+NEW scan markers (height-ordered):
+  ai/slas/by_buyer/<buyer>/<created_at_be>/<object_id>   ->  empty
+  ai/slas/by_seller/<seller>/<created_at_be>/<object_id> ->  empty
+    Index height is the memory object envelope's `created_at`, which
+    is the canonical chain height at create time. The payload's
+    `created_at_height` field is informational and may differ.
+
+Per-entity memory count (existing):
+  ai/memory_count/<buyer>  ->  u32_be
+```
+
+### 6. Handler Validation Orders
+
+`CreateMemoryObject` (type 14 add-ons via `validate_sla_agreement_payload`):
+
+```
+1. Decode 210-byte payload (InvalidSlaAgreement on length mismatch).
+2. version == SLA_AGREEMENT_V1.
+3. status == SLA_STATUS_PROPOSED.
+4. accepted_at_height == 0, violation_count == 0,
+   terminated_at_height == 0, slashed_amount == 0.
+5. buyer_entity_id == issuer.id.
+6. seller_entity_id != buyer_entity_id.
+7. end_height > start_height.
+8. start_height >= current_height.
+9. end_height - start_height <= SLA_MAX_DURATION_BLOCKS.
+10. violation_threshold >= 1.
+11. slash_amount > 0.
+12. min_uptime_bps <= 10000, min_delivery_success_bps <= 10000.
+13. reserved == zero.
+14. Seller entity exists and is_active.
+15. No existing open SLA between (buyer, seller).
+16. Buyer's open SlaAgreement count < MAX_SLAS_PER_ENTITY = 8.
+17. Write three indexes (active_between singleton, by_buyer marker,
+    by_seller marker) plus the standard memory-object envelope and
+    by_type marker. All atomic via the existing ops batch.
+```
+
+`SlaAccept` (signal type 18):
+
+```
+1. Decode SlaAcceptExtraV1 (64-byte tail).
+2. read_memory_object(db, buyer, sla_object_id); SlaAcceptNotFound
+   if missing.
+3. object_type == SlaAgreement; SlaAcceptObjectTypeMismatch otherwise.
+4. SlaAgreementData::decode succeeds; SlaAcceptDecodeFailed otherwise.
+5. sla.status == SLA_STATUS_PROPOSED; SlaAcceptNotProposed otherwise.
+6. sla.seller_entity_id == issuer.id; SlaAcceptSellerMismatch otherwise.
+7. current_height < sla.start_height; SlaAcceptAfterStart otherwise.
+8. issuer.stake_balance >= sla.slash_amount;
+   SlaAcceptInsufficientStake otherwise.
+9. sla.status = SLA_STATUS_ACTIVE; sla.accepted_at_height = current_height;
+   re-encode and rewrite the memory object envelope. active_between
+   singleton stays in place.
+```
+
+`ServiceAttestation` (auto-slash add-on, inside the existing FAILED
+branch):
+
+```
+1. Look up sla_active_between_key(record.payer, record.payee).
+2. If present and resolves to a Some(SlaAgreement) that is currently
+   Active and in-window:
+     a. Increment violation_count (saturating).
+     b. If violation_count >= violation_threshold:
+          - actual_slashed = min(payee.stake_balance, sla.slash_amount).
+          - Debit payee.stake_balance by actual_slashed.
+          - If actual_slashed > 0: credit KEY_SLASH_TREASURY by the
+            same amount.
+          - Apply REP_DELTA_SLA_VIOLATION_TRIGGERED (-5) to the payee
+            (in addition to the standard -3 from PaymentFailed).
+          - sla.status = SLA_STATUS_VIOLATED; record
+            terminated_at_height and slashed_amount.
+          - Delete the active_between singleton.
+     c. Re-encode and rewrite the SLA memory object envelope
+        (violation_count always updated; status/terminated/slashed
+        only on breach).
+3. Out-of-window FAILED attestations: NO counter increment, NO slash.
+4. Wrong object type at the pointer: silent skip (defensive).
+```
+
+`StakeWithdraw` (collateral check, before the actual debit):
+
+```
+1. After-withdraw stake = entity.stake_balance - extra.amount.
+2. committed = sla_committed_collateral_as_seller(db, entity.id,
+                                                  current_height).
+3. If after_withdraw < committed:
+     StakeWithdrawWouldUnderfundSlaCollateral { required: committed,
+       available_after_withdraw }.
+4. Otherwise debit as normal.
+```
+
+`DeleteMemoryObject` (type 14 add-ons):
+
+```
+1. If SLA decode succeeds AND status == SLA_STATUS_ACTIVE AND
+   current_height <= sla.end_height: SlaAgreementDeleteWhileActive.
+2. Compute the canonical index height (envelope's created_at).
+3. Push Deletes for by_buyer and by_seller markers.
+4. If status != SLA_STATUS_VIOLATED, also Delete the active_between
+   singleton (already gone for Violated).
+```
+
+### 7. RPC
+
+```
+Method: novai_getSlaAgreement
+Params: { owner: hex32, object_id: hex32 }
+Response: { agreement: SlaAgreementJson | null }
+
+Method: novai_getActiveSla
+Params: { buyer: hex32, seller: hex32 }
+Response: { agreement: SlaAgreementJson | null }
+
+Method: novai_listSlasByBuyer
+Params: { entity_id: hex32, start_height: u64, end_height: u64 }
+Response: { agreements: [SlaAgreementJson, ...] }
+
+Method: novai_listSlasBySeller
+Params: { entity_id: hex32, start_height: u64, end_height: u64 }
+Response: { agreements: [SlaAgreementJson, ...] }
+
+SlaAgreementJson {
+  object_id, owner_entity, created_at, updated_at, version,
+  buyer_entity_id, seller_entity_id, service_descriptor_hash (hex),
+  status, status_label, created_at_height, accepted_at_height,
+  start_height, end_height, violation_count, violation_threshold,
+  max_response_time_blocks, min_uptime_bps, min_delivery_success_bps,
+  price_per_call (decimal), slash_amount (decimal),
+  terminated_at_height, slashed_amount (decimal)
+}
+```
+
+`is_expired` is computed client-side against `novai_getStatus`'s
+committed head; the RPC does not bake it in. List queries cap at
+`MAX_SIGNAL_QUERY_RANGE = 10_000` heights, matching the existing
+payment / signal queries.
+
+### 8. CLI
+
+```
+novai-cli sla propose \
+  --key-file alice.key \
+  --buyer-entity-id <alice-hex32> \
+  --seller-entity-id <bob-hex32> \
+  [--service-descriptor-hash <hex32>] \
+  --start-height 1000 --end-height 5000 \
+  --violation-threshold 3 \
+  --slash-amount 1000000 \
+  [--price-per-call 100] \
+  [--max-response-time-blocks 0] [--min-uptime-bps 0]
+  [--min-delivery-success-bps 0]
+
+novai-cli sla accept \
+  --key-file bob.key \
+  --sla-object-id <hex32> \
+  --buyer-entity-id <alice-hex32> \
+  --seller-entity-id <bob-hex32>
+
+novai-cli sla cancel --key-file alice.key --sla-object-id <hex32>
+
+novai-cli sla show --owner <alice-hex32> --object-id <hex32>
+novai-cli sla active --buyer <alice-hex32> --seller <bob-hex32>
+novai-cli sla list-by-buyer  --entity-id <alice-hex32>  [--start-height 0] [--end-height 10000]
+novai-cli sla list-by-seller --entity-id <bob-hex32>    [--start-height 0] [--end-height 10000]
+```
+
+`propose` wraps `CreateMemoryObject` payload v3 with type 14;
+`cancel` wraps `DeleteMemoryObject` payload v5; `accept` builds the
+SlaAccept signal payload directly (`signal_hash` derived locally as
+`blake3("novai-sla-accept-v1" || sla_object_id || buyer_entity_id)`
+so callers do not have to invent one).
+
+### 9. Test Surface
+
+| File | Tests | What it covers |
+|------|-------|---------------|
+| crates/ai_entities/src/memory.rs | 8 new | Type-byte 14 in roundtrip + name + invalid-byte tests, codec constants, 210-byte roundtrip, arbitrary-reserved preservation, length rejection, version + status byte preservation, golden vector field-by-field. |
+| crates/execution/tests/sla_system.rs | 21 | Happy path + per-buyer cap + every individual create-side validation rejection. |
+| crates/execution/tests/sla_accept.rs | 11 | PROPOSED -> ACTIVE transition, active_between singleton preservation, wire-length sanity, and every defensive rejection (not-found, type-mismatch, double-accept, wrong-seller, at-start boundary, strictly-after-start, insufficient stake, stake-equal-to-slash boundary). |
+| crates/execution/tests/sla_auto_slash.rs | 11 | Below-threshold no-slash, at-threshold slash + transition, no-double-fire, saturating slash, zero-stake no-treasury-credit, before-start / after-end window skip, still-Proposed skip, no-SLA-no-slash, DELIVERED no-increment, envelope updated_at bumped. |
+| crates/execution/tests/sla_lifecycle.rs | 13 | Update rejected (mutated + identical payloads), delete-by-state (Proposed / Active-in-window / Active-expired / Violated), pair-singleton-freed-after-delete, withdraw under/at/over slack, no-active / expired-SLA / post-slash unconstrained, sum-across-buyers. |
+| crates/execution/tests/sla_end_to_end.rs | 4 | Full lifecycle smoke (propose -> accept -> 3xFAILED -> slash -> delete), by-buyer / by-seller list parity, height-window filter, post-violation point query. |
+| tools/novai-cli/src/commands/sla.rs | 3 | build_agreement codec roundtrip, bad-hex buyer rejection, bad-hex seller rejection. |
+
+### 10. Outstanding Work Items
+
+- **Multi-violation slashing**: v1 fires a single slash on the
+  breaching attestation and terminates the SLA. A future variant
+  could continue counting and slash per-violation up to a cap.
+- **Mutual cancel**: v1 has no mutual cancellation path; once
+  accepted, the SLA runs to expiry or violation. A future signal
+  type could let both parties co-sign a release.
+- **Response-time / uptime / delivery-rate enforcement**: the
+  reserved fields decode but the runtime ignores them. A future
+  schema bump can activate them by extending the validation
+  hooks; the wire layout is forward-compatible.
+- **Partial dispute refund**: 100% of slashed funds go to
+  `KEY_SLASH_TREASURY` to remove the fake-violation incentive. A
+  future dispute-resolved flow could split the penalty between
+  the buyer and the treasury under a multisig oracle.
+- **Buyer-side dispute / oracle attestations**: only the SLA's
+  buyer can drive violations (via NAP attestations). A future
+  oracle-backed CompositionCheck-style signal could let a third
+  party attest to a deliverability failure.
+- **VerificationRecord / PaymentRecord SLA cross-reference**:
+  intentionally deferred per pushback P7 to avoid a schema bump.
+  Off-chain audit consumers can join via signal_hash + SLA
+  by_buyer index.
+
+**Week 31 Status: COMPLETE.** Five phases shipped, all 1,564 tests
+passing, zero clippy warnings, cargo deny check licenses passes.
+NOVAI now has on-chain Service Level Agreements with deterministic
+auto-slash on threshold breach, an honest collateral check that
+prevents sellers from quietly draining stake out from under an
+open SLA, and a complete RPC + CLI surface for managing the
+two-party lifecycle.
