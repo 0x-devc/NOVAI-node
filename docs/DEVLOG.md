@@ -16706,3 +16706,391 @@ passing, zero clippy warnings, cargo deny check licenses passes. AI
 agents on NOVAI can now discover services on-chain through a
 category-indexed query and reference the resulting `object_id` from a
 Week 28 `PaymentRequest`. The discovery loop is closed.
+
+## Week 30: VK Registry
+
+### 1. Overview - Objectives & Deliverables
+
+Week 30 closes a documented limitation from the Groth16 ZK verifier
+shipped in late Week 21: until this week, every `ProofSubmission`
+carried its full `vk_bytes` field inline (~500 bytes compressed for the
+BN254 sum circuit, up to the 8 KiB v2 cap). For repeated proofs against
+the same circuit that is pure duplication; for off-chain consumers
+trying to verify proofs by replaying the dispatch it forces them to
+re-receive the VK on every submission. The Week 30 VK Registry lets an
+entity publish a VK once as a new memory object type and lets future
+`ProofSubmission` signals reference it by a 32-byte handle.
+
+**Goal Statement.** Ship a memory object type carrying registered
+verification keys, a global handle-to-owner index for cross-entity
+lookup, a new `proof_type` discriminant on `ProofSubmission` that
+resolves the VK via the index instead of inlining it, an RPC surface
+for discovering registrations, and a typed CLI subcommand.
+
+**Deliverables.**
+
+- D30.1: `MemoryObjectType::VkRegistration` (type byte 13) + the
+  variable-length `VkRegistrationData` codec (39-byte header + label +
+  compressed VK) + golden vector locking the header layout.
+- D30.2: `PROOF_TYPE_GROTH16_REGISTERED = 3` constant + matching
+  decoder rule (`vk_len == 32` exactly when `proof_type = 3`) +
+  dispatch path that resolves the registered VK and feeds its bytes
+  to `Groth16Verifier::verify_proof`. `PROOF_TYPE_PLONK_REGISTERED = 4`
+  reserved.
+- D30.3: Global by-id index `ai/vk_registry/by_id/<object_id>` ->
+  owner entity id, maintained by the create and delete handlers in the
+  same atomic batch as the existing memory-object writes.
+- D30.4: Create-side validation (decode, version, supported proof_type,
+  label cap, VK bytes cap, ark-groth16 deserialize check, per-entity
+  cap) and update-side immutability rules (`version`, `proof_type`,
+  `code_hash`, `vk_bytes` frozen; only `label` mutable).
+- D30.5: `novai_getVkRegistration` and `novai_listVkRegistrations` RPC
+  methods + `get_vk_registration_by_id` / `get_vk_registrations_by_entity`
+  execution helpers backing them.
+- D30.6: `novai-cli vk register/update-label/delete/show/list`
+  subcommand + `novai-cli signal publish proof-submission --vk-id ...`
+  flag for submitting registered-VK proofs.
+
+**Final Metrics.**
+
+- 45 new tests across the three batches (23 codec/unit + integration
+  in Batch 1, 8 dispatch integration tests in Batch 2, 14 RPC + CLI
+  unit tests in Batch 3).
+- 1,493 tests passing total (1,448 baseline + 45 net new), 0 failing.
+- Zero clippy warnings under `--all-targets -- -D warnings`.
+- `cargo deny check licenses` passes.
+- One commit per batch across three batches.
+
+### 2. Design Decisions (Pushbacks Against the Original Prompt)
+
+The original prompt was "the VK Registry lets entities register
+verification keys on-chain so future proof submissions can reference a
+registered VK by ID instead of carrying the full VK every time." Seven
+design pushbacks reshaped that into the final implementation.
+
+**P1. Memory object, not bespoke KV record.** A new KV record type
+would need its own transaction type, secondary indexes, and CLI shape
+for no architectural benefit. Reusing `MemoryObjectType` (type byte
+13) gets us the existing CRUD pipeline, per-entity cap framework, and
+RPC patterns for free, the same way Week 21 modelled durable AI state
+and Week 29 modelled service descriptors.
+
+**P2. Bind VK to `code_hash` at registration.** The original prompt
+was silent on what the registered VK is _for_. Without a binding, a
+publisher could register a VK for circuit A and then claim it verifies
+a proof for circuit B by tampering with the `code_hash` on the
+`ProofSubmission`. The fix: `VkRegistrationData` carries the canonical
+`code_hash` and the dispatch path rejects a submission whose `code_hash`
+does not match the stored binding.
+
+**P3. Full immutability on update.** Allowing `vk_bytes` to change on
+update would let a publisher swap the verified circuit out from under
+existing references, breaking any cached or queued submissions. The
+rule: `UpdateMemoryObject` accepts only `label` mutations; the
+runtime rejects any mutation of `version`, `proof_type`, `code_hash`,
+or `vk_bytes` with `VkRegistrationImmutableFieldChanged`. Mirrors the
+`DelegationGrantNotUpdatable` pattern at type 10.
+
+**P4. New `PROOF_TYPE` discriminant, not a flag in extras.** A flag
+inside the existing extras would have required teaching the decoder to
+interpret `vk_bytes` as either inline-VK or a 32-byte id depending on
+auxiliary state. `PROOF_TYPE_GROTH16_REGISTERED = 3` keeps the
+existing v2 wire format and just adds a new dispatch arm; the decoder
+enforces `vk_len == 32` only when `proof_type = 3`, surfacing
+`RegisteredVkBadIdLength` on mismatch.
+
+**P5. Do NOT extend `VerificationRecord` with a `vk_registry_id`
+field.** Tempting for audit traceability but the `VerificationRecord`
+encoding is locked at 105 bytes by golden vector tests, and changing
+it would force a schema bump on a record type that has shipped since
+Week 21. The audit trail remains recoverable: the signal carries the
+registry id; signals are persisted by height. The
+`VerificationRecord` does carry `proof_type = 3` for registry-routed
+verifications so audit consumers can filter on it without a schema
+change.
+
+**P6. Per-entity cap of 8.** `ServiceDescriptor` and
+`DelegationGrant` use 16; VKs are bulkier (hundreds of bytes to
+several KiB compressed) and in v1 most entities will register at most
+one VK per circuit. `MAX_VK_REGISTRATIONS_PER_ENTITY = 8` is generous
+relative to expected usage and bounds the per-entity scan cost.
+
+**P7. Allow `DeleteMemoryObject`, no reference counting.** Tracking
+which submissions reference which registry handles would balloon
+state with no operational benefit. Deletion is allowed; subsequent
+submissions referencing the deleted handle fail with
+`VkRegistrationNotFound`. Documented contract: registry owners control
+the lifetime of their VKs.
+
+**Bonus (during Batch 2):** the original `PROOF_TYPE_MAX` constant was
+a single monotonic upper bound, which broke once the registered
+variants introduced a gap at `PROOF_TYPE_PLONK` (= 2, reserved but
+unwired). Introduced `is_supported_proof_type` so the decoder gates on
+an explicit set rather than a contiguous range; `PROOF_TYPE_PLONK`
+stays rejected, `PROOF_TYPE_GROTH16_REGISTERED` is accepted.
+
+### 3. Wire Layout (Locked by Golden Vector Test)
+
+```
+VkRegistrationData (variable, min 40 bytes, max ~8.3 KiB):
+  version           u8     byte  0          (VK_REGISTRATION_VERSION = 1)
+  proof_type        u8     byte  1          (PROOF_TYPE_* discriminant)
+  code_hash         [u8;32] bytes 2..34
+  label_len         u8     byte  34         (0..=32)
+  vk_len_be         u32    bytes 35..39     (1..=PROOF_SUBMISSION_MAX_VK_BYTES = 8192)
+  label             [u8]   bytes 39..39+label_len    (UTF-8, free-form tag)
+  vk_bytes          [u8]   bytes 39+label_len..      (ark-serialize compressed VK)
+```
+
+Fixed header is 39 bytes; total min payload is 40 (header + 1-byte VK,
+no label), total max is 8 263 (header + 32-byte label + 8 192-byte
+VK). The on-chain footprint with the 86-byte `MemoryObject` envelope
+varies: a typical Groth16 BN254 sum-circuit VK lands around **~700
+bytes** stored.
+
+### 4. Proof-Type Enum
+
+```
+proof_type discriminants in crates/execution/src/lib.rs:
+
+  0  PROOF_TYPE_STUB                Always-accept verifier (NOT for production).
+  1  PROOF_TYPE_GROTH16             BN254 Groth16 with inline vk_bytes.
+  2  PROOF_TYPE_PLONK               Reserved (no verifier wired).
+  3  PROOF_TYPE_GROTH16_REGISTERED  BN254 Groth16 with vk_bytes = 32-byte registry handle.
+  4  PROOF_TYPE_PLONK_REGISTERED    Reserved (no verifier wired).
+```
+
+`is_supported_proof_type` accepts {0, 1, 3} and rejects everything
+else, including the reserved {2, 4}. Activating either reserved
+discriminant requires both adding the verifier dispatch arm AND
+extending `is_supported_proof_type`.
+
+### 5. Storage Layout
+
+```
+Primary record (existing memory-object layout):
+  ai/memory_objects/<owner>/<object_id>  ->  encoded MemoryObject{type=13, ...}
+
+Per-entity type index (existing, written by create handler):
+  ai/memory_by_type/13/<owner>/<object_id>  ->  empty marker
+
+NEW global by-id index:
+  ai/vk_registry/by_id/<object_id>  ->  <owner_entity_id (32 bytes)>
+
+Per-entity count index (existing):
+  ai/memory_count/<owner>  ->  u32_be
+```
+
+The by-id index is the resolution path the `ProofSubmission` handler
+uses when `proof_type = PROOF_TYPE_GROTH16_REGISTERED`: the wire
+carries only the 32-byte handle, and this index recovers `(owner,
+object_id)` for the primary memory-object read. Create and delete
+handlers maintain it in the same atomic batch as the existing writes;
+update does not touch it because `vk_bytes` (and therefore the
+handle's payload binding) is immutable.
+
+### 6. Handler Validation Order
+
+`CreateMemoryObject` (apply_create_memory_object_tx_inner):
+
+```
+1. validate_vk_registration_payload (no-op for non-VkRegistration types
+   so the call sits alongside the existing per-type hooks):
+   - Decode the variable-length payload (InvalidVkRegistration on
+     length-prefix mismatch).
+   - version == VK_REGISTRATION_VERSION.
+   - proof_type == PROOF_TYPE_GROTH16 (others rejected; the registered
+     variants are reserved for the dispatch path, not registration).
+   - label.len() <= VK_REGISTRATION_LABEL_MAX (32).
+   - vk_bytes non-empty AND <= PROOF_SUBMISSION_MAX_VK_BYTES (8192).
+   - Groth16Verifier::is_valid_vk(vk_bytes) (ark-groth16 deserialize check).
+   - Existing registration count for this publisher <
+     MAX_VK_REGISTRATIONS_PER_ENTITY (8). Bounded prefix scan over the
+     by_type index, mirroring the Week 29 ServiceDescriptor cap.
+2. Standard create writes: primary memory object, by_type marker,
+   count increment.
+3. NEW: by-id index entry (handle -> owner).
+4. All ops commit through the existing atomic batch.
+```
+
+`UpdateMemoryObject` (apply_update_memory_object_tx_inner):
+
+```
+1. Existing DelegationGrantNotUpdatable check (unchanged).
+2. Existing validate_composition_graph_payload (unchanged).
+3. Existing validate_service_descriptor_update (unchanged).
+4. NEW: validate_vk_registration_update:
+   - Re-runs every field-level create rule on the new payload.
+   - Rejects any change to version, proof_type, code_hash, or vk_bytes
+     with VkRegistrationImmutableFieldChanged. Only label may change.
+5. Standard update writes: primary memory object only (data +
+   updated_at change, object_id is preserved). NO by-id index rewrite
+   because the handle's binding is immutable.
+```
+
+`DeleteMemoryObject` (apply_delete_memory_object_tx_inner):
+
+```
+1. Existing primary + by_type + count deletes (unchanged).
+2. Existing ServiceDescriptor by_category teardown (unchanged).
+3. NEW: when the deleted object is a VkRegistration, push a Delete for
+   the by-id index entry (reconstructed from payload.object_id; no
+   payload decode required, so a stale or malformed payload does not
+   block deletion).
+```
+
+### 7. ProofSubmission Dispatch (PROOF_TYPE_GROTH16_REGISTERED)
+
+Decoder addition (V2 layout, when `proof_type = 3`):
+
+```
+- vk_len_be MUST equal 32 exactly; otherwise reject with
+  RegisteredVkBadIdLength { actual }.
+- proof_len_be still capped at PROOF_SUBMISSION_MAX_PROOF_BYTES (1024).
+```
+
+Dispatch addition (apply_signal_commitment_tx_inner, ProofSubmission
+branch):
+
+```
+if extra.proof_type == PROOF_TYPE_GROTH16_REGISTERED:
+  1. Read 32-byte registry_id from extra.vk_bytes.
+  2. db.get(vk_registry_by_id_key(registry_id))
+       -> owner_entity_id (32 bytes) OR VkRegistrationNotFound.
+  3. read_memory_object(db, owner, registry_id)
+       -> MemoryObject{type=VkRegistration} OR VkRegistrationNotFound.
+  4. Reject if object_type != VkRegistration with VkRegistrationTypeMismatch.
+  5. VkRegistrationData::decode(memory_object.data)
+       -> registration OR InvalidVkRegistration.
+  6. Reject if registration.proof_type != PROOF_TYPE_GROTH16 with
+     VkRegistrationProofTypeMismatch (defence-in-depth; the create-side
+     validator already enforces this).
+  7. Reject if registration.code_hash != extra.code_hash with
+     VkRegistrationCodeHashMismatch (the binding check from P2).
+  8. effective_vk_bytes = registration.vk_bytes.
+else:
+  effective_vk_bytes = extra.vk_bytes (existing inline path).
+
+Groth16Verifier::verify_proof(
+  proof_bytes, effective_vk_bytes, public_inputs,
+  PROOF_TYPE_GROTH16, code_hash
+)
+```
+
+On success the VerificationRecord is written with
+`proof_type = PROOF_TYPE_GROTH16_REGISTERED` (= 3) so audit consumers
+can distinguish registry-routed verifications from inline-VK ones
+without a schema change.
+
+### 8. RPC
+
+```
+Method: novai_getVkRegistration
+Params: { id: hex32 }
+Response: { registration: VkRegistrationJson | null }
+
+Method: novai_listVkRegistrations
+Params: { entity_id: hex32 }
+Response: { registrations: [VkRegistrationJson, ...] }
+
+VkRegistrationJson {
+  object_id, owner_entity (hex),
+  created_at, updated_at,
+  version,
+  proof_type, proof_type_label (e.g. "groth16", "groth16-registered"),
+  code_hash (hex),
+  label (lossy UTF-8 string),
+  vk_len,
+  vk_bytes_hex
+}
+```
+
+`vk_bytes_hex` is included in the response so off-chain consumers can
+verify a referenced VK without a second round trip. `proof_type_label`
+covers all 5 PROOF_TYPE_* discriminants and renders out-of-range bytes
+as `"unknown"`.
+
+### 9. CLI
+
+```
+novai-cli vk register \
+  --key-file alice.key \
+  --code-hash <hex32> \
+  --vk-file ./sum_v1.vk.bin \
+  [--proof-type groth16] \
+  [--label "sum-v1"] \
+  [--fee 1000]
+
+novai-cli vk update-label --key-file alice.key --object-id <hex32> --label "v2"
+novai-cli vk delete --key-file alice.key --object-id <hex32>
+novai-cli vk show --id <hex32>
+novai-cli vk list --entity-id <hex32>
+
+novai-cli signal publish \
+  --key-file alice.key \
+  --signal-hash <hex32> \
+  --signal-type proof-submission \
+  --issuer-entity-id <hex32> \
+  --proof-type 3 \
+  --code-hash <hex32> \
+  --computation-hash <hex32> \
+  --vk-id <hex32> \
+  --proof-file ./proof.bin
+```
+
+`vk update-label` first fetches the existing registration over RPC so
+it can preserve the immutable fields verbatim while only changing the
+label. The `signal publish` proof-submission flow enforces mutual
+exclusion between `--vk-id` (proof_type = 3), `--vk-file` (proof_type
+= 1), and the v1 stub form (proof_type = 0) so a typo surfaces
+client-side before paying a tx fee.
+
+### 10. Test Surface
+
+| File | Tests | What it covers |
+|------|-------|---------------|
+| crates/ai_entities/src/memory.rs | 10 new | Type enum byte 13, codec roundtrip, empty/max label, decode rejects too-short/trailing/truncated, version + proof_type byte preservation, golden header layout. |
+| crates/execution/src/lib.rs | 0 new (existing tests cover the new helpers transitively) | get_vk_registration_by_id and get_vk_registrations_by_entity exercised end-to-end by the integration tests below. |
+| crates/execution/tests/vk_registry_system.rs | 13 | Full create/update/delete handler suite + per-entity cap + delete-then-recreate slot freeing. |
+| crates/execution/tests/vk_registry_dispatch.rs | 8 | End-to-end ProofSubmission with proof_type = 3 (happy path + cross-entity), decoder length rejections, NotFound, CodeHashMismatch, delete-then-submit, tampered proof. |
+| crates/node/src/rpc.rs | 4 new inline | Params deserialize for both methods, JSON shape including vk_bytes_hex, proof_type_label coverage for the full PROOF_TYPE_* set. |
+| tools/novai-cli/src/commands/vk.rs | 6 unit | Proof-system name parser (accept/reject/unknown), label-cap and empty-VK rejection, codec roundtrip through the typed builder. |
+| tools/novai-cli/src/commands/signal.rs | 4 new | proof-submission registered payload byte layout + mutual-exclusion errors between --vk-id, --vk-file, and stub. |
+
+### 11. Outstanding Work Items
+
+- **Discovery surface**: the only filter v1 exposes is "all VKs owned
+  by an entity". A future RPC parameter could narrow by
+  `proof_type` or `code_hash` if the entity-level fan-out becomes
+  unwieldy. Currently the per-entity cap (8) keeps every list
+  response naturally small.
+- **PLONK activation**: `PROOF_TYPE_PLONK` (= 2) and
+  `PROOF_TYPE_PLONK_REGISTERED` (= 4) stay reserved-but-unwired.
+  Adding PLONK means landing a real PLONK verifier in `novai_crypto`,
+  extending `is_supported_proof_type`, and wiring the dispatch
+  branches.
+- **VK deserialization caching**: every accepted registry-routed
+  submission deserializes the same compressed VK from KV bytes. For
+  hot circuits an LRU cache keyed on the registry handle would save
+  repeated parsing cost. Out of scope for v1 because the bench cost
+  is dominated by the pairing verification, not the deserialize.
+- **VerificationRecord `vk_registry_id` field**: deferred per
+  pushback P5 to avoid a schema bump on a locked-in record. If
+  cross-record traceability becomes a hard requirement, a future
+  `VerificationRecordV2` (new memory object type byte) can layer in
+  the field without disturbing the v1 encoding.
+- **Cross-entity registry "publish for anyone"**: any entity can
+  reference any published handle (this is the cross-entity test).
+  The current cap enforces only "8 VKs per publisher". A future
+  discovery RPC could surface VKs by `code_hash` so a third-party
+  consumer can find an existing registration before paying to
+  re-publish their own.
+
+**Week 30 Status: COMPLETE.** Three batches shipped, all 1,493 tests
+passing, zero clippy warnings, cargo deny check licenses passes. The
+on-chain VK binding documented as a known limitation in the Week 21
+verification spec is now closed: a `ProofSubmission` can reference a
+registered VK by a 32-byte handle instead of carrying the full
+~500-byte VK every time, and the dispatch path enforces the
+`code_hash` binding so registered handles cannot be aliased across
+circuits.
