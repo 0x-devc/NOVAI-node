@@ -20,23 +20,25 @@ use crate::consensus_node::Storage;
 use crate::MutexExt;
 use mempool::{NonceProvider, TxMempool};
 use novai_ai_entities::{
-    AiSignalType, MemoryObject, ServiceDescriptorData, SignalCommitment, VkRegistrationData,
-    SERVICE_CATEGORY_COMPUTE, SERVICE_CATEGORY_DATA_ORACLE, SERVICE_CATEGORY_GATEWAY,
-    SERVICE_CATEGORY_GENERIC, SERVICE_CATEGORY_INDEXER, SERVICE_CATEGORY_INFERENCE,
-    SERVICE_CATEGORY_MONITORING, SERVICE_CATEGORY_RESERVED_MAX, SERVICE_CATEGORY_SIGNAL_PROVIDER,
-    SERVICE_CATEGORY_STORAGE, SERVICE_CATEGORY_VERIFICATION, SERVICE_STATUS_ACTIVE,
-    SERVICE_STATUS_DEPRECATED, SERVICE_STATUS_PAUSED,
+    AiSignalType, MemoryObject, ServiceDescriptorData, SignalCommitment, SlaAgreementData,
+    VkRegistrationData, SERVICE_CATEGORY_COMPUTE, SERVICE_CATEGORY_DATA_ORACLE,
+    SERVICE_CATEGORY_GATEWAY, SERVICE_CATEGORY_GENERIC, SERVICE_CATEGORY_INDEXER,
+    SERVICE_CATEGORY_INFERENCE, SERVICE_CATEGORY_MONITORING, SERVICE_CATEGORY_RESERVED_MAX,
+    SERVICE_CATEGORY_SIGNAL_PROVIDER, SERVICE_CATEGORY_STORAGE, SERVICE_CATEGORY_VERIFICATION,
+    SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DEPRECATED, SERVICE_STATUS_PAUSED, SLA_STATUS_ACTIVE,
+    SLA_STATUS_CANCELLED, SLA_STATUS_COMPLETED, SLA_STATUS_PROPOSED, SLA_STATUS_VIOLATED,
 };
 use novai_codec::{decode_tx_v1_signed, txid_v1};
 use novai_consensus_types;
 use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_execution::{
-    get_memory_objects_by_entity, get_payments_by_entity, get_service_descriptors_by_category,
-    get_signals_by_height, get_signals_by_issuer, get_signals_by_type, get_vk_registration_by_id,
-    get_vk_registrations_by_entity, read_account_or_default, read_ai_entity, PaymentRecord,
-    PaymentRole, PAYMENT_ATTESTATION_STATUS_DELIVERED, PAYMENT_ATTESTATION_STATUS_FAILED,
-    PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16, PROOF_TYPE_GROTH16_REGISTERED,
-    PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
+    get_active_sla_between, get_memory_objects_by_entity, get_payments_by_entity,
+    get_service_descriptors_by_category, get_signals_by_height, get_signals_by_issuer,
+    get_signals_by_type, get_sla_agreement, get_slas_by_buyer, get_slas_by_seller,
+    get_vk_registration_by_id, get_vk_registrations_by_entity, read_account_or_default,
+    read_ai_entity, PaymentRecord, PaymentRole, PAYMENT_ATTESTATION_STATUS_DELIVERED,
+    PAYMENT_ATTESTATION_STATUS_FAILED, PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16,
+    PROOF_TYPE_GROTH16_REGISTERED, PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
 };
 use novai_p2p::{NetworkMessage, PeerManager};
 use novai_types::{Address, TxV1, TxVersion};
@@ -539,6 +541,133 @@ struct GetVkRegistrationResult {
 #[derive(Debug, Serialize)]
 struct ListVkRegistrationsResult {
     registrations: Vec<VkRegistrationJson>,
+}
+
+/// Parameters for novai_getSlaAgreement (Week 31).
+#[derive(Debug, Deserialize)]
+struct GetSlaAgreementParams {
+    /// Hex-encoded 32-byte buyer entity id (the SLA's memory-object owner).
+    owner: String,
+    /// Hex-encoded 32-byte SLA memory object id.
+    object_id: String,
+}
+
+/// Parameters for novai_getActiveSla (Week 31).
+#[derive(Debug, Deserialize)]
+struct GetActiveSlaParams {
+    /// Hex-encoded 32-byte buyer entity id.
+    buyer: String,
+    /// Hex-encoded 32-byte seller entity id.
+    seller: String,
+}
+
+/// Parameters for novai_listSlasByBuyer / novai_listSlasBySeller (Week 31).
+#[derive(Debug, Deserialize)]
+struct ListSlasParams {
+    /// Hex-encoded 32-byte entity id (buyer or seller, depending on the
+    /// RPC method).
+    entity_id: String,
+    /// Inclusive lower bound on the SLA memory object's
+    /// `created_at` height.
+    start_height: u64,
+    /// Inclusive upper bound on the SLA memory object's
+    /// `created_at` height.
+    end_height: u64,
+}
+
+/// JSON-serializable `SlaAgreement` record (Week 31).
+///
+/// Decimal-string encoding is used for the `u128` `slash_amount` and
+/// `slashed_amount` fields to avoid JSON precision loss, matching the
+/// convention shipped in Week 28 for `PaymentRecord.amount` and
+/// Week 29 for `ServiceDescriptorData.min_stake`. Clients compute
+/// `is_expired` locally by comparing `end_height` against the chain's
+/// committed head (returned by `novai_getStatus`).
+#[derive(Debug, Serialize)]
+struct SlaAgreementJson {
+    object_id: String,
+    owner_entity: String,
+    created_at: u64,
+    updated_at: u64,
+    version: u8,
+    buyer_entity_id: String,
+    seller_entity_id: String,
+    service_descriptor_hash: String,
+    status: u8,
+    /// `"proposed" | "active" | "completed" | "violated" | "cancelled"`
+    /// for the well-known v1 discriminants; out-of-range bytes render
+    /// as `"unknown"` rather than panicking.
+    status_label: &'static str,
+    created_at_height: u64,
+    accepted_at_height: u64,
+    start_height: u64,
+    end_height: u64,
+    violation_count: u32,
+    violation_threshold: u32,
+    max_response_time_blocks: u32,
+    min_uptime_bps: u16,
+    min_delivery_success_bps: u16,
+    /// Per-call price as a decimal string.
+    price_per_call: String,
+    /// Penalty paid on threshold breach, as a decimal string.
+    slash_amount: String,
+    terminated_at_height: u64,
+    /// Actual debit applied on auto-slash, as a decimal string.
+    slashed_amount: String,
+}
+
+impl From<(MemoryObject, SlaAgreementData)> for SlaAgreementJson {
+    fn from(pair: (MemoryObject, SlaAgreementData)) -> Self {
+        let (obj, sla) = pair;
+        Self {
+            object_id: hex::encode(obj.object_id),
+            owner_entity: hex::encode(obj.owner_entity),
+            created_at: obj.created_at,
+            updated_at: obj.updated_at,
+            version: sla.version,
+            buyer_entity_id: hex::encode(sla.buyer_entity_id),
+            seller_entity_id: hex::encode(sla.seller_entity_id),
+            service_descriptor_hash: hex::encode(sla.service_descriptor_hash),
+            status: sla.status,
+            status_label: sla_status_label(sla.status),
+            created_at_height: sla.created_at_height,
+            accepted_at_height: sla.accepted_at_height,
+            start_height: sla.start_height,
+            end_height: sla.end_height,
+            violation_count: sla.violation_count,
+            violation_threshold: sla.violation_threshold,
+            max_response_time_blocks: sla.max_response_time_blocks,
+            min_uptime_bps: sla.min_uptime_bps,
+            min_delivery_success_bps: sla.min_delivery_success_bps,
+            price_per_call: sla.price_per_call.to_string(),
+            slash_amount: sla.slash_amount.to_string(),
+            terminated_at_height: sla.terminated_at_height,
+            slashed_amount: sla.slashed_amount.to_string(),
+        }
+    }
+}
+
+fn sla_status_label(byte: u8) -> &'static str {
+    match byte {
+        SLA_STATUS_PROPOSED => "proposed",
+        SLA_STATUS_ACTIVE => "active",
+        SLA_STATUS_COMPLETED => "completed",
+        SLA_STATUS_VIOLATED => "violated",
+        SLA_STATUS_CANCELLED => "cancelled",
+        _ => "unknown",
+    }
+}
+
+/// Result for novai_getSlaAgreement / novai_getActiveSla.
+#[derive(Debug, Serialize)]
+struct GetSlaAgreementResult {
+    agreement: Option<SlaAgreementJson>,
+}
+
+/// Result for novai_listSlasByBuyer / novai_listSlasBySeller.
+#[derive(Debug, Serialize)]
+struct ListSlasResult {
+    agreements: Vec<SlaAgreementJson>,
 }
 
 // ============================================================================
@@ -1122,6 +1251,78 @@ pub fn start_rpc_server_with_state(
                         }
                     }
                 }
+                "novai_getSlaAgreement" => match handle_get_sla_agreement(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_getActiveSla" => match handle_get_active_sla(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_listSlasByBuyer" => match handle_list_slas_by_buyer(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_listSlasBySeller" => match handle_list_slas_by_seller(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
                 "novai_getBalance" => match handle_get_balance(&rpc_request, &db) {
                     Ok(result) => {
                         let response = RpcResponse {
@@ -1713,6 +1914,137 @@ fn handle_list_vk_registrations(
             .into_iter()
             .map(VkRegistrationJson::from)
             .collect(),
+    })
+}
+
+/// Handle novai_getSlaAgreement RPC method (Week 31).
+///
+/// Resolves a single SLA by its `(owner, object_id)` pair. Returns
+/// `{ agreement: null }` if the memory object does not exist, the
+/// type does not match, or the payload fails to decode.
+fn handle_get_sla_agreement(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetSlaAgreementResult, RpcError> {
+    let params: GetSlaAgreementParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let owner = parse_hex32(&params.owner, "owner")?;
+    let object_id = parse_hex32(&params.object_id, "object_id")?;
+
+    let db = db.lock_or_recover();
+    let resolved = get_sla_agreement(&*db, &owner, &object_id).map_err(|_| RpcError {
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
+
+    Ok(GetSlaAgreementResult {
+        agreement: resolved.map(SlaAgreementJson::from),
+    })
+}
+
+/// Handle novai_getActiveSla RPC method (Week 31).
+///
+/// Resolves the currently-open SLA between `(buyer, seller)` via the
+/// active-between singleton. Returns `{ agreement: null }` if no
+/// open SLA exists for the pair.
+fn handle_get_active_sla(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetSlaAgreementResult, RpcError> {
+    let params: GetActiveSlaParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let buyer = parse_hex32(&params.buyer, "buyer")?;
+    let seller = parse_hex32(&params.seller, "seller")?;
+
+    let db = db.lock_or_recover();
+    let resolved = get_active_sla_between(&*db, &buyer, &seller).map_err(|_| RpcError {
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
+
+    Ok(GetSlaAgreementResult {
+        agreement: resolved.map(SlaAgreementJson::from),
+    })
+}
+
+/// Handle novai_listSlasByBuyer RPC method (Week 31).
+///
+/// Returns every SLA where the entity is the buyer and the SLA was
+/// created in `[start_height, end_height]` (inclusive). The height
+/// window is capped at `MAX_SIGNAL_QUERY_RANGE` matching the other
+/// height-windowed queries.
+fn handle_list_slas_by_buyer(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<ListSlasResult, RpcError> {
+    let params: ListSlasParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
+            ),
+        });
+    }
+
+    let db = db.lock_or_recover();
+    let pairs = get_slas_by_buyer(&*db, &entity_id, params.start_height, params.end_height)
+        .map_err(|_| RpcError {
+            code: -32002,
+            message: "State query failed".to_string(),
+        })?;
+
+    Ok(ListSlasResult {
+        agreements: pairs.into_iter().map(SlaAgreementJson::from).collect(),
+    })
+}
+
+/// Handle novai_listSlasBySeller RPC method (Week 31).
+///
+/// Returns every SLA where the entity is the seller and the SLA was
+/// created in `[start_height, end_height]`. Unlike the by-buyer
+/// query the per-entry resolution walks the by-type index to recover
+/// the buyer (memory-object owner); the lookup is bounded by the
+/// total number of `SlaAgreement` memory objects per buyer (cap = 8).
+fn handle_list_slas_by_seller(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<ListSlasResult, RpcError> {
+    let params: ListSlasParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
+            ),
+        });
+    }
+
+    let db = db.lock_or_recover();
+    let pairs = get_slas_by_seller(&*db, &entity_id, params.start_height, params.end_height)
+        .map_err(|_| RpcError {
+            code: -32002,
+            message: "State query failed".to_string(),
+        })?;
+
+    Ok(ListSlasResult {
+        agreements: pairs.into_iter().map(SlaAgreementJson::from).collect(),
     })
 }
 

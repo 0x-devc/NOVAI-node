@@ -323,4 +323,115 @@ impl RpcClient {
             .ok_or("missing registrations in response")?;
         Ok(registrations.clone())
     }
+
+    /// Query a single SLA Agreement by its owner (buyer) entity id and
+    /// 32-byte object id (Week 31).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn get_sla_agreement(
+        &self,
+        owner_hex: &str,
+        object_id_hex: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_getSlaAgreement",
+                serde_json::json!({ "owner": owner_hex, "object_id": object_id_hex }),
+            )
+            .await?;
+        let agreement = &result["agreement"];
+        if agreement.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(agreement.clone()))
+        }
+    }
+
+    /// Resolve the currently-open SLA between a buyer and a seller
+    /// via the active-between singleton index (Week 31).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn get_active_sla(
+        &self,
+        buyer_hex: &str,
+        seller_hex: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_getActiveSla",
+                serde_json::json!({ "buyer": buyer_hex, "seller": seller_hex }),
+            )
+            .await?;
+        let agreement = &result["agreement"];
+        if agreement.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(agreement.clone()))
+        }
+    }
+
+    /// List SLA agreements where `entity_id` is the buyer (memory
+    /// object owner), filtered by `created_at` in `[start, end]`
+    /// (Week 31).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn list_slas_by_buyer(
+        &self,
+        entity_id_hex: &str,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_listSlasByBuyer",
+                serde_json::json!({
+                    "entity_id": entity_id_hex,
+                    "start_height": start_height,
+                    "end_height": end_height,
+                }),
+            )
+            .await?;
+        let agreements = result["agreements"]
+            .as_array()
+            .ok_or("missing agreements in response")?;
+        Ok(agreements.clone())
+    }
+
+    /// List SLA agreements where `entity_id` is the seller, filtered
+    /// by `created_at` in `[start, end]` (Week 31).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn list_slas_by_seller(
+        &self,
+        entity_id_hex: &str,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_listSlasBySeller",
+                serde_json::json!({
+                    "entity_id": entity_id_hex,
+                    "start_height": start_height,
+                    "end_height": end_height,
+                }),
+            )
+            .await?;
+        let agreements = result["agreements"]
+            .as_array()
+            .ok_or("missing agreements in response")?;
+        Ok(agreements.clone())
+    }
 }

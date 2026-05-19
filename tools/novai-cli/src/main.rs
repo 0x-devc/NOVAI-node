@@ -3,7 +3,7 @@ mod rpc_client;
 
 use clap::{Parser, Subcommand};
 use commands::signal::ExtendedSignalArgs;
-use commands::{account, ai, keygen, memory, service, signal, vk};
+use commands::{account, ai, keygen, memory, service, signal, sla, vk};
 use rpc_client::RpcClient;
 
 /// NOVAI CLI — interact with NOVAI blockchain nodes.
@@ -95,6 +95,13 @@ enum Command {
     Vk {
         #[command(subcommand)]
         command: VkCommand,
+    },
+    /// SLA Agreement operations (Week 31): propose, accept, cancel,
+    /// show, and list two-party service level agreements with
+    /// auto-slash on threshold breach.
+    Sla {
+        #[command(subcommand)]
+        command: SlaCommand,
     },
 }
 
@@ -388,6 +395,138 @@ enum VkCommand {
         /// Hex-encoded 32-byte entity id.
         #[arg(long)]
         entity_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SlaCommand {
+    /// Propose a new SLA against a seller (wraps CreateMemoryObject
+    /// payload v3 with type 14).
+    Propose {
+        /// Path to buyer entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte buyer entity id (must equal the signer).
+        #[arg(long)]
+        buyer_entity_id: String,
+        /// Hex-encoded 32-byte seller entity id.
+        #[arg(long)]
+        seller_entity_id: String,
+        /// Hex-encoded 32-byte service descriptor reference. Zero
+        /// (`00..`) means no reference; informational only.
+        #[arg(
+            long,
+            default_value = "0000000000000000000000000000000000000000000000000000000000000000"
+        )]
+        service_descriptor_hash: String,
+        /// First block height inside the violation window.
+        #[arg(long)]
+        start_height: u64,
+        /// Last block height inside the violation window (must be
+        /// strictly greater than start_height; window <= 604800 blocks).
+        #[arg(long)]
+        end_height: u64,
+        /// Number of in-window FAILED attestations that must accumulate
+        /// before auto-slash fires. Must be >= 1.
+        #[arg(long)]
+        violation_threshold: u32,
+        /// Penalty paid on threshold breach (saturating against the
+        /// seller's stake_balance). Must be > 0.
+        #[arg(long)]
+        slash_amount: u128,
+        /// Per-call price (informational; NAP enforces actual payments).
+        #[arg(long, default_value_t = 0)]
+        price_per_call: u64,
+        /// RESERVED v1: maximum acceptable response time in blocks.
+        #[arg(long, default_value_t = 0)]
+        max_response_time_blocks: u32,
+        /// RESERVED v1: minimum uptime in basis points (<= 10000).
+        #[arg(long, default_value_t = 0)]
+        min_uptime_bps: u16,
+        /// RESERVED v1: minimum delivery success in basis points
+        /// (<= 10000).
+        #[arg(long, default_value_t = 0)]
+        min_delivery_success_bps: u16,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Accept a proposed SLA (wraps the SlaAccept signal type 18).
+    /// The signer must be the SLA's seller. Rejected if the seller's
+    /// stake_balance is below the SLA's slash_amount.
+    Accept {
+        /// Path to seller entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte SLA memory object id.
+        #[arg(long)]
+        sla_object_id: String,
+        /// Hex-encoded 32-byte buyer entity id (memory-object owner).
+        #[arg(long)]
+        buyer_entity_id: String,
+        /// Hex-encoded 32-byte seller entity id (must equal the signer).
+        #[arg(long)]
+        seller_entity_id: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Cancel a still-Proposed SLA by deleting the memory object.
+    /// Active SLAs inside their window cannot be cancelled.
+    Cancel {
+        /// Path to buyer entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte SLA memory object id.
+        #[arg(long)]
+        sla_object_id: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Show a single SLA by `(owner, object_id)`.
+    Show {
+        /// Hex-encoded 32-byte buyer entity id (memory-object owner).
+        #[arg(long)]
+        owner: String,
+        /// Hex-encoded 32-byte SLA memory object id.
+        #[arg(long)]
+        object_id: String,
+    },
+    /// Resolve the currently-open SLA between a buyer and a seller
+    /// via the active-between singleton.
+    Active {
+        /// Hex-encoded 32-byte buyer entity id.
+        #[arg(long)]
+        buyer: String,
+        /// Hex-encoded 32-byte seller entity id.
+        #[arg(long)]
+        seller: String,
+    },
+    /// List SLAs where the entity is the buyer (memory-object owner).
+    ListByBuyer {
+        /// Hex-encoded 32-byte buyer entity id.
+        #[arg(long)]
+        entity_id: String,
+        /// Inclusive lower bound on `created_at` height.
+        #[arg(long, default_value_t = 0)]
+        start_height: u64,
+        /// Inclusive upper bound on `created_at` height. The runtime
+        /// caps the span at 10_000 heights per query.
+        #[arg(long, default_value_t = 10_000)]
+        end_height: u64,
+    },
+    /// List SLAs where the entity is the seller.
+    ListBySeller {
+        /// Hex-encoded 32-byte seller entity id.
+        #[arg(long)]
+        entity_id: String,
+        /// Inclusive lower bound on `created_at` height.
+        #[arg(long, default_value_t = 0)]
+        start_height: u64,
+        /// Inclusive upper bound on `created_at` height.
+        #[arg(long, default_value_t = 10_000)]
+        end_height: u64,
     },
 }
 
@@ -694,6 +833,83 @@ async fn main() {
             } => vk::run_delete(&rpc, &key_file, &object_id, fee, cli.json).await,
             VkCommand::Show { id } => vk::run_show(&rpc, &id, cli.json).await,
             VkCommand::List { entity_id } => vk::run_list(&rpc, &entity_id, cli.json).await,
+        },
+        Command::Sla { command } => match command {
+            SlaCommand::Propose {
+                key_file,
+                buyer_entity_id,
+                seller_entity_id,
+                service_descriptor_hash,
+                start_height,
+                end_height,
+                violation_threshold,
+                slash_amount,
+                price_per_call,
+                max_response_time_blocks,
+                min_uptime_bps,
+                min_delivery_success_bps,
+                fee,
+            } => {
+                sla::run_propose(
+                    &rpc,
+                    &key_file,
+                    &buyer_entity_id,
+                    &seller_entity_id,
+                    &service_descriptor_hash,
+                    start_height,
+                    end_height,
+                    violation_threshold,
+                    slash_amount,
+                    price_per_call,
+                    max_response_time_blocks,
+                    min_uptime_bps,
+                    min_delivery_success_bps,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            SlaCommand::Accept {
+                key_file,
+                sla_object_id,
+                buyer_entity_id,
+                seller_entity_id,
+                fee,
+            } => {
+                sla::run_accept(
+                    &rpc,
+                    &key_file,
+                    &sla_object_id,
+                    &buyer_entity_id,
+                    &seller_entity_id,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            SlaCommand::Cancel {
+                key_file,
+                sla_object_id,
+                fee,
+            } => sla::run_cancel(&rpc, &key_file, &sla_object_id, fee, cli.json).await,
+            SlaCommand::Show { owner, object_id } => {
+                sla::run_show(&rpc, &owner, &object_id, cli.json).await
+            }
+            SlaCommand::Active { buyer, seller } => {
+                sla::run_active(&rpc, &buyer, &seller, cli.json).await
+            }
+            SlaCommand::ListByBuyer {
+                entity_id,
+                start_height,
+                end_height,
+            } => sla::run_list_by_buyer(&rpc, &entity_id, start_height, end_height, cli.json).await,
+            SlaCommand::ListBySeller {
+                entity_id,
+                start_height,
+                end_height,
+            } => {
+                sla::run_list_by_seller(&rpc, &entity_id, start_height, end_height, cli.json).await
+            }
         },
     };
 

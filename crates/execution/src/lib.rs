@@ -7331,6 +7331,185 @@ pub fn get_vk_registrations_by_entity<K: Kv>(
     Ok(results)
 }
 
+/// Query a single `SlaAgreement` by its owner (buyer) and object id
+/// (Week 31).
+///
+/// Returns `Ok(None)` if the memory object does not exist, the object
+/// type does not match, or the payload fails to decode — i.e., any
+/// state where the SLA is not currently resolvable.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the underlying KV read fails.
+pub fn get_sla_agreement<K: Kv>(
+    db: &K,
+    buyer_id: &[u8; 32],
+    object_id: &[u8; 32],
+) -> Result<Option<(MemoryObject, SlaAgreementData)>, ExecError<K::Error>> {
+    let Some(obj) = read_memory_object(db, buyer_id, object_id)? else {
+        return Ok(None);
+    };
+    if obj.object_type != MemoryObjectType::SlaAgreement {
+        return Ok(None);
+    }
+    let Some(sla) = SlaAgreementData::decode(&obj.data) else {
+        return Ok(None);
+    };
+    Ok(Some((obj, sla)))
+}
+
+/// Resolve the currently-open SLA between `buyer` and `seller`
+/// (Week 31) via the active-between singleton.
+///
+/// Returns `Ok(None)` if no open SLA exists, the singleton points at
+/// a deleted memory object, the resolved object is not of type
+/// `SlaAgreement`, or the payload fails to decode.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the underlying KV read fails.
+pub fn get_active_sla_between<K: Kv>(
+    db: &K,
+    buyer_id: &[u8; 32],
+    seller_id: &[u8; 32],
+) -> Result<Option<(MemoryObject, SlaAgreementData)>, ExecError<K::Error>> {
+    let Some(object_id_bytes) = db
+        .get(&sla_active_between_key(buyer_id, seller_id))
+        .map_err(ExecError::Db)?
+    else {
+        return Ok(None);
+    };
+    if object_id_bytes.len() != 32 {
+        return Ok(None);
+    }
+    let mut object_id = [0u8; 32];
+    object_id.copy_from_slice(&object_id_bytes);
+    get_sla_agreement(db, buyer_id, &object_id)
+}
+
+/// Query `SlaAgreement` memory objects owned by `buyer_id` whose
+/// envelope `created_at` falls inside `[start_height, end_height]`
+/// (inclusive, Week 31).
+///
+/// Walks the `ai/slas/by_buyer/<buyer>/<height_be>/<object_id>` scan
+/// index, then for each marker reads the primary memory object and
+/// decodes its payload. Stale markers (memory object missing, type
+/// mismatch, malformed payload) are silently skipped. Results are in
+/// height-ascending order (the natural lex order of the index).
+///
+/// The RPC layer enforces the height-window cap
+/// (`MAX_SIGNAL_QUERY_RANGE`); this helper trusts callers to pass a
+/// bounded window. If `start_height > end_height` the result is the
+/// empty list (no entries match).
+///
+/// # Errors
+/// Returns `ExecError::Db` if the underlying KV scan fails.
+pub fn get_slas_by_buyer<K: Kv>(
+    db: &K,
+    buyer_id: &[u8; 32],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<(MemoryObject, SlaAgreementData)>, ExecError<K::Error>> {
+    scan_slas_by_owner_index(
+        db,
+        KEY_PREFIX_AI_SLAS_BY_BUYER,
+        buyer_id,
+        start_height,
+        end_height,
+        /* owner_is_buyer = */ true,
+    )
+}
+
+/// Query `SlaAgreement` memory objects where `seller_id` is the
+/// seller and the envelope `created_at` falls inside
+/// `[start_height, end_height]` (inclusive, Week 31).
+///
+/// Walks the `ai/slas/by_seller/<seller>/<height_be>/<object_id>`
+/// scan index. The SLA's buyer (who owns the memory object) is
+/// recovered by reading the SLA payload itself. Stale markers and
+/// malformed payloads are silently skipped.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the underlying KV scan fails.
+pub fn get_slas_by_seller<K: Kv>(
+    db: &K,
+    seller_id: &[u8; 32],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<(MemoryObject, SlaAgreementData)>, ExecError<K::Error>> {
+    scan_slas_by_owner_index(
+        db,
+        KEY_PREFIX_AI_SLAS_BY_SELLER,
+        seller_id,
+        start_height,
+        end_height,
+        /* owner_is_buyer = */ false,
+    )
+}
+
+fn scan_slas_by_owner_index<K: Kv>(
+    db: &K,
+    prefix_const: &[u8],
+    party_id: &[u8; 32],
+    start_height: u64,
+    end_height: u64,
+    owner_is_buyer: bool,
+) -> Result<Vec<(MemoryObject, SlaAgreementData)>, ExecError<K::Error>> {
+    let mut prefix = Vec::with_capacity(prefix_const.len() + 32);
+    prefix.extend_from_slice(prefix_const);
+    prefix.extend_from_slice(party_id);
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let suffix_off = prefix_const.len() + 32;
+    let mut results = Vec::new();
+    for (key, _value) in entries {
+        if key.len() != suffix_off + 8 + 32 {
+            continue;
+        }
+        let mut height_bytes = [0u8; 8];
+        height_bytes.copy_from_slice(&key[suffix_off..suffix_off + 8]);
+        let height = u64::from_be_bytes(height_bytes);
+        if height < start_height || height > end_height {
+            continue;
+        }
+        let mut object_id = [0u8; 32];
+        object_id.copy_from_slice(&key[suffix_off + 8..suffix_off + 8 + 32]);
+
+        let owner_id = if owner_is_buyer {
+            *party_id
+        } else {
+            // For by_seller, the buyer (owner) is embedded in the SLA
+            // payload. To find it without scanning the global memory
+            // namespace, look up via the by_type index by object_id.
+            let mut type_prefix = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 2);
+            type_prefix.extend_from_slice(KEY_PREFIX_AI_MEMORY_BY_TYPE);
+            type_prefix.push(MemoryObjectType::SlaAgreement.to_byte());
+            type_prefix.push(b'/');
+            let type_entries = db.scan_prefix(&type_prefix).map_err(ExecError::Db)?;
+            let mut buyer_id_opt: Option<[u8; 32]> = None;
+            for (type_key, _) in &type_entries {
+                let owner_off = KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1;
+                if type_key.len() != owner_off + 32 + 1 + 32 {
+                    continue;
+                }
+                if type_key[owner_off + 33..owner_off + 33 + 32] == object_id[..] {
+                    let mut o = [0u8; 32];
+                    o.copy_from_slice(&type_key[owner_off..owner_off + 32]);
+                    buyer_id_opt = Some(o);
+                    break;
+                }
+            }
+            match buyer_id_opt {
+                Some(o) => o,
+                None => continue,
+            }
+        };
+
+        if let Some(pair) = get_sla_agreement(db, &owner_id, &object_id)? {
+            results.push(pair);
+        }
+    }
+    Ok(results)
+}
+
 // ============================================================================
 // SIGNAL QUERY FUNCTIONS (Week 14 - D14.5)
 // ============================================================================
