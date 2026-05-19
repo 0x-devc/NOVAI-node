@@ -722,6 +722,32 @@ pub enum ExecError<E> {
     /// halves of the index together at proposal time) but surfaced
     /// so the auto-slash path does not panic on malformed state.
     SlaMemoryObjectCorrupted,
+    // Week 31 - SLA lifecycle errors (Phase 4).
+    /// `UpdateMemoryObject` against a `SlaAgreement`: SLA payloads
+    /// are not updatable. Every mutation is runtime-controlled
+    /// (`SlaAccept` signal for Proposed -> Active, auto-slash hook
+    /// for Active -> Violated). Mirrors `DelegationGrantNotUpdatable`.
+    SlaAgreementImmutableOnUpdate,
+    /// `DeleteMemoryObject` against a still-active `SlaAgreement`:
+    /// the SLA is in `SLA_STATUS_ACTIVE` and `current_height` is
+    /// still inside `[start_height, end_height]`. Active SLAs are
+    /// binding until expiry or auto-slash; delete is rejected so
+    /// the buyer cannot quietly tear down an in-force agreement.
+    SlaAgreementDeleteWhileActive,
+    /// `StakeWithdraw`: the requested withdrawal would drop the
+    /// issuer's `stake_balance` below the sum of `slash_amount` of
+    /// every active SLA where the issuer is the seller. Q1 Option B
+    /// collateral check (Week 31 Phase 4). The seller can withdraw
+    /// up to the slack between `stake_balance` and committed
+    /// collateral; anything beyond is rejected.
+    StakeWithdrawWouldUnderfundSlaCollateral {
+        /// Sum of `slash_amount` across the issuer's active SLAs as
+        /// seller (the runtime-computed collateral floor).
+        required: u128,
+        /// `stake_balance` the issuer would hold if the requested
+        /// withdrawal were permitted.
+        available_after_withdraw: u128,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -2589,6 +2615,129 @@ pub fn sla_by_seller_key(seller: &[u8; 32], height: u64, object_id: &[u8; 32]) -
     out
 }
 
+/// Sum the `slash_amount` of every `SlaAgreement` where `seller_id` is
+/// the seller AND the SLA is in `SLA_STATUS_ACTIVE` AND
+/// `current_height <= end_height` (Week 31 Phase 4).
+///
+/// Backs the lazy `StakeWithdraw` collateral check (Q1 Option B):
+/// the runtime requires a seller's `stake_balance` after withdrawal
+/// to be at least this sum so that an in-force SLA still has the
+/// stake it relies on for auto-slash. Cost: one bounded prefix scan
+/// over `ai/slas/by_seller/<seller_id>/`, one decode per entry, one
+/// `checked_add` per entry. The per-seller cap is not enforced in
+/// v1 but the per-buyer cap of `MAX_SLAS_PER_ENTITY = 8` caps the
+/// total number of distinct buyers, which is the same bound on
+/// distinct active sellers from any one buyer; the worst case scan
+/// is bounded only by the number of total SLAs where this entity
+/// is named seller.
+///
+/// Malformed index entries (corrupt `MemoryObject` envelope or
+/// `SlaAgreementData` body) are skipped silently rather than failing
+/// the whole transaction. Future schema-bumps cannot cause
+/// historical entries to suddenly count.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the KV scan fails;
+/// `ExecError::Overflow` if the running sum overflows `u128` (the
+/// pathological case of many active SLAs whose `slash_amount`s
+/// together exceed `u128::MAX`).
+pub fn sla_committed_collateral_as_seller<K: Kv>(
+    db: &K,
+    seller_id: &[u8; 32],
+    current_height: u64,
+) -> Result<u128, ExecError<K::Error>> {
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_SLAS_BY_SELLER.len() + 32);
+    prefix.extend_from_slice(KEY_PREFIX_AI_SLAS_BY_SELLER);
+    prefix.extend_from_slice(seller_id);
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let mut sum: u128 = 0;
+    // by_seller key layout:
+    //   prefix(b"ai/slas/by_seller/") || seller_id(32) || created_at_be(8) || object_id(32)
+    // The buyer is NOT in the index key; we must read the underlying
+    // SLA payload to discover the owner. The by_seller index covers
+    // every SLA where this entity is the seller, regardless of
+    // status, so the loop body re-filters on Active + in-window.
+    for (key, _value) in entries {
+        // Defensive: the scan_prefix iterator is supposed to return
+        // only keys with our exact prefix, but we double-check the
+        // tail width so malformed state cannot panic the slice.
+        let suffix_off = KEY_PREFIX_AI_SLAS_BY_SELLER.len() + 32;
+        if key.len() != suffix_off + 8 + 32 {
+            continue;
+        }
+        let mut object_id = [0u8; 32];
+        object_id.copy_from_slice(&key[suffix_off + 8..suffix_off + 8 + 32]);
+        // The SLA's primary record lives under the BUYER's namespace,
+        // not the seller's. The buyer id is embedded in the payload.
+        // Decode the by_seller marker's parent SLA by trial: scan
+        // the global memory namespace would be expensive, so we use
+        // the singleton active_between layer. But active_between is
+        // keyed by (buyer, seller) so we still need the buyer.
+        //
+        // Approach: scan keys under ai/slas/active_between/*/<seller>
+        // would also work, but `db.scan_prefix` does not support
+        // suffix matching, so we'd have to walk every active_between
+        // entry. The cleanest path is to peek into the by_seller
+        // entry's parent SLA via the by_type index, but that also
+        // requires a buyer scan.
+        //
+        // Pragma: the by_seller key is informational; the canonical
+        // resolution path goes through ai/memory_by_type/14/* which
+        // is keyed by (type, owner=buyer, object_id). Scan that
+        // index with the same `object_id` suffix to find the buyer.
+        // Since we have the object_id and the per-buyer cap is
+        // small (8), the worst case is to walk every (buyer, *) pair
+        // for type 14 until we find a matching object_id. That is
+        // bounded by the total number of SLA memory objects in the
+        // entire chain.
+        //
+        // For the v1 lazy collateral check we accept the worst case
+        // because (a) the per-buyer cap bounds it operationally and
+        // (b) the alternative is a dedicated owner-suffix index that
+        // bloats writes without a strong reason in v1. The check
+        // runs only on StakeWithdraw, which is comparatively rare.
+        let mut type_prefix = Vec::with_capacity(KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 2);
+        type_prefix.extend_from_slice(KEY_PREFIX_AI_MEMORY_BY_TYPE);
+        type_prefix.push(MemoryObjectType::SlaAgreement.to_byte());
+        type_prefix.push(b'/');
+        let type_entries = db.scan_prefix(&type_prefix).map_err(ExecError::Db)?;
+        let mut buyer_id_opt: Option<[u8; 32]> = None;
+        for (type_key, _) in &type_entries {
+            // type_key layout: prefix || type_byte || b'/' || owner(32) || b'/' || object_id(32)
+            let owner_off = KEY_PREFIX_AI_MEMORY_BY_TYPE.len() + 1 + 1;
+            if type_key.len() != owner_off + 32 + 1 + 32 {
+                continue;
+            }
+            if type_key[owner_off + 33..owner_off + 33 + 32] == object_id[..] {
+                let mut owner = [0u8; 32];
+                owner.copy_from_slice(&type_key[owner_off..owner_off + 32]);
+                buyer_id_opt = Some(owner);
+                break;
+            }
+        }
+        let Some(buyer_id) = buyer_id_opt else {
+            // Stale by_seller marker (memory object already deleted).
+            continue;
+        };
+        let Some(sla_memory) = read_memory_object(db, &buyer_id, &object_id)? else {
+            continue;
+        };
+        if sla_memory.object_type != MemoryObjectType::SlaAgreement {
+            continue;
+        }
+        let Some(sla) = SlaAgreementData::decode(&sla_memory.data) else {
+            continue;
+        };
+        if sla.status == SLA_STATUS_ACTIVE && current_height <= sla.end_height {
+            sum = sum
+                .checked_add(sla.slash_amount)
+                .ok_or(ExecError::Overflow)?;
+        }
+    }
+    Ok(sum)
+}
+
 /// Role discriminator for `get_payments_by_entity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaymentRole {
@@ -4356,10 +4505,24 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
                 available: entity.stake_balance,
             });
         }
-        entity.stake_balance = entity
+        // Week 31: lazy SLA collateral check (Q1 Option B). Sum the
+        // slash_amount of every active SLA where this entity is the
+        // seller and the window is still open; reject any withdrawal
+        // that would drop stake_balance below that sum. Bounded scan
+        // by definition: every entry must be a memory object owned
+        // by some buyer, and per-buyer cap is 8.
+        let after_withdraw = entity
             .stake_balance
             .checked_sub(extra.amount)
             .ok_or(ExecError::Overflow)?;
+        let committed = sla_committed_collateral_as_seller(db, &entity.id, current_height)?;
+        if after_withdraw < committed {
+            return Err(ExecError::StakeWithdrawWouldUnderfundSlaCollateral {
+                required: committed,
+                available_after_withdraw: after_withdraw,
+            });
+        }
+        entity.stake_balance = after_withdraw;
         entity.economic_balance = entity
             .economic_balance
             .checked_add(extra.amount)
@@ -6227,6 +6390,31 @@ fn validate_vk_registration_update<E>(
     Ok(())
 }
 
+/// Per-type structural validation for `UPDATE_MEMORY_OBJECT` against an
+/// `SlaAgreement` (Week 31). No-op for non-`SlaAgreement` types so the
+/// UPDATE handler can call it unconditionally.
+///
+/// SLAs are NOT updatable via `UPDATE_MEMORY_OBJECT`: every mutation
+/// to an SLA's payload is runtime-controlled. The Proposed -> Active
+/// transition is the `SlaAccept` signal; the Active -> Violated
+/// transition is the auto-slash hook in the `ServiceAttestation`
+/// handler. Cancellation of a still-Proposed agreement is
+/// `DELETE_MEMORY_OBJECT`. Allowing field-level updates here would
+/// let either party rewrite economic terms mid-flight, defeating the
+/// point of a binding agreement.
+///
+/// Mirrors the `DelegationGrantNotUpdatable` policy at type 10.
+fn validate_sla_agreement_update<E>(
+    object_type: MemoryObjectType,
+    _old_data: &[u8],
+    _new_data: &[u8],
+) -> Result<(), ExecError<E>> {
+    if object_type != MemoryObjectType::SlaAgreement {
+        return Ok(());
+    }
+    Err(ExecError::SlaAgreementImmutableOnUpdate)
+}
+
 /// Per-type structural and semantic validation for a `SlaAgreement`
 /// memory object payload (Week 31). No-op for non-`SlaAgreement` types
 /// so the CREATE handler can call it unconditionally alongside the
@@ -6683,6 +6871,16 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
         &payload.new_data,
     )?;
 
+    // Week 31: SLAs are NOT updatable via UpdateMemoryObject. Every
+    // mutation is runtime-controlled (SlaAccept signal, auto-slash
+    // hook). The validator unconditionally rejects updates against
+    // type 14; for any other type it is a no-op.
+    validate_sla_agreement_update::<K::Error>(
+        memory_object.object_type,
+        &memory_object.data,
+        &payload.new_data,
+    )?;
+
     // Update memory object
     memory_object.data = payload.new_data;
     memory_object.updated_at = current_height;
@@ -6739,6 +6937,7 @@ pub fn apply_delete_memory_object_tx<K: KvBatch>(
 }
 
 /// Inner delete-memory-object implementation taking a pre-resolved AI entity.
+#[allow(clippy::too_many_lines)]
 fn apply_delete_memory_object_tx_inner<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -6859,6 +7058,59 @@ fn apply_delete_memory_object_tx_inner<K: KvBatch>(
     if memory_object.object_type == MemoryObjectType::VkRegistration {
         let registry_index_key = vk_registry_by_id_key(&payload.object_id);
         ops.push(WriteOp::Delete(registry_index_key));
+    }
+
+    // Week 31: tear down the SLA-specific indexes when an
+    // `SlaAgreement` is deleted. The buyer (memory object owner) is
+    // the only entity permitted to delete via this path. Delete is
+    // gated on lifecycle status:
+    //   * SLA_STATUS_PROPOSED: cancellation before acceptance; tear
+    //     down all three indexes (active_between, by_buyer, by_seller).
+    //   * SLA_STATUS_VIOLATED: post-slash audit cleanup. The
+    //     active_between key was already removed at the slash event;
+    //     by_buyer / by_seller still need to go.
+    //   * SLA_STATUS_ACTIVE: only permitted past `end_height`
+    //     (post-expiry cleanup). Active in-window agreements are
+    //     binding; deletion is rejected.
+    //   * Other states are unreachable in v1 but treated as
+    //     deletable for forward compat with the reserved
+    //     SLA_STATUS_COMPLETED / SLA_STATUS_CANCELLED discriminants.
+    //
+    // A malformed SlaAgreementData payload causes the index Deletes
+    // to be skipped silently, mirroring the DelegationGrant and
+    // ServiceDescriptor tolerance policies above. The primary memory
+    // object Delete is unaffected.
+    if memory_object.object_type == MemoryObjectType::SlaAgreement {
+        if let Some(sla) = SlaAgreementData::decode(&memory_object.data) {
+            if sla.status == SLA_STATUS_ACTIVE && current_height <= sla.end_height {
+                return Err(ExecError::SlaAgreementDeleteWhileActive);
+            }
+            // The by_buyer / by_seller index keys are built at create
+            // time with `current_height` (recorded on the memory
+            // object envelope's `created_at`). The payload's
+            // `created_at_height` field is informational and may
+            // differ from the envelope value; use the envelope so
+            // create and delete agree on the key.
+            let index_height = memory_object.created_at;
+            ops.push(WriteOp::Delete(sla_by_buyer_key(
+                &sla.buyer_entity_id,
+                index_height,
+                &payload.object_id,
+            )));
+            ops.push(WriteOp::Delete(sla_by_seller_key(
+                &sla.seller_entity_id,
+                index_height,
+                &payload.object_id,
+            )));
+            // active_between is gone after auto-slash; only delete it
+            // for the still-Proposed / Active-expired cases.
+            if sla.status != SLA_STATUS_VIOLATED {
+                ops.push(WriteOp::Delete(sla_active_between_key(
+                    &sla.buyer_entity_id,
+                    &sla.seller_entity_id,
+                )));
+            }
+        }
     }
 
     // Update count (decrement, but don't go below 0)
