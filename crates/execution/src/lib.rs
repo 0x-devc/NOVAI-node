@@ -708,6 +708,20 @@ pub enum ExecError<E> {
         /// Seller's current `stake_balance`.
         available: u128,
     },
+    // Week 31 - SLA auto-slash defensive errors (Phase 3).
+    /// `ServiceAttestation` (auto-slash path): the
+    /// `ai/slas/active_between/<payer>/<payee>` index entry exists
+    /// but its value is not 32 bytes. State corruption; surfaced
+    /// verbatim so logs identify the underlying issue rather than
+    /// silently dropping the violation count.
+    SlaPairIndexCorrupted,
+    /// `ServiceAttestation` (auto-slash path): the memory object
+    /// resolved through the active-between index is missing or
+    /// fails to decode as a `MemoryObject` / `SlaAgreementData`.
+    /// Unreachable in normal operation (the runtime wrote both
+    /// halves of the index together at proposal time) but surfaced
+    /// so the auto-slash path does not panic on malformed state.
+    SlaMemoryObjectCorrupted,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -3582,7 +3596,7 @@ use novai_ai_entities::{
     VerificationRecordData, VkRegistrationData, MAX_REPUTATION_SCORE, MAX_SLAS_PER_ENTITY,
     MAX_SUBSCRIPTIONS_PER_ENTITY, SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS,
     SLA_MIN_DELIVERY_SUCCESS_BPS_MAX, SLA_MIN_UPTIME_BPS_MAX, SLA_RESERVED_LEN, SLA_STATUS_ACTIVE,
-    SLA_STATUS_PROPOSED,
+    SLA_STATUS_PROPOSED, SLA_STATUS_VIOLATED,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
 use novai_crypto::{Groth16Verifier, StubZkVerifier, ZkVerifier};
@@ -5046,6 +5060,93 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             .map_err(|_| ExecError::Overflow)?;
         payee.reputation_score = new_score;
         payee.reputation_events_count = payee.reputation_events_count.saturating_add(1);
+
+        // Week 31: SLA auto-slash hook. Fires only on FAILED
+        // attestations and only when an active SLA exists between
+        // (payer, payee) AND `current_height` is inside that SLA's
+        // [start_height, end_height] window. The `payee` AiEntity
+        // is already loaded and mutable; any stake debit / treasury
+        // credit / rep delta applied here commits in the same
+        // atomic batch as the PaymentRecord rewrite below.
+        if extra.status == PAYMENT_ATTESTATION_STATUS_FAILED {
+            let pair_key = sla_active_between_key(&record.payer, &record.payee);
+            if let Some(object_id_bytes) = db.get(&pair_key).map_err(ExecError::Db)? {
+                let object_id: [u8; 32] = object_id_bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ExecError::SlaPairIndexCorrupted)?;
+                let sla_memory = read_memory_object(db, &record.payer, &object_id)?
+                    .ok_or(ExecError::SlaMemoryObjectCorrupted)?;
+                if sla_memory.object_type == MemoryObjectType::SlaAgreement {
+                    let mut sla = SlaAgreementData::decode(&sla_memory.data)
+                        .ok_or(ExecError::SlaMemoryObjectCorrupted)?;
+                    let in_window = sla.status == SLA_STATUS_ACTIVE
+                        && current_height >= sla.start_height
+                        && current_height <= sla.end_height;
+                    if in_window {
+                        sla.violation_count = sla.violation_count.saturating_add(1);
+                        if sla.violation_count >= sla.violation_threshold {
+                            // AUTO-SLASH: saturating debit from the seller's
+                            // stake_balance, treasury credit, additional
+                            // reputation hit, terminal status transition.
+                            let actual = payee.stake_balance.min(sla.slash_amount);
+                            payee.stake_balance = payee
+                                .stake_balance
+                                .checked_sub(actual)
+                                .ok_or(ExecError::Overflow)?;
+                            if actual > 0 {
+                                let new_treasury = read_treasury_balance(db, KEY_SLASH_TREASURY)?
+                                    .checked_add(actual)
+                                    .ok_or(ExecError::Overflow)?;
+                                ops.push(WriteOp::Put(
+                                    KEY_SLASH_TREASURY.to_vec(),
+                                    encode_fee_pool_v1(&FeePoolV1 {
+                                        balance: new_treasury,
+                                    })
+                                    .to_vec(),
+                                ));
+                            }
+                            // REP_DELTA_SLA_VIOLATION_TRIGGERED is applied
+                            // IN ADDITION to REP_DELTA_PAYMENT_FAILED above:
+                            // -3 (PaymentFailed) + -5 (SlaViolation) = -8
+                            // total on the breach event.
+                            let new_score: u16 = (i32::from(payee.reputation_score)
+                                + REP_DELTA_SLA_VIOLATION_TRIGGERED)
+                                .clamp(0, i32::from(MAX_REPUTATION_SCORE))
+                                .try_into()
+                                .map_err(|_| ExecError::Overflow)?;
+                            payee.reputation_score = new_score;
+                            payee.reputation_events_count =
+                                payee.reputation_events_count.saturating_add(1);
+                            sla.status = SLA_STATUS_VIOLATED;
+                            sla.terminated_at_height = current_height;
+                            sla.slashed_amount = actual;
+                            // Tear down the active-between singleton: the
+                            // SLA is no longer open between this pair, so
+                            // a fresh proposal becomes possible.
+                            ops.push(WriteOp::Delete(pair_key));
+                        }
+                        // Re-encode the SLA memory object: violation_count
+                        // always changes; status/terminated/slashed only
+                        // change on threshold breach (above).
+                        let mut updated = sla_memory;
+                        updated.data = sla.encode().to_vec();
+                        updated.updated_at = current_height;
+                        ops.push(WriteOp::Put(
+                            ai_memory_object_key(&record.payer, &object_id),
+                            encode_memory_object_v1(&updated),
+                        ));
+                    }
+                    // Out-of-window FAILED attestations: counter NOT
+                    // incremented and no slash. Intentional: the SLA only
+                    // promises enforcement during its window.
+                }
+                // Wrong object type at the pointer: silent skip (defensive
+                // against state corruption).
+            }
+            // No active-between entry: payment failed but no SLA covers
+            // this pair; only the standard PaymentFailed rep delta fires.
+        }
 
         // Rewrite the record in place. The same by_hash key holds the
         // updated bytes; future attestation attempts will see
