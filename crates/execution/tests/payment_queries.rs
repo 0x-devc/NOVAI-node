@@ -97,6 +97,7 @@ fn payment_payload(
             max_block_height: EXPIRY_HEIGHT,
         }),
         service_attestation: None,
+        sla_accept: None,
     })
 }
 
@@ -126,6 +127,7 @@ fn attestation_payload(
             payee_entity_id: payee,
             status,
         }),
+        sla_accept: None,
     })
 }
 

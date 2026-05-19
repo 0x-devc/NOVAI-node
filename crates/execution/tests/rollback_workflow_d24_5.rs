@@ -182,6 +182,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
             subscription_cancel: None,
             payment_request: None,
             service_attestation: None,
+            sla_accept: None,
         };
         let signal_tx = TxV1 {
             version: TxVersion::V1,
@@ -229,6 +230,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
         subscription_cancel: None,
         payment_request: None,
         service_attestation: None,
+        sla_accept: None,
     };
     let anomaly_tx = TxV1 {
         version: TxVersion::V1,

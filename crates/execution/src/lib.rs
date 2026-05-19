@@ -656,6 +656,58 @@ pub enum ExecError<E> {
         /// Cap (`MAX_SLAS_PER_ENTITY`).
         max: u32,
     },
+    // Week 31 - SLA Accept signal errors (Phase 2).
+    /// `SlaAccept`: the referenced `(buyer_entity_id, sla_object_id)`
+    /// pair does not resolve to a memory object. Either the
+    /// `sla_object_id` is wrong, the buyer never created the SLA, or
+    /// the SLA was deleted before acceptance landed.
+    SlaAcceptNotFound,
+    /// `SlaAccept`: the memory object resolved through
+    /// `(buyer_entity_id, sla_object_id)` exists but is not of type
+    /// `SlaAgreement`. State corruption or the seller targeted the
+    /// wrong object id.
+    SlaAcceptObjectTypeMismatch {
+        /// `MemoryObjectType` byte the resolved memory object carries.
+        found: u8,
+    },
+    /// `SlaAccept`: the resolved `SlaAgreement` payload failed to
+    /// decode. Unreachable in normal operation (the runtime wrote the
+    /// bytes itself at create time) but surfaced verbatim so the
+    /// underlying corruption is debuggable from logs.
+    SlaAcceptDecodeFailed,
+    /// `SlaAccept`: the resolved SLA is not in `SLA_STATUS_PROPOSED`.
+    /// Acceptance is single-shot; an already-accepted, violated, or
+    /// cancelled SLA cannot be re-accepted.
+    SlaAcceptNotProposed {
+        /// Current `status` byte of the SLA.
+        status: u8,
+    },
+    /// `SlaAccept`: the signal issuer (i.e. the seller submitting the
+    /// acceptance) is not the seller named in the SLA payload. Catches
+    /// a forged acceptance attempt by an entity other than the
+    /// designated counterparty.
+    SlaAcceptSellerMismatch,
+    /// `SlaAccept`: the `current_height` is at or past the SLA's
+    /// `start_height`. Acceptance must land strictly before the
+    /// violation window opens so the buyer knows whether the SLA is
+    /// going to be active when the window begins.
+    SlaAcceptAfterStart {
+        /// Current block height.
+        current: u64,
+        /// SLA `start_height`.
+        start: u64,
+    },
+    /// `SlaAccept`: the seller's current `stake_balance` is less than
+    /// the SLA's `slash_amount`. Q2-enforced stake gate at acceptance
+    /// time. The seller must hold at least nominal collateral for the
+    /// auto-slash to have economic weight; falling below at acceptance
+    /// is grounds for rejection.
+    SlaAcceptInsufficientStake {
+        /// `slash_amount` declared by the SLA.
+        required: u128,
+        /// Seller's current `stake_balance`.
+        available: u128,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -820,6 +872,21 @@ pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN: usize =
 /// Inline-extra size for a `ServiceAttestation` signal payload.
 /// `payment_signal_hash:32 | payee_entity_id:32 | status:1`.
 pub const SERVICE_ATTESTATION_EXTRA_LEN: usize = 32 + 32 + 1;
+
+/// Inline-extra size for an `SlaAccept` signal payload (Week 31).
+///
+/// Layout: `sla_object_id:32 | buyer_entity_id:32`. The buyer id is
+/// carried alongside the SLA object id so the handler can construct
+/// the primary `ai_memory_object_key(buyer, object_id)` without
+/// scanning every entity's memory namespace; defence in depth
+/// verifies that the resolved SLA's `buyer_entity_id` matches the
+/// wire value.
+pub const SLA_ACCEPT_EXTRA_LEN: usize = 32 + 32;
+
+/// Total size of an `SlaAccept` signal payload (base + extra) in
+/// the v1 wire format.
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SLA_ACCEPT_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SLA_ACCEPT_EXTRA_LEN;
 
 /// Total size of a `ServiceAttestation` signal payload (base + extra).
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN: usize =
@@ -1299,6 +1366,24 @@ pub struct ServiceAttestationExtraV1 {
     pub status: u8,
 }
 
+/// Inline tail carried by `AiSignalType::SlaAccept` signal commitment
+/// payloads (Week 31).
+///
+/// Wire layout (64 bytes): `sla_object_id:32 | buyer_entity_id:32`.
+/// The buyer's entity id is carried alongside the SLA's `object_id`
+/// because memory objects are keyed by `(owner, object_id)`; without
+/// the owner the handler would have to scan every entity's namespace
+/// to find the SLA. Defence in depth verifies that the resolved
+/// `SlaAgreementData.buyer_entity_id` equals the wire value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlaAcceptExtraV1 {
+    /// 32-byte memory object id of the `SlaAgreement` being accepted.
+    pub sla_object_id: [u8; 32],
+    /// Buyer (memory object owner) of the SLA. Used to build the
+    /// primary `ai_memory_object_key(buyer, sla_object_id)`.
+    pub buyer_entity_id: [u8; 32],
+}
+
 /// Canonical Signal Commitment payload (D14.1):
 /// - Base (signal types 0..=6): 66 bytes
 ///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
@@ -1362,6 +1447,9 @@ pub struct SignalCommitmentPayloadV1 {
     /// Inline service-attestation tail. MUST be `Some` iff
     /// `signal_type == ServiceAttestation`.
     pub service_attestation: Option<ServiceAttestationExtraV1>,
+    /// Inline SLA-accept tail. MUST be `Some` iff
+    /// `signal_type == SlaAccept`.
+    pub sla_accept: Option<SlaAcceptExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
@@ -1395,6 +1483,7 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
     let is_payment_request = p.signal_type == novai_ai_entities::AiSignalType::PaymentRequest;
     let is_service_attestation =
         p.signal_type == novai_ai_entities::AiSignalType::ServiceAttestation;
+    let is_sla_accept = p.signal_type == novai_ai_entities::AiSignalType::SlaAccept;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
@@ -1450,6 +1539,11 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.service_attestation.is_some(),
         "service_attestation tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_sla_accept,
+        p.sla_accept.is_some(),
+        "sla_accept tail presence must match signal_type"
+    );
     debug_assert!(
         u8::from(is_reputation)
             + u8::from(is_purchase)
@@ -1462,6 +1556,7 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             + u8::from(is_subscription_cancel)
             + u8::from(is_payment_request)
             + u8::from(is_service_attestation)
+            + u8::from(is_sla_accept)
             <= 1,
         "tails are mutually exclusive"
     );
@@ -1498,6 +1593,8 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN
     } else if is_service_attestation {
         SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN
+    } else if is_sla_accept {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_SLA_ACCEPT_LEN
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -1616,6 +1713,14 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; SERVICE_ATTESTATION_EXTRA_LEN]);
         }
+    } else if is_sla_accept {
+        if let Some(extra) = &p.sla_accept {
+            out.extend_from_slice(&extra.sla_object_id);
+            out.extend_from_slice(&extra.buyer_entity_id);
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; SLA_ACCEPT_EXTRA_LEN]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -1667,7 +1772,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 17, // max valid signal type
+            expected: 18, // max valid signal type (Week 31: SlaAccept = 18)
             got: payload[33],
         },
     )?;
@@ -1686,6 +1791,7 @@ pub fn decode_signal_commitment_payload_v1(
     let is_subscription_cancel = signal_type == novai_ai_entities::AiSignalType::SubscriptionCancel;
     let is_payment_request = signal_type == novai_ai_entities::AiSignalType::PaymentRequest;
     let is_service_attestation = signal_type == novai_ai_entities::AiSignalType::ServiceAttestation;
+    let is_sla_accept = signal_type == novai_ai_entities::AiSignalType::SlaAccept;
     let (
         reputation,
         purchase,
@@ -1698,6 +1804,7 @@ pub fn decode_signal_commitment_payload_v1(
         subscription_cancel,
         payment_request,
         service_attestation,
+        sla_accept,
     ) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -1715,6 +1822,7 @@ pub fn decode_signal_commitment_payload_v1(
                 event_type,
                 points_delta,
             }),
+            None,
             None,
             None,
             None,
@@ -1762,6 +1870,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_stake_deposit {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN {
@@ -1777,6 +1886,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeDepositExtraV1 { amount }),
+            None,
             None,
             None,
             None,
@@ -1801,6 +1911,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeWithdrawExtraV1 { amount }),
+            None,
             None,
             None,
             None,
@@ -1840,6 +1951,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_composition_check {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN {
@@ -1868,6 +1980,7 @@ pub fn decode_signal_commitment_payload_v1(
                 failed_dependency_idx,
                 failure_reason,
             }),
+            None,
             None,
             None,
             None,
@@ -1979,6 +2092,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_subscription_create {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN {
@@ -2027,6 +2141,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_subscription_cancel {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN {
@@ -2047,6 +2162,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(SubscriptionCancelExtraV1 { subscription_id }),
+            None,
             None,
             None,
         )
@@ -2101,6 +2217,7 @@ pub fn decode_signal_commitment_payload_v1(
                 max_block_height,
             }),
             None,
+            None,
         )
     } else if is_service_attestation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN {
@@ -2133,6 +2250,35 @@ pub fn decode_signal_commitment_payload_v1(
                 payee_entity_id,
                 status,
             }),
+            None,
+        )
+    } else if is_sla_accept {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SLA_ACCEPT_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_SLA_ACCEPT_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut sla_object_id = [0u8; 32];
+        sla_object_id.copy_from_slice(&payload[66..98]);
+        let mut buyer_entity_id = [0u8; 32];
+        buyer_entity_id.copy_from_slice(&payload[98..130]);
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(SlaAcceptExtraV1 {
+                sla_object_id,
+                buyer_entity_id,
+            }),
         )
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
@@ -2142,7 +2288,7 @@ pub fn decode_signal_commitment_payload_v1(
             });
         }
         (
-            None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None,
         )
     };
 
@@ -2161,6 +2307,7 @@ pub fn decode_signal_commitment_payload_v1(
         subscription_cancel,
         payment_request,
         service_attestation,
+        sla_accept,
     })
 }
 
@@ -3434,7 +3581,7 @@ use novai_ai_entities::{
     MemoryObjectType, SignalCatalogData, SignalCommitment, SlaAgreementData, SubscriptionData,
     VerificationRecordData, VkRegistrationData, MAX_REPUTATION_SCORE, MAX_SLAS_PER_ENTITY,
     MAX_SUBSCRIPTIONS_PER_ENTITY, SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS,
-    SLA_MIN_DELIVERY_SUCCESS_BPS_MAX, SLA_MIN_UPTIME_BPS_MAX, SLA_RESERVED_LEN,
+    SLA_MIN_DELIVERY_SUCCESS_BPS_MAX, SLA_MIN_UPTIME_BPS_MAX, SLA_RESERVED_LEN, SLA_STATUS_ACTIVE,
     SLA_STATUS_PROPOSED,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
@@ -4911,6 +5058,70 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         ));
 
         ops.push(write_ai_entity_op(&payee));
+    }
+
+    // SlaAccept branch (Week 31): the seller named in a previously
+    // proposed `SlaAgreement` memory object accepts the agreement,
+    // transitioning the SLA from `SLA_STATUS_PROPOSED` to
+    // `SLA_STATUS_ACTIVE`. The handler loads the SLA via
+    // `(buyer_entity_id, sla_object_id)` from the wire payload,
+    // verifies the issuer of this signal equals the SLA's seller,
+    // gates on the seller's current `stake_balance >= sla.slash_amount`
+    // (Q2 stake gate at acceptance time), and records the acceptance
+    // height. The active-pair singleton index entry stays in place
+    // (it was written when the SLA was proposed).
+    if payload.signal_type == AiSignalType::SlaAccept {
+        let extra = payload
+            .sla_accept
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("SlaAccept missing extra".into()))?;
+
+        let sla_memory = read_memory_object(db, &extra.buyer_entity_id, &extra.sla_object_id)?
+            .ok_or(ExecError::SlaAcceptNotFound)?;
+        if sla_memory.object_type != MemoryObjectType::SlaAgreement {
+            return Err(ExecError::SlaAcceptObjectTypeMismatch {
+                found: sla_memory.object_type.to_byte(),
+            });
+        }
+        let mut sla =
+            SlaAgreementData::decode(&sla_memory.data).ok_or(ExecError::SlaAcceptDecodeFailed)?;
+        if sla.status != SLA_STATUS_PROPOSED {
+            return Err(ExecError::SlaAcceptNotProposed { status: sla.status });
+        }
+        if sla.seller_entity_id != entity.id {
+            return Err(ExecError::SlaAcceptSellerMismatch);
+        }
+        if current_height >= sla.start_height {
+            return Err(ExecError::SlaAcceptAfterStart {
+                current: current_height,
+                start: sla.start_height,
+            });
+        }
+        // Q2 stake gate: seller must hold at least nominal collateral.
+        // Note: v1 does not lock the stake; the Phase 4 lazy
+        // StakeWithdraw collateral check is the runtime enforcement
+        // path, and this gate catches the obvious "seller has no
+        // stake at all" case at the latest possible client-visible
+        // moment.
+        if entity.stake_balance < sla.slash_amount {
+            return Err(ExecError::SlaAcceptInsufficientStake {
+                required: sla.slash_amount,
+                available: entity.stake_balance,
+            });
+        }
+
+        sla.status = SLA_STATUS_ACTIVE;
+        sla.accepted_at_height = current_height;
+        // Rewrite the SLA memory object in place; object_id stays
+        // stable and the active-between singleton index entry was
+        // written at proposal time and is not touched here.
+        let mut updated = sla_memory;
+        updated.data = sla.encode().to_vec();
+        updated.updated_at = current_height;
+        ops.push(WriteOp::Put(
+            ai_memory_object_key(&extra.buyer_entity_id, &extra.sla_object_id),
+            encode_memory_object_v1(&updated),
+        ));
     }
 
     ops.push(write_ai_entity_op(&entity));
@@ -9716,6 +9927,7 @@ mod tests {
             subscription_cancel: None,
             payment_request: Some(make_payment_request_extra()),
             service_attestation: None,
+            sla_accept: None,
         };
         encode_signal_commitment_payload_v1(&p)
     }
@@ -9744,6 +9956,7 @@ mod tests {
             subscription_cancel: None,
             payment_request: None,
             service_attestation: Some(make_service_attestation_extra()),
+            sla_accept: None,
         };
         encode_signal_commitment_payload_v1(&p)
     }
@@ -10162,7 +10375,9 @@ mod tests {
     #[test]
     fn signal_type_byte_17_decodes_to_service_attestation_from_execution_view() {
         // Smoke test that the execution crate's view of AiSignalType
-        // matches the ai_entities crate after the Phase 1 enum bump.
+        // matches the ai_entities crate. Week 28 added PaymentRequest
+        // and ServiceAttestation at 16/17; Week 31 added SlaAccept at
+        // 18 and shifted the first invalid byte to 19.
         assert_eq!(
             novai_ai_entities::AiSignalType::from_byte(16),
             Some(novai_ai_entities::AiSignalType::PaymentRequest),
@@ -10171,7 +10386,11 @@ mod tests {
             novai_ai_entities::AiSignalType::from_byte(17),
             Some(novai_ai_entities::AiSignalType::ServiceAttestation),
         );
-        assert_eq!(novai_ai_entities::AiSignalType::from_byte(18), None);
+        assert_eq!(
+            novai_ai_entities::AiSignalType::from_byte(18),
+            Some(novai_ai_entities::AiSignalType::SlaAccept),
+        );
+        assert_eq!(novai_ai_entities::AiSignalType::from_byte(19), None);
     }
 
     // ========================================================================

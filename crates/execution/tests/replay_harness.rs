@@ -115,6 +115,7 @@ fn mk_signal_commitment(
         subscription_cancel: None,
         payment_request: None,
         service_attestation: None,
+        sla_accept: None,
     });
     TxV1 {
         version: TxVersion::V1,

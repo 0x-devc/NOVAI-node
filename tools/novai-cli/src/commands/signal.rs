@@ -136,6 +136,17 @@ pub struct ExtendedSignalArgs {
     /// real verifier proof_type). Required for proof_type = 1 or 3.
     #[arg(long)]
     pub proof_file: Option<String>,
+
+    /// Hex-encoded 32-byte SLA memory object id (sla-accept). The
+    /// signal issuer must equal the SLA's seller.
+    #[arg(long)]
+    pub sla_object_id: Option<String>,
+
+    /// Hex-encoded 32-byte buyer entity id (sla-accept). The buyer
+    /// owns the SLA memory object; supplying the id here lets the
+    /// handler load it without a global scan.
+    #[arg(long)]
+    pub buyer_entity_id: Option<String>,
 }
 
 /// Parse signal type string.
@@ -159,8 +170,9 @@ fn parse_signal_type(s: &str) -> Result<AiSignalType, String> {
         "subscription-cancel" => Ok(AiSignalType::SubscriptionCancel),
         "payment-request" => Ok(AiSignalType::PaymentRequest),
         "service-attestation" => Ok(AiSignalType::ServiceAttestation),
+        "sla-accept" => Ok(AiSignalType::SlaAccept),
         _ => Err(format!(
-            "Unknown signal type '{s}'. Valid: anomaly, optimization, prediction, risk-score, audit-report, spam-risk, congestion-forecast, reputation-update, signal-purchase, stake-deposit, stake-withdraw, stake-slash, composition-check, proof-submission, subscription-create, subscription-cancel, payment-request, service-attestation"
+            "Unknown signal type '{s}'. Valid: anomaly, optimization, prediction, risk-score, audit-report, spam-risk, congestion-forecast, reputation-update, signal-purchase, stake-deposit, stake-withdraw, stake-slash, composition-check, proof-submission, subscription-create, subscription-cancel, payment-request, service-attestation, sla-accept"
         )),
     }
 }
@@ -485,6 +497,18 @@ fn build_signal_payload(
             payload.extend_from_slice(&payee);
             payload.push(status);
         }
+        AiSignalType::SlaAccept => {
+            let sla_object_id = parse_hex32(
+                require_str(&extra.sla_object_id, "--sla-object-id", "sla-accept")?,
+                "sla_object_id",
+            )?;
+            let buyer = parse_hex32(
+                require_str(&extra.buyer_entity_id, "--buyer-entity-id", "sla-accept")?,
+                "buyer_entity_id",
+            )?;
+            payload.extend_from_slice(&sla_object_id);
+            payload.extend_from_slice(&buyer);
+        }
     }
 
     Ok(payload)
@@ -631,11 +655,13 @@ mod tests {
             vk_id: None,
             vk_file: None,
             proof_file: None,
+            sla_object_id: Some("00".repeat(32)),
+            buyer_entity_id: Some("00".repeat(32)),
         }
     }
 
     #[test]
-    fn test_signal_payload_lengths_for_all_18_types() {
+    fn test_signal_payload_lengths_for_all_19_types() {
         let extra = full_extra();
         for (sig_type, expected_len) in [
             (AiSignalType::Anomaly, 66),
@@ -656,6 +682,7 @@ mod tests {
             (AiSignalType::SubscriptionCancel, 98),
             (AiSignalType::PaymentRequest, 178),
             (AiSignalType::ServiceAttestation, 131),
+            (AiSignalType::SlaAccept, 130),
         ] {
             let payload = build_signal_payload([0u8; 32], sig_type, [0u8; 32], &extra).unwrap();
             assert_eq!(payload.len(), expected_len, "wrong length for {sig_type:?}");
@@ -663,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_signal_type_accepts_all_18_strings() {
+    fn test_parse_signal_type_accepts_all_19_strings() {
         let cases = [
             ("anomaly", AiSignalType::Anomaly),
             ("optimization", AiSignalType::Optimization),
@@ -683,6 +710,7 @@ mod tests {
             ("subscription-cancel", AiSignalType::SubscriptionCancel),
             ("payment-request", AiSignalType::PaymentRequest),
             ("service-attestation", AiSignalType::ServiceAttestation),
+            ("sla-accept", AiSignalType::SlaAccept),
         ];
         for (s, expected) in cases {
             assert_eq!(parse_signal_type(s).unwrap(), expected, "for input '{s}'");

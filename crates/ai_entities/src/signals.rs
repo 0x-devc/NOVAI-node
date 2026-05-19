@@ -102,6 +102,18 @@ pub enum AiSignalType {
     /// payment_signal_hash:32 | payee_entity_id:32 | status:1
     /// (0 = Delivered, 1 = Failed).
     ServiceAttestation = 17,
+    /// SLA acceptance (Week 31): the issuing entity (the seller named in
+    /// a previously proposed `SlaAgreement` memory object) accepts the
+    /// agreement. The handler loads the SLA memory object via the
+    /// embedded buyer entity id and SLA object id, verifies the signal
+    /// issuer equals the SLA's seller, gates on the seller's current
+    /// `stake_balance >= sla.slash_amount`, then transitions the SLA
+    /// from `SLA_STATUS_PROPOSED` to `SLA_STATUS_ACTIVE` and records the
+    /// acceptance height. The acceptance must land BEFORE the SLA's
+    /// `start_height`; the active-pair singleton index entry stays in
+    /// place (it was written at create time). Carries a 64-byte tail:
+    /// sla_object_id:32 | buyer_entity_id:32.
+    SlaAccept = 18,
 }
 
 impl AiSignalType {
@@ -131,6 +143,7 @@ impl AiSignalType {
             15 => Some(AiSignalType::SubscriptionCancel),
             16 => Some(AiSignalType::PaymentRequest),
             17 => Some(AiSignalType::ServiceAttestation),
+            18 => Some(AiSignalType::SlaAccept),
             _ => None,
         }
     }
@@ -247,8 +260,13 @@ mod tests {
         );
         assert_eq!(
             AiSignalType::from_byte(18),
+            Some(AiSignalType::SlaAccept),
+            "18 must decode to SlaAccept (Week 31)"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(19),
             None,
-            "18 must be rejected as unknown signal type"
+            "19 must be rejected as unknown signal type"
         );
         assert_eq!(AiSignalType::CompositionCheck.to_byte(), 12);
         assert_eq!(AiSignalType::ProofSubmission.to_byte(), 13);

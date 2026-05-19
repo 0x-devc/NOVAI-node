@@ -112,6 +112,7 @@ fn build_payment_payload(
             max_block_height,
         }),
         service_attestation: None,
+        sla_accept: None,
     })
 }
 

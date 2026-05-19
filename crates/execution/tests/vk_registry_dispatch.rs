@@ -238,6 +238,7 @@ fn submit_registered_proof(
         subscription_cancel: None,
         payment_request: None,
         service_attestation: None,
+        sla_accept: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,
@@ -281,6 +282,7 @@ fn submit_with_custom_vk_bytes(
         subscription_cancel: None,
         payment_request: None,
         service_attestation: None,
+        sla_accept: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,

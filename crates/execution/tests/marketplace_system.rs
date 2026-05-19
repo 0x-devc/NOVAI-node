@@ -140,6 +140,7 @@ fn build_purchase_payload(
         subscription_cancel: None,
         payment_request: None,
         service_attestation: None,
+        sla_accept: None,
     })
 }
 
@@ -519,6 +520,7 @@ fn non_purchase_signals_still_work() {
         subscription_cancel: None,
         payment_request: None,
         service_attestation: None,
+        sla_accept: None,
     });
     let tx = make_tx(issuer.id, 0, SIGNAL_FEE, payload);
 

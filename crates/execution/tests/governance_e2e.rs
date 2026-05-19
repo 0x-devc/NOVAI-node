@@ -114,6 +114,7 @@ fn create_signal_payload(
         subscription_cancel: None,
         payment_request: None,
         service_attestation: None,
+        sla_accept: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }
