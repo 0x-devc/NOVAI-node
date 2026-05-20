@@ -17550,3 +17550,418 @@ auto-slash on threshold breach, an honest collateral check that
 prevents sellers from quietly draining stake out from under an
 open SLA, and a complete RPC + CLI surface for managing the
 two-party lifecycle.
+
+---
+
+## Week 32: Bidirectional Payment Channels
+
+### 1. Overview - Objectives & Deliverables
+
+Week 32 closes the agent-to-cloud compute wedge by adding
+bidirectional payment channels between two AI entities. After
+Week 28 wired the single-shot NAP payment rail and Week 31
+shipped binding SLAs, the missing piece was high-frequency
+micropayment settlement: an AI agent paying $0.003 per inference
+call ten thousand times an hour cannot submit ten thousand
+on-chain transactions. Channels collapse those streams into one
+on-chain settlement.
+
+**Goal Statement.** Ship a memory object type carrying channel
+collateral and state, three new lifecycle signals (`ChannelAccept`,
+`ChannelClose`, `ChannelFinalize`), an off-chain doubly-signed
+state update format with chain-id and channel-id binding, an
+end-to-end dispute mechanism (cooperative settle vs unilateral
+close vs higher-nonce dispute vs permissionless finalize), an RPC
+and CLI surface for the full lifecycle, and an off-chain `channel
+sign-update` helper that produces canonical state signatures.
+
+**Deliverables.**
+
+- D32.1: `MemoryObjectType::PaymentChannel` (type byte 15) + the
+  fixed 222-byte `PaymentChannelData` codec + golden vector.
+  Stored inside the existing 86-byte memory-object envelope, so
+  on-chain footprint is ~308 bytes per channel.
+- D32.2: Two new indexes:
+    * `ai/channels/by_party_a/<party_a>/<proposed_at_be>/<object_id>`
+      (zero-byte marker; height-windowed scans of channels owned
+      by an entity).
+    * `ai/channels/by_party_b/<party_b>/<proposed_at_be>/<object_id>`
+      (value is the 32-byte memory-object owner so by-party-B
+      resolution is O(1) per match; a deliberate departure from
+      the SLA `by_seller` design's O(N) by-type walk).
+- D32.3: Three new signal types:
+    * `AiSignalType::ChannelAccept = 19` (64-byte tail; party B
+      escrows `deposit_b` and flips status PROPOSED -> OPEN).
+    * `AiSignalType::ChannelClose = 20` (233-byte tail; carries
+      both party signatures + nonce + balances + is_final flag).
+    * `AiSignalType::ChannelFinalize = 21` (64-byte tail;
+      permissionless teardown after the dispute deadline).
+- D32.4: Off-chain doubly-signed update format. Both parties sign
+  every channel state via `novai_crypto::sign_channel_state` over
+  a 167-byte canonical message: `"NOVAI_CHANNEL_STATE_V1"` domain
+  tag (22) | chain_id (8) | channel_object_id (32) | party_a (32)
+  | party_b (32) | nonce (8) | balance_a (16) | balance_b (16) |
+  is_final (1). The chain verifies both signatures at close time
+  via `verify_channel_state_signature`.
+- D32.5: `ChannelClose` handler with three sub-flows through one
+  signal type. Cooperative settle (is_final = 1): instant credit
+  to both parties + delete primary + all indexes + decrement
+  party A's memory count. Initial unilateral close (status ==
+  OPEN, is_final = 0): flip to CLOSING, record closing_at_height,
+  set dispute_deadline_height = current + dispute_window_blocks,
+  persist (nonce, balance_a, balance_b). Dispute (status ==
+  CLOSING, in window, strictly larger nonce): persist higher-
+  nonce state without resetting the deadline so the cheater
+  cannot extend the window.
+- D32.6: Nonce-0 initial-state close exception. The only nonce-
+  monotonicity exception: parties may close a never-used channel
+  without burning a dummy off-chain nonce, BUT the payload's
+  balances must match the deposits exactly (else
+  `ChannelCloseInitialStateMismatch`).
+- D32.7: `ChannelFinalize` handler. Permissionless after the
+  dispute window expires. Credits the recorded `balance_a` and
+  `balance_b` back to the parties (handling submitter-is-party-A,
+  submitter-is-party-B, and submitter-is-third-party cases),
+  deletes the channel record + all indexes, decrements party A's
+  memory count.
+- D32.8: `validate_payment_channel_payload` enforcing 13 numbered
+  rules: version, status, party identities, deposits non-zero,
+  deposit overflow, balance invariant (`balance_a == deposit_a`,
+  `balance_b == 0` at create), nonce/lifecycle-heights all zero,
+  dispute window in `[100, 10_000]`, reserved all-zero, party B
+  exists and active, proposer's balance after fee covers
+  `deposit_a`, per-entity cap (`MAX_PAYMENT_CHANNELS_PER_ENTITY =
+  32`) across both party roles.
+- D32.9: Memory object lifecycle gates.
+  `validate_payment_channel_update` unconditionally rejects every
+  `UpdateMemoryObject` against type 15 with
+  `PaymentChannelImmutableOnUpdate`. `DeleteMemoryObject` of a
+  channel: PROPOSED refunds party A's deposit and tears down
+  both by-party indexes; OPEN / CLOSING reject with
+  `PaymentChannelDeleteWhileActive` (teardown of non-PROPOSED
+  channels is the finalize signal's job).
+- D32.10: Four RPC methods: `novai_getPaymentChannel`,
+  `novai_listChannelsByPartyA`, `novai_listChannelsByPartyB`,
+  `novai_getChannelDisputeStatus` (returns status,
+  closing_at_height, dispute_deadline_height, current chain
+  height, derived blocks_remaining and finalize_ready).
+- D32.11: Ten CLI subcommands: `channel propose`, `accept`,
+  `sign-update`, `close`, `finalize`, `cancel`, `show`,
+  `list-by-party-a`, `list-by-party-b`, `dispute-status`.
+  `sign-update` is the off-chain helper that produces ed25519
+  signatures over canonical channel state bytes without any chain
+  interaction; critical for testability.
+
+### 2. Design Pushbacks (Approved in Phase 0)
+
+Eight pushbacks against the initial prompt were accepted before
+any code was written.
+
+- **P1: NAP and channels are independent**, not nested. Routing
+  PaymentRequest through a channel would couple two unrelated
+  subsystems and destroy NAP's auditable per-payment trail.
+  Channels and NAP are sibling primitives.
+- **P2: SLA reference is informational only in v1.** The channel
+  carries an optional `sla_object_id` field, but the runtime does
+  not couple channel lifecycle to SLA status. Cross-coupling
+  would require either expensive on-chain hooks or a new index;
+  defer to v2 if real users need it.
+- **P3: One ChannelClose signal, not two.** Close, unilateral
+  close, and dispute share 95% of logic; collapse them into one
+  signal type branched by `is_final` flag and channel status.
+- **P4: Both signatures always required on every off-chain
+  update.** Raiden's single-sig is more bandwidth-efficient
+  off-chain but produces a more complex on-chain verifier with
+  "try both pubkeys to identify the signer" logic. Doubly-signed
+  states are one extra off-chain round-trip (negligible for AI
+  agents) and a much simpler chain verifier.
+- **P5: No slash on dispute in v1.** Highest-nonce-wins resolves
+  all conflicts; the cheater simply loses to the counterparty's
+  newer-nonce submission. Adding a separate slash adds error
+  variants and edge cases for marginal deterrence.
+- **P6: Allow multiple active channels per (A, B) pair**, not a
+  singleton like SLA's active_between. Different service
+  categories, different lifetimes, different deposit sizes. The
+  by_pair singleton constraint adds bug surface ("channel exists,
+  can't open another") for no benefit.
+- **P7: Skip ChannelTopUp in v1.** Mid-channel top-ups are a
+  known bug source in Raiden. Parties close cooperatively and
+  open a new channel instead. Defer.
+- **P8: Asymmetric propose+accept matching the SLA pattern**, not
+  symmetric. Party A proposes (debits `deposit_a`), party B
+  accepts (debits `deposit_b`). No embedded second-sig dance at
+  open time.
+
+### 3. Wire Layouts
+
+**PaymentChannelData (222 bytes).**
+
+```
+0       1   version (PAYMENT_CHANNEL_V1 = 1)
+1      32   party_a_entity_id      (memory object owner)
+33     32   party_b_entity_id      (counterparty)
+65     32   sla_object_id          (informational; zero = no ref)
+97      1   status                 (PROPOSED / OPEN / CLOSING)
+98     16   deposit_a              (u128 be; immutable after create)
+114    16   deposit_b              (u128 be; immutable after accept)
+130    16   balance_a              (u128 be; current settled balance)
+146    16   balance_b              (u128 be; current settled balance)
+                                   invariant once OPEN:
+                                   balance_a + balance_b ==
+                                   deposit_a + deposit_b
+162     8   nonce                  (u64 be; highest applied state)
+170     8   proposed_at_height
+178     8   accepted_at_height     (0 until ChannelAccept)
+186     8   closing_at_height      (0 unless status == CLOSING)
+194     8   dispute_deadline_height
+202     4   dispute_window_blocks  (u32 be; immutable after create)
+206    16   reserved               (MUST be zero on create / accept)
+```
+
+**Off-chain signed update message (167 bytes).**
+
+```
+0      22   "NOVAI_CHANNEL_STATE_V1"   (raw, no length prefix)
+22      8   chain_id_be                (NOVAI_CHANNEL_CHAIN_ID = 1)
+30     32   channel_object_id
+62     32   party_a_entity_id
+94     32   party_b_entity_id
+126     8   nonce_be
+134    16   balance_a_be
+150    16   balance_b_be
+166     1   is_final                   (0 or 1)
+```
+
+**Signal payload tails.**
+
+- `ChannelAccept` (64-byte tail; 130-byte total): channel_object_id (32) | party_a_entity_id (32).
+- `ChannelClose` (233-byte tail; 299-byte total): channel_object_id (32) | party_a_entity_id (32) | nonce_be (8) | balance_a_be (16) | balance_b_be (16) | is_final (1) | sig_a (64) | sig_b (64).
+- `ChannelFinalize` (64-byte tail; 130-byte total): channel_object_id (32) | party_a_entity_id (32).
+
+### 4. State Machine
+
+```
+[create]                       [ChannelAccept]
+   |                                  |
+   v                                  v
+PROPOSED  -- ChannelAccept -->     OPEN
+   |                                  |
+   |  [cancel via                     |  [ChannelClose
+   |   DeleteMemoryObject:            |   is_final=1]
+   |   refund deposit_a]              |     |
+   |                                  |     v
+   |                                  | [DELETED + credits]
+   |                                  |
+   |                              [ChannelClose is_final=0]
+   |                                  |
+   |                                  v
+   |                              CLOSING
+   |                              |   |
+   |                              |   v
+   |                              | [ChannelClose with higher
+   |                              |  nonce, still in window:
+   |                              |  override state, keep deadline]
+   |                              |
+   |                              v
+   |                          [current_height > deadline]
+   |                              |
+   |                              v
+   |                          [ChannelFinalize:
+   |                           credit + DELETE + indexes torn down]
+```
+
+### 5. Storage Layout
+
+| Key | Value | Purpose |
+|---|---|---|
+| `ai_memory_object_key(party_a, channel_object_id)` | MemoryObject envelope + 222-byte payload | Canonical record |
+| `ai_memory_by_type_key(15, party_a, channel_object_id)` | empty | Generic by-type scan |
+| `channel_by_party_a_key(party_a, proposed_at_be, object_id)` | empty | Height-windowed scan |
+| `channel_by_party_b_key(party_b, proposed_at_be, object_id)` | party_a (32) | Height-windowed scan; embedded owner for O(1) resolution |
+| `ai_memory_count_key(party_a)` | u32 | Per-entity memory object count |
+
+`MAX_PAYMENT_CHANNELS_PER_ENTITY = 32`, counted across both party
+roles via `count_payment_channels_for_entity` (two bounded prefix
+scans plus a sum).
+
+### 6. Capability and Permission Model
+
+- Channel propose / accept / close / finalize: standard
+  `emit_proposals` (signals) or `read_memory_objects` (memory
+  object CRUD) capability on the issuer, matching every other
+  AI-entity-issued transaction.
+- ChannelClose submitter MUST be party A or party B per
+  `ChannelCloseSubmitterNotParticipant`. Third-party closes are
+  rejected.
+- ChannelFinalize is **permissionless**: any active AI entity may
+  submit. The participants have aligned incentives to finalize
+  themselves, but allowing third-party finalize means channel
+  liveness does not depend on either participant staying online.
+  The third party pays only the standard tx fee from their own
+  `economic_balance`; balance credits land on the participants
+  regardless of who submits.
+
+### 7. RPC
+
+```
+Method: novai_getPaymentChannel
+Params: { owner: hex32, object_id: hex32 }
+Response: { channel: PaymentChannelJson | null }
+
+Method: novai_listChannelsByPartyA
+Params: { entity_id: hex32, start_height: u64, end_height: u64 }
+Response: { channels: [PaymentChannelJson, ...] }
+
+Method: novai_listChannelsByPartyB
+Params: { entity_id: hex32, start_height: u64, end_height: u64 }
+Response: { channels: [PaymentChannelJson, ...] }
+
+Method: novai_getChannelDisputeStatus
+Params: { owner: hex32, object_id: hex32 }
+Response: {
+  found: bool,
+  status: u8,
+  status_label: "proposed" | "open" | "closing" | "unknown",
+  closing_at_height: u64,
+  dispute_deadline_height: u64,
+  current_height: u64,
+  blocks_remaining: u64,
+  finalize_ready: bool
+}
+
+PaymentChannelJson {
+  object_id, owner_entity, created_at, updated_at, version,
+  party_a_entity_id, party_b_entity_id, sla_object_id,
+  status, status_label,
+  deposit_a (decimal), deposit_b (decimal),
+  balance_a (decimal), balance_b (decimal),
+  nonce, proposed_at_height, accepted_at_height,
+  closing_at_height, dispute_deadline_height,
+  dispute_window_blocks
+}
+```
+
+List queries cap at `MAX_SIGNAL_QUERY_RANGE = 10_000` heights,
+matching every other height-windowed query. Decimal-string
+encoding on the u128 deposit / balance fields matches Week 28
+PaymentRecord.amount and Week 31 SlaAgreementData.slash_amount.
+
+### 8. CLI
+
+```
+novai-cli channel propose \
+  --key-file alice.key \
+  --party-a-entity-id <alice-hex32> \
+  --party-b-entity-id <bob-hex32> \
+  [--sla-object-id <hex32>] \
+  --deposit-a 200000 --deposit-b 150000 \
+  [--dispute-window-blocks 256]
+
+novai-cli channel accept \
+  --key-file bob.key \
+  --channel-object-id <hex32> \
+  --party-a-entity-id <alice-hex32> \
+  --party-b-entity-id <bob-hex32>
+
+novai-cli channel sign-update \
+  --signing-key alice.key \
+  --channel-object-id <hex32> \
+  --party-a-entity-id <alice-hex32> \
+  --party-b-entity-id <bob-hex32> \
+  --nonce 5 --balance-a 100000 --balance-b 250000 \
+  [--final-state]
+  # outputs: 64-byte hex signature
+
+novai-cli channel close \
+  --key-file alice.key \
+  --channel-object-id <hex32> \
+  --party-a-entity-id <alice-hex32> \
+  --party-b-entity-id <bob-hex32> \
+  --nonce 5 --balance-a 100000 --balance-b 250000 \
+  [--final-state] \
+  --sig-a <hex64> --sig-b <hex64>
+
+novai-cli channel finalize \
+  --key-file watcher.key \
+  --channel-object-id <hex32> \
+  --party-a-entity-id <alice-hex32>
+
+novai-cli channel cancel \
+  --key-file alice.key --channel-object-id <hex32>
+
+novai-cli channel show          --owner <hex32> --object-id <hex32>
+novai-cli channel list-by-party-a --entity-id <hex32> [--start-height 0] [--end-height 10000]
+novai-cli channel list-by-party-b --entity-id <hex32> [--start-height 0] [--end-height 10000]
+novai-cli channel dispute-status  --owner <hex32> --object-id <hex32>
+```
+
+`sign-update` is pure offline: no network calls, no transaction
+submission. Operators exchange signatures over any out-of-band
+channel; the chain only sees the doubly-signed result at close
+time. Replay protection comes from the canonical signing bytes
+binding `chain_id`, `channel_object_id`, `nonce`, and the
+`is_final` flag.
+
+### 9. Test Surface
+
+| File | Tests | What it covers |
+|------|-------|---------------|
+| crates/ai_entities/src/memory.rs | 8 new | Type-byte 15 in roundtrip + name + invalid-byte tests, codec constants, 222-byte roundtrip, arbitrary-reserved preservation, length rejection, version + status byte preservation, golden vector field-by-field. |
+| crates/ai_entities/src/signals.rs | 1 extended | Type bytes 19/20/21 added to roundtrip + boundary test (22 is first invalid). |
+| crates/ai_entities/tests/signal_verification_vectors.rs | 1 extended | Boundary test updated to 0..=21 valid range. |
+| crates/crypto/src/lib.rs | 4 new | `channel_state_signing_bytes` 167-byte length + domain tag, sign/verify roundtrip, every-field binding (mutating any field breaks verify), garbage pubkey rejected. |
+| crates/execution/tests/channel_create.rs | 22 | Happy path (deposit debit + index writes + record fields), every numbered validator rule, per-entity cap, delete-while-PROPOSED refunds + clears, delete-while-OPEN rejected, delete-while-CLOSING rejected, update always rejected. |
+| crates/execution/tests/channel_accept.rs | 9 | Status flip + balance_b set + deposit_b debited, 130-byte wire-length sanity, by-party indexes preserved, all defensive rejections (not-found, type mismatch, double-accept, wrong counterparty, insufficient balance, atomicity-on-failure). |
+| crates/execution/tests/channel_close.rs | 16 | Cooperative settle by either party submitter, unilateral close at initial state, unilateral close with signed mid-channel update, dispute higher-nonce override (deadline preserved), dispute lower-nonce rejected, dispute after deadline rejected, invalid sig_a / sig_b, balance imbalance, submitter not participant, initial-state mismatch, PROPOSED status close rejected, channel not found, signature binds chain_id, signature binds is_final flag. |
+| crates/execution/tests/channel_finalize.rs | 10 | Finalize by party A and party B, permissionless third-party finalize, full propose -> accept -> close -> finalize lifecycle with balance-conservation accounting, before-deadline rejected, OPEN / PROPOSED status rejected, channel-not-found, type mismatch, double-finalize (second finalize sees no record). |
+| crates/execution/tests/channel_queries.rs | 11 | get_payment_channel happy path + PROPOSED -> OPEN transition + missing + type mismatch; get_channels_by_party_a height-ordered + window filtered + unknown entity empty; get_channels_by_party_b multi-owner via embedded-owner + window filtered + unknown empty; cross-helper consistency proving one channel appears identically in both party views. |
+| crates/execution/tests/channel_adversarial.rs | 5 | Cross-channel signature replay rejected (sigs bind channel_object_id), cross-pair signature replay rejected (sigs bind both party ids), multi-channel between same pair allowed (pushback P6), close against keyless counterparty rejected at sig verify, nonce-0 initial-state close rejected after channel advances past nonce 0. |
+| tools/novai-cli/src/commands/channel.rs | 4 | build_channel codec roundtrip, bad-hex party A / party B rejection, ChannelClose 299-byte wire spec sanity. |
+
+### 10. Outstanding Work Items
+
+- **Channel top-up**: deferred per pushback P7. Mid-channel deposit
+  increase via Raiden-style `setTotalDeposit` is a known bug
+  source; parties close cooperatively and open a new channel
+  instead. v2 candidate.
+- **Slash on dispute**: deferred per pushback P5. Highest-nonce-
+  wins resolves all conflicts in v1. If cheating attempts are
+  observed in production, future work could add a reputation
+  penalty when a higher-nonce dispute overrides a lower-nonce
+  initial close.
+- **NAP / channel coupling**: deferred per pushback P1. NAP
+  remains the on-chain settlement rail; channels operate
+  independently. A future bridge tx could let an NAP PaymentRequest
+  route through an open channel between the same pair.
+- **SLA / channel coupling**: deferred per pushback P2. The
+  `sla_object_id` field is informational in v1; v2 could add a
+  reverse index (`ai/channels/by_sla/<sla_object_id>/`) and a
+  hook in the SLA auto-slash path that auto-pauses or
+  auto-closes referenced channels.
+- **Watchtower-as-a-service**: the dispute window assumes a
+  participant or their deputy will come online to submit a higher-
+  nonce update if needed. A future memory object type
+  `WatchtowerSubscription` could let participants pre-pay a
+  third-party watcher to monitor specific channels and submit
+  disputes on their behalf.
+- **Cross-channel splice**: opening a new channel between the
+  same parties currently requires a new on-chain create tx. A
+  future "channel rollover" path could atomically close-and-open
+  in one tx so high-throughput pairs do not pay the full open
+  fee per channel cycle.
+- **Generalized state channels**: the current channel is fixed-
+  purpose (balance distribution). Perun-style adjudicators that
+  run arbitrary off-chain state machines are out of scope; if
+  real demand surfaces they would be a new memory object type
+  rather than an extension of PaymentChannel.
+
+**Week 32 Status: COMPLETE.** Eight phases shipped, all 1,653
+tests passing, zero clippy warnings, cargo deny check licenses
+passes. NOVAI now has bidirectional payment channels with
+cooperative-settle and unilateral-close-plus-dispute lifecycle,
+doubly-signed off-chain state updates with chain-id and channel-id
+replay binding, permissionless finalize, a height-windowed query
+surface, and a complete CLI including the off-chain `sign-update`
+helper. The end-to-end propose -> accept -> close -> finalize
+lifecycle test in `channel_finalize.rs` proves balance
+conservation across the whole flow.
