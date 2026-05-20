@@ -3205,6 +3205,88 @@ pub fn sla_by_buyer_key(buyer: &[u8; 32], height: u64, object_id: &[u8; 32]) -> 
     out
 }
 
+/// Build the canonical KV key for the `PaymentChannel` per-party-A
+/// scan index entry (Week 32):
+/// `b"ai/channels/by_party_a/" || party_a[32] || proposed_at_height_be[8] || object_id[32]`.
+///
+/// Value is a zero-byte marker; the canonical `PaymentChannelData`
+/// lives inside the memory object at
+/// `ai_memory_object_key(party_a, object_id)`. Big-endian
+/// `proposed_at_height` keeps prefix-scan results in height-
+/// ascending order without an in-memory sort.
+#[must_use]
+pub fn channel_by_party_a_key(
+    party_a: &[u8; 32],
+    proposed_at: u64,
+    object_id: &[u8; 32],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_CHANNELS_BY_PARTY_A.len() + 32 + 8 + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_CHANNELS_BY_PARTY_A);
+    out.extend_from_slice(party_a);
+    out.extend_from_slice(&proposed_at.to_be_bytes());
+    out.extend_from_slice(object_id);
+    out
+}
+
+/// Build the canonical KV key for the `PaymentChannel` per-party-B
+/// scan index entry (Week 32):
+/// `b"ai/channels/by_party_b/" || party_b[32] || proposed_at_height_be[8] || object_id[32]`.
+///
+/// Value is the 32-byte `party_a` (memory object owner) so the
+/// runtime can resolve the primary record without an extra scan of
+/// `ai/memory_by_type/15/`. This is a deliberate departure from the
+/// SLA `by_seller` design (which stores an empty marker and forces
+/// an O(N) scan to recover the buyer); embedding the owner in the
+/// value lets per-entity cap checks at accept time resolve the
+/// primary record directly.
+#[must_use]
+pub fn channel_by_party_b_key(
+    party_b: &[u8; 32],
+    proposed_at: u64,
+    object_id: &[u8; 32],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_CHANNELS_BY_PARTY_B.len() + 32 + 8 + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_CHANNELS_BY_PARTY_B);
+    out.extend_from_slice(party_b);
+    out.extend_from_slice(&proposed_at.to_be_bytes());
+    out.extend_from_slice(object_id);
+    out
+}
+
+/// Count the total `PaymentChannel` memory objects the given entity
+/// participates in, summed across both roles.
+///
+/// Sums across party-A (memory object owner) and party-B
+/// (counterparty). Backs the `MAX_PAYMENT_CHANNELS_PER_ENTITY` cap
+/// enforcement at create and accept time. Two bounded prefix scans
+/// (one per role) plus a sum. Result is clamped to `u32::MAX` to
+/// avoid an arithmetic overflow on the cap comparison if the entity
+/// ever exceeds the addressable range (unreachable under the cap).
+///
+/// # Errors
+/// Returns `ExecError::Db` if either KV scan fails.
+pub fn count_payment_channels_for_entity<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+) -> Result<u32, ExecError<K::Error>> {
+    let mut owner_role_prefix = Vec::with_capacity(KEY_PREFIX_AI_CHANNELS_BY_PARTY_A.len() + 32);
+    owner_role_prefix.extend_from_slice(KEY_PREFIX_AI_CHANNELS_BY_PARTY_A);
+    owner_role_prefix.extend_from_slice(entity_id);
+    let owner_count = db.scan_prefix(&owner_role_prefix).map_err(ExecError::Db)?.len();
+
+    let mut counterparty_role_prefix =
+        Vec::with_capacity(KEY_PREFIX_AI_CHANNELS_BY_PARTY_B.len() + 32);
+    counterparty_role_prefix.extend_from_slice(KEY_PREFIX_AI_CHANNELS_BY_PARTY_B);
+    counterparty_role_prefix.extend_from_slice(entity_id);
+    let counterparty_count = db
+        .scan_prefix(&counterparty_role_prefix)
+        .map_err(ExecError::Db)?
+        .len();
+
+    let total = owner_count.saturating_add(counterparty_count);
+    Ok(u32::try_from(total).unwrap_or(u32::MAX))
+}
+
 /// Build the canonical KV key for the SLA per-seller scan index
 /// entry (Week 31):
 /// `b"ai/slas/by_seller/" || seller[32] || created_at_height_be[8] || object_id[32]`.
@@ -4354,9 +4436,11 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
 
 use novai_ai_entities::{
     encode_memory_object_v1, AiEntity, AiSignalType, CompositionGraphData, MemoryObject,
-    MemoryObjectType, SignalCatalogData, SignalCommitment, SlaAgreementData, SubscriptionData,
-    VerificationRecordData, VkRegistrationData, MAX_REPUTATION_SCORE, MAX_SLAS_PER_ENTITY,
-    MAX_SUBSCRIPTIONS_PER_ENTITY, SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS,
+    MemoryObjectType, PaymentChannelData, SignalCatalogData, SignalCommitment, SlaAgreementData,
+    SubscriptionData, VerificationRecordData, VkRegistrationData,
+    CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS, CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS, MAX_PAYMENT_CHANNELS_PER_ENTITY,
+    MAX_REPUTATION_SCORE, MAX_SLAS_PER_ENTITY, MAX_SUBSCRIPTIONS_PER_ENTITY, PAYMENT_CHANNEL_RESERVED_LEN,
+    PAYMENT_CHANNEL_STATUS_PROPOSED, PAYMENT_CHANNEL_V1, SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS,
     SLA_MIN_DELIVERY_SUCCESS_BPS_MAX, SLA_MIN_UPTIME_BPS_MAX, SLA_RESERVED_LEN, SLA_STATUS_ACTIVE,
     SLA_STATUS_PROPOSED, SLA_STATUS_VIOLATED,
 };
@@ -7028,6 +7112,23 @@ fn validate_sla_agreement_update<E>(
     Err(ExecError::SlaAgreementImmutableOnUpdate)
 }
 
+/// `PaymentChannel` memory objects are never user-updatable. Every
+/// mutation is runtime-controlled via the `ChannelAccept` /
+/// `ChannelClose` / `ChannelFinalize` signal handlers. The validator
+/// unconditionally rejects updates against type 15; for any other
+/// type it is a no-op so the update dispatch can call it
+/// unconditionally alongside the existing per-type validators.
+fn validate_payment_channel_update<E>(
+    object_type: MemoryObjectType,
+    _old_data: &[u8],
+    _new_data: &[u8],
+) -> Result<(), ExecError<E>> {
+    if object_type != MemoryObjectType::PaymentChannel {
+        return Ok(());
+    }
+    Err(ExecError::PaymentChannelImmutableOnUpdate)
+}
+
 /// Per-type structural and semantic validation for a `SlaAgreement`
 /// memory object payload (Week 31). No-op for non-`SlaAgreement` types
 /// so the CREATE handler can call it unconditionally alongside the
@@ -7165,6 +7266,144 @@ fn validate_sla_agreement_payload<K: Kv>(
     Ok(Some(sla))
 }
 
+/// Per-type structural and semantic validation for a `PaymentChannel`
+/// memory object payload (Week 32). No-op for non-`PaymentChannel`
+/// types so the CREATE handler can call it unconditionally alongside
+/// the existing per-type validators.
+///
+/// Validation rules (full list):
+/// 1. Bytes decode cleanly to `PaymentChannelData`.
+/// 2. `version == PAYMENT_CHANNEL_V1`.
+/// 3. `status == PAYMENT_CHANNEL_STATUS_PROPOSED` (proposer cannot
+///    pre-seed Open / Closing).
+/// 4. Runtime-only fields are zero on create: `balance_b`, `nonce`,
+///    `accepted_at_height`, `closing_at_height`,
+///    `dispute_deadline_height`. The proposer MUST set `balance_a
+///    == deposit_a` so the on-chain initial state matches the
+///    no-update close path.
+/// 5. `party_a_entity_id == proposer.id`.
+/// 6. `party_b_entity_id != party_a_entity_id`.
+/// 7. `deposit_a > 0`, `deposit_b > 0`.
+/// 8. `deposit_a + deposit_b` does not overflow `u128`.
+/// 9. `dispute_window_blocks` in `[CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS,
+///    CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS]`.
+/// 10. `reserved[..16]` all zero.
+/// 11. Party B exists in state and `is_active == true`.
+/// 12. Proposer's `economic_balance` (after the tx fee debit) covers
+///     `deposit_a`.
+/// 13. Proposer's open `PaymentChannel` count across both party-A
+///     and party-B roles `< MAX_PAYMENT_CHANNELS_PER_ENTITY`.
+///     Bounded prefix scans over the by-party indexes.
+///
+/// Returns the decoded `PaymentChannelData` on success so the create
+/// handler can derive `party_b_entity_id` and `proposed_at_height`
+/// for the secondary indexes (and the `deposit_a` debit) without
+/// re-decoding the payload.
+fn validate_payment_channel_payload<K: Kv>(
+    db: &K,
+    object_type: MemoryObjectType,
+    data: &[u8],
+    proposer: &AiEntity,
+    fee_u128: u128,
+) -> Result<Option<PaymentChannelData>, ExecError<K::Error>> {
+    if object_type != MemoryObjectType::PaymentChannel {
+        return Ok(None);
+    }
+    let channel = PaymentChannelData::decode(data).ok_or(ExecError::InvalidPaymentChannel)?;
+
+    if channel.version != PAYMENT_CHANNEL_V1 {
+        return Err(ExecError::PaymentChannelVersionInvalid {
+            byte: channel.version,
+        });
+    }
+    if channel.status != PAYMENT_CHANNEL_STATUS_PROPOSED {
+        return Err(ExecError::PaymentChannelStatusInvalidAtCreate {
+            byte: channel.status,
+        });
+    }
+    if channel.party_a_entity_id != proposer.id {
+        return Err(ExecError::PaymentChannelPartyAMustBeIssuer);
+    }
+    if channel.party_b_entity_id == channel.party_a_entity_id {
+        return Err(ExecError::PaymentChannelSelfReferential);
+    }
+    if channel.deposit_a == 0 {
+        return Err(ExecError::PaymentChannelDepositAZero);
+    }
+    if channel.deposit_b == 0 {
+        return Err(ExecError::PaymentChannelDepositBZero);
+    }
+    if channel
+        .deposit_a
+        .checked_add(channel.deposit_b)
+        .is_none()
+    {
+        return Err(ExecError::PaymentChannelDepositTotalOverflow);
+    }
+    // Initial on-chain state invariants: balance_a must equal deposit_a;
+    // balance_b stays zero until B accepts and escrows deposit_b. Nonce
+    // and lifecycle heights are runtime-only fields the proposer must
+    // not pre-seed.
+    if channel.balance_a != channel.deposit_a
+        || channel.balance_b != 0
+        || channel.nonce != 0
+        || channel.accepted_at_height != 0
+        || channel.closing_at_height != 0
+        || channel.dispute_deadline_height != 0
+    {
+        return Err(ExecError::PaymentChannelInitialFieldsNotZero);
+    }
+    if channel.dispute_window_blocks < CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS
+        || channel.dispute_window_blocks > CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS
+    {
+        return Err(ExecError::PaymentChannelDisputeWindowOutOfRange {
+            found: channel.dispute_window_blocks,
+            min: CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS,
+            max: CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS,
+        });
+    }
+    if channel.reserved != [0u8; PAYMENT_CHANNEL_RESERVED_LEN] {
+        return Err(ExecError::PaymentChannelReservedNotZero);
+    }
+
+    // Party B must exist and be active. The handler also needs to be
+    // able to load party B at acceptance time (to debit deposit_b)
+    // and at every close / finalize (to credit their balance back); a
+    // missing-now counterparty fails fast here so party A does not
+    // waste fees on an unfunded proposal.
+    let party_b = read_ai_entity(db, &channel.party_b_entity_id)?
+        .ok_or(ExecError::PaymentChannelPartyBNotFound)?;
+    if !party_b.is_active {
+        return Err(ExecError::PaymentChannelPartyBNotActive);
+    }
+
+    // Proposer balance check: deposit_a is debited from
+    // `economic_balance` in addition to the tx fee. The fee has
+    // already been validated against `economic_balance` upstream;
+    // here we require the remainder to cover `deposit_a`.
+    let after_fee = proposer
+        .economic_balance
+        .checked_sub(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+    if after_fee < channel.deposit_a {
+        return Err(ExecError::PaymentChannelInsufficientBalanceA {
+            required: channel.deposit_a,
+            available: after_fee,
+        });
+    }
+
+    // Per-entity channel cap, counted across both party roles.
+    let current = count_payment_channels_for_entity(db, &proposer.id)?;
+    if current >= MAX_PAYMENT_CHANNELS_PER_ENTITY {
+        return Err(ExecError::PaymentChannelPerEntityCapExceeded {
+            current,
+            max: MAX_PAYMENT_CHANNELS_PER_ENTITY,
+        });
+    }
+
+    Ok(Some(channel))
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply_create_memory_object_tx_inner<K: KvBatch>(
     db: &mut K,
@@ -7235,6 +7474,23 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
         current_height,
     )?;
 
+    // Week 32: Per-type structural and semantic validation for
+    // `PaymentChannel`. Decodes the channel once so the create
+    // handler can write the by-party-A and by-party-B index entries
+    // below (and apply the `deposit_a` debit) without redecoding.
+    // Also enforces the dispute-window bounds, the party-B liveness
+    // gate, the proposer-balance-covers-deposit gate, and the
+    // per-entity channel cap across both roles. Takes `tx.fee` so
+    // the balance gate matches the fee debit applied further below.
+    let fee_u128 = u128::from(tx.fee);
+    let payment_channel = validate_payment_channel_payload(
+        db,
+        payload.object_type,
+        &payload.data,
+        &entity,
+        fee_u128,
+    )?;
+
     // W5-06: Reject operations from deactivated entities
     if !entity.is_active {
         return Err(ExecError::EntityNotActive);
@@ -7251,8 +7507,8 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
         });
     }
 
-    // Validate balance
-    let fee_u128 = u128::from(tx.fee);
+    // Validate balance (fee_u128 was computed above for the
+    // PaymentChannel validator's balance gate).
     if entity.economic_balance < fee_u128 {
         return Err(ExecError::InsufficientFunds {
             balance: entity.economic_balance,
@@ -7280,6 +7536,18 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
         .economic_balance
         .checked_sub(fee_u128)
         .ok_or(ExecError::Overflow)?;
+    // Week 32: debit `deposit_a` from the proposer at create time.
+    // The validator already verified `after_fee >= deposit_a`, so
+    // the checked_sub here is defence in depth against arithmetic
+    // bugs; the deposit is held inside the channel memory object
+    // payload (encoded above) until cooperative settle, finalize,
+    // or proposer-cancel of a still-Proposed channel refunds it.
+    if let Some(channel) = &payment_channel {
+        entity.economic_balance = entity
+            .economic_balance
+            .checked_sub(channel.deposit_a)
+            .ok_or(ExecError::Overflow)?;
+    }
     entity.nonce = entity
         .nonce
         .checked_add(1)
@@ -7344,6 +7612,30 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
 
         let by_seller = sla_by_seller_key(&sla.seller_entity_id, current_height, &object_id);
         ops.push(WriteOp::Put(by_seller, Vec::new()));
+    }
+
+    // Week 32: PaymentChannel index writes. Two keys go in atomically:
+    //   - by_party_a/<party_a>/<proposed_at_be>/<object_id>  -> empty
+    //   - by_party_b/<party_b>/<proposed_at_be>/<object_id>  -> party_a
+    // The by_party_b value embeds the memory-object owner so the
+    // per-entity cap scan at accept time can resolve the primary
+    // record without an extra by_type scan. The two index markers
+    // persist until the memory object is deleted (proposer-cancel
+    // while still PROPOSED, or finalize after the dispute deadline).
+    if let Some(channel) = &payment_channel {
+        let by_a = channel_by_party_a_key(
+            &channel.party_a_entity_id,
+            current_height,
+            &object_id,
+        );
+        ops.push(WriteOp::Put(by_a, Vec::new()));
+
+        let by_b = channel_by_party_b_key(
+            &channel.party_b_entity_id,
+            current_height,
+            &object_id,
+        );
+        ops.push(WriteOp::Put(by_b, channel.party_a_entity_id.to_vec()));
     }
 
     let count_key = ai_memory_count_key(&entity.id);
@@ -7489,6 +7781,17 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
     // hook). The validator unconditionally rejects updates against
     // type 14; for any other type it is a no-op.
     validate_sla_agreement_update::<K::Error>(
+        memory_object.object_type,
+        &memory_object.data,
+        &payload.new_data,
+    )?;
+
+    // Week 32: PaymentChannels are NOT updatable via
+    // UpdateMemoryObject. Every mutation is runtime-controlled
+    // (ChannelAccept / ChannelClose / ChannelFinalize signals). The
+    // validator unconditionally rejects updates against type 15;
+    // for any other type it is a no-op.
+    validate_payment_channel_update::<K::Error>(
         memory_object.object_type,
         &memory_object.data,
         &payload.new_data,
@@ -7723,6 +8026,57 @@ fn apply_delete_memory_object_tx_inner<K: KvBatch>(
                     &sla.seller_entity_id,
                 )));
             }
+        }
+    }
+
+    // Week 32: PaymentChannel delete is gated on lifecycle status.
+    //   * PROPOSED: party A can cancel before B accepts; refund
+    //     `deposit_a` to party A and tear down both by-party indexes.
+    //   * OPEN / CLOSING: reject. Channels in these states hold
+    //     party B's collateral and may have an open dispute window;
+    //     teardown is the finalize path's job, not delete.
+    //
+    // A malformed PaymentChannelData payload makes the gate fall
+    // through silently (treated as deletable, mirroring the
+    // SlaAgreement / ServiceDescriptor tolerance policies above) but
+    // the refund + index Deletes are skipped because the payload's
+    // deposit_a / party_b are unknown. The proposer simply loses
+    // whatever was locked in a corrupt record; in normal operation
+    // the runtime wrote those bytes itself so this is unreachable.
+    if memory_object.object_type == MemoryObjectType::PaymentChannel {
+        if let Some(channel) = PaymentChannelData::decode(&memory_object.data) {
+            if channel.status != PAYMENT_CHANNEL_STATUS_PROPOSED {
+                return Err(ExecError::PaymentChannelDeleteWhileActive {
+                    status: channel.status,
+                });
+            }
+            // Refund deposit_a to the proposer (party A == memory
+            // object owner == this tx's issuer per ownership gate
+            // above). Saturating-add against the existing fee debit
+            // is not needed here: at create time the validator
+            // checked deposit_a + fee fit in u128; at delete the
+            // checked_add is defence against arithmetic bugs.
+            entity.economic_balance = entity
+                .economic_balance
+                .checked_add(channel.deposit_a)
+                .ok_or(ExecError::Overflow)?;
+
+            // The by_party_a / by_party_b index keys are built at
+            // create time with `current_height`, recorded on the
+            // memory object envelope's `created_at`. Use the
+            // envelope's height so create and delete agree on the
+            // key bytes regardless of what the payload carries.
+            let index_height = memory_object.created_at;
+            ops.push(WriteOp::Delete(channel_by_party_a_key(
+                &channel.party_a_entity_id,
+                index_height,
+                &payload.object_id,
+            )));
+            ops.push(WriteOp::Delete(channel_by_party_b_key(
+                &channel.party_b_entity_id,
+                index_height,
+                &payload.object_id,
+            )));
         }
     }
 
