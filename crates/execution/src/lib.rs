@@ -921,6 +921,13 @@ pub enum ExecError<E> {
     /// `ChannelClose`: the initial-state close path (`nonce == 0`)
     /// requires the payload balances to match the deposits exactly.
     ChannelCloseInitialStateMismatch,
+    /// `ChannelClose` / `ChannelFinalize`: a participating entity
+    /// referenced by the channel record cannot be loaded from state
+    /// (returns `None` from `read_ai_entity`). State corruption in
+    /// normal operation since channel creation gated on both
+    /// parties existing; surfaced verbatim so the underlying issue
+    /// is debuggable from logs.
+    ChannelCounterpartyMissing,
     /// `ChannelFinalize`: the referenced `(party_a_entity_id,
     /// channel_object_id)` pair does not resolve to a memory
     /// object.
@@ -1188,6 +1195,17 @@ pub const CHANNEL_CLOSE_IS_FINAL: u8 = 1;
 /// dispute": a dispute window will open (or remain open) and a
 /// strictly larger nonce inside the window may override this state.
 pub const CHANNEL_CLOSE_NOT_FINAL: u8 = 0;
+
+/// Numeric chain id bound into every `PaymentChannel` off-chain
+/// state signature (Week 32).
+///
+/// Distinct from the human-readable `chain_id` string carried in
+/// the genesis config; this is the 64-bit identifier mixed into the
+/// canonical channel state signing bytes so an update signed on one
+/// NOVAI deployment cannot be replayed against another. Hardcoded
+/// for v1; governance can allocate additional chain ids if
+/// multi-deployment becomes a concern.
+pub const NOVAI_CHANNEL_CHAIN_ID: u64 = 1;
 
 /// Total size of a `ServiceAttestation` signal payload (base + extra).
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN: usize =
@@ -4440,13 +4458,13 @@ use novai_ai_entities::{
     SubscriptionData, VerificationRecordData, VkRegistrationData,
     CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS, CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS, MAX_PAYMENT_CHANNELS_PER_ENTITY,
     MAX_REPUTATION_SCORE, MAX_SLAS_PER_ENTITY, MAX_SUBSCRIPTIONS_PER_ENTITY, PAYMENT_CHANNEL_RESERVED_LEN,
-    PAYMENT_CHANNEL_STATUS_OPEN, PAYMENT_CHANNEL_STATUS_PROPOSED, PAYMENT_CHANNEL_V1,
-    SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS, SLA_MIN_DELIVERY_SUCCESS_BPS_MAX,
+    PAYMENT_CHANNEL_STATUS_CLOSING, PAYMENT_CHANNEL_STATUS_OPEN, PAYMENT_CHANNEL_STATUS_PROPOSED,
+    PAYMENT_CHANNEL_V1, SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS, SLA_MIN_DELIVERY_SUCCESS_BPS_MAX,
     SLA_MIN_UPTIME_BPS_MAX, SLA_RESERVED_LEN, SLA_STATUS_ACTIVE, SLA_STATUS_PROPOSED,
     SLA_STATUS_VIOLATED,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
-use novai_crypto::{Groth16Verifier, StubZkVerifier, ZkVerifier};
+use novai_crypto::{verify_channel_state_signature, Groth16Verifier, StubZkVerifier, ZkVerifier};
 use novai_state::{
     ai_entity_key, ai_memory_by_type_key, ai_memory_key, ai_memory_object_key,
     ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
@@ -4924,6 +4942,7 @@ pub fn apply_signal_commitment_tx<K: KvBatch>(
 /// because `tx.from` is `address_from_pubkey(entity.pubkey)` while signals are
 /// indexed by the entity's primary id (`compute_id(code_hash, creator)`).
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::similar_names)]
 fn apply_signal_commitment_tx_inner<K: KvBatch>(
     db: &mut K,
     tx: &TxV1,
@@ -6147,6 +6166,240 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             ai_memory_object_key(&extra.party_a_entity_id, &extra.channel_object_id),
             encode_memory_object_v1(&updated),
         ));
+    }
+
+    // Week 32 Phase 4: ChannelClose handler. Handles three sub-flows
+    // through one signal type:
+    //   - Cooperative settle (is_final == 1): both parties have
+    //     signed an `is_final = 1` state. Credit balances back to
+    //     parties' economic_balance and delete the channel memory
+    //     object plus its two by-party indexes in the same atomic
+    //     batch.
+    //   - Initial unilateral close (status == OPEN, is_final == 0):
+    //     flip status to CLOSING, record closing_at_height, set
+    //     dispute_deadline_height = current_height +
+    //     dispute_window_blocks, persist the payload's (nonce,
+    //     balance_a, balance_b).
+    //   - Dispute (status == CLOSING, is_final == 0, nonce strictly
+    //     greater than channel.nonce, inside the dispute window):
+    //     persist the higher-nonce state without resetting
+    //     closing_at_height or dispute_deadline_height (so the
+    //     cheater cannot extend the window by submitting again).
+    //
+    // Both signatures are ALWAYS required regardless of sub-flow.
+    // The nonce-0 initial-state close is the only nonce-monotonicity
+    // exception: it requires balances to match deposits exactly so
+    // the initial on-chain state is the only valid nonce-0 payload.
+    if payload.signal_type == AiSignalType::ChannelClose {
+        let extra = payload
+            .channel_close
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("ChannelClose missing extra".into()))?;
+
+        let channel_memory =
+            read_memory_object(db, &extra.party_a_entity_id, &extra.channel_object_id)?
+                .ok_or(ExecError::ChannelCloseNotFound)?;
+        if channel_memory.object_type != MemoryObjectType::PaymentChannel {
+            return Err(ExecError::ChannelCloseObjectTypeMismatch {
+                found: channel_memory.object_type.to_byte(),
+            });
+        }
+        let mut channel = PaymentChannelData::decode(&channel_memory.data)
+            .ok_or(ExecError::ChannelCloseDecodeFailed)?;
+
+        // Status gate. PROPOSED channels have no funds escrowed by
+        // party B and no canonical signed state to apply; CLOSING
+        // channels after the dispute deadline are finalize-only.
+        if channel.status == PAYMENT_CHANNEL_STATUS_CLOSING {
+            if current_height > channel.dispute_deadline_height {
+                return Err(ExecError::ChannelCloseAfterDeadline {
+                    current: current_height,
+                    deadline: channel.dispute_deadline_height,
+                });
+            }
+        } else if channel.status != PAYMENT_CHANNEL_STATUS_OPEN {
+            return Err(ExecError::ChannelCloseInvalidStatus {
+                status: channel.status,
+            });
+        }
+
+        // Submitter must be one of the two participants. Permissionless
+        // close would let an unrelated entity force-write a balance
+        // they have signatures for, which is fine for liveness, but
+        // makes accidental cross-channel mistakes harder to attribute
+        // and complicates fee economics; restrict to participants in
+        // v1.
+        if entity.id != channel.party_a_entity_id && entity.id != channel.party_b_entity_id {
+            return Err(ExecError::ChannelCloseSubmitterNotParticipant);
+        }
+
+        // Balance invariant: an off-chain update may shift the split
+        // between parties but never the total escrowed.
+        let sum_balances = extra
+            .balance_a
+            .checked_add(extra.balance_b)
+            .ok_or(ExecError::Overflow)?;
+        let sum_deposits = channel
+            .deposit_a
+            .checked_add(channel.deposit_b)
+            .ok_or(ExecError::Overflow)?;
+        if sum_balances != sum_deposits {
+            return Err(ExecError::ChannelCloseBalanceImbalance {
+                sum_balances,
+                sum_deposits,
+            });
+        }
+
+        // Nonce monotonicity. Nonce 0 is the initial-state exception:
+        // allowed only when the channel has no off-chain history
+        // (channel.nonce == 0) AND the payload's balances exactly
+        // match the deposits.
+        if extra.nonce == 0 {
+            if extra.balance_a != channel.deposit_a || extra.balance_b != channel.deposit_b {
+                return Err(ExecError::ChannelCloseInitialStateMismatch);
+            }
+            if channel.nonce > 0 {
+                return Err(ExecError::ChannelCloseNonceNotMonotonic {
+                    current: channel.nonce,
+                    attempted: 0,
+                });
+            }
+        } else if extra.nonce <= channel.nonce {
+            return Err(ExecError::ChannelCloseNonceNotMonotonic {
+                current: channel.nonce,
+                attempted: extra.nonce,
+            });
+        }
+
+        // Resolve party pubkeys. The issuer's entity is already
+        // loaded as `entity`; the counterparty needs a read.
+        let (party_a_pubkey, party_b_pubkey) = if entity.id == channel.party_a_entity_id {
+            let party_b_entity = read_ai_entity(db, &channel.party_b_entity_id)?
+                .ok_or(ExecError::ChannelCounterpartyMissing)?;
+            (entity.pubkey, party_b_entity.pubkey)
+        } else {
+            let party_a_entity = read_ai_entity(db, &channel.party_a_entity_id)?
+                .ok_or(ExecError::ChannelCounterpartyMissing)?;
+            (party_a_entity.pubkey, entity.pubkey)
+        };
+
+        // Verify both signatures over the canonical channel state
+        // signing bytes. The is_final flag is bound into the signed
+        // message so a mid-channel snapshot cannot be reused to
+        // force an instant cooperative settle.
+        let is_final_bool = extra.is_final == CHANNEL_CLOSE_IS_FINAL;
+        if !verify_channel_state_signature(
+            &extra.sig_a,
+            &party_a_pubkey,
+            NOVAI_CHANNEL_CHAIN_ID,
+            &extra.channel_object_id,
+            &channel.party_a_entity_id,
+            &channel.party_b_entity_id,
+            extra.nonce,
+            extra.balance_a,
+            extra.balance_b,
+            is_final_bool,
+        ) {
+            return Err(ExecError::ChannelCloseInvalidSignatureA);
+        }
+        if !verify_channel_state_signature(
+            &extra.sig_b,
+            &party_b_pubkey,
+            NOVAI_CHANNEL_CHAIN_ID,
+            &extra.channel_object_id,
+            &channel.party_a_entity_id,
+            &channel.party_b_entity_id,
+            extra.nonce,
+            extra.balance_a,
+            extra.balance_b,
+            is_final_bool,
+        ) {
+            return Err(ExecError::ChannelCloseInvalidSignatureB);
+        }
+
+        if is_final_bool {
+            // Cooperative settle: instant credit + delete. Either
+            // participant may submit (the issuer is `entity`, the
+            // counterparty must be loaded and mutated).
+            if entity.id == channel.party_a_entity_id {
+                entity.economic_balance = entity
+                    .economic_balance
+                    .checked_add(extra.balance_a)
+                    .ok_or(ExecError::Overflow)?;
+                let mut party_b_entity = read_ai_entity(db, &channel.party_b_entity_id)?
+                    .ok_or(ExecError::ChannelCounterpartyMissing)?;
+                party_b_entity.economic_balance = party_b_entity
+                    .economic_balance
+                    .checked_add(extra.balance_b)
+                    .ok_or(ExecError::Overflow)?;
+                ops.push(write_ai_entity_op(&party_b_entity));
+            } else {
+                entity.economic_balance = entity
+                    .economic_balance
+                    .checked_add(extra.balance_b)
+                    .ok_or(ExecError::Overflow)?;
+                let mut party_a_entity = read_ai_entity(db, &channel.party_a_entity_id)?
+                    .ok_or(ExecError::ChannelCounterpartyMissing)?;
+                party_a_entity.economic_balance = party_a_entity
+                    .economic_balance
+                    .checked_add(extra.balance_a)
+                    .ok_or(ExecError::Overflow)?;
+                ops.push(write_ai_entity_op(&party_a_entity));
+            }
+
+            // Tear down the primary record and all indexes. Decrement
+            // party A's memory object count since they were the owner.
+            ops.push(WriteOp::Delete(ai_memory_object_key(
+                &channel.party_a_entity_id,
+                &extra.channel_object_id,
+            )));
+            ops.push(WriteOp::Delete(ai_memory_by_type_key(
+                MemoryObjectType::PaymentChannel.to_byte(),
+                &channel.party_a_entity_id,
+                &extra.channel_object_id,
+            )));
+            ops.push(WriteOp::Delete(channel_by_party_a_key(
+                &channel.party_a_entity_id,
+                channel_memory.created_at,
+                &extra.channel_object_id,
+            )));
+            ops.push(WriteOp::Delete(channel_by_party_b_key(
+                &channel.party_b_entity_id,
+                channel_memory.created_at,
+                &extra.channel_object_id,
+            )));
+
+            let count = read_memory_count(db, &channel.party_a_entity_id)?;
+            ops.push(WriteOp::Put(
+                ai_memory_count_key(&channel.party_a_entity_id),
+                encode_memory_count(count.saturating_sub(1)).to_vec(),
+            ));
+        } else {
+            // Unilateral close (status was OPEN) or dispute (status
+            // was CLOSING). Persist the payload's state; update the
+            // lifecycle heights only on first close.
+            channel.nonce = extra.nonce;
+            channel.balance_a = extra.balance_a;
+            channel.balance_b = extra.balance_b;
+            if channel.status == PAYMENT_CHANNEL_STATUS_OPEN {
+                channel.status = PAYMENT_CHANNEL_STATUS_CLOSING;
+                channel.closing_at_height = current_height;
+                channel.dispute_deadline_height = current_height
+                    .checked_add(u64::from(channel.dispute_window_blocks))
+                    .ok_or(ExecError::Overflow)?;
+            }
+            // status == CLOSING: leave closing_at_height and
+            // dispute_deadline_height unchanged so the cheater cannot
+            // extend the window by re-submitting.
+
+            let mut updated = channel_memory;
+            updated.data = channel.encode().to_vec();
+            updated.updated_at = current_height;
+            ops.push(WriteOp::Put(
+                ai_memory_object_key(&channel.party_a_entity_id, &extra.channel_object_id),
+                encode_memory_object_v1(&updated),
+            ));
+        }
     }
 
     ops.push(write_ai_entity_op(&entity));

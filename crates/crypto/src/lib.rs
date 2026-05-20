@@ -1,6 +1,6 @@
 use blake3::Hasher;
 use ed25519_dalek::Signer;
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use ed25519_dalek::Signature;
 use rand_core::OsRng;
 
 use novai_codec::{encode_tx_v1_unsigned, CodecError};
@@ -9,6 +9,14 @@ use novai_types::{Address, SignatureBytes, TxV1};
 // ZK verification hooks (D20.4 stub; real Groth16 in Groth16Verifier)
 pub mod zk;
 pub use zk::{Groth16Verifier, StubZkVerifier, ZkVerifier};
+
+// Re-export the ed25519-dalek key types so downstream crates (e.g.,
+// the execution layer's integration tests for Week 32 channel state
+// signing) can construct keys without taking a direct dependency on
+// ed25519-dalek. The Signature type stays private because its
+// canonical wire form is the 64-byte `SignatureBytes` type alias
+// already re-exported via `novai_types`.
+pub use ed25519_dalek::{SigningKey, VerifyingKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CryptoError {
