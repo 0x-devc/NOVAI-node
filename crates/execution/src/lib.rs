@@ -8853,6 +8853,134 @@ pub fn get_slas_by_seller<K: Kv>(
     )
 }
 
+/// Resolve a `PaymentChannel` by its `(party_a_entity_id, object_id)`
+/// pair (Week 32).
+///
+/// Returns `Ok(None)` if the memory object does not exist, the type
+/// does not match, or the payload fails to decode. Returns
+/// `Ok(Some(...))` with both the wrapping envelope (for
+/// `created_at` / `updated_at`) and the decoded
+/// `PaymentChannelData`.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the underlying KV read fails.
+pub fn get_payment_channel<K: Kv>(
+    db: &K,
+    party_a_id: &[u8; 32],
+    object_id: &[u8; 32],
+) -> Result<Option<(MemoryObject, PaymentChannelData)>, ExecError<K::Error>> {
+    let Some(obj) = read_memory_object(db, party_a_id, object_id)? else {
+        return Ok(None);
+    };
+    if obj.object_type != MemoryObjectType::PaymentChannel {
+        return Ok(None);
+    }
+    let Some(channel) = PaymentChannelData::decode(&obj.data) else {
+        return Ok(None);
+    };
+    Ok(Some((obj, channel)))
+}
+
+/// Query `PaymentChannel` memory objects owned by `party_a_id` whose
+/// envelope `created_at` falls inside `[start_height, end_height]`
+/// (inclusive, Week 32).
+///
+/// Walks `ai/channels/by_party_a/<party_a>/<height_be>/<object_id>`,
+/// reads the primary record under
+/// `ai_memory_object_key(party_a, object_id)`, decodes the payload.
+/// Stale markers (missing object, type mismatch, decode failure)
+/// are silently skipped. Results are in height-ascending order
+/// (the natural lex order of the BE-height index).
+///
+/// The RPC layer enforces the height-window cap; this helper trusts
+/// callers to pass a bounded window.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the underlying KV scan fails.
+pub fn get_channels_by_party_a<K: Kv>(
+    db: &K,
+    party_a_id: &[u8; 32],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<(MemoryObject, PaymentChannelData)>, ExecError<K::Error>> {
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_CHANNELS_BY_PARTY_A.len() + 32);
+    prefix.extend_from_slice(KEY_PREFIX_AI_CHANNELS_BY_PARTY_A);
+    prefix.extend_from_slice(party_a_id);
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let suffix_off = KEY_PREFIX_AI_CHANNELS_BY_PARTY_A.len() + 32;
+    let mut results = Vec::new();
+    for (key, _value) in entries {
+        if key.len() != suffix_off + 8 + 32 {
+            continue;
+        }
+        let mut height_bytes = [0u8; 8];
+        height_bytes.copy_from_slice(&key[suffix_off..suffix_off + 8]);
+        let height = u64::from_be_bytes(height_bytes);
+        if height < start_height || height > end_height {
+            continue;
+        }
+        let mut object_id = [0u8; 32];
+        object_id.copy_from_slice(&key[suffix_off + 8..suffix_off + 8 + 32]);
+        if let Some(pair) = get_payment_channel(db, party_a_id, &object_id)? {
+            results.push(pair);
+        }
+    }
+    Ok(results)
+}
+
+/// Query `PaymentChannel` memory objects where `party_b_id` is the
+/// counterparty and the envelope `created_at` falls inside
+/// `[start_height, end_height]` (inclusive, Week 32).
+///
+/// Walks `ai/channels/by_party_b/<party_b>/<height_be>/<object_id>`.
+/// Unlike the SLA by-seller index, the channel by-party-B index
+/// value embeds the 32-byte party A (memory object owner), so each
+/// resolution is O(1) without an expensive walk through the
+/// by-type index. Stale markers (memory object missing, type
+/// mismatch, malformed payload, malformed value) are silently
+/// skipped.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the underlying KV scan fails.
+#[allow(clippy::similar_names)]
+pub fn get_channels_by_party_b<K: Kv>(
+    db: &K,
+    party_b_id: &[u8; 32],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<(MemoryObject, PaymentChannelData)>, ExecError<K::Error>> {
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_CHANNELS_BY_PARTY_B.len() + 32);
+    prefix.extend_from_slice(KEY_PREFIX_AI_CHANNELS_BY_PARTY_B);
+    prefix.extend_from_slice(party_b_id);
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+
+    let suffix_off = KEY_PREFIX_AI_CHANNELS_BY_PARTY_B.len() + 32;
+    let mut results = Vec::new();
+    for (key, value) in entries {
+        if key.len() != suffix_off + 8 + 32 {
+            continue;
+        }
+        if value.len() != 32 {
+            continue;
+        }
+        let mut height_bytes = [0u8; 8];
+        height_bytes.copy_from_slice(&key[suffix_off..suffix_off + 8]);
+        let height = u64::from_be_bytes(height_bytes);
+        if height < start_height || height > end_height {
+            continue;
+        }
+        let mut object_id = [0u8; 32];
+        object_id.copy_from_slice(&key[suffix_off + 8..suffix_off + 8 + 32]);
+        let mut party_a_id = [0u8; 32];
+        party_a_id.copy_from_slice(&value);
+        if let Some(pair) = get_payment_channel(db, &party_a_id, &object_id)? {
+            results.push(pair);
+        }
+    }
+    Ok(results)
+}
+
 fn scan_slas_by_owner_index<K: Kv>(
     db: &K,
     prefix_const: &[u8],

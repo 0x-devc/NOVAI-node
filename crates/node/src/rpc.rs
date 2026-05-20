@@ -20,19 +20,22 @@ use crate::consensus_node::Storage;
 use crate::MutexExt;
 use mempool::{NonceProvider, TxMempool};
 use novai_ai_entities::{
-    AiSignalType, MemoryObject, ServiceDescriptorData, SignalCommitment, SlaAgreementData,
-    VkRegistrationData, SERVICE_CATEGORY_COMPUTE, SERVICE_CATEGORY_DATA_ORACLE,
-    SERVICE_CATEGORY_GATEWAY, SERVICE_CATEGORY_GENERIC, SERVICE_CATEGORY_INDEXER,
-    SERVICE_CATEGORY_INFERENCE, SERVICE_CATEGORY_MONITORING, SERVICE_CATEGORY_RESERVED_MAX,
-    SERVICE_CATEGORY_SIGNAL_PROVIDER, SERVICE_CATEGORY_STORAGE, SERVICE_CATEGORY_VERIFICATION,
-    SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DEPRECATED, SERVICE_STATUS_PAUSED, SLA_STATUS_ACTIVE,
-    SLA_STATUS_CANCELLED, SLA_STATUS_COMPLETED, SLA_STATUS_PROPOSED, SLA_STATUS_VIOLATED,
+    AiSignalType, MemoryObject, PaymentChannelData, ServiceDescriptorData, SignalCommitment,
+    SlaAgreementData, VkRegistrationData, PAYMENT_CHANNEL_STATUS_CLOSING,
+    PAYMENT_CHANNEL_STATUS_OPEN, PAYMENT_CHANNEL_STATUS_PROPOSED, SERVICE_CATEGORY_COMPUTE,
+    SERVICE_CATEGORY_DATA_ORACLE, SERVICE_CATEGORY_GATEWAY, SERVICE_CATEGORY_GENERIC,
+    SERVICE_CATEGORY_INDEXER, SERVICE_CATEGORY_INFERENCE, SERVICE_CATEGORY_MONITORING,
+    SERVICE_CATEGORY_RESERVED_MAX, SERVICE_CATEGORY_SIGNAL_PROVIDER, SERVICE_CATEGORY_STORAGE,
+    SERVICE_CATEGORY_VERIFICATION, SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DEPRECATED,
+    SERVICE_STATUS_PAUSED, SLA_STATUS_ACTIVE, SLA_STATUS_CANCELLED, SLA_STATUS_COMPLETED,
+    SLA_STATUS_PROPOSED, SLA_STATUS_VIOLATED,
 };
 use novai_codec::{decode_tx_v1_signed, txid_v1};
 use novai_consensus_types;
 use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_execution::{
-    get_active_sla_between, get_memory_objects_by_entity, get_payments_by_entity,
+    get_active_sla_between, get_channels_by_party_a, get_channels_by_party_b,
+    get_memory_objects_by_entity, get_payment_channel, get_payments_by_entity,
     get_service_descriptors_by_category, get_signals_by_height, get_signals_by_issuer,
     get_signals_by_type, get_sla_agreement, get_slas_by_buyer, get_slas_by_seller,
     get_vk_registration_by_id, get_vk_registrations_by_entity, read_account_or_default,
@@ -668,6 +671,146 @@ struct GetSlaAgreementResult {
 #[derive(Debug, Serialize)]
 struct ListSlasResult {
     agreements: Vec<SlaAgreementJson>,
+}
+
+/// Parameters for novai_getPaymentChannel and
+/// novai_getChannelDisputeStatus (Week 32).
+#[derive(Debug, Deserialize)]
+struct GetPaymentChannelParams {
+    /// Hex-encoded 32-byte party A entity id (the channel's
+    /// memory-object owner).
+    owner: String,
+    /// Hex-encoded 32-byte channel memory object id.
+    object_id: String,
+}
+
+/// Parameters for novai_listChannelsByPartyA /
+/// novai_listChannelsByPartyB (Week 32).
+#[derive(Debug, Deserialize)]
+struct ListChannelsParams {
+    /// Hex-encoded 32-byte entity id (party A or party B depending
+    /// on the RPC method).
+    entity_id: String,
+    /// Inclusive lower bound on the channel memory object's
+    /// `created_at` height (its `proposed_at_height`).
+    start_height: u64,
+    /// Inclusive upper bound on the channel memory object's
+    /// `created_at` height.
+    end_height: u64,
+}
+
+/// JSON-serializable `PaymentChannel` record (Week 32).
+///
+/// Decimal-string encoding is used for the `u128` deposit and
+/// balance fields to avoid JSON precision loss, matching Week 28
+/// `PaymentRecord.amount`, Week 29 `ServiceDescriptorData.min_stake`,
+/// and Week 31 `SlaAgreementData.slash_amount`.
+#[derive(Debug, Serialize)]
+struct PaymentChannelJson {
+    object_id: String,
+    owner_entity: String,
+    created_at: u64,
+    updated_at: u64,
+    version: u8,
+    party_a_entity_id: String,
+    party_b_entity_id: String,
+    sla_object_id: String,
+    status: u8,
+    /// `"proposed" | "open" | "closing"` for the well-known v1
+    /// discriminants; out-of-range bytes render as `"unknown"`.
+    status_label: &'static str,
+    /// Party A's deposit as a decimal string.
+    deposit_a: String,
+    /// Party B's deposit as a decimal string.
+    deposit_b: String,
+    /// Party A's currently recorded balance as a decimal string.
+    balance_a: String,
+    /// Party B's currently recorded balance as a decimal string.
+    balance_b: String,
+    /// Highest applied off-chain state nonce.
+    nonce: u64,
+    proposed_at_height: u64,
+    accepted_at_height: u64,
+    closing_at_height: u64,
+    dispute_deadline_height: u64,
+    dispute_window_blocks: u32,
+}
+
+impl From<(MemoryObject, PaymentChannelData)> for PaymentChannelJson {
+    fn from(pair: (MemoryObject, PaymentChannelData)) -> Self {
+        let (obj, channel) = pair;
+        Self {
+            object_id: hex::encode(obj.object_id),
+            owner_entity: hex::encode(obj.owner_entity),
+            created_at: obj.created_at,
+            updated_at: obj.updated_at,
+            version: channel.version,
+            party_a_entity_id: hex::encode(channel.party_a_entity_id),
+            party_b_entity_id: hex::encode(channel.party_b_entity_id),
+            sla_object_id: hex::encode(channel.sla_object_id),
+            status: channel.status,
+            status_label: payment_channel_status_label(channel.status),
+            deposit_a: channel.deposit_a.to_string(),
+            deposit_b: channel.deposit_b.to_string(),
+            balance_a: channel.balance_a.to_string(),
+            balance_b: channel.balance_b.to_string(),
+            nonce: channel.nonce,
+            proposed_at_height: channel.proposed_at_height,
+            accepted_at_height: channel.accepted_at_height,
+            closing_at_height: channel.closing_at_height,
+            dispute_deadline_height: channel.dispute_deadline_height,
+            dispute_window_blocks: channel.dispute_window_blocks,
+        }
+    }
+}
+
+fn payment_channel_status_label(byte: u8) -> &'static str {
+    match byte {
+        PAYMENT_CHANNEL_STATUS_PROPOSED => "proposed",
+        PAYMENT_CHANNEL_STATUS_OPEN => "open",
+        PAYMENT_CHANNEL_STATUS_CLOSING => "closing",
+        _ => "unknown",
+    }
+}
+
+/// Result for novai_getPaymentChannel.
+#[derive(Debug, Serialize)]
+struct GetPaymentChannelResult {
+    channel: Option<PaymentChannelJson>,
+}
+
+/// Result for novai_listChannelsByPartyA / novai_listChannelsByPartyB.
+#[derive(Debug, Serialize)]
+struct ListChannelsResult {
+    channels: Vec<PaymentChannelJson>,
+}
+
+/// Result for novai_getChannelDisputeStatus (Week 32).
+///
+/// Returns dispute-window-relevant fields plus a derived
+/// `blocks_remaining` so clients do not have to combine a separate
+/// `novai_getStatus` call with the channel record. `found = false`
+/// when the channel does not exist or is not a `PaymentChannel`;
+/// the other fields are then all zero.
+#[derive(Debug, Serialize)]
+struct GetChannelDisputeStatusResult {
+    /// `true` when the channel resolved and decoded; `false`
+    /// otherwise (in which case the other fields are placeholder
+    /// zeros).
+    found: bool,
+    status: u8,
+    status_label: &'static str,
+    closing_at_height: u64,
+    dispute_deadline_height: u64,
+    current_height: u64,
+    /// `dispute_deadline_height.saturating_sub(current_height)`. Zero
+    /// if the deadline has passed (the channel is ready to be
+    /// finalized) OR if the channel is not in the CLOSING state.
+    blocks_remaining: u64,
+    /// `true` iff `status == CLOSING && current_height >
+    /// dispute_deadline_height`. A finalize signal submitted at the
+    /// current height would succeed (modulo per-tx gates).
+    finalize_ready: bool,
 }
 
 // ============================================================================
@@ -1323,6 +1466,84 @@ pub fn start_rpc_server_with_state(
                         json_response(response)
                     }
                 },
+                "novai_getPaymentChannel" => match handle_get_payment_channel(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_listChannelsByPartyA" => {
+                    match handle_list_channels_by_party_a(&rpc_request, &db) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                    }
+                }
+                "novai_listChannelsByPartyB" => {
+                    match handle_list_channels_by_party_b(&rpc_request, &db) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                    }
+                }
+                "novai_getChannelDisputeStatus" => {
+                    match handle_get_channel_dispute_status(&rpc_request, &db, &blockchain_index) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                    }
+                }
                 "novai_getBalance" => match handle_get_balance(&rpc_request, &db) {
                     Ok(result) => {
                         let response = RpcResponse {
@@ -2045,6 +2266,175 @@ fn handle_list_slas_by_seller(
 
     Ok(ListSlasResult {
         agreements: pairs.into_iter().map(SlaAgreementJson::from).collect(),
+    })
+}
+
+/// Handle novai_getPaymentChannel RPC method (Week 32).
+///
+/// Resolves a single `PaymentChannel` by its `(owner, object_id)`
+/// pair. Returns `{ channel: null }` if the memory object does not
+/// exist, the type does not match, or the payload fails to decode.
+fn handle_get_payment_channel(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetPaymentChannelResult, RpcError> {
+    let params: GetPaymentChannelParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let owner = parse_hex32(&params.owner, "owner")?;
+    let object_id = parse_hex32(&params.object_id, "object_id")?;
+
+    let db = db.lock_or_recover();
+    let resolved = get_payment_channel(&*db, &owner, &object_id).map_err(|_| RpcError {
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
+
+    Ok(GetPaymentChannelResult {
+        channel: resolved.map(PaymentChannelJson::from),
+    })
+}
+
+/// Handle novai_listChannelsByPartyA RPC method (Week 32).
+///
+/// Returns every `PaymentChannel` whose memory-object owner is the
+/// queried entity and whose `created_at` falls inside
+/// `[start_height, end_height]` (inclusive). The height window is
+/// capped at `MAX_SIGNAL_QUERY_RANGE` matching the other
+/// height-windowed queries.
+fn handle_list_channels_by_party_a(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<ListChannelsResult, RpcError> {
+    let params: ListChannelsParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
+            ),
+        });
+    }
+
+    let db = db.lock_or_recover();
+    let pairs = get_channels_by_party_a(&*db, &entity_id, params.start_height, params.end_height)
+        .map_err(|_| RpcError {
+            code: -32002,
+            message: "State query failed".to_string(),
+        })?;
+
+    Ok(ListChannelsResult {
+        channels: pairs.into_iter().map(PaymentChannelJson::from).collect(),
+    })
+}
+
+/// Handle novai_listChannelsByPartyB RPC method (Week 32).
+///
+/// Returns every `PaymentChannel` where the queried entity is the
+/// embedded counterparty (party B) and the `created_at` falls inside
+/// `[start_height, end_height]`. The by-party-B index value embeds
+/// the channel's memory-object owner (party A), so primary-record
+/// resolution is O(1) per match (no walk through the by-type index).
+fn handle_list_channels_by_party_b(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<ListChannelsResult, RpcError> {
+    let params: ListChannelsParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
+            ),
+        });
+    }
+
+    let db = db.lock_or_recover();
+    let pairs = get_channels_by_party_b(&*db, &entity_id, params.start_height, params.end_height)
+        .map_err(|_| RpcError {
+            code: -32002,
+            message: "State query failed".to_string(),
+        })?;
+
+    Ok(ListChannelsResult {
+        channels: pairs.into_iter().map(PaymentChannelJson::from).collect(),
+    })
+}
+
+/// Handle novai_getChannelDisputeStatus RPC method (Week 32).
+///
+/// Returns dispute-window-relevant fields plus a derived
+/// `blocks_remaining` and `finalize_ready` so monitoring tools and
+/// the CLI do not have to combine a separate `novai_getStatus` call
+/// with the channel record. Reads `committed_height` from the
+/// blockchain index for the comparison.
+fn handle_get_channel_dispute_status(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+    index: &Arc<Mutex<BlockchainIndex>>,
+) -> Result<GetChannelDisputeStatusResult, RpcError> {
+    let params: GetPaymentChannelParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+    let owner = parse_hex32(&params.owner, "owner")?;
+    let object_id = parse_hex32(&params.object_id, "object_id")?;
+
+    let current_height = index.lock_or_recover().committed_height;
+    let db = db.lock_or_recover();
+    let resolved = get_payment_channel(&*db, &owner, &object_id).map_err(|_| RpcError {
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
+
+    let Some((_, channel)) = resolved else {
+        return Ok(GetChannelDisputeStatusResult {
+            found: false,
+            status: 0,
+            status_label: "unknown",
+            closing_at_height: 0,
+            dispute_deadline_height: 0,
+            current_height,
+            blocks_remaining: 0,
+            finalize_ready: false,
+        });
+    };
+
+    // blocks_remaining is meaningful only when the channel is in
+    // CLOSING. For other statuses we return 0 (and finalize_ready is
+    // necessarily false).
+    let (blocks_remaining, finalize_ready) = if channel.status == PAYMENT_CHANNEL_STATUS_CLOSING {
+        let remaining = channel
+            .dispute_deadline_height
+            .saturating_sub(current_height);
+        let ready = current_height > channel.dispute_deadline_height;
+        (remaining, ready)
+    } else {
+        (0, false)
+    };
+
+    Ok(GetChannelDisputeStatusResult {
+        found: true,
+        status: channel.status,
+        status_label: payment_channel_status_label(channel.status),
+        closing_at_height: channel.closing_at_height,
+        dispute_deadline_height: channel.dispute_deadline_height,
+        current_height,
+        blocks_remaining,
+        finalize_ready,
     })
 }
 
