@@ -98,6 +98,9 @@ fn build_reputation_payload(
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     })
 }
 
@@ -366,6 +369,9 @@ fn non_reputation_signal_unchanged_behavior() {
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     let tx = make_tx(entity.id, 0, SIGNAL_FEE, payload);
     apply_signal_commitment_tx(&mut db, &tx, 100).expect("non-reputation must still work");
@@ -402,6 +408,9 @@ fn reputation_payload_is_101_bytes() {
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     assert_eq!(payload.len(), 101);
     assert_eq!(payload.len(), SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN);

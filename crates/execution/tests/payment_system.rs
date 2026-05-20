@@ -113,6 +113,9 @@ fn build_payment_payload(
         }),
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     })
 }
 

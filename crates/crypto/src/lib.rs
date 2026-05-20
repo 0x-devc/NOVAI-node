@@ -16,6 +16,126 @@ pub enum CryptoError {
     Codec(CodecError),
 }
 
+/// Domain tag for `PaymentChannel` off-chain state update signatures
+/// (Week 32). The 167-byte canonical bytes prepended with this tag are
+/// what both parties sign for every off-chain channel state update
+/// (cooperative or unilateral). Distinct from `NOVAI_TX_V1` to prevent
+/// cross-domain signature replay: an entity's `TxV1` signature must
+/// never be reinterpretable as a channel state update and vice versa.
+pub const DOMAIN_TAG_CHANNEL_STATE_V1: &[u8] = b"NOVAI_CHANNEL_STATE_V1";
+
+/// Build the canonical bytes both parties of a `PaymentChannel` sign
+/// for an off-chain state update.
+///
+/// Layout (167 bytes):
+/// `domain_tag (22) | chain_id_be (8) | channel_object_id (32) |
+/// party_a (32) | party_b (32) | nonce_be (8) | balance_a_be (16) |
+/// balance_b_be (16) | is_final (1)`.
+///
+/// `chain_id` is bound so an update signed on one NOVAI deployment
+/// (e.g., testnet) cannot be replayed on another (e.g., mainnet).
+/// `channel_object_id` is bound so an update signed for one channel
+/// cannot be replayed on another. `nonce` strictly increases per
+/// update; `is_final` distinguishes cooperative-settle states from
+/// regular mid-channel snapshots so a mid-channel snapshot cannot be
+/// reused to force an instant cooperative settle.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn channel_state_signing_bytes(
+    chain_id: u64,
+    channel_object_id: &[u8; 32],
+    party_a: &[u8; 32],
+    party_b: &[u8; 32],
+    nonce: u64,
+    balance_a: u128,
+    balance_b: u128,
+    is_final: bool,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        DOMAIN_TAG_CHANNEL_STATE_V1.len() + 8 + 32 + 32 + 32 + 8 + 16 + 16 + 1,
+    );
+    out.extend_from_slice(DOMAIN_TAG_CHANNEL_STATE_V1);
+    out.extend_from_slice(&chain_id.to_be_bytes());
+    out.extend_from_slice(channel_object_id);
+    out.extend_from_slice(party_a);
+    out.extend_from_slice(party_b);
+    out.extend_from_slice(&nonce.to_be_bytes());
+    out.extend_from_slice(&balance_a.to_be_bytes());
+    out.extend_from_slice(&balance_b.to_be_bytes());
+    out.push(u8::from(is_final));
+    out
+}
+
+/// Sign a `PaymentChannel` off-chain state update with the given key.
+///
+/// Returns the raw 64-byte ed25519 signature over
+/// `channel_state_signing_bytes(...)`. The returned signature is what
+/// gets placed into `sig_a` or `sig_b` in the `ChannelClose` signal
+/// payload, depending on which party's key was used.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn sign_channel_state(
+    sk: &SigningKey,
+    chain_id: u64,
+    channel_object_id: &[u8; 32],
+    party_a: &[u8; 32],
+    party_b: &[u8; 32],
+    nonce: u64,
+    balance_a: u128,
+    balance_b: u128,
+    is_final: bool,
+) -> SignatureBytes {
+    let msg = channel_state_signing_bytes(
+        chain_id,
+        channel_object_id,
+        party_a,
+        party_b,
+        nonce,
+        balance_a,
+        balance_b,
+        is_final,
+    );
+    sign_bytes(sk, &msg)
+}
+
+/// Verify a `PaymentChannel` off-chain state update signature.
+///
+/// Returns `false` if the public key bytes are not a valid Ed25519
+/// verifying key, or if the signature does not verify under
+/// `pubkey` over the canonical signing bytes. The `ChannelClose`
+/// handler calls this twice per submission (once for `sig_a` against
+/// party A's pubkey, once for `sig_b` against party B's pubkey) and
+/// rejects the close on either failure.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_channel_state_signature(
+    sig: &SignatureBytes,
+    pubkey: &[u8; 32],
+    chain_id: u64,
+    channel_object_id: &[u8; 32],
+    party_a: &[u8; 32],
+    party_b: &[u8; 32],
+    nonce: u64,
+    balance_a: u128,
+    balance_b: u128,
+    is_final: bool,
+) -> bool {
+    let Ok(vk) = pubkey_from_bytes(pubkey) else {
+        return false;
+    };
+    let msg = channel_state_signing_bytes(
+        chain_id,
+        channel_object_id,
+        party_a,
+        party_b,
+        nonce,
+        balance_a,
+        balance_b,
+        is_final,
+    );
+    verify_bytes(&vk, &msg, sig)
+}
+
 pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
     let sk = SigningKey::generate(&mut OsRng);
     let pk = sk.verifying_key();
@@ -165,5 +285,117 @@ mod tests {
         // Mutating any unsigned field should break signature
         tx.fee += 1;
         assert!(!verify_tx_v1(&pk, &tx).unwrap());
+    }
+
+    // ========================================================================
+    // Week 32 Phase 1: PaymentChannel off-chain state signature helpers
+    // ========================================================================
+
+    #[test]
+    fn channel_state_signing_bytes_is_167_bytes_and_carries_domain_tag() {
+        let bytes =
+            channel_state_signing_bytes(1, &[0u8; 32], &[1u8; 32], &[2u8; 32], 0, 0, 0, false);
+        assert_eq!(bytes.len(), 167);
+        assert!(bytes.starts_with(DOMAIN_TAG_CHANNEL_STATE_V1));
+    }
+
+    #[test]
+    fn channel_state_sign_verify_roundtrip() {
+        let sk_a = SigningKey::from_bytes(&[4u8; 32]);
+        let pk_a = sk_a.verifying_key().to_bytes();
+        let sk_b = SigningKey::from_bytes(&[5u8; 32]);
+        let pk_b = sk_b.verifying_key().to_bytes();
+
+        let channel_id = [0xAAu8; 32];
+        let party_a = [0xBBu8; 32];
+        let party_b = [0xCCu8; 32];
+        let chain_id: u64 = 7;
+        let nonce: u64 = 42;
+        let balance_a: u128 = 1_000;
+        let balance_b: u128 = 500;
+        let is_final = false;
+
+        let sig_a = sign_channel_state(
+            &sk_a, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b, is_final,
+        );
+        let sig_b = sign_channel_state(
+            &sk_b, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b, is_final,
+        );
+
+        assert!(verify_channel_state_signature(
+            &sig_a, &pk_a, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b,
+            is_final,
+        ));
+        assert!(verify_channel_state_signature(
+            &sig_b, &pk_b, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b,
+            is_final,
+        ));
+        // Cross-key: A's signature does not verify under B's pubkey.
+        assert!(!verify_channel_state_signature(
+            &sig_a, &pk_b, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b,
+            is_final,
+        ));
+    }
+
+    #[test]
+    fn channel_state_signature_binds_every_field() {
+        let sk = SigningKey::from_bytes(&[6u8; 32]);
+        let pk = sk.verifying_key().to_bytes();
+
+        let base = (
+            1u64,
+            [0x11u8; 32],
+            [0x22u8; 32],
+            [0x33u8; 32],
+            10u64,
+            100u128,
+            50u128,
+            false,
+        );
+        let sig = sign_channel_state(
+            &sk, base.0, &base.1, &base.2, &base.3, base.4, base.5, base.6, base.7,
+        );
+
+        // Flipping any single field breaks verification.
+        let mutated = [
+            (base.0 + 1, base.1, base.2, base.3, base.4, base.5, base.6, base.7),
+            (base.0, [0xFFu8; 32], base.2, base.3, base.4, base.5, base.6, base.7),
+            (base.0, base.1, [0xFFu8; 32], base.3, base.4, base.5, base.6, base.7),
+            (base.0, base.1, base.2, [0xFFu8; 32], base.4, base.5, base.6, base.7),
+            (base.0, base.1, base.2, base.3, base.4 + 1, base.5, base.6, base.7),
+            (base.0, base.1, base.2, base.3, base.4, base.5 + 1, base.6, base.7),
+            (base.0, base.1, base.2, base.3, base.4, base.5, base.6 + 1, base.7),
+            (base.0, base.1, base.2, base.3, base.4, base.5, base.6, !base.7),
+        ];
+        for m in &mutated {
+            assert!(
+                !verify_channel_state_signature(
+                    &sig, &pk, m.0, &m.1, &m.2, &m.3, m.4, m.5, m.6, m.7,
+                ),
+                "verification must reject mutated field"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_state_verify_rejects_garbage_pubkey() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let sig = sign_channel_state(
+            &sk,
+            0,
+            &[0u8; 32],
+            &[0u8; 32],
+            &[0u8; 32],
+            0,
+            0,
+            0,
+            false,
+        );
+        // An all-zero pubkey is not a valid Ed25519 point; verification
+        // must return false rather than panicking.
+        let bogus = [0u8; 32];
+        assert!(!verify_channel_state_signature(
+            &sig, &bogus, 0, &[0u8; 32], &[0u8; 32], &[0u8; 32], 0, 0, 0, false,
+        ));
     }
 }

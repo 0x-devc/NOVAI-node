@@ -67,6 +67,9 @@ fn create_signal_payload(
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }

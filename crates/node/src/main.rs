@@ -1743,7 +1743,6 @@ fn main() {
                 mp.insert(tx, &nonce_provider).expect("mempool insert");
             }
 
-            // ✅ MISSING IN YOUR BROKEN FILE: define these before using them
             let before = mp.len();
             let drained = mp.drain_ready(max, &nonce_provider);
             let after = mp.len();

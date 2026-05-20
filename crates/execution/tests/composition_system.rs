@@ -200,6 +200,9 @@ fn build_composition_check_payload(
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     })
 }
 
@@ -720,6 +723,9 @@ fn non_composition_signals_still_work() {
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, anomaly), HEIGHT)
         .expect("base anomaly still applies; CompositionCheck doesn't break it");

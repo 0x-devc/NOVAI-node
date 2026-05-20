@@ -509,6 +509,20 @@ fn build_signal_payload(
             payload.extend_from_slice(&sla_object_id);
             payload.extend_from_slice(&buyer);
         }
+        AiSignalType::ChannelAccept
+        | AiSignalType::ChannelClose
+        | AiSignalType::ChannelFinalize => {
+            // Week 32 channel signals carry rich, signature-bearing
+            // payloads that do not fit the generic --extra arg shape.
+            // The dedicated `novai-cli channel ...` subcommand
+            // (wired in Week 32 Phase 7) is the supported entry
+            // point; the raw signal-publish path stays explicit
+            // about that restriction until then.
+            return Err(format!(
+                "signal type {:?} must be published via `novai-cli channel ...`, not the raw `signal publish` path",
+                signal_type
+            ));
+        }
     }
 
     Ok(payload)

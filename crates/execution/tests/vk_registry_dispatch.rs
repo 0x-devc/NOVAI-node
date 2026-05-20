@@ -239,6 +239,9 @@ fn submit_registered_proof(
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,
@@ -283,6 +286,9 @@ fn submit_with_custom_vk_bytes(
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,

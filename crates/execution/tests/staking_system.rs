@@ -105,6 +105,9 @@ fn build_stake_deposit_payload(issuer: [u8; 32], amount: u128) -> Vec<u8> {
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     })
 }
 
@@ -125,6 +128,9 @@ fn build_stake_withdraw_payload(issuer: [u8; 32], amount: u128) -> Vec<u8> {
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     })
 }
 
@@ -156,6 +162,9 @@ fn build_stake_slash_payload(
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     })
 }
 
@@ -633,6 +642,9 @@ fn entity_with_zero_stake_can_still_operate() {
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     apply_signal_commitment_tx(
         &mut db,

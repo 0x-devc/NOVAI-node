@@ -150,6 +150,9 @@ fn accept_sla(
             sla_object_id,
             buyer_entity_id: buyer_id,
         }),
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,
@@ -228,6 +231,9 @@ fn attest(
             status,
         }),
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,

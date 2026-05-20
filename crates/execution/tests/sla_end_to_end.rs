@@ -151,6 +151,9 @@ fn accept(db: &mut MemKv, seller: &AiEntity, nonce: u64, sla_id: [u8; 32], buyer
             sla_object_id: sla_id,
             buyer_entity_id: buyer_id,
         }),
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,
@@ -225,6 +228,9 @@ fn attest_failed(
             status: PAYMENT_ATTESTATION_STATUS_FAILED,
         }),
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,

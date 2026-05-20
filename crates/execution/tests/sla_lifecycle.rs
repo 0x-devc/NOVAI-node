@@ -148,6 +148,9 @@ fn accept_sla(
             sla_object_id,
             buyer_entity_id: buyer_id,
         }),
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,
@@ -208,6 +211,9 @@ fn make_withdraw_tx(seller: &AiEntity, nonce: u64, amount: u128) -> TxV1 {
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     TxV1 {
         version: TxVersion::V1,
@@ -281,6 +287,9 @@ fn attest_failed(
             status: PAYMENT_ATTESTATION_STATUS_FAILED,
         }),
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,

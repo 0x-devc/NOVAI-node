@@ -231,6 +231,87 @@ pub const SLA_MIN_DELIVERY_SUCCESS_BPS_MAX: u16 = 10_000;
 /// `StakeWithdraw` collateral check shipped in Phase 4.
 pub const SLA_MAX_DURATION_BLOCKS: u64 = 604_800;
 
+/// Maximum number of `PaymentChannel` memory objects a single entity
+/// may participate in (Week 32), counted across BOTH party roles
+/// (memory-object owner AND embedded counterparty). Counted by a
+/// bounded prefix scan over `ai/channels/by_party_a/<entity>/` plus
+/// `ai/channels/by_party_b/<entity>/` at propose / accept time. The
+/// cap is intentionally higher than `MAX_SLAS_PER_ENTITY` (= 8)
+/// because channels are designed for high-frequency micropayments
+/// and an entity may reasonably hold several concurrent streams to
+/// different counterparties; the cap still bounds the worst-case
+/// fan-out for the by-party scans.
+pub const MAX_PAYMENT_CHANNELS_PER_ENTITY: u32 = 32;
+
+/// Wire-format version byte carried at offset 0 of every
+/// `PaymentChannelData` payload (Week 32).
+pub const PAYMENT_CHANNEL_V1: u8 = 1;
+
+/// Number of trailing reserved bytes carried by every
+/// `PaymentChannelData` payload. MUST be zero on create / accept;
+/// decode preserves them verbatim so future field allocations are
+/// forward-compatible with the v1 binary layout.
+pub const PAYMENT_CHANNEL_RESERVED_LEN: usize = 16;
+
+/// Canonical wire size of a `PaymentChannelData` payload, in bytes.
+///
+/// Layout: `version:1 | party_a_entity_id:32 | party_b_entity_id:32 |
+/// sla_object_id:32 | status:1 | deposit_a_be:16 | deposit_b_be:16 |
+/// balance_a_be:16 | balance_b_be:16 | nonce_be:8 |
+/// proposed_at_height_be:8 | accepted_at_height_be:8 |
+/// closing_at_height_be:8 | dispute_deadline_height_be:8 |
+/// dispute_window_blocks_be:4 | reserved:16`. Total = 222 bytes.
+pub const PAYMENT_CHANNEL_SIZE: usize =
+    1 + 32 + 32 + 32 + 1 + 16 + 16 + 16 + 16 + 8 + 8 + 8 + 8 + 8 + 4 + 16;
+
+/// `PaymentChannel` lifecycle status discriminants (Week 32).
+///
+/// State machine:
+/// * `_PROPOSED`: written by the create handler when party A submits
+///   the `CREATE_MEMORY_OBJECT` (debits `deposit_a` from A's
+///   `economic_balance`). The channel is one-sided until B accepts.
+/// * `_OPEN`: written by the `ChannelAccept` signal handler (debits
+///   `deposit_b` from B). Off-chain state updates may flow during
+///   this state without any on-chain interaction.
+/// * `_CLOSING`: written by the `ChannelClose` signal handler when
+///   submitted with `is_final = 0`. Sets `closing_at_height` and
+///   `dispute_deadline_height`. Higher-nonce `ChannelClose` signals
+///   inside the dispute window may override the recorded state.
+///
+/// There is no `_SETTLED` status: cooperative settle (`is_final = 1`)
+/// and successful finalize after the dispute deadline both DELETE the
+/// memory object (and tear down all secondary indexes) in the same
+/// batch that credits the final balances back to the parties.
+pub const PAYMENT_CHANNEL_STATUS_PROPOSED: u8 = 0;
+/// Channel is open; off-chain payments may proceed.
+pub const PAYMENT_CHANNEL_STATUS_OPEN: u8 = 1;
+/// Channel is in the unilateral-close dispute window. Higher-nonce
+/// `ChannelClose` signals may still override the recorded state until
+/// `current_height > dispute_deadline_height`.
+pub const PAYMENT_CHANNEL_STATUS_CLOSING: u8 = 2;
+/// Maximum valid `PaymentChannel` status discriminant.
+pub const PAYMENT_CHANNEL_STATUS_MAX: u8 = PAYMENT_CHANNEL_STATUS_CLOSING;
+
+/// Minimum allowed `dispute_window_blocks` value on a newly proposed
+/// `PaymentChannel`. Bounds the time the disputant has to come online
+/// and submit a counter-state, while preventing a degenerate
+/// near-zero window that would render the dispute mechanism
+/// vestigial.
+pub const CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS: u32 = 100;
+
+/// Maximum allowed `dispute_window_blocks` value on a newly proposed
+/// `PaymentChannel`. Bounds the time funds can stay locked in the
+/// CLOSING state after a unilateral close, capping the worst-case
+/// dispute liveness requirement.
+pub const CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS: u32 = 10_000;
+
+/// Default `dispute_window_blocks` value. Used by the CLI's
+/// `channel propose` subcommand when the operator omits the flag.
+/// At ~1 second per block this is roughly four minutes; long enough
+/// for a normally-online counterparty to disput, short enough that
+/// finalization is not noticeably delayed.
+pub const CHANNEL_DISPUTE_WINDOW_DEFAULT_BLOCKS: u32 = 256;
+
 // ============================================================================
 // MEMORY OBJECT TYPE ENUM (D21.1)
 // ============================================================================
@@ -339,6 +420,22 @@ pub enum MemoryObjectType {
     /// transitions the SLA to `SLA_STATUS_VIOLATED`. The agreement
     /// is binding once accepted: no mutual cancel signal in v1.
     SlaAgreement = 14,
+    /// Bidirectional payment channel between two AI entities
+    /// (Week 32). The memory object owner is party A (the proposer
+    /// who debits `deposit_a` at create time); the embedded
+    /// `party_b_entity_id` is the counterparty who accepts via the
+    /// `ChannelAccept` signal (and debits `deposit_b` at accept
+    /// time). Off-chain state updates are signed by both parties
+    /// and never touch the chain unless a cooperative settle, a
+    /// unilateral close, a dispute, or a finalize signal is
+    /// submitted. The channel's funds are held INSIDE the memory
+    /// object payload (`balance_a` / `balance_b`); credits back to
+    /// the parties' `economic_balance` happen only on cooperative
+    /// settle, finalize after a dispute window, or buyer-initiated
+    /// cancel while still in `PAYMENT_CHANNEL_STATUS_PROPOSED`. The
+    /// optional `sla_object_id` is informational only in v1: the
+    /// runtime does NOT couple channel lifecycle to SLA status.
+    PaymentChannel = 15,
 }
 
 impl MemoryObjectType {
@@ -367,6 +464,7 @@ impl MemoryObjectType {
             12 => Some(Self::ServiceDescriptor),
             13 => Some(Self::VkRegistration),
             14 => Some(Self::SlaAgreement),
+            15 => Some(Self::PaymentChannel),
             _ => None,
         }
     }
@@ -390,6 +488,7 @@ impl MemoryObjectType {
             Self::ServiceDescriptor => "ServiceDescriptor",
             Self::VkRegistration => "VkRegistration",
             Self::SlaAgreement => "SlaAgreement",
+            Self::PaymentChannel => "PaymentChannel",
         }
     }
 }
@@ -1785,6 +1884,206 @@ impl SlaAgreementData {
 }
 
 // ============================================================================
+// PAYMENT CHANNEL DATA (Week 32)
+// ============================================================================
+
+/// Bidirectional payment channel between two AI entities (Week 32).
+///
+/// Channels collapse high-frequency off-chain micropayments into a
+/// single on-chain settlement. Both parties deposit collateral at
+/// channel open, exchange doubly-signed state updates off-chain, and
+/// settle the final balance via either a cooperative `ChannelClose`
+/// (instant) or a unilateral close followed by a dispute window and
+/// finalize.
+///
+/// Wire layout (fixed 222 bytes; locked by golden vector test):
+///
+/// ```text
+/// version:1
+/// party_a_entity_id:32             (memory object owner; the proposer)
+/// party_b_entity_id:32             (counterparty; debits at accept)
+/// sla_object_id:32                 (informational; zero = no reference)
+/// status:1                         (PROPOSED / OPEN / CLOSING)
+/// deposit_a_be:16                  (immutable after create)
+/// deposit_b_be:16                  (immutable after accept; 0 while PROPOSED)
+/// balance_a_be:16                  (current settled balance for party A)
+/// balance_b_be:16                  (current settled balance for party B)
+///                                  invariant once OPEN:
+///                                  balance_a + balance_b == deposit_a + deposit_b
+/// nonce_be:8                       (highest applied off-chain state nonce)
+/// proposed_at_height_be:8
+/// accepted_at_height_be:8          (0 until ChannelAccept lands)
+/// closing_at_height_be:8           (0 unless status == CLOSING)
+/// dispute_deadline_height_be:8     (0 unless status == CLOSING)
+/// dispute_window_blocks_be:4       (set at create; immutable)
+/// reserved:16                      (MUST be zero on create / accept)
+/// ```
+///
+/// The reserved bytes are the forward-compatibility lock for future
+/// schema fields (e.g., per-channel fee parameters, slash hooks); the
+/// v1 runtime requires them all-zero at create and accept time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaymentChannelData {
+    /// Wire-format version byte. Must equal `PAYMENT_CHANNEL_V1` at
+    /// create / accept; decode preserves it verbatim so the handler
+    /// can surface a specific error on mismatch.
+    pub version: u8,
+    /// Party A (memory object owner). Initiates the channel via
+    /// `CREATE_MEMORY_OBJECT` and debits `deposit_a` from its
+    /// `economic_balance` at that time. Also the entity that may
+    /// `DELETE_MEMORY_OBJECT` to cancel while still
+    /// `PAYMENT_CHANNEL_STATUS_PROPOSED`.
+    pub party_a_entity_id: [u8; 32],
+    /// Party B (counterparty). Accepts via the `ChannelAccept`
+    /// signal, at which point `deposit_b` is debited from B's
+    /// `economic_balance` and the channel transitions to
+    /// `PAYMENT_CHANNEL_STATUS_OPEN`.
+    pub party_b_entity_id: [u8; 32],
+    /// Optional reference to a Week 31 `SlaAgreement` memory object
+    /// id describing the service this channel is settling for. Zero
+    /// (all-zero bytes) signals "no reference". Informational only;
+    /// the v1 runtime does NOT verify the reference resolves to a
+    /// real SLA and does NOT couple channel lifecycle to SLA status.
+    pub sla_object_id: [u8; 32],
+    /// Lifecycle status discriminant. Must be
+    /// `PAYMENT_CHANNEL_STATUS_PROPOSED` at create; transitions to
+    /// `_OPEN` on `ChannelAccept`, then to `_CLOSING` on a
+    /// unilateral `ChannelClose`. Cooperative settle and successful
+    /// finalize after the dispute deadline DELETE the memory object
+    /// rather than writing a terminal status byte.
+    pub status: u8,
+    /// Collateral debited from party A at create time. Immutable
+    /// after create; the off-chain state updates may shift the
+    /// balance between A and B but never change the total deposit
+    /// pool. Recorded so the runtime can verify the
+    /// `balance_a + balance_b == deposit_a + deposit_b` invariant on
+    /// every `ChannelClose` signal.
+    pub deposit_a: u128,
+    /// Collateral debited from party B at accept time. Zero while
+    /// `status == PAYMENT_CHANNEL_STATUS_PROPOSED`; immutable after
+    /// `ChannelAccept`.
+    pub deposit_b: u128,
+    /// Current settled balance for party A. Initialized to
+    /// `deposit_a` at create and rewritten by `ChannelClose` signals.
+    /// On cooperative settle / finalize this is the amount credited
+    /// back to A's `economic_balance`.
+    pub balance_a: u128,
+    /// Current settled balance for party B. Initialized to zero at
+    /// create and bumped to `deposit_b` at accept. On cooperative
+    /// settle / finalize this is the amount credited back to B's
+    /// `economic_balance`.
+    pub balance_b: u128,
+    /// Highest applied off-chain state nonce. `ChannelClose` signals
+    /// are rejected unless they carry a strictly larger nonce than
+    /// the current value, except for the initial nonce-0 close path
+    /// (used when the channel has no off-chain history to cite).
+    pub nonce: u64,
+    /// Block height the create transaction landed (set by the
+    /// create handler from block context).
+    pub proposed_at_height: u64,
+    /// Block height the `ChannelAccept` signal landed. 0 while
+    /// `status == PAYMENT_CHANNEL_STATUS_PROPOSED`.
+    pub accepted_at_height: u64,
+    /// Block height the first unilateral `ChannelClose` (with
+    /// `is_final = 0`) landed. 0 unless `status ==
+    /// PAYMENT_CHANNEL_STATUS_CLOSING`. NOT updated by subsequent
+    /// dispute submissions inside the window.
+    pub closing_at_height: u64,
+    /// Block height at which the dispute window expires.
+    /// `closing_at_height + dispute_window_blocks`. After this
+    /// height, any entity may submit `ChannelFinalize` to
+    /// distribute the recorded balances back to the parties.
+    /// 0 unless `status == PAYMENT_CHANNEL_STATUS_CLOSING`.
+    pub dispute_deadline_height: u64,
+    /// Length of the dispute window in blocks, set at create time.
+    /// Must be in `[CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS,
+    /// CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS]`. Immutable after create.
+    pub dispute_window_blocks: u32,
+    /// 16 bytes reserved for future field allocation. MUST be zero
+    /// on create / accept; decode preserves verbatim so future
+    /// schema additions are forward-compatible with the v1 binary
+    /// layout.
+    pub reserved: [u8; PAYMENT_CHANNEL_RESERVED_LEN],
+}
+
+impl PaymentChannelData {
+    /// Encode this payment channel to its 222-byte canonical form.
+    #[must_use]
+    pub fn encode(&self) -> [u8; PAYMENT_CHANNEL_SIZE] {
+        let mut out = [0u8; PAYMENT_CHANNEL_SIZE];
+        out[0] = self.version;
+        out[1..33].copy_from_slice(&self.party_a_entity_id);
+        out[33..65].copy_from_slice(&self.party_b_entity_id);
+        out[65..97].copy_from_slice(&self.sla_object_id);
+        out[97] = self.status;
+        out[98..114].copy_from_slice(&self.deposit_a.to_be_bytes());
+        out[114..130].copy_from_slice(&self.deposit_b.to_be_bytes());
+        out[130..146].copy_from_slice(&self.balance_a.to_be_bytes());
+        out[146..162].copy_from_slice(&self.balance_b.to_be_bytes());
+        out[162..170].copy_from_slice(&self.nonce.to_be_bytes());
+        out[170..178].copy_from_slice(&self.proposed_at_height.to_be_bytes());
+        out[178..186].copy_from_slice(&self.accepted_at_height.to_be_bytes());
+        out[186..194].copy_from_slice(&self.closing_at_height.to_be_bytes());
+        out[194..202].copy_from_slice(&self.dispute_deadline_height.to_be_bytes());
+        out[202..206].copy_from_slice(&self.dispute_window_blocks.to_be_bytes());
+        out[206..222].copy_from_slice(&self.reserved);
+        out
+    }
+
+    /// Decode a payment channel from canonical bytes.
+    ///
+    /// Returns `None` if the slice length is not exactly
+    /// `PAYMENT_CHANNEL_SIZE`. Field-level validation (version,
+    /// status range, deposit non-zero, balance invariant, dispute
+    /// window range, zero-reserved, party-distinct) is the
+    /// handler's responsibility; decode preserves byte content
+    /// verbatim so the runtime can produce specific error variants
+    /// for each invalid field.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != PAYMENT_CHANNEL_SIZE {
+            return None;
+        }
+        let mut party_a_entity_id = [0u8; 32];
+        party_a_entity_id.copy_from_slice(&bytes[1..33]);
+        let mut party_b_entity_id = [0u8; 32];
+        party_b_entity_id.copy_from_slice(&bytes[33..65]);
+        let mut sla_object_id = [0u8; 32];
+        sla_object_id.copy_from_slice(&bytes[65..97]);
+        let deposit_a = u128::from_be_bytes(bytes[98..114].try_into().ok()?);
+        let deposit_b = u128::from_be_bytes(bytes[114..130].try_into().ok()?);
+        let balance_a = u128::from_be_bytes(bytes[130..146].try_into().ok()?);
+        let balance_b = u128::from_be_bytes(bytes[146..162].try_into().ok()?);
+        let nonce = u64::from_be_bytes(bytes[162..170].try_into().ok()?);
+        let proposed_at_height = u64::from_be_bytes(bytes[170..178].try_into().ok()?);
+        let accepted_at_height = u64::from_be_bytes(bytes[178..186].try_into().ok()?);
+        let closing_at_height = u64::from_be_bytes(bytes[186..194].try_into().ok()?);
+        let dispute_deadline_height = u64::from_be_bytes(bytes[194..202].try_into().ok()?);
+        let dispute_window_blocks = u32::from_be_bytes(bytes[202..206].try_into().ok()?);
+        let mut reserved = [0u8; PAYMENT_CHANNEL_RESERVED_LEN];
+        reserved.copy_from_slice(&bytes[206..222]);
+        Some(Self {
+            version: bytes[0],
+            party_a_entity_id,
+            party_b_entity_id,
+            sla_object_id,
+            status: bytes[97],
+            deposit_a,
+            deposit_b,
+            balance_a,
+            balance_b,
+            nonce,
+            proposed_at_height,
+            accepted_at_height,
+            closing_at_height,
+            dispute_deadline_height,
+            dispute_window_blocks,
+            reserved,
+        })
+    }
+}
+
+// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -1809,6 +2108,7 @@ mod tests {
             MemoryObjectType::ServiceDescriptor,
             MemoryObjectType::VkRegistration,
             MemoryObjectType::SlaAgreement,
+            MemoryObjectType::PaymentChannel,
         ] {
             let byte = t.to_byte();
             let decoded = MemoryObjectType::from_byte(byte).unwrap();
@@ -1828,9 +2128,14 @@ mod tests {
             Some(MemoryObjectType::SlaAgreement),
             "byte 14 must decode to SlaAgreement (Week 31)"
         );
+        assert_eq!(
+            MemoryObjectType::from_byte(15),
+            Some(MemoryObjectType::PaymentChannel),
+            "byte 15 must decode to PaymentChannel (Week 32)"
+        );
         assert!(
-            MemoryObjectType::from_byte(15).is_none(),
-            "15 is the first invalid byte after Week 31"
+            MemoryObjectType::from_byte(16).is_none(),
+            "16 is the first invalid byte after Week 32"
         );
         assert!(MemoryObjectType::from_byte(255).is_none());
     }
@@ -1863,6 +2168,7 @@ mod tests {
         );
         assert_eq!(MemoryObjectType::VkRegistration.name(), "VkRegistration");
         assert_eq!(MemoryObjectType::SlaAgreement.name(), "SlaAgreement");
+        assert_eq!(MemoryObjectType::PaymentChannel.name(), "PaymentChannel");
     }
 
     #[test]
@@ -2304,7 +2610,11 @@ mod tests {
             MemoryObjectType::from_byte(14),
             Some(MemoryObjectType::SlaAgreement)
         );
-        assert_eq!(MemoryObjectType::from_byte(15), None);
+        assert_eq!(
+            MemoryObjectType::from_byte(15),
+            Some(MemoryObjectType::PaymentChannel)
+        );
+        assert_eq!(MemoryObjectType::from_byte(16), None);
         assert_eq!(
             MemoryObjectType::CompositionGraph.name(),
             "CompositionGraph"
@@ -3380,5 +3690,174 @@ mod tests {
             "slashed_amount_be at 178..194 (zero on create)"
         );
         assert_eq!(&bytes[194..210], &[0u8; 16], "reserved at 194..210 (zero)");
+    }
+
+    // ========================================================================
+    // Week 32 Phase 1: PaymentChannel types and codec
+    // ========================================================================
+
+    fn sample_payment_channel() -> PaymentChannelData {
+        PaymentChannelData {
+            version: PAYMENT_CHANNEL_V1,
+            party_a_entity_id: [0x11u8; 32],
+            party_b_entity_id: [0x22u8; 32],
+            sla_object_id: [0x33u8; 32],
+            status: PAYMENT_CHANNEL_STATUS_PROPOSED,
+            deposit_a: 0x1112_1314_1516_1718_191A_1B1C_1D1E_1F20,
+            deposit_b: 0x2122_2324_2526_2728_292A_2B2C_2D2E_2F30,
+            balance_a: 0x3132_3334_3536_3738_393A_3B3C_3D3E_3F40,
+            balance_b: 0x4142_4344_4546_4748_494A_4B4C_4D4E_4F50,
+            nonce: 0x5152_5354_5556_5758,
+            proposed_at_height: 0x6162_6364_6566_6768,
+            accepted_at_height: 0,
+            closing_at_height: 0,
+            dispute_deadline_height: 0,
+            dispute_window_blocks: CHANNEL_DISPUTE_WINDOW_DEFAULT_BLOCKS,
+            reserved: [0u8; PAYMENT_CHANNEL_RESERVED_LEN],
+        }
+    }
+
+    #[test]
+    fn payment_channel_constants_are_stable() {
+        assert_eq!(MAX_PAYMENT_CHANNELS_PER_ENTITY, 32);
+        assert_eq!(PAYMENT_CHANNEL_V1, 1);
+        assert_eq!(PAYMENT_CHANNEL_RESERVED_LEN, 16);
+        assert_eq!(PAYMENT_CHANNEL_STATUS_PROPOSED, 0);
+        assert_eq!(PAYMENT_CHANNEL_STATUS_OPEN, 1);
+        assert_eq!(PAYMENT_CHANNEL_STATUS_CLOSING, 2);
+        assert_eq!(PAYMENT_CHANNEL_STATUS_MAX, PAYMENT_CHANNEL_STATUS_CLOSING);
+        assert_eq!(CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS, 100);
+        assert_eq!(CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS, 10_000);
+        assert_eq!(CHANNEL_DISPUTE_WINDOW_DEFAULT_BLOCKS, 256);
+    }
+
+    #[test]
+    fn payment_channel_size_constant_matches_layout() {
+        assert_eq!(PAYMENT_CHANNEL_SIZE, 222);
+        assert_eq!(
+            PAYMENT_CHANNEL_SIZE,
+            1 + 32 + 32 + 32 + 1 + 16 + 16 + 16 + 16 + 8 + 8 + 8 + 8 + 8 + 4 + 16
+        );
+    }
+
+    #[test]
+    fn payment_channel_roundtrip() {
+        let channel = sample_payment_channel();
+        let bytes = channel.encode();
+        assert_eq!(bytes.len(), PAYMENT_CHANNEL_SIZE);
+        let decoded = PaymentChannelData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded, channel);
+    }
+
+    #[test]
+    fn payment_channel_roundtrip_preserves_arbitrary_reserved_bytes() {
+        // Decoder is byte-faithful: any non-zero `reserved` survives a
+        // roundtrip. Handler-level validation rejects non-zero `reserved`
+        // at create / accept; the codec contract is to preserve bytes.
+        let mut channel = sample_payment_channel();
+        channel.reserved = [
+            0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE,
+            0xAF, 0xB0,
+        ];
+        let bytes = channel.encode();
+        let decoded = PaymentChannelData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.reserved, channel.reserved);
+    }
+
+    #[test]
+    fn payment_channel_decode_rejects_wrong_length() {
+        let channel = sample_payment_channel();
+        let mut bytes = channel.encode().to_vec();
+        bytes.push(0);
+        assert!(PaymentChannelData::decode(&bytes).is_none());
+        bytes.pop();
+        bytes.pop();
+        assert!(PaymentChannelData::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn payment_channel_decode_preserves_version_byte() {
+        let mut channel = sample_payment_channel();
+        channel.version = 99;
+        let bytes = channel.encode();
+        let decoded = PaymentChannelData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.version, 99);
+    }
+
+    #[test]
+    fn payment_channel_decode_preserves_status_byte() {
+        let mut channel = sample_payment_channel();
+        channel.status = 99;
+        let bytes = channel.encode();
+        let decoded = PaymentChannelData::decode(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.status, 99);
+    }
+
+    #[test]
+    fn golden_vector_payment_channel_222_bytes() {
+        // Locks the byte layout for PAYMENT_CHANNEL_V1 = 1 against
+        // accidental field reordering or width changes. Sample uses
+        // distinctive byte values per field so a one-byte offset error
+        // surfaces immediately.
+        let channel = sample_payment_channel();
+        let bytes = channel.encode();
+        assert_eq!(bytes.len(), 222);
+
+        assert_eq!(bytes[0], PAYMENT_CHANNEL_V1, "version at 0");
+        assert_eq!(&bytes[1..33], &[0x11u8; 32], "party_a_entity_id at 1..33");
+        assert_eq!(&bytes[33..65], &[0x22u8; 32], "party_b_entity_id at 33..65");
+        assert_eq!(&bytes[65..97], &[0x33u8; 32], "sla_object_id at 65..97");
+        assert_eq!(bytes[97], PAYMENT_CHANNEL_STATUS_PROPOSED, "status at 97");
+        assert_eq!(
+            &bytes[98..114],
+            &0x1112_1314_1516_1718_191A_1B1C_1D1E_1F20u128.to_be_bytes(),
+            "deposit_a_be at 98..114"
+        );
+        assert_eq!(
+            &bytes[114..130],
+            &0x2122_2324_2526_2728_292A_2B2C_2D2E_2F30u128.to_be_bytes(),
+            "deposit_b_be at 114..130"
+        );
+        assert_eq!(
+            &bytes[130..146],
+            &0x3132_3334_3536_3738_393A_3B3C_3D3E_3F40u128.to_be_bytes(),
+            "balance_a_be at 130..146"
+        );
+        assert_eq!(
+            &bytes[146..162],
+            &0x4142_4344_4546_4748_494A_4B4C_4D4E_4F50u128.to_be_bytes(),
+            "balance_b_be at 146..162"
+        );
+        assert_eq!(
+            &bytes[162..170],
+            &0x5152_5354_5556_5758u64.to_be_bytes(),
+            "nonce_be at 162..170"
+        );
+        assert_eq!(
+            &bytes[170..178],
+            &0x6162_6364_6566_6768u64.to_be_bytes(),
+            "proposed_at_height_be at 170..178"
+        );
+        assert_eq!(
+            &bytes[178..186],
+            &0u64.to_be_bytes(),
+            "accepted_at_height_be at 178..186 (zero before acceptance)"
+        );
+        assert_eq!(
+            &bytes[186..194],
+            &0u64.to_be_bytes(),
+            "closing_at_height_be at 186..194 (zero before close)"
+        );
+        assert_eq!(
+            &bytes[194..202],
+            &0u64.to_be_bytes(),
+            "dispute_deadline_height_be at 194..202 (zero before close)"
+        );
+        assert_eq!(
+            &bytes[202..206],
+            &CHANNEL_DISPUTE_WINDOW_DEFAULT_BLOCKS.to_be_bytes(),
+            "dispute_window_blocks_be at 202..206"
+        );
+        assert_eq!(&bytes[206..222], &[0u8; 16], "reserved at 206..222 (zero)");
     }
 }

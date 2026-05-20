@@ -116,6 +116,9 @@ fn mk_signal_commitment(
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     TxV1 {
         version: TxVersion::V1,

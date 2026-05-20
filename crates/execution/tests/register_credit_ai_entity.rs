@@ -558,6 +558,9 @@ fn register_then_signal() {
         payment_request: None,
         service_attestation: None,
         sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
 
     // Signal tx is from the entity itself (entity pays fee from its balance)

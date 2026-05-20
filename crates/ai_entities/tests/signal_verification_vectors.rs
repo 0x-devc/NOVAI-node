@@ -513,14 +513,14 @@ fn verify_signal_type_encoding() {
 /// Verify signal type roundtrip from byte.
 #[test]
 fn verify_signal_type_roundtrip() {
-    for i in 0u8..=18 {
+    for i in 0u8..=21 {
         let signal_type = AiSignalType::from_byte(i).expect("valid type");
         assert_eq!(signal_type.to_byte(), i);
     }
 
-    // Invalid bytes should return None (19 is the first invalid byte
-    // after Week 31's SlaAccept = 18).
-    assert!(AiSignalType::from_byte(19).is_none());
+    // Invalid bytes should return None (22 is the first invalid byte
+    // after Week 32's ChannelFinalize = 21).
+    assert!(AiSignalType::from_byte(22).is_none());
     assert!(AiSignalType::from_byte(255).is_none());
 }
 

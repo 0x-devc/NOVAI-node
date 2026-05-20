@@ -148,6 +148,9 @@ fn make_accept_tx(
             sla_object_id,
             buyer_entity_id: buyer_id,
         }),
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
     });
     TxV1 {
         version: TxVersion::V1,

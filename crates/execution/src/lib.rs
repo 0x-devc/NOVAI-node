@@ -748,6 +748,218 @@ pub enum ExecError<E> {
         /// withdrawal were permitted.
         available_after_withdraw: u128,
     },
+    // Week 32 - PaymentChannel errors.
+    /// `CreateMemoryObject` / `ChannelAccept`: payload bytes for a
+    /// `PaymentChannel` could not be decoded as
+    /// `PaymentChannelData`. Either the payload length is not
+    /// exactly `PAYMENT_CHANNEL_SIZE` or the byte content is
+    /// otherwise inconsistent.
+    InvalidPaymentChannel,
+    /// `CreateMemoryObject`: payload version byte does not equal
+    /// `PAYMENT_CHANNEL_V1`. Surfaced verbatim so audit consumers
+    /// can detect attempts to land a future schema version on the
+    /// v1 wire format.
+    PaymentChannelVersionInvalid {
+        /// Offending `version` byte the payload carried.
+        byte: u8,
+    },
+    /// `CreateMemoryObject`: payload `status` byte is not
+    /// `PAYMENT_CHANNEL_STATUS_PROPOSED`. New channels MUST start
+    /// in the Proposed state; transitions to Open / Closing are
+    /// runtime-controlled.
+    PaymentChannelStatusInvalidAtCreate {
+        /// Offending `status` byte the payload carried.
+        byte: u8,
+    },
+    /// `CreateMemoryObject`: payload pre-seeds one of the runtime-
+    /// only fields (`balance_b`, `nonce`, `accepted_at_height`,
+    /// `closing_at_height`, `dispute_deadline_height`). These are
+    /// set by the runtime on lifecycle transitions, not by the
+    /// proposer. The proposer must set `balance_a = deposit_a` so
+    /// the on-chain initial state is consistent with the no-update
+    /// close path.
+    PaymentChannelInitialFieldsNotZero,
+    /// `CreateMemoryObject`: `party_a_entity_id` in the payload
+    /// does not equal the issuing entity's id.
+    PaymentChannelPartyAMustBeIssuer,
+    /// `CreateMemoryObject`: `party_b_entity_id` equals
+    /// `party_a_entity_id`. Self-channels are not allowed.
+    PaymentChannelSelfReferential,
+    /// `CreateMemoryObject`: party B entity does not exist in
+    /// state.
+    PaymentChannelPartyBNotFound,
+    /// `CreateMemoryObject`: party B entity exists but
+    /// `is_active == false`.
+    PaymentChannelPartyBNotActive,
+    /// `CreateMemoryObject`: `deposit_a` is zero. A zero-deposit
+    /// channel has no economic substance.
+    PaymentChannelDepositAZero,
+    /// `CreateMemoryObject`: `deposit_b` is zero.
+    PaymentChannelDepositBZero,
+    /// `CreateMemoryObject`: `deposit_a + deposit_b` overflows
+    /// `u128`. Rejected before any balance mutation.
+    PaymentChannelDepositTotalOverflow,
+    /// `CreateMemoryObject`: `dispute_window_blocks` is outside
+    /// `[CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS,
+    /// CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS]`.
+    PaymentChannelDisputeWindowOutOfRange {
+        /// Window length the payload carried.
+        found: u32,
+        /// Minimum allowed.
+        min: u32,
+        /// Maximum allowed.
+        max: u32,
+    },
+    /// `CreateMemoryObject`: trailing `reserved` bytes are not all
+    /// zero. Forward-compat lock for future schema additions.
+    PaymentChannelReservedNotZero,
+    /// `CreateMemoryObject`: party A's `economic_balance` does not
+    /// cover `deposit_a` (after the tx fee debit).
+    PaymentChannelInsufficientBalanceA {
+        /// Required `deposit_a`.
+        required: u128,
+        /// Party A's `economic_balance` after fee debit.
+        available: u128,
+    },
+    /// `CreateMemoryObject` / `ChannelAccept`: the entity is at the
+    /// `MAX_PAYMENT_CHANNELS_PER_ENTITY` cap, counted across both
+    /// party-A and party-B roles.
+    PaymentChannelPerEntityCapExceeded {
+        /// Current channel count across both roles.
+        current: u32,
+        /// Cap (`MAX_PAYMENT_CHANNELS_PER_ENTITY`).
+        max: u32,
+    },
+    /// `ChannelAccept`: the referenced `(party_a_entity_id,
+    /// channel_object_id)` pair does not resolve to a memory
+    /// object.
+    ChannelAcceptNotFound,
+    /// `ChannelAccept`: the resolved memory object exists but is
+    /// not of type `PaymentChannel`.
+    ChannelAcceptObjectTypeMismatch {
+        /// `MemoryObjectType` byte the resolved object carries.
+        found: u8,
+    },
+    /// `ChannelAccept`: the resolved `PaymentChannel` payload
+    /// failed to decode. Unreachable in normal operation.
+    ChannelAcceptDecodeFailed,
+    /// `ChannelAccept`: the resolved channel is not in
+    /// `PAYMENT_CHANNEL_STATUS_PROPOSED`.
+    ChannelAcceptNotProposed {
+        /// Current `status` byte of the channel.
+        status: u8,
+    },
+    /// `ChannelAccept`: the signal issuer is not the party B
+    /// named in the channel payload.
+    ChannelAcceptCounterpartyMismatch,
+    /// `ChannelAccept`: party B's `economic_balance` does not
+    /// cover `deposit_b` (after the tx fee debit).
+    ChannelAcceptInsufficientBalance {
+        /// Required `deposit_b`.
+        required: u128,
+        /// Party B's `economic_balance` after fee debit.
+        available: u128,
+    },
+    /// `ChannelClose`: the referenced `(party_a_entity_id,
+    /// channel_object_id)` pair does not resolve to a memory
+    /// object.
+    ChannelCloseNotFound,
+    /// `ChannelClose`: the resolved memory object exists but is
+    /// not of type `PaymentChannel`.
+    ChannelCloseObjectTypeMismatch {
+        /// `MemoryObjectType` byte the resolved object carries.
+        found: u8,
+    },
+    /// `ChannelClose`: the resolved `PaymentChannel` payload
+    /// failed to decode.
+    ChannelCloseDecodeFailed,
+    /// `ChannelClose`: the channel is in a status that does not
+    /// permit close (still PROPOSED, or close arrived after the
+    /// dispute deadline expired).
+    ChannelCloseInvalidStatus {
+        /// Current `status` byte of the channel.
+        status: u8,
+    },
+    /// `ChannelClose`: the tx submitter is neither party A nor
+    /// party B of the channel.
+    ChannelCloseSubmitterNotParticipant,
+    /// `ChannelClose`: `balance_a + balance_b` does not equal
+    /// `deposit_a + deposit_b`.
+    ChannelCloseBalanceImbalance {
+        /// `balance_a + balance_b` from the payload.
+        sum_balances: u128,
+        /// `deposit_a + deposit_b` from the channel record.
+        sum_deposits: u128,
+    },
+    /// `ChannelClose`: the payload's `nonce` is not strictly
+    /// greater than the channel's current `nonce` (with the
+    /// initial-state nonce-0 exception).
+    ChannelCloseNonceNotMonotonic {
+        /// Channel's current `nonce`.
+        current: u64,
+        /// Nonce carried in the payload.
+        attempted: u64,
+    },
+    /// `ChannelClose`: payload's `is_final` byte is not 0 or 1.
+    /// Surfaced at decode time before any state mutation.
+    ChannelCloseInvalidIsFinalFlag {
+        /// Offending byte the payload carried.
+        byte: u8,
+    },
+    /// `ChannelClose`: party A's signature failed to verify.
+    ChannelCloseInvalidSignatureA,
+    /// `ChannelClose`: party B's signature failed to verify.
+    ChannelCloseInvalidSignatureB,
+    /// `ChannelClose`: close arrived after the channel's dispute
+    /// deadline expired.
+    ChannelCloseAfterDeadline {
+        /// Current block height.
+        current: u64,
+        /// `dispute_deadline_height` from the channel record.
+        deadline: u64,
+    },
+    /// `ChannelClose`: the initial-state close path (`nonce == 0`)
+    /// requires the payload balances to match the deposits exactly.
+    ChannelCloseInitialStateMismatch,
+    /// `ChannelFinalize`: the referenced `(party_a_entity_id,
+    /// channel_object_id)` pair does not resolve to a memory
+    /// object.
+    ChannelFinalizeNotFound,
+    /// `ChannelFinalize`: the resolved memory object exists but is
+    /// not of type `PaymentChannel`.
+    ChannelFinalizeObjectTypeMismatch {
+        /// `MemoryObjectType` byte the resolved object carries.
+        found: u8,
+    },
+    /// `ChannelFinalize`: the resolved `PaymentChannel` payload
+    /// failed to decode.
+    ChannelFinalizeDecodeFailed,
+    /// `ChannelFinalize`: the channel is not in
+    /// `PAYMENT_CHANNEL_STATUS_CLOSING`.
+    ChannelFinalizeNotClosing {
+        /// Current `status` byte of the channel.
+        status: u8,
+    },
+    /// `ChannelFinalize`: `current_height` is at or before the
+    /// channel's `dispute_deadline_height`.
+    ChannelFinalizeBeforeDeadline {
+        /// Current block height.
+        current: u64,
+        /// `dispute_deadline_height` from the channel record.
+        deadline: u64,
+    },
+    /// `UpdateMemoryObject` against a `PaymentChannel`: channel
+    /// payloads are not updatable.
+    PaymentChannelImmutableOnUpdate,
+    /// `DeleteMemoryObject` against a `PaymentChannel` that is
+    /// not in `PAYMENT_CHANNEL_STATUS_PROPOSED`: open / closing
+    /// channels hold collateral and have a pending dispute
+    /// window; teardown is gated to the proposer-cancel path
+    /// (PROPOSED) plus the finalize signal.
+    PaymentChannelDeleteWhileActive {
+        /// Current `status` byte of the channel.
+        status: u8,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -928,6 +1140,55 @@ pub const SLA_ACCEPT_EXTRA_LEN: usize = 32 + 32;
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SLA_ACCEPT_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SLA_ACCEPT_EXTRA_LEN;
 
+/// Inline-extra size for a `ChannelAccept` signal payload (Week 32).
+///
+/// Layout: `channel_object_id:32 | party_a_entity_id:32`. The party A
+/// id is carried alongside the channel object id so the handler can
+/// construct the primary `ai_memory_object_key(party_a, object_id)`
+/// without scanning every entity's memory namespace; defence in depth
+/// verifies that the resolved channel's `party_a_entity_id` matches
+/// the wire value.
+pub const CHANNEL_ACCEPT_EXTRA_LEN: usize = 32 + 32;
+
+/// Total size of a `ChannelAccept` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_ACCEPT_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + CHANNEL_ACCEPT_EXTRA_LEN;
+
+/// Inline-extra size for a `ChannelClose` signal payload (Week 32).
+///
+/// Layout: `channel_object_id:32 | party_a_entity_id:32 | nonce_be:8 |
+/// balance_a_be:16 | balance_b_be:16 | is_final:1 | sig_a:64 | sig_b:64`.
+/// Both signatures are always required; the handler verifies `sig_a`
+/// under party A's pubkey and `sig_b` under party B's pubkey over the
+/// canonical channel state signing bytes (see
+/// `novai_crypto::channel_state_signing_bytes`).
+pub const CHANNEL_CLOSE_EXTRA_LEN: usize = 32 + 32 + 8 + 16 + 16 + 1 + 64 + 64;
+
+/// Total size of a `ChannelClose` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_CLOSE_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + CHANNEL_CLOSE_EXTRA_LEN;
+
+/// Inline-extra size for a `ChannelFinalize` signal payload (Week 32).
+///
+/// Layout: `channel_object_id:32 | party_a_entity_id:32`. Permissionless
+/// finalize after the dispute window expires; either party (or any
+/// third party with an active AI entity) may submit.
+pub const CHANNEL_FINALIZE_EXTRA_LEN: usize = 32 + 32;
+
+/// Total size of a `ChannelFinalize` signal payload (base + extra).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_FINALIZE_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + CHANNEL_FINALIZE_EXTRA_LEN;
+
+/// `ChannelClose.is_final` byte value meaning "cooperative settle":
+/// both parties have signed an `is_final = 1` state and the channel
+/// should be torn down immediately, with no dispute window.
+pub const CHANNEL_CLOSE_IS_FINAL: u8 = 1;
+
+/// `ChannelClose.is_final` byte value meaning "unilateral close or
+/// dispute": a dispute window will open (or remain open) and a
+/// strictly larger nonce inside the window may override this state.
+pub const CHANNEL_CLOSE_NOT_FINAL: u8 = 0;
+
 /// Total size of a `ServiceAttestation` signal payload (base + extra).
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SERVICE_ATTESTATION_EXTRA_LEN;
@@ -1027,6 +1288,32 @@ pub const KEY_PREFIX_AI_SLAS_BY_BUYER: &[u8] = b"ai/slas/by_buyer/";
 /// active-SLA `slash_amount` to gate withdrawals) and the
 /// `novai_listSlasBySeller` RPC.
 pub const KEY_PREFIX_AI_SLAS_BY_SELLER: &[u8] = b"ai/slas/by_seller/";
+
+/// KV-key prefix for the `PaymentChannel` per-party-A scan index
+/// (Week 32).
+///
+/// Layout:
+/// `b"ai/channels/by_party_a/" || party_a[32] || proposed_at_height_be[8] || object_id[32]`.
+/// Each entry's value is a zero-byte marker; the canonical
+/// `PaymentChannelData` lives inside the memory object at
+/// `ai_memory_object_key(party_a, object_id)` (party A is the memory
+/// object owner). Big-endian `proposed_at_height` keeps prefix-scan
+/// results in height-ascending order without an in-memory sort.
+pub const KEY_PREFIX_AI_CHANNELS_BY_PARTY_A: &[u8] = b"ai/channels/by_party_a/";
+
+/// KV-key prefix for the `PaymentChannel` per-party-B scan index
+/// (Week 32).
+///
+/// Layout:
+/// `b"ai/channels/by_party_b/" || party_b[32] || proposed_at_height_be[8] || object_id[32]`.
+/// Each entry's value is the 32-byte `party_a` (memory object owner)
+/// so the runtime can resolve the primary record without an extra
+/// scan of `ai/memory_by_type/15/`. This is a deliberate departure
+/// from the SLA `by_seller` design (which stores an empty marker and
+/// reuses an O(N) scan to recover the buyer); channels embed the
+/// owner in the value because per-entity cap checks at accept time
+/// need fast resolution.
+pub const KEY_PREFIX_AI_CHANNELS_BY_PARTY_B: &[u8] = b"ai/channels/by_party_b/";
 
 /// Block-count duration that newly deposited stake is locked for.
 /// `stake_locked_until = current_height + STAKE_LOCK_PERIOD` on every deposit.
@@ -1424,6 +1711,88 @@ pub struct SlaAcceptExtraV1 {
     pub buyer_entity_id: [u8; 32],
 }
 
+/// Inline tail carried by `AiSignalType::ChannelAccept` signal
+/// commitment payloads (Week 32).
+///
+/// Wire layout (64 bytes): `channel_object_id:32 | party_a_entity_id:32`.
+/// The party A id is carried alongside the channel's `object_id`
+/// because memory objects are keyed by `(owner, object_id)`; without
+/// the owner the handler would have to scan every entity's namespace
+/// to find the channel. Defence in depth verifies that the resolved
+/// `PaymentChannelData.party_a_entity_id` equals the wire value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelAcceptExtraV1 {
+    /// 32-byte memory object id of the `PaymentChannel` being accepted.
+    pub channel_object_id: [u8; 32],
+    /// Party A (memory object owner) of the channel. Used to build
+    /// the primary `ai_memory_object_key(party_a, channel_object_id)`.
+    pub party_a_entity_id: [u8; 32],
+}
+
+/// Inline tail carried by `AiSignalType::ChannelClose` signal
+/// commitment payloads (Week 32).
+///
+/// Wire layout (233 bytes): `channel_object_id:32 |
+/// party_a_entity_id:32 | nonce_be:8 | balance_a_be:16 |
+/// balance_b_be:16 | is_final:1 | sig_a:64 | sig_b:64`.
+///
+/// Both party signatures are always carried in the payload. The
+/// handler verifies `sig_a` under party A's pubkey and `sig_b` under
+/// party B's pubkey over the canonical channel state signing bytes
+/// (see `novai_crypto::channel_state_signing_bytes`) and rejects the
+/// close if either signature does not verify. `is_final` is a flag
+/// byte (must be exactly 0 or 1; any other value is rejected): when
+/// 1 the close is cooperative and the channel is settled
+/// immediately; when 0 the channel transitions to `_CLOSING` and a
+/// dispute window opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelCloseExtraV1 {
+    /// 32-byte memory object id of the channel being closed.
+    pub channel_object_id: [u8; 32],
+    /// Party A (memory object owner) of the channel.
+    pub party_a_entity_id: [u8; 32],
+    /// Off-chain state nonce being applied. Must be strictly greater
+    /// than the channel's current `nonce` (rejected with
+    /// `ChannelCloseNonceNotMonotonic` otherwise), with one exception:
+    /// the channel's initial-state close path accepts `nonce == 0`
+    /// when `balance_a == deposit_a` and `balance_b == deposit_b`
+    /// even though both sigs are still required.
+    pub nonce: u64,
+    /// Settled balance for party A in this state. The handler
+    /// enforces `balance_a + balance_b == deposit_a + deposit_b`.
+    pub balance_a: u128,
+    /// Settled balance for party B in this state.
+    pub balance_b: u128,
+    /// Cooperative-settle flag. `CHANNEL_CLOSE_IS_FINAL` (= 1)
+    /// triggers immediate settle and memory object delete;
+    /// `CHANNEL_CLOSE_NOT_FINAL` (= 0) opens or extends a dispute
+    /// window. Any other byte value is rejected at decode time.
+    pub is_final: u8,
+    /// Party A's signature over the canonical channel state signing
+    /// bytes. Must verify under the party A entity's pubkey.
+    pub sig_a: [u8; 64],
+    /// Party B's signature over the canonical channel state signing
+    /// bytes. Must verify under the party B entity's pubkey.
+    pub sig_b: [u8; 64],
+}
+
+/// Inline tail carried by `AiSignalType::ChannelFinalize` signal
+/// commitment payloads (Week 32).
+///
+/// Wire layout (64 bytes): `channel_object_id:32 | party_a_entity_id:32`.
+/// Permissionless: any active AI entity may submit a finalize after
+/// the dispute window expires. The handler verifies the channel is
+/// in `_CLOSING` and `current_height > dispute_deadline_height`,
+/// then credits the recorded balances back to the parties and
+/// deletes the memory object plus all secondary indexes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelFinalizeExtraV1 {
+    /// 32-byte memory object id of the channel being finalized.
+    pub channel_object_id: [u8; 32],
+    /// Party A (memory object owner) of the channel.
+    pub party_a_entity_id: [u8; 32],
+}
+
 /// Canonical Signal Commitment payload (D14.1):
 /// - Base (signal types 0..=6): 66 bytes
 ///   `[version:1][signal_hash:32][signal_type:1][issuer_entity_id:32]`
@@ -1449,13 +1818,21 @@ pub struct SlaAcceptExtraV1 {
 ///   `... [payee_id:32][amount_be:8][service_descriptor_hash:32][request_hash:32][max_block_height_be:8]`
 /// - `ServiceAttestation` (signal type 17): 131 bytes (base + 65-byte tail)
 ///   `... [payment_signal_hash:32][payee_id:32][status:1]`
+/// - `SlaAccept` (signal type 18): 130 bytes (base + 64-byte tail)
+///   `... [sla_object_id:32][buyer_entity_id:32]`
+/// - `ChannelAccept` (signal type 19): 130 bytes (base + 64-byte tail)
+///   `... [channel_object_id:32][party_a_entity_id:32]`
+/// - `ChannelClose` (signal type 20): 299 bytes (base + 233-byte tail)
+///   `... [channel_object_id:32][party_a_entity_id:32][nonce_be:8][balance_a_be:16][balance_b_be:16][is_final:1][sig_a:64][sig_b:64]`
+/// - `ChannelFinalize` (signal type 21): 130 bytes (base + 64-byte tail)
+///   `... [channel_object_id:32][party_a_entity_id:32]`
 ///
 /// At most one tail is populated; the active tail is determined by `signal_type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalCommitmentPayloadV1 {
     /// Commitment hash of the full signal.
     pub signal_hash: [u8; 32],
-    /// Signal type (0..=17).
+    /// Signal type (0..=21).
     pub signal_type: novai_ai_entities::AiSignalType,
     /// AI entity ID that issued this signal.
     pub issuer_entity_id: [u8; 32],
@@ -1490,6 +1867,15 @@ pub struct SignalCommitmentPayloadV1 {
     /// Inline SLA-accept tail. MUST be `Some` iff
     /// `signal_type == SlaAccept`.
     pub sla_accept: Option<SlaAcceptExtraV1>,
+    /// Inline channel-accept tail. MUST be `Some` iff
+    /// `signal_type == ChannelAccept`.
+    pub channel_accept: Option<ChannelAcceptExtraV1>,
+    /// Inline channel-close tail. MUST be `Some` iff
+    /// `signal_type == ChannelClose`.
+    pub channel_close: Option<ChannelCloseExtraV1>,
+    /// Inline channel-finalize tail. MUST be `Some` iff
+    /// `signal_type == ChannelFinalize`.
+    pub channel_finalize: Option<ChannelFinalizeExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
@@ -1524,6 +1910,9 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
     let is_service_attestation =
         p.signal_type == novai_ai_entities::AiSignalType::ServiceAttestation;
     let is_sla_accept = p.signal_type == novai_ai_entities::AiSignalType::SlaAccept;
+    let is_channel_accept = p.signal_type == novai_ai_entities::AiSignalType::ChannelAccept;
+    let is_channel_close = p.signal_type == novai_ai_entities::AiSignalType::ChannelClose;
+    let is_channel_finalize = p.signal_type == novai_ai_entities::AiSignalType::ChannelFinalize;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
@@ -1584,6 +1973,21 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.sla_accept.is_some(),
         "sla_accept tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_channel_accept,
+        p.channel_accept.is_some(),
+        "channel_accept tail presence must match signal_type"
+    );
+    debug_assert_eq!(
+        is_channel_close,
+        p.channel_close.is_some(),
+        "channel_close tail presence must match signal_type"
+    );
+    debug_assert_eq!(
+        is_channel_finalize,
+        p.channel_finalize.is_some(),
+        "channel_finalize tail presence must match signal_type"
+    );
     debug_assert!(
         u8::from(is_reputation)
             + u8::from(is_purchase)
@@ -1597,6 +2001,9 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             + u8::from(is_payment_request)
             + u8::from(is_service_attestation)
             + u8::from(is_sla_accept)
+            + u8::from(is_channel_accept)
+            + u8::from(is_channel_close)
+            + u8::from(is_channel_finalize)
             <= 1,
         "tails are mutually exclusive"
     );
@@ -1635,6 +2042,12 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN
     } else if is_sla_accept {
         SIGNAL_COMMITMENT_PAYLOAD_V1_SLA_ACCEPT_LEN
+    } else if is_channel_accept {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_ACCEPT_LEN
+    } else if is_channel_close {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_CLOSE_LEN
+    } else if is_channel_finalize {
+        SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_FINALIZE_LEN
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -1761,6 +2174,36 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; SLA_ACCEPT_EXTRA_LEN]);
         }
+    } else if is_channel_accept {
+        if let Some(extra) = &p.channel_accept {
+            out.extend_from_slice(&extra.channel_object_id);
+            out.extend_from_slice(&extra.party_a_entity_id);
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; CHANNEL_ACCEPT_EXTRA_LEN]);
+        }
+    } else if is_channel_close {
+        if let Some(extra) = &p.channel_close {
+            out.extend_from_slice(&extra.channel_object_id);
+            out.extend_from_slice(&extra.party_a_entity_id);
+            out.extend_from_slice(&extra.nonce.to_be_bytes());
+            out.extend_from_slice(&extra.balance_a.to_be_bytes());
+            out.extend_from_slice(&extra.balance_b.to_be_bytes());
+            out.push(extra.is_final);
+            out.extend_from_slice(&extra.sig_a);
+            out.extend_from_slice(&extra.sig_b);
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; CHANNEL_CLOSE_EXTRA_LEN]);
+        }
+    } else if is_channel_finalize {
+        if let Some(extra) = &p.channel_finalize {
+            out.extend_from_slice(&extra.channel_object_id);
+            out.extend_from_slice(&extra.party_a_entity_id);
+        } else {
+            // Zero-tail in the inconsistent-release-build path.
+            out.extend_from_slice(&[0u8; CHANNEL_FINALIZE_EXTRA_LEN]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -1786,6 +2229,7 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
 /// # Errors
 /// Returns error if payload length, version, or signal type is invalid.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::similar_names)]
 pub fn decode_signal_commitment_payload_v1(
     payload: &[u8],
 ) -> Result<SignalCommitmentPayloadV1, ExecError<()>> {
@@ -1812,7 +2256,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 18, // max valid signal type (Week 31: SlaAccept = 18)
+            expected: 21, // max valid signal type (Week 32: ChannelFinalize = 21)
             got: payload[33],
         },
     )?;
@@ -1832,6 +2276,9 @@ pub fn decode_signal_commitment_payload_v1(
     let is_payment_request = signal_type == novai_ai_entities::AiSignalType::PaymentRequest;
     let is_service_attestation = signal_type == novai_ai_entities::AiSignalType::ServiceAttestation;
     let is_sla_accept = signal_type == novai_ai_entities::AiSignalType::SlaAccept;
+    let is_channel_accept = signal_type == novai_ai_entities::AiSignalType::ChannelAccept;
+    let is_channel_close = signal_type == novai_ai_entities::AiSignalType::ChannelClose;
+    let is_channel_finalize = signal_type == novai_ai_entities::AiSignalType::ChannelFinalize;
     let (
         reputation,
         purchase,
@@ -1845,6 +2292,9 @@ pub fn decode_signal_commitment_payload_v1(
         payment_request,
         service_attestation,
         sla_accept,
+        channel_accept,
+        channel_close,
+        channel_finalize,
     ) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -1862,6 +2312,9 @@ pub fn decode_signal_commitment_payload_v1(
                 event_type,
                 points_delta,
             }),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -1911,6 +2364,9 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
     } else if is_stake_deposit {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN {
@@ -1926,6 +2382,9 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeDepositExtraV1 { amount }),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -1951,6 +2410,9 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeWithdrawExtraV1 { amount }),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -1992,6 +2454,9 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
     } else if is_composition_check {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN {
@@ -2020,6 +2485,9 @@ pub fn decode_signal_commitment_payload_v1(
                 failed_dependency_idx,
                 failure_reason,
             }),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -2133,6 +2601,9 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
     } else if is_subscription_create {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN {
@@ -2182,6 +2653,9 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
     } else if is_subscription_cancel {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN {
@@ -2202,6 +2676,9 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(SubscriptionCancelExtraV1 { subscription_id }),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -2258,6 +2735,9 @@ pub fn decode_signal_commitment_payload_v1(
             }),
             None,
             None,
+            None,
+            None,
+            None,
         )
     } else if is_service_attestation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN {
@@ -2291,6 +2771,9 @@ pub fn decode_signal_commitment_payload_v1(
                 status,
             }),
             None,
+            None,
+            None,
+            None,
         )
     } else if is_sla_accept {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SLA_ACCEPT_LEN {
@@ -2319,6 +2802,132 @@ pub fn decode_signal_commitment_payload_v1(
                 sla_object_id,
                 buyer_entity_id,
             }),
+            None,
+            None,
+            None,
+        )
+    } else if is_channel_accept {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_ACCEPT_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_ACCEPT_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut channel_object_id = [0u8; 32];
+        channel_object_id.copy_from_slice(&payload[66..98]);
+        let mut party_a_entity_id = [0u8; 32];
+        party_a_entity_id.copy_from_slice(&payload[98..130]);
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(ChannelAcceptExtraV1 {
+                channel_object_id,
+                party_a_entity_id,
+            }),
+            None,
+            None,
+        )
+    } else if is_channel_close {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_CLOSE_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_CLOSE_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut channel_object_id = [0u8; 32];
+        channel_object_id.copy_from_slice(&payload[66..98]);
+        let mut party_a_entity_id = [0u8; 32];
+        party_a_entity_id.copy_from_slice(&payload[98..130]);
+        let nonce = u64::from_be_bytes([
+            payload[130],
+            payload[131],
+            payload[132],
+            payload[133],
+            payload[134],
+            payload[135],
+            payload[136],
+            payload[137],
+        ]);
+        let mut party_a_balance_bytes = [0u8; 16];
+        party_a_balance_bytes.copy_from_slice(&payload[138..154]);
+        let balance_a = u128::from_be_bytes(party_a_balance_bytes);
+        let mut party_b_balance_bytes = [0u8; 16];
+        party_b_balance_bytes.copy_from_slice(&payload[154..170]);
+        let balance_b = u128::from_be_bytes(party_b_balance_bytes);
+        let is_final = payload[170];
+        if is_final != CHANNEL_CLOSE_NOT_FINAL && is_final != CHANNEL_CLOSE_IS_FINAL {
+            return Err(ExecError::ChannelCloseInvalidIsFinalFlag { byte: is_final });
+        }
+        let mut sig_a = [0u8; 64];
+        sig_a.copy_from_slice(&payload[171..235]);
+        let mut sig_b = [0u8; 64];
+        sig_b.copy_from_slice(&payload[235..299]);
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(ChannelCloseExtraV1 {
+                channel_object_id,
+                party_a_entity_id,
+                nonce,
+                balance_a,
+                balance_b,
+                is_final,
+                sig_a,
+                sig_b,
+            }),
+            None,
+        )
+    } else if is_channel_finalize {
+        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_FINALIZE_LEN {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_FINALIZE_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut channel_object_id = [0u8; 32];
+        channel_object_id.copy_from_slice(&payload[66..98]);
+        let mut party_a_entity_id = [0u8; 32];
+        party_a_entity_id.copy_from_slice(&payload[98..130]);
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(ChannelFinalizeExtraV1 {
+                channel_object_id,
+                party_a_entity_id,
+            }),
         )
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
@@ -2328,7 +2937,8 @@ pub fn decode_signal_commitment_payload_v1(
             });
         }
         (
-            None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None,
         )
     };
 
@@ -2348,6 +2958,9 @@ pub fn decode_signal_commitment_payload_v1(
         payment_request,
         service_attestation,
         sla_accept,
+        channel_accept,
+        channel_close,
+        channel_finalize,
     })
 }
 
@@ -10460,6 +11073,9 @@ mod tests {
             payment_request: Some(make_payment_request_extra()),
             service_attestation: None,
             sla_accept: None,
+            channel_accept: None,
+            channel_close: None,
+            channel_finalize: None,
         };
         encode_signal_commitment_payload_v1(&p)
     }
@@ -10489,6 +11105,9 @@ mod tests {
             payment_request: None,
             service_attestation: Some(make_service_attestation_extra()),
             sla_accept: None,
+            channel_accept: None,
+            channel_close: None,
+            channel_finalize: None,
         };
         encode_signal_commitment_payload_v1(&p)
     }
@@ -10909,7 +11528,8 @@ mod tests {
         // Smoke test that the execution crate's view of AiSignalType
         // matches the ai_entities crate. Week 28 added PaymentRequest
         // and ServiceAttestation at 16/17; Week 31 added SlaAccept at
-        // 18 and shifted the first invalid byte to 19.
+        // 18; Week 32 added ChannelAccept/Close/Finalize at 19/20/21
+        // and shifted the first invalid byte to 22.
         assert_eq!(
             novai_ai_entities::AiSignalType::from_byte(16),
             Some(novai_ai_entities::AiSignalType::PaymentRequest),
@@ -10922,7 +11542,19 @@ mod tests {
             novai_ai_entities::AiSignalType::from_byte(18),
             Some(novai_ai_entities::AiSignalType::SlaAccept),
         );
-        assert_eq!(novai_ai_entities::AiSignalType::from_byte(19), None);
+        assert_eq!(
+            novai_ai_entities::AiSignalType::from_byte(19),
+            Some(novai_ai_entities::AiSignalType::ChannelAccept),
+        );
+        assert_eq!(
+            novai_ai_entities::AiSignalType::from_byte(20),
+            Some(novai_ai_entities::AiSignalType::ChannelClose),
+        );
+        assert_eq!(
+            novai_ai_entities::AiSignalType::from_byte(21),
+            Some(novai_ai_entities::AiSignalType::ChannelFinalize),
+        );
+        assert_eq!(novai_ai_entities::AiSignalType::from_byte(22), None);
     }
 
     // ========================================================================

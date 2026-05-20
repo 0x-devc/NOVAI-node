@@ -114,6 +114,41 @@ pub enum AiSignalType {
     /// place (it was written at create time). Carries a 64-byte tail:
     /// sla_object_id:32 | buyer_entity_id:32.
     SlaAccept = 18,
+    /// Payment channel accept (Week 32): the issuing entity (party B,
+    /// the counterparty named in a previously proposed `PaymentChannel`
+    /// memory object) accepts the channel. The handler loads the
+    /// channel memory object via the embedded party A entity id and
+    /// channel object id, verifies the signal issuer equals the
+    /// channel's `party_b_entity_id`, debits B's `economic_balance` by
+    /// the channel's `deposit_b`, transitions the channel from
+    /// `PAYMENT_CHANNEL_STATUS_PROPOSED` to `_OPEN`, sets
+    /// `accepted_at_height`, and bumps `balance_b` to `deposit_b`.
+    /// Carries a 64-byte tail: channel_object_id:32 | party_a_entity_id:32.
+    ChannelAccept = 19,
+    /// Payment channel close (Week 32): handles both cooperative
+    /// settle (instant) and unilateral close (opens a dispute window).
+    /// Carries a 233-byte tail: channel_object_id:32 |
+    /// party_a_entity_id:32 | nonce_be:8 | balance_a_be:16 |
+    /// balance_b_be:16 | is_final:1 | sig_a:64 | sig_b:64. Both party
+    /// signatures are always required (even on unilateral close); the
+    /// `is_final` flag distinguishes cooperative settle (instant
+    /// distribution + memory object delete) from unilateral close
+    /// (status -> CLOSING, dispute window opens). Inside the dispute
+    /// window a strictly larger nonce overrides the recorded state.
+    /// The submitter signs the enclosing `TxV1` and pays the fee;
+    /// either participant may submit.
+    ChannelClose = 20,
+    /// Payment channel finalize (Week 32): credits the recorded
+    /// `balance_a` / `balance_b` back to the parties'
+    /// `economic_balance` and deletes the channel memory object plus
+    /// its secondary indexes. Valid only when `status ==
+    /// PAYMENT_CHANNEL_STATUS_CLOSING` and `current_height >
+    /// dispute_deadline_height`. Permissionless: any active AI entity
+    /// may submit (the parties have aligned incentives to submit
+    /// themselves; allowing third parties means a finalize is never
+    /// gated on a specific participant's liveness). Carries a 64-byte
+    /// tail: channel_object_id:32 | party_a_entity_id:32.
+    ChannelFinalize = 21,
 }
 
 impl AiSignalType {
@@ -144,6 +179,9 @@ impl AiSignalType {
             16 => Some(AiSignalType::PaymentRequest),
             17 => Some(AiSignalType::ServiceAttestation),
             18 => Some(AiSignalType::SlaAccept),
+            19 => Some(AiSignalType::ChannelAccept),
+            20 => Some(AiSignalType::ChannelClose),
+            21 => Some(AiSignalType::ChannelFinalize),
             _ => None,
         }
     }
@@ -265,8 +303,23 @@ mod tests {
         );
         assert_eq!(
             AiSignalType::from_byte(19),
+            Some(AiSignalType::ChannelAccept),
+            "19 must decode to ChannelAccept (Week 32)"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(20),
+            Some(AiSignalType::ChannelClose),
+            "20 must decode to ChannelClose (Week 32)"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(21),
+            Some(AiSignalType::ChannelFinalize),
+            "21 must decode to ChannelFinalize (Week 32)"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(22),
             None,
-            "19 must be rejected as unknown signal type"
+            "22 must be rejected as unknown signal type"
         );
         assert_eq!(AiSignalType::CompositionCheck.to_byte(), 12);
         assert_eq!(AiSignalType::ProofSubmission.to_byte(), 13);
@@ -274,6 +327,10 @@ mod tests {
         assert_eq!(AiSignalType::SubscriptionCancel.to_byte(), 15);
         assert_eq!(AiSignalType::PaymentRequest.to_byte(), 16);
         assert_eq!(AiSignalType::ServiceAttestation.to_byte(), 17);
+        assert_eq!(AiSignalType::SlaAccept.to_byte(), 18);
+        assert_eq!(AiSignalType::ChannelAccept.to_byte(), 19);
+        assert_eq!(AiSignalType::ChannelClose.to_byte(), 20);
+        assert_eq!(AiSignalType::ChannelFinalize.to_byte(), 21);
     }
 
     #[test]
