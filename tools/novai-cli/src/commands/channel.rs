@@ -284,16 +284,14 @@ pub async fn run_close(
     let channel_id_bytes = parse_hex32(channel_object_id, "channel_object_id")?;
     let party_a_bytes = parse_hex32(party_a_entity_id, "party_a_entity_id")?;
 
-    let sig_a_raw =
-        hex::decode(sig_a_hex).map_err(|e| format!("Invalid sig_a hex: {e}"))?;
+    let sig_a_raw = hex::decode(sig_a_hex).map_err(|e| format!("Invalid sig_a hex: {e}"))?;
     if sig_a_raw.len() != 64 {
         return Err(format!("sig_a must be 64 bytes, got {}", sig_a_raw.len()));
     }
     let mut sig_a = [0u8; 64];
     sig_a.copy_from_slice(&sig_a_raw);
 
-    let sig_b_raw =
-        hex::decode(sig_b_hex).map_err(|e| format!("Invalid sig_b hex: {e}"))?;
+    let sig_b_raw = hex::decode(sig_b_hex).map_err(|e| format!("Invalid sig_b hex: {e}"))?;
     if sig_b_raw.len() != 64 {
         return Err(format!("sig_b must be 64 bytes, got {}", sig_b_raw.len()));
     }
@@ -381,7 +379,11 @@ pub async fn run_close(
     } else {
         println!(
             "Channel close submitted ({})",
-            if is_final { "cooperative settle" } else { "unilateral / dispute" }
+            if is_final {
+                "cooperative settle"
+            } else {
+                "unilateral / dispute"
+            }
         );
         println!("Channel:    {channel_object_id}");
         println!("Party A:    {party_a_entity_id}");
@@ -613,7 +615,10 @@ fn print_single(channel: Option<serde_json::Value>, json: bool) {
         "Balance B:               {}",
         c["balance_b"].as_str().unwrap_or("0")
     );
-    println!("Nonce:                   {}", c["nonce"].as_u64().unwrap_or(0));
+    println!(
+        "Nonce:                   {}",
+        c["nonce"].as_u64().unwrap_or(0)
+    );
     println!(
         "Proposed at:             {}",
         c["proposed_at_height"].as_u64().unwrap_or(0)

@@ -90,7 +90,14 @@ fn make_keyed_entity(
 ) -> KeyedEntity {
     let sk = SigningKey::from_bytes(&seed);
     let pubkey = sk.verifying_key().to_bytes();
-    let mut entity = AiEntity::new_with_pubkey(code_hash, creator, AutonomyMode::Gated, caps(), pubkey, 1000);
+    let mut entity = AiEntity::new_with_pubkey(
+        code_hash,
+        creator,
+        AutonomyMode::Gated,
+        caps(),
+        pubkey,
+        1000,
+    );
     entity.economic_balance = balance;
     db.apply_batch(&[
         write_ai_entity_op(&entity),
@@ -126,7 +133,12 @@ fn sample_channel(
     }
 }
 
-fn propose(db: &mut MemKv, party_a: &AiEntity, nonce: u64, channel: &PaymentChannelData) -> [u8; 32] {
+fn propose(
+    db: &mut MemKv,
+    party_a: &AiEntity,
+    nonce: u64,
+    channel: &PaymentChannelData,
+) -> [u8; 32] {
     let payload = encode_create_memory_object_payload_v1(&CreateMemoryObjectPayloadV1 {
         object_type: MemoryObjectType::PaymentChannel,
         data: channel.encode().to_vec(),
@@ -143,7 +155,13 @@ fn propose(db: &mut MemKv, party_a: &AiEntity, nonce: u64, channel: &PaymentChan
     apply_create_memory_object_tx(db, &tx, HEIGHT_PROPOSE).expect("propose succeeds")
 }
 
-fn accept(db: &mut MemKv, party_b: &AiEntity, nonce: u64, channel_object_id: [u8; 32], party_a_id: [u8; 32]) {
+fn accept(
+    db: &mut MemKv,
+    party_b: &AiEntity,
+    nonce: u64,
+    channel_object_id: [u8; 32],
+    party_a_id: [u8; 32],
+) {
     let payload = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
         signal_hash: [0xEFu8; 32],
         signal_type: AiSignalType::ChannelAccept,
@@ -346,11 +364,19 @@ fn channel_cooperative_settle_credits_and_deletes() {
         .unwrap()
         .is_none());
     assert!(db
-        .get(&channel_by_party_a_key(&a.entity.id, HEIGHT_PROPOSE, &object_id))
+        .get(&channel_by_party_a_key(
+            &a.entity.id,
+            HEIGHT_PROPOSE,
+            &object_id
+        ))
         .unwrap()
         .is_none());
     assert!(db
-        .get(&channel_by_party_b_key(&b.entity.id, HEIGHT_PROPOSE, &object_id))
+        .get(&channel_by_party_b_key(
+            &b.entity.id,
+            HEIGHT_PROPOSE,
+            &object_id
+        ))
         .unwrap()
         .is_none());
 
@@ -941,14 +967,23 @@ fn channel_close_rejects_balance_imbalance() {
         [0x09u8; 32],
     );
     let err = apply_signal_commitment_tx(&mut db, &tx, HEIGHT_CLOSE).unwrap_err();
-    assert!(matches!(err, ExecError::ChannelCloseBalanceImbalance { .. }));
+    assert!(matches!(
+        err,
+        ExecError::ChannelCloseBalanceImbalance { .. }
+    ));
 }
 
 #[test]
 fn channel_close_rejects_submitter_not_participant() {
     let mut db = MemKv::new();
     let (a, b, object_id) = setup_open_channel(&mut db, [0x1Bu8; 32], [0x1Cu8; 32]);
-    let intruder = make_keyed_entity(&mut db, [0x1Du8; 32], [0x2Du8; 32], [0x1Eu8; 32], PROPOSER_BALANCE);
+    let intruder = make_keyed_entity(
+        &mut db,
+        [0x1Du8; 32],
+        [0x2Du8; 32],
+        [0x1Eu8; 32],
+        PROPOSER_BALANCE,
+    );
 
     let nonce: u64 = 1;
     let balance_a = DEFAULT_DEPOSIT_A;
@@ -987,7 +1022,10 @@ fn channel_close_rejects_submitter_not_participant() {
         [0x0Au8; 32],
     );
     let err = apply_signal_commitment_tx(&mut db, &tx, HEIGHT_CLOSE).unwrap_err();
-    assert!(matches!(err, ExecError::ChannelCloseSubmitterNotParticipant));
+    assert!(matches!(
+        err,
+        ExecError::ChannelCloseSubmitterNotParticipant
+    ));
 }
 
 #[test]
@@ -1039,8 +1077,20 @@ fn channel_close_rejects_initial_state_mismatch() {
 fn channel_close_rejects_proposed_status() {
     // Create but DO NOT accept; the channel stays in PROPOSED.
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x21u8; 32], [0x31u8; 32], [0x22u8; 32], PROPOSER_BALANCE);
-    let b = make_keyed_entity(&mut db, [0x23u8; 32], [0x33u8; 32], [0x24u8; 32], COUNTERPARTY_BALANCE);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x21u8; 32],
+        [0x31u8; 32],
+        [0x22u8; 32],
+        PROPOSER_BALANCE,
+    );
+    let b = make_keyed_entity(
+        &mut db,
+        [0x23u8; 32],
+        [0x33u8; 32],
+        [0x24u8; 32],
+        COUNTERPARTY_BALANCE,
+    );
     let channel = sample_channel(&a.entity, &b.entity, DEFAULT_DEPOSIT_A, DEFAULT_DEPOSIT_B);
     let object_id = propose(&mut db, &a.entity, 0, &channel);
 
@@ -1090,7 +1140,13 @@ fn channel_close_rejects_proposed_status() {
 #[test]
 fn channel_close_rejects_when_channel_not_found() {
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x25u8; 32], [0x35u8; 32], [0x26u8; 32], PROPOSER_BALANCE);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x25u8; 32],
+        [0x35u8; 32],
+        [0x26u8; 32],
+        PROPOSER_BALANCE,
+    );
     let bogus = [0xAAu8; 32];
     let sig = [0u8; 64];
     let tx = make_close_tx(

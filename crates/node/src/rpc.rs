@@ -2326,9 +2326,9 @@ fn handle_list_channels_by_party_a(
     let db = db.lock_or_recover();
     let pairs = get_channels_by_party_a(&*db, &entity_id, params.start_height, params.end_height)
         .map_err(|_| RpcError {
-            code: -32002,
-            message: "State query failed".to_string(),
-        })?;
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
 
     Ok(ListChannelsResult {
         channels: pairs.into_iter().map(PaymentChannelJson::from).collect(),
@@ -2364,9 +2364,9 @@ fn handle_list_channels_by_party_b(
     let db = db.lock_or_recover();
     let pairs = get_channels_by_party_b(&*db, &entity_id, params.start_height, params.end_height)
         .map_err(|_| RpcError {
-            code: -32002,
-            message: "State query failed".to_string(),
-        })?;
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
 
     Ok(ListChannelsResult {
         channels: pairs.into_iter().map(PaymentChannelJson::from).collect(),

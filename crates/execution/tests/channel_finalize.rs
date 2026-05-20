@@ -80,8 +80,14 @@ fn make_keyed_entity(
 ) -> KeyedEntity {
     let sk = SigningKey::from_bytes(&seed);
     let pubkey = sk.verifying_key().to_bytes();
-    let mut entity =
-        AiEntity::new_with_pubkey(code_hash, creator, AutonomyMode::Gated, caps(), pubkey, 1000);
+    let mut entity = AiEntity::new_with_pubkey(
+        code_hash,
+        creator,
+        AutonomyMode::Gated,
+        caps(),
+        pubkey,
+        1000,
+    );
     entity.economic_balance = balance;
     db.apply_batch(&[
         write_ai_entity_op(&entity),
@@ -117,7 +123,12 @@ fn sample_channel(
     }
 }
 
-fn propose(db: &mut MemKv, party_a: &AiEntity, nonce: u64, channel: &PaymentChannelData) -> [u8; 32] {
+fn propose(
+    db: &mut MemKv,
+    party_a: &AiEntity,
+    nonce: u64,
+    channel: &PaymentChannelData,
+) -> [u8; 32] {
     let payload = encode_create_memory_object_payload_v1(&CreateMemoryObjectPayloadV1 {
         object_type: MemoryObjectType::PaymentChannel,
         data: channel.encode().to_vec(),
@@ -328,7 +339,18 @@ fn channel_finalize_by_party_a_credits_both_and_deletes() {
     // Unilateral close at nonce 3 (A paid B 30k).
     let bal_a = DEFAULT_DEPOSIT_A - 30_000;
     let bal_b = DEFAULT_DEPOSIT_B + 30_000;
-    close_unilateral(&mut db, &a, 1, object_id, &a, &b, 3, bal_a, bal_b, [0x01u8; 32]);
+    close_unilateral(
+        &mut db,
+        &a,
+        1,
+        object_id,
+        &a,
+        &b,
+        3,
+        bal_a,
+        bal_b,
+        [0x01u8; 32],
+    );
 
     let a_before = entity_balance(&db, &a.entity.id);
     let b_before = entity_balance(&db, &b.entity.id);
@@ -343,11 +365,19 @@ fn channel_finalize_by_party_a_credits_both_and_deletes() {
         .unwrap()
         .is_none());
     assert!(db
-        .get(&channel_by_party_a_key(&a.entity.id, HEIGHT_PROPOSE, &object_id))
+        .get(&channel_by_party_a_key(
+            &a.entity.id,
+            HEIGHT_PROPOSE,
+            &object_id
+        ))
         .unwrap()
         .is_none());
     assert!(db
-        .get(&channel_by_party_b_key(&b.entity.id, HEIGHT_PROPOSE, &object_id))
+        .get(&channel_by_party_b_key(
+            &b.entity.id,
+            HEIGHT_PROPOSE,
+            &object_id
+        ))
         .unwrap()
         .is_none());
 
@@ -366,7 +396,18 @@ fn channel_finalize_by_party_b_credits_both_and_deletes() {
 
     let bal_a = DEFAULT_DEPOSIT_A + 25_000;
     let bal_b = DEFAULT_DEPOSIT_B - 25_000;
-    close_unilateral(&mut db, &a, 1, object_id, &a, &b, 7, bal_a, bal_b, [0x03u8; 32]);
+    close_unilateral(
+        &mut db,
+        &a,
+        1,
+        object_id,
+        &a,
+        &b,
+        7,
+        bal_a,
+        bal_b,
+        [0x03u8; 32],
+    );
 
     let a_before = entity_balance(&db, &a.entity.id);
     let b_before = entity_balance(&db, &b.entity.id);
@@ -401,7 +442,18 @@ fn channel_finalize_by_third_party_credits_participants_only() {
 
     let bal_a = DEFAULT_DEPOSIT_A - 10_000;
     let bal_b = DEFAULT_DEPOSIT_B + 10_000;
-    close_unilateral(&mut db, &a, 1, object_id, &a, &b, 2, bal_a, bal_b, [0x05u8; 32]);
+    close_unilateral(
+        &mut db,
+        &a,
+        1,
+        object_id,
+        &a,
+        &b,
+        2,
+        bal_a,
+        bal_b,
+        [0x05u8; 32],
+    );
 
     let a_before = entity_balance(&db, &a.entity.id);
     let b_before = entity_balance(&db, &b.entity.id);
@@ -445,7 +497,18 @@ fn channel_full_lifecycle_propose_accept_close_finalize() {
     // lifetime. nonce = 12, balances reflect the cumulative shift.
     let final_a = DEFAULT_DEPOSIT_A - 75_000;
     let final_b = DEFAULT_DEPOSIT_B + 75_000;
-    close_unilateral(&mut db, &a, 1, object_id, &a, &b, 12, final_a, final_b, [0x07u8; 32]);
+    close_unilateral(
+        &mut db,
+        &a,
+        1,
+        object_id,
+        &a,
+        &b,
+        12,
+        final_a,
+        final_b,
+        [0x07u8; 32],
+    );
 
     // After close: A paid CLOSE_FEE; B paid nothing extra. Funds are
     // still locked in the channel record.
@@ -479,8 +542,10 @@ fn channel_full_lifecycle_propose_accept_close_finalize() {
     // all the on-chain fees that went to the fee pool.
     let total_pre = PROPOSER_BALANCE + COUNTERPARTY_BALANCE;
     let total_post = a_final + b_final;
-    let fees_paid =
-        u128::from(CREATE_FEE) + u128::from(ACCEPT_FEE) + u128::from(CLOSE_FEE) + u128::from(FINALIZE_FEE);
+    let fees_paid = u128::from(CREATE_FEE)
+        + u128::from(ACCEPT_FEE)
+        + u128::from(CLOSE_FEE)
+        + u128::from(FINALIZE_FEE);
     assert_eq!(total_pre - fees_paid, total_post);
 }
 
@@ -495,7 +560,18 @@ fn channel_finalize_before_deadline_rejected() {
 
     let bal_a = DEFAULT_DEPOSIT_A;
     let bal_b = DEFAULT_DEPOSIT_B;
-    close_unilateral(&mut db, &a, 1, object_id, &a, &b, 0, bal_a, bal_b, [0x09u8; 32]);
+    close_unilateral(
+        &mut db,
+        &a,
+        1,
+        object_id,
+        &a,
+        &b,
+        0,
+        bal_a,
+        bal_b,
+        [0x09u8; 32],
+    );
 
     // Try to finalize AT the deadline (current_height ==
     // dispute_deadline_height; rule is current must be strictly
@@ -530,8 +606,20 @@ fn channel_finalize_on_open_status_rejected() {
 fn channel_finalize_on_proposed_status_rejected() {
     // Create but DO NOT accept; status is PROPOSED.
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x14u8; 32], [0x24u8; 32], [0x15u8; 32], PROPOSER_BALANCE);
-    let b = make_keyed_entity(&mut db, [0x16u8; 32], [0x26u8; 32], [0x17u8; 32], COUNTERPARTY_BALANCE);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x14u8; 32],
+        [0x24u8; 32],
+        [0x15u8; 32],
+        PROPOSER_BALANCE,
+    );
+    let b = make_keyed_entity(
+        &mut db,
+        [0x16u8; 32],
+        [0x26u8; 32],
+        [0x17u8; 32],
+        COUNTERPARTY_BALANCE,
+    );
     let channel = sample_channel(&a.entity, &b.entity, DEFAULT_DEPOSIT_A, DEFAULT_DEPOSIT_B);
     let object_id = propose(&mut db, &a.entity, 0, &channel);
 
@@ -548,7 +636,13 @@ fn channel_finalize_on_proposed_status_rejected() {
 #[test]
 fn channel_finalize_not_found_rejected() {
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x18u8; 32], [0x28u8; 32], [0x19u8; 32], PROPOSER_BALANCE);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x18u8; 32],
+        [0x28u8; 32],
+        [0x19u8; 32],
+        PROPOSER_BALANCE,
+    );
     let bogus = [0xDEu8; 32];
     let tx = make_finalize_tx(&a.entity, 0, bogus, a.entity.id, [0x0Du8; 32]);
     let err = apply_signal_commitment_tx(&mut db, &tx, past_deadline_height()).unwrap_err();
@@ -564,7 +658,18 @@ fn channel_finalize_double_finalize_rejected() {
 
     let bal_a = DEFAULT_DEPOSIT_A;
     let bal_b = DEFAULT_DEPOSIT_B;
-    close_unilateral(&mut db, &a, 1, object_id, &a, &b, 0, bal_a, bal_b, [0x0Eu8; 32]);
+    close_unilateral(
+        &mut db,
+        &a,
+        1,
+        object_id,
+        &a,
+        &b,
+        0,
+        bal_a,
+        bal_b,
+        [0x0Eu8; 32],
+    );
 
     let tx = make_finalize_tx(&a.entity, 2, object_id, a.entity.id, [0x0Fu8; 32]);
     apply_signal_commitment_tx(&mut db, &tx, past_deadline_height()).expect("first finalize");
@@ -581,7 +686,13 @@ fn channel_finalize_object_type_mismatch_rejected() {
     // the finalize handler. The handler must reject with the
     // type-mismatch variant carrying the resolved type byte.
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x1Cu8; 32], [0x2Cu8; 32], [0x1Du8; 32], PROPOSER_BALANCE);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x1Cu8; 32],
+        [0x2Cu8; 32],
+        [0x1Du8; 32],
+        PROPOSER_BALANCE,
+    );
 
     let payload = encode_create_memory_object_payload_v1(&CreateMemoryObjectPayloadV1 {
         object_type: MemoryObjectType::ChainSummary,

@@ -118,7 +118,12 @@ fn sample_channel(
     }
 }
 
-fn propose(db: &mut MemKv, party_a: &AiEntity, nonce: u64, channel: &PaymentChannelData) -> [u8; 32] {
+fn propose(
+    db: &mut MemKv,
+    party_a: &AiEntity,
+    nonce: u64,
+    channel: &PaymentChannelData,
+) -> [u8; 32] {
     let payload = encode_create_memory_object_payload_v1(&CreateMemoryObjectPayloadV1 {
         object_type: MemoryObjectType::PaymentChannel,
         data: channel.encode().to_vec(),
@@ -353,7 +358,10 @@ fn channel_accept_rejects_insufficient_balance() {
     let tx = make_accept_tx(&b, 0, object_id, a.id);
     let err = apply_signal_commitment_tx(&mut db, &tx, HEIGHT_ACCEPT).unwrap_err();
     match err {
-        ExecError::ChannelAcceptInsufficientBalance { required, available } => {
+        ExecError::ChannelAcceptInsufficientBalance {
+            required,
+            available,
+        } => {
             assert_eq!(required, DEFAULT_DEPOSIT_B);
             // After fee debit upstream, available == DEFAULT_DEPOSIT_B - 1.
             assert_eq!(available, DEFAULT_DEPOSIT_B - 1);
@@ -387,6 +395,9 @@ fn channel_accept_atomic_on_failure() {
     let intruder_after = novai_execution::lookup_ai_entity_by_address(&db, &intruder.id)
         .unwrap()
         .unwrap();
-    assert_eq!(intruder_after.economic_balance, intruder_before.economic_balance);
+    assert_eq!(
+        intruder_after.economic_balance,
+        intruder_before.economic_balance
+    );
     assert_eq!(intruder_after.nonce, intruder_before.nonce);
 }

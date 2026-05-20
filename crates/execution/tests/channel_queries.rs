@@ -21,10 +21,10 @@ use novai_ai_entities::{
     PAYMENT_CHANNEL_STATUS_OPEN, PAYMENT_CHANNEL_STATUS_PROPOSED, PAYMENT_CHANNEL_V1,
 };
 use novai_execution::{
-    apply_create_memory_object_tx, apply_signal_commitment_tx, encode_create_memory_object_payload_v1,
-    encode_signal_commitment_payload_v1, get_channels_by_party_a, get_channels_by_party_b,
-    get_payment_channel, write_ai_entity_op, ChannelAcceptExtraV1, CreateMemoryObjectPayloadV1,
-    SignalCommitmentPayloadV1,
+    apply_create_memory_object_tx, apply_signal_commitment_tx,
+    encode_create_memory_object_payload_v1, encode_signal_commitment_payload_v1,
+    get_channels_by_party_a, get_channels_by_party_b, get_payment_channel, write_ai_entity_op,
+    ChannelAcceptExtraV1, CreateMemoryObjectPayloadV1, SignalCommitmentPayloadV1,
 };
 use novai_state::{ai_entity_by_address_key, KvBatch, MemKv, WriteOp};
 use novai_types::{TxV1, TxVersion};
@@ -85,7 +85,13 @@ fn sample_channel(
     }
 }
 
-fn propose_at(db: &mut MemKv, party_a: &AiEntity, nonce: u64, channel: &PaymentChannelData, height: u64) -> [u8; 32] {
+fn propose_at(
+    db: &mut MemKv,
+    party_a: &AiEntity,
+    nonce: u64,
+    channel: &PaymentChannelData,
+    height: u64,
+) -> [u8; 32] {
     let payload = encode_create_memory_object_payload_v1(&CreateMemoryObjectPayloadV1 {
         object_type: MemoryObjectType::PaymentChannel,
         data: channel.encode().to_vec(),

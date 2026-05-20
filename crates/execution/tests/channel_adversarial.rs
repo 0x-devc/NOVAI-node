@@ -79,8 +79,14 @@ fn make_keyed_entity(
 ) -> KeyedEntity {
     let sk = SigningKey::from_bytes(&seed);
     let pubkey = sk.verifying_key().to_bytes();
-    let mut entity =
-        AiEntity::new_with_pubkey(code_hash, creator, AutonomyMode::Gated, caps(), pubkey, 1000);
+    let mut entity = AiEntity::new_with_pubkey(
+        code_hash,
+        creator,
+        AutonomyMode::Gated,
+        caps(),
+        pubkey,
+        1000,
+    );
     entity.economic_balance = balance;
     db.apply_batch(&[
         write_ai_entity_op(&entity),
@@ -263,8 +269,20 @@ fn channel_sig_does_not_replay_across_channels() {
     // not verify because the canonical signing bytes bind the
     // distinct channel_object_id values.
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x11u8; 32], [0x21u8; 32], [0x01u8; 32], PROPOSER_BALANCE * 2);
-    let b = make_keyed_entity(&mut db, [0x12u8; 32], [0x22u8; 32], [0x02u8; 32], COUNTERPARTY_BALANCE * 2);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x11u8; 32],
+        [0x21u8; 32],
+        [0x01u8; 32],
+        PROPOSER_BALANCE * 2,
+    );
+    let b = make_keyed_entity(
+        &mut db,
+        [0x12u8; 32],
+        [0x22u8; 32],
+        [0x02u8; 32],
+        COUNTERPARTY_BALANCE * 2,
+    );
 
     let ch_x = sample_channel(&a.entity, &b.entity, DEPOSIT_A, DEPOSIT_B);
     let oid_x = propose_at(&mut db, &a.entity, 0, &ch_x, HEIGHT_PROPOSE);
@@ -321,7 +339,9 @@ fn channel_sig_does_not_replay_across_channels() {
     assert!(matches!(err, ExecError::ChannelCloseInvalidSignatureA));
 
     // Channel Y's state is unchanged.
-    let (_, ch_y_after) = get_payment_channel(&db, &a.entity.id, &oid_y).unwrap().unwrap();
+    let (_, ch_y_after) = get_payment_channel(&db, &a.entity.id, &oid_y)
+        .unwrap()
+        .unwrap();
     assert_eq!(ch_y_after.nonce, 0);
     assert_eq!(ch_y_after.balance_a, DEPOSIT_A);
     assert_eq!(ch_y_after.balance_b, DEPOSIT_B);
@@ -333,9 +353,27 @@ fn channel_sig_does_not_replay_across_pair() {
     // The (A, B1) state is signed by B1; submitting that sig in B2's
     // slot must fail because B2's pubkey does not verify B1's sig.
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x13u8; 32], [0x23u8; 32], [0x03u8; 32], PROPOSER_BALANCE * 2);
-    let b1 = make_keyed_entity(&mut db, [0x14u8; 32], [0x24u8; 32], [0x04u8; 32], COUNTERPARTY_BALANCE);
-    let b2 = make_keyed_entity(&mut db, [0x15u8; 32], [0x25u8; 32], [0x05u8; 32], COUNTERPARTY_BALANCE);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x13u8; 32],
+        [0x23u8; 32],
+        [0x03u8; 32],
+        PROPOSER_BALANCE * 2,
+    );
+    let b1 = make_keyed_entity(
+        &mut db,
+        [0x14u8; 32],
+        [0x24u8; 32],
+        [0x04u8; 32],
+        COUNTERPARTY_BALANCE,
+    );
+    let b2 = make_keyed_entity(
+        &mut db,
+        [0x15u8; 32],
+        [0x25u8; 32],
+        [0x05u8; 32],
+        COUNTERPARTY_BALANCE,
+    );
 
     let ch_ab1 = sample_channel(&a.entity, &b1.entity, DEPOSIT_A, DEPOSIT_B);
     let oid_ab1 = propose_at(&mut db, &a.entity, 0, &ch_ab1, HEIGHT_PROPOSE);
@@ -343,7 +381,14 @@ fn channel_sig_does_not_replay_across_pair() {
 
     let ch_ab2 = sample_channel(&a.entity, &b2.entity, DEPOSIT_A, DEPOSIT_B);
     let oid_ab2 = propose_at(&mut db, &a.entity, 1, &ch_ab2, HEIGHT_PROPOSE + 1);
-    accept_at(&mut db, &b2.entity, 0, oid_ab2, a.entity.id, HEIGHT_ACCEPT + 1);
+    accept_at(
+        &mut db,
+        &b2.entity,
+        0,
+        oid_ab2,
+        a.entity.id,
+        HEIGHT_ACCEPT + 1,
+    );
 
     // A and B1 sign a state for channel (A, B1).
     let nonce: u64 = 1;
@@ -403,8 +448,20 @@ fn multi_channel_between_same_pair_allowed() {
     // Confirm via three concurrent channels between (A, B), each
     // visible in both by-party scans.
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x16u8; 32], [0x26u8; 32], [0x06u8; 32], PROPOSER_BALANCE * 5);
-    let b = make_keyed_entity(&mut db, [0x17u8; 32], [0x27u8; 32], [0x07u8; 32], COUNTERPARTY_BALANCE * 5);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x16u8; 32],
+        [0x26u8; 32],
+        [0x06u8; 32],
+        PROPOSER_BALANCE * 5,
+    );
+    let b = make_keyed_entity(
+        &mut db,
+        [0x17u8; 32],
+        [0x27u8; 32],
+        [0x07u8; 32],
+        COUNTERPARTY_BALANCE * 5,
+    );
 
     let ch1 = sample_channel(&a.entity, &b.entity, 30_000, 20_000);
     let oid1 = propose_at(&mut db, &a.entity, 0, &ch1, 100);
@@ -414,9 +471,15 @@ fn multi_channel_between_same_pair_allowed() {
     let oid3 = propose_at(&mut db, &a.entity, 2, &ch3, 300);
 
     // All three resolve cleanly.
-    assert!(get_payment_channel(&db, &a.entity.id, &oid1).unwrap().is_some());
-    assert!(get_payment_channel(&db, &a.entity.id, &oid2).unwrap().is_some());
-    assert!(get_payment_channel(&db, &a.entity.id, &oid3).unwrap().is_some());
+    assert!(get_payment_channel(&db, &a.entity.id, &oid1)
+        .unwrap()
+        .is_some());
+    assert!(get_payment_channel(&db, &a.entity.id, &oid2)
+        .unwrap()
+        .is_some());
+    assert!(get_payment_channel(&db, &a.entity.id, &oid3)
+        .unwrap()
+        .is_some());
 
     // by_party_a lists all three in height order.
     let by_a = get_channels_by_party_a(&db, &a.entity.id, 0, u64::MAX).unwrap();
@@ -456,7 +519,13 @@ fn channel_close_against_keyless_counterparty_rejected_at_sig_verify() {
     // ChannelClose attempt fails at the sig_b verification because
     // [0; 32] is not a valid Ed25519 public point.
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x18u8; 32], [0x28u8; 32], [0x08u8; 32], PROPOSER_BALANCE);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x18u8; 32],
+        [0x28u8; 32],
+        [0x08u8; 32],
+        PROPOSER_BALANCE,
+    );
     let b = make_keyless_entity(&mut db, [0x19u8; 32], [0x29u8; 32], COUNTERPARTY_BALANCE);
 
     let ch = sample_channel(&a.entity, &b, DEPOSIT_A, DEPOSIT_B);
@@ -521,8 +590,20 @@ fn channel_initial_state_close_rejected_after_state_advances() {
     // nonce-monotonicity gate's nonce-0 exception only fires when
     // channel.nonce is also 0.
     let mut db = MemKv::new();
-    let a = make_keyed_entity(&mut db, [0x1Au8; 32], [0x2Au8; 32], [0x0Au8; 32], PROPOSER_BALANCE);
-    let b = make_keyed_entity(&mut db, [0x1Bu8; 32], [0x2Bu8; 32], [0x0Bu8; 32], COUNTERPARTY_BALANCE);
+    let a = make_keyed_entity(
+        &mut db,
+        [0x1Au8; 32],
+        [0x2Au8; 32],
+        [0x0Au8; 32],
+        PROPOSER_BALANCE,
+    );
+    let b = make_keyed_entity(
+        &mut db,
+        [0x1Bu8; 32],
+        [0x2Bu8; 32],
+        [0x0Bu8; 32],
+        COUNTERPARTY_BALANCE,
+    );
     let ch = sample_channel(&a.entity, &b.entity, DEPOSIT_A, DEPOSIT_B);
     let oid = propose_at(&mut db, &a.entity, 0, &ch, HEIGHT_PROPOSE);
     accept_at(&mut db, &b.entity, 0, oid, a.entity.id, HEIGHT_ACCEPT);

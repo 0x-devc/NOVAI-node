@@ -26,9 +26,9 @@
 use novai_ai_entities::{
     AiEntity, AutonomyMode, Capabilities, MemoryObjectType, PaymentChannelData,
     CHANNEL_DISPUTE_WINDOW_DEFAULT_BLOCKS, CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS,
-    CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS, MAX_PAYMENT_CHANNELS_PER_ENTITY, PAYMENT_CHANNEL_RESERVED_LEN,
-    PAYMENT_CHANNEL_SIZE, PAYMENT_CHANNEL_STATUS_CLOSING, PAYMENT_CHANNEL_STATUS_OPEN,
-    PAYMENT_CHANNEL_STATUS_PROPOSED, PAYMENT_CHANNEL_V1,
+    CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS, MAX_PAYMENT_CHANNELS_PER_ENTITY,
+    PAYMENT_CHANNEL_RESERVED_LEN, PAYMENT_CHANNEL_SIZE, PAYMENT_CHANNEL_STATUS_CLOSING,
+    PAYMENT_CHANNEL_STATUS_OPEN, PAYMENT_CHANNEL_STATUS_PROPOSED, PAYMENT_CHANNEL_V1,
 };
 use novai_execution::{
     apply_create_memory_object_tx, apply_delete_memory_object_tx, apply_update_memory_object_tx,
@@ -262,7 +262,10 @@ fn channel_propose_insufficient_balance_rejected() {
     let tx = propose_tx(&a, 0, &channel);
     let err = apply_create_memory_object_tx(&mut db, &tx, HEIGHT_PROPOSE).unwrap_err();
     match err {
-        ExecError::PaymentChannelInsufficientBalanceA { required, available } => {
+        ExecError::PaymentChannelInsufficientBalanceA {
+            required,
+            available,
+        } => {
             assert_eq!(required, oversized);
             assert_eq!(available, PROPOSER_BALANCE - u128::from(CREATE_FEE));
         }
@@ -382,7 +385,13 @@ fn channel_propose_party_b_not_found_rejected() {
     let mut db = MemKv::new();
     let a = make_proposer(&mut db, [0x3Du8; 32], [0x4Du8; 32]);
     // Construct a sample channel against a non-existent party B id.
-    let phantom = AiEntity::new([0xFFu8; 32], [0xFEu8; 32], AutonomyMode::Gated, caps(), 1000);
+    let phantom = AiEntity::new(
+        [0xFFu8; 32],
+        [0xFEu8; 32],
+        AutonomyMode::Gated,
+        caps(),
+        1000,
+    );
     let channel = sample_channel(&a, &phantom, DEFAULT_DEPOSIT_A, DEFAULT_DEPOSIT_B);
     let tx = propose_tx(&a, 0, &channel);
     let err = apply_create_memory_object_tx(&mut db, &tx, HEIGHT_PROPOSE).unwrap_err();

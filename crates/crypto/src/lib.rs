@@ -1,6 +1,6 @@
 use blake3::Hasher;
-use ed25519_dalek::Signer;
 use ed25519_dalek::Signature;
+use ed25519_dalek::Signer;
 use rand_core::OsRng;
 
 use novai_codec::{encode_tx_v1_unsigned, CodecError};
@@ -59,9 +59,8 @@ pub fn channel_state_signing_bytes(
     balance_b: u128,
     is_final: bool,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(
-        DOMAIN_TAG_CHANNEL_STATE_V1.len() + 8 + 32 + 32 + 32 + 8 + 16 + 16 + 1,
-    );
+    let mut out =
+        Vec::with_capacity(DOMAIN_TAG_CHANNEL_STATE_V1.len() + 8 + 32 + 32 + 32 + 8 + 16 + 16 + 1);
     out.extend_from_slice(DOMAIN_TAG_CHANNEL_STATE_V1);
     out.extend_from_slice(&chain_id.to_be_bytes());
     out.extend_from_slice(channel_object_id);
@@ -324,23 +323,63 @@ mod tests {
         let is_final = false;
 
         let sig_a = sign_channel_state(
-            &sk_a, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b, is_final,
+            &sk_a,
+            chain_id,
+            &channel_id,
+            &party_a,
+            &party_b,
+            nonce,
+            balance_a,
+            balance_b,
+            is_final,
         );
         let sig_b = sign_channel_state(
-            &sk_b, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b, is_final,
+            &sk_b,
+            chain_id,
+            &channel_id,
+            &party_a,
+            &party_b,
+            nonce,
+            balance_a,
+            balance_b,
+            is_final,
         );
 
         assert!(verify_channel_state_signature(
-            &sig_a, &pk_a, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b,
+            &sig_a,
+            &pk_a,
+            chain_id,
+            &channel_id,
+            &party_a,
+            &party_b,
+            nonce,
+            balance_a,
+            balance_b,
             is_final,
         ));
         assert!(verify_channel_state_signature(
-            &sig_b, &pk_b, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b,
+            &sig_b,
+            &pk_b,
+            chain_id,
+            &channel_id,
+            &party_a,
+            &party_b,
+            nonce,
+            balance_a,
+            balance_b,
             is_final,
         ));
         // Cross-key: A's signature does not verify under B's pubkey.
         assert!(!verify_channel_state_signature(
-            &sig_a, &pk_b, chain_id, &channel_id, &party_a, &party_b, nonce, balance_a, balance_b,
+            &sig_a,
+            &pk_b,
+            chain_id,
+            &channel_id,
+            &party_a,
+            &party_b,
+            nonce,
+            balance_a,
+            balance_b,
             is_final,
         ));
     }
@@ -366,14 +405,79 @@ mod tests {
 
         // Flipping any single field breaks verification.
         let mutated = [
-            (base.0 + 1, base.1, base.2, base.3, base.4, base.5, base.6, base.7),
-            (base.0, [0xFFu8; 32], base.2, base.3, base.4, base.5, base.6, base.7),
-            (base.0, base.1, [0xFFu8; 32], base.3, base.4, base.5, base.6, base.7),
-            (base.0, base.1, base.2, [0xFFu8; 32], base.4, base.5, base.6, base.7),
-            (base.0, base.1, base.2, base.3, base.4 + 1, base.5, base.6, base.7),
-            (base.0, base.1, base.2, base.3, base.4, base.5 + 1, base.6, base.7),
-            (base.0, base.1, base.2, base.3, base.4, base.5, base.6 + 1, base.7),
-            (base.0, base.1, base.2, base.3, base.4, base.5, base.6, !base.7),
+            (
+                base.0 + 1,
+                base.1,
+                base.2,
+                base.3,
+                base.4,
+                base.5,
+                base.6,
+                base.7,
+            ),
+            (
+                base.0,
+                [0xFFu8; 32],
+                base.2,
+                base.3,
+                base.4,
+                base.5,
+                base.6,
+                base.7,
+            ),
+            (
+                base.0,
+                base.1,
+                [0xFFu8; 32],
+                base.3,
+                base.4,
+                base.5,
+                base.6,
+                base.7,
+            ),
+            (
+                base.0,
+                base.1,
+                base.2,
+                [0xFFu8; 32],
+                base.4,
+                base.5,
+                base.6,
+                base.7,
+            ),
+            (
+                base.0,
+                base.1,
+                base.2,
+                base.3,
+                base.4 + 1,
+                base.5,
+                base.6,
+                base.7,
+            ),
+            (
+                base.0,
+                base.1,
+                base.2,
+                base.3,
+                base.4,
+                base.5 + 1,
+                base.6,
+                base.7,
+            ),
+            (
+                base.0,
+                base.1,
+                base.2,
+                base.3,
+                base.4,
+                base.5,
+                base.6 + 1,
+                base.7,
+            ),
+            (
+                base.0, base.1, base.2, base.3, base.4, base.5, base.6, !base.7,
+            ),
         ];
         for m in &mutated {
             assert!(
@@ -388,17 +492,7 @@ mod tests {
     #[test]
     fn channel_state_verify_rejects_garbage_pubkey() {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
-        let sig = sign_channel_state(
-            &sk,
-            0,
-            &[0u8; 32],
-            &[0u8; 32],
-            &[0u8; 32],
-            0,
-            0,
-            0,
-            false,
-        );
+        let sig = sign_channel_state(&sk, 0, &[0u8; 32], &[0u8; 32], &[0u8; 32], 0, 0, 0, false);
         // An all-zero pubkey is not a valid Ed25519 point; verification
         // must return false rather than panicking.
         let bogus = [0u8; 32];

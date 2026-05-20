@@ -3290,7 +3290,10 @@ pub fn count_payment_channels_for_entity<K: Kv>(
     let mut owner_role_prefix = Vec::with_capacity(KEY_PREFIX_AI_CHANNELS_BY_PARTY_A.len() + 32);
     owner_role_prefix.extend_from_slice(KEY_PREFIX_AI_CHANNELS_BY_PARTY_A);
     owner_role_prefix.extend_from_slice(entity_id);
-    let owner_count = db.scan_prefix(&owner_role_prefix).map_err(ExecError::Db)?.len();
+    let owner_count = db
+        .scan_prefix(&owner_role_prefix)
+        .map_err(ExecError::Db)?
+        .len();
 
     let mut counterparty_role_prefix =
         Vec::with_capacity(KEY_PREFIX_AI_CHANNELS_BY_PARTY_B.len() + 32);
@@ -4456,10 +4459,11 @@ use novai_ai_entities::{
     encode_memory_object_v1, AiEntity, AiSignalType, CompositionGraphData, MemoryObject,
     MemoryObjectType, PaymentChannelData, SignalCatalogData, SignalCommitment, SlaAgreementData,
     SubscriptionData, VerificationRecordData, VkRegistrationData,
-    CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS, CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS, MAX_PAYMENT_CHANNELS_PER_ENTITY,
-    MAX_REPUTATION_SCORE, MAX_SLAS_PER_ENTITY, MAX_SUBSCRIPTIONS_PER_ENTITY, PAYMENT_CHANNEL_RESERVED_LEN,
-    PAYMENT_CHANNEL_STATUS_CLOSING, PAYMENT_CHANNEL_STATUS_OPEN, PAYMENT_CHANNEL_STATUS_PROPOSED,
-    PAYMENT_CHANNEL_V1, SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS, SLA_MIN_DELIVERY_SUCCESS_BPS_MAX,
+    CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS, CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS,
+    MAX_PAYMENT_CHANNELS_PER_ENTITY, MAX_REPUTATION_SCORE, MAX_SLAS_PER_ENTITY,
+    MAX_SUBSCRIPTIONS_PER_ENTITY, PAYMENT_CHANNEL_RESERVED_LEN, PAYMENT_CHANNEL_STATUS_CLOSING,
+    PAYMENT_CHANNEL_STATUS_OPEN, PAYMENT_CHANNEL_STATUS_PROPOSED, PAYMENT_CHANNEL_V1,
+    SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS, SLA_MIN_DELIVERY_SUCCESS_BPS_MAX,
     SLA_MIN_UPTIME_BPS_MAX, SLA_RESERVED_LEN, SLA_STATUS_ACTIVE, SLA_STATUS_PROPOSED,
     SLA_STATUS_VIOLATED,
 };
@@ -7774,11 +7778,7 @@ fn validate_payment_channel_payload<K: Kv>(
     if channel.deposit_b == 0 {
         return Err(ExecError::PaymentChannelDepositBZero);
     }
-    if channel
-        .deposit_a
-        .checked_add(channel.deposit_b)
-        .is_none()
-    {
+    if channel.deposit_a.checked_add(channel.deposit_b).is_none() {
         return Err(ExecError::PaymentChannelDepositTotalOverflow);
     }
     // Initial on-chain state invariants: balance_a must equal deposit_a;
@@ -8064,18 +8064,10 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
     // persist until the memory object is deleted (proposer-cancel
     // while still PROPOSED, or finalize after the dispute deadline).
     if let Some(channel) = &payment_channel {
-        let by_a = channel_by_party_a_key(
-            &channel.party_a_entity_id,
-            current_height,
-            &object_id,
-        );
+        let by_a = channel_by_party_a_key(&channel.party_a_entity_id, current_height, &object_id);
         ops.push(WriteOp::Put(by_a, Vec::new()));
 
-        let by_b = channel_by_party_b_key(
-            &channel.party_b_entity_id,
-            current_height,
-            &object_id,
-        );
+        let by_b = channel_by_party_b_key(&channel.party_b_entity_id, current_height, &object_id);
         ops.push(WriteOp::Put(by_b, channel.party_a_entity_id.to_vec()));
     }
 
