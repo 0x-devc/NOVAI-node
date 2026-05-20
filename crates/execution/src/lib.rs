@@ -6402,6 +6402,130 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         }
     }
 
+    // Week 32 Phase 5: ChannelFinalize handler. After the dispute
+    // window expires (status == CLOSING and current_height >
+    // dispute_deadline_height), anyone with an active AI entity may
+    // submit a finalize signal to distribute the recorded balances
+    // back to the parties and tear down the channel record plus
+    // its indexes. Permissionless because the two parties have
+    // aligned incentives to finalize themselves; allowing third
+    // parties means liveness does not depend on either participant
+    // staying online, and a third party submitter takes nothing
+    // from the channel beyond the standard tx fee paid from their
+    // own economic_balance.
+    if payload.signal_type == AiSignalType::ChannelFinalize {
+        let extra = payload
+            .channel_finalize
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("ChannelFinalize missing extra".into()))?;
+
+        let channel_memory =
+            read_memory_object(db, &extra.party_a_entity_id, &extra.channel_object_id)?
+                .ok_or(ExecError::ChannelFinalizeNotFound)?;
+        if channel_memory.object_type != MemoryObjectType::PaymentChannel {
+            return Err(ExecError::ChannelFinalizeObjectTypeMismatch {
+                found: channel_memory.object_type.to_byte(),
+            });
+        }
+        let channel = PaymentChannelData::decode(&channel_memory.data)
+            .ok_or(ExecError::ChannelFinalizeDecodeFailed)?;
+
+        if channel.status != PAYMENT_CHANNEL_STATUS_CLOSING {
+            return Err(ExecError::ChannelFinalizeNotClosing {
+                status: channel.status,
+            });
+        }
+        if current_height <= channel.dispute_deadline_height {
+            return Err(ExecError::ChannelFinalizeBeforeDeadline {
+                current: current_height,
+                deadline: channel.dispute_deadline_height,
+            });
+        }
+
+        // Credit the recorded balances back to the two parties.
+        // The submitter is `entity`; the two participants may or may
+        // not include the submitter, so we branch on each case.
+        //
+        // When the submitter is one of the parties, mutate `entity`
+        // in place (it gets written at the end of the function via
+        // `ops.push(write_ai_entity_op(&entity))` below) and load
+        // the counterparty for a separate write. When the submitter
+        // is a third party, load BOTH parties for separate writes
+        // and leave `entity` (the submitter) untouched beyond the
+        // fee debit already applied upstream.
+        if entity.id == channel.party_a_entity_id {
+            entity.economic_balance = entity
+                .economic_balance
+                .checked_add(channel.balance_a)
+                .ok_or(ExecError::Overflow)?;
+            let mut party_b_entity = read_ai_entity(db, &channel.party_b_entity_id)?
+                .ok_or(ExecError::ChannelCounterpartyMissing)?;
+            party_b_entity.economic_balance = party_b_entity
+                .economic_balance
+                .checked_add(channel.balance_b)
+                .ok_or(ExecError::Overflow)?;
+            ops.push(write_ai_entity_op(&party_b_entity));
+        } else if entity.id == channel.party_b_entity_id {
+            entity.economic_balance = entity
+                .economic_balance
+                .checked_add(channel.balance_b)
+                .ok_or(ExecError::Overflow)?;
+            let mut party_a_entity = read_ai_entity(db, &channel.party_a_entity_id)?
+                .ok_or(ExecError::ChannelCounterpartyMissing)?;
+            party_a_entity.economic_balance = party_a_entity
+                .economic_balance
+                .checked_add(channel.balance_a)
+                .ok_or(ExecError::Overflow)?;
+            ops.push(write_ai_entity_op(&party_a_entity));
+        } else {
+            // Third-party submitter. Load BOTH participants and
+            // credit each separately.
+            let mut party_a_entity = read_ai_entity(db, &channel.party_a_entity_id)?
+                .ok_or(ExecError::ChannelCounterpartyMissing)?;
+            party_a_entity.economic_balance = party_a_entity
+                .economic_balance
+                .checked_add(channel.balance_a)
+                .ok_or(ExecError::Overflow)?;
+            let mut party_b_entity = read_ai_entity(db, &channel.party_b_entity_id)?
+                .ok_or(ExecError::ChannelCounterpartyMissing)?;
+            party_b_entity.economic_balance = party_b_entity
+                .economic_balance
+                .checked_add(channel.balance_b)
+                .ok_or(ExecError::Overflow)?;
+            ops.push(write_ai_entity_op(&party_a_entity));
+            ops.push(write_ai_entity_op(&party_b_entity));
+        }
+
+        // Tear down the channel: primary record + by-type marker +
+        // both by-party indexes, then decrement party A's memory
+        // count (party A is the memory object owner).
+        ops.push(WriteOp::Delete(ai_memory_object_key(
+            &channel.party_a_entity_id,
+            &extra.channel_object_id,
+        )));
+        ops.push(WriteOp::Delete(ai_memory_by_type_key(
+            MemoryObjectType::PaymentChannel.to_byte(),
+            &channel.party_a_entity_id,
+            &extra.channel_object_id,
+        )));
+        ops.push(WriteOp::Delete(channel_by_party_a_key(
+            &channel.party_a_entity_id,
+            channel_memory.created_at,
+            &extra.channel_object_id,
+        )));
+        ops.push(WriteOp::Delete(channel_by_party_b_key(
+            &channel.party_b_entity_id,
+            channel_memory.created_at,
+            &extra.channel_object_id,
+        )));
+
+        let count = read_memory_count(db, &channel.party_a_entity_id)?;
+        ops.push(WriteOp::Put(
+            ai_memory_count_key(&channel.party_a_entity_id),
+            encode_memory_count(count.saturating_sub(1)).to_vec(),
+        ));
+    }
+
     ops.push(write_ai_entity_op(&entity));
 
     // Apply all changes atomically
