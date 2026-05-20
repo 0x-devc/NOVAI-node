@@ -4440,9 +4440,10 @@ use novai_ai_entities::{
     SubscriptionData, VerificationRecordData, VkRegistrationData,
     CHANNEL_DISPUTE_WINDOW_MAX_BLOCKS, CHANNEL_DISPUTE_WINDOW_MIN_BLOCKS, MAX_PAYMENT_CHANNELS_PER_ENTITY,
     MAX_REPUTATION_SCORE, MAX_SLAS_PER_ENTITY, MAX_SUBSCRIPTIONS_PER_ENTITY, PAYMENT_CHANNEL_RESERVED_LEN,
-    PAYMENT_CHANNEL_STATUS_PROPOSED, PAYMENT_CHANNEL_V1, SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS,
-    SLA_MIN_DELIVERY_SUCCESS_BPS_MAX, SLA_MIN_UPTIME_BPS_MAX, SLA_RESERVED_LEN, SLA_STATUS_ACTIVE,
-    SLA_STATUS_PROPOSED, SLA_STATUS_VIOLATED,
+    PAYMENT_CHANNEL_STATUS_OPEN, PAYMENT_CHANNEL_STATUS_PROPOSED, PAYMENT_CHANNEL_V1,
+    SLA_AGREEMENT_V1, SLA_MAX_DURATION_BLOCKS, SLA_MIN_DELIVERY_SUCCESS_BPS_MAX,
+    SLA_MIN_UPTIME_BPS_MAX, SLA_RESERVED_LEN, SLA_STATUS_ACTIVE, SLA_STATUS_PROPOSED,
+    SLA_STATUS_VIOLATED,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
 use novai_crypto::{Groth16Verifier, StubZkVerifier, ZkVerifier};
@@ -6081,6 +6082,69 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         updated.updated_at = current_height;
         ops.push(WriteOp::Put(
             ai_memory_object_key(&extra.buyer_entity_id, &extra.sla_object_id),
+            encode_memory_object_v1(&updated),
+        ));
+    }
+
+    // Week 32 Phase 3: ChannelAccept handler. Party B (the issuer of
+    // this signal) accepts a PROPOSED payment channel that party A
+    // created via CREATE_MEMORY_OBJECT. The handler resolves the
+    // primary record via (party_a_entity_id, channel_object_id),
+    // verifies the issuer is the named counterparty, debits
+    // deposit_b from issuer's economic_balance (already had the tx
+    // fee debited above), and transitions the channel from PROPOSED
+    // to OPEN. The two by-party index entries written at create stay
+    // in place; they remain valid for the channel's whole lifetime.
+    if payload.signal_type == AiSignalType::ChannelAccept {
+        let extra = payload
+            .channel_accept
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("ChannelAccept missing extra".into()))?;
+
+        let channel_memory =
+            read_memory_object(db, &extra.party_a_entity_id, &extra.channel_object_id)?
+                .ok_or(ExecError::ChannelAcceptNotFound)?;
+        if channel_memory.object_type != MemoryObjectType::PaymentChannel {
+            return Err(ExecError::ChannelAcceptObjectTypeMismatch {
+                found: channel_memory.object_type.to_byte(),
+            });
+        }
+        let mut channel = PaymentChannelData::decode(&channel_memory.data)
+            .ok_or(ExecError::ChannelAcceptDecodeFailed)?;
+        if channel.status != PAYMENT_CHANNEL_STATUS_PROPOSED {
+            return Err(ExecError::ChannelAcceptNotProposed {
+                status: channel.status,
+            });
+        }
+        if channel.party_b_entity_id != entity.id {
+            return Err(ExecError::ChannelAcceptCounterpartyMismatch);
+        }
+        if entity.economic_balance < channel.deposit_b {
+            return Err(ExecError::ChannelAcceptInsufficientBalance {
+                required: channel.deposit_b,
+                available: entity.economic_balance,
+            });
+        }
+
+        // Debit deposit_b from party B. The deposit is held inside
+        // the channel memory object's `balance_b` field below; no
+        // separate escrow record is written.
+        entity.economic_balance = entity
+            .economic_balance
+            .checked_sub(channel.deposit_b)
+            .ok_or(ExecError::Overflow)?;
+
+        channel.status = PAYMENT_CHANNEL_STATUS_OPEN;
+        channel.accepted_at_height = current_height;
+        channel.balance_b = channel.deposit_b;
+        // Rewrite the channel memory object in place; object_id and
+        // the two by-party indexes were written at create and are
+        // not touched here.
+        let mut updated = channel_memory;
+        updated.data = channel.encode().to_vec();
+        updated.updated_at = current_height;
+        ops.push(WriteOp::Put(
+            ai_memory_object_key(&extra.party_a_entity_id, &extra.channel_object_id),
             encode_memory_object_v1(&updated),
         ));
     }
