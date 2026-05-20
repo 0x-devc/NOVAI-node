@@ -434,4 +434,115 @@ impl RpcClient {
             .ok_or("missing agreements in response")?;
         Ok(agreements.clone())
     }
+
+    /// Resolve a single `PaymentChannel` by its `(owner, object_id)`
+    /// pair (Week 32). Returns `Ok(None)` when the channel does not
+    /// exist or the resolved memory object is not a `PaymentChannel`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn get_payment_channel(
+        &self,
+        owner_hex: &str,
+        object_id_hex: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_getPaymentChannel",
+                serde_json::json!({ "owner": owner_hex, "object_id": object_id_hex }),
+            )
+            .await?;
+        let channel = &result["channel"];
+        if channel.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(channel.clone()))
+        }
+    }
+
+    /// List `PaymentChannel` records where `entity_id` is the
+    /// memory-object owner (party A), filtered by `created_at` in
+    /// `[start, end]` (Week 32).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn list_channels_by_party_a(
+        &self,
+        entity_id_hex: &str,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_listChannelsByPartyA",
+                serde_json::json!({
+                    "entity_id": entity_id_hex,
+                    "start_height": start_height,
+                    "end_height": end_height,
+                }),
+            )
+            .await?;
+        let channels = result["channels"]
+            .as_array()
+            .ok_or("missing channels in response")?;
+        Ok(channels.clone())
+    }
+
+    /// List `PaymentChannel` records where `entity_id` is the
+    /// embedded counterparty (party B), filtered by `created_at` in
+    /// `[start, end]` (Week 32).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn list_channels_by_party_b(
+        &self,
+        entity_id_hex: &str,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_listChannelsByPartyB",
+                serde_json::json!({
+                    "entity_id": entity_id_hex,
+                    "start_height": start_height,
+                    "end_height": end_height,
+                }),
+            )
+            .await?;
+        let channels = result["channels"]
+            .as_array()
+            .ok_or("missing channels in response")?;
+        Ok(channels.clone())
+    }
+
+    /// Resolve dispute-window status for a `PaymentChannel` (Week 32).
+    /// Returns the full response object so callers can read
+    /// `found`, `status`, `closing_at_height`,
+    /// `dispute_deadline_height`, `current_height`,
+    /// `blocks_remaining`, and `finalize_ready`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, JSON-RPC error, or malformed
+    /// response shape.
+    pub async fn get_channel_dispute_status(
+        &self,
+        owner_hex: &str,
+        object_id_hex: &str,
+    ) -> Result<serde_json::Value, String> {
+        let result = self
+            .call(
+                "novai_getChannelDisputeStatus",
+                serde_json::json!({ "owner": owner_hex, "object_id": object_id_hex }),
+            )
+            .await?;
+        Ok(result)
+    }
 }

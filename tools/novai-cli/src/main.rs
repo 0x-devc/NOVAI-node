@@ -3,7 +3,7 @@ mod rpc_client;
 
 use clap::{Parser, Subcommand};
 use commands::signal::ExtendedSignalArgs;
-use commands::{account, ai, keygen, memory, service, signal, sla, vk};
+use commands::{account, ai, channel, keygen, memory, service, signal, sla, vk};
 use rpc_client::RpcClient;
 
 /// NOVAI CLI — interact with NOVAI blockchain nodes.
@@ -102,6 +102,14 @@ enum Command {
     Sla {
         #[command(subcommand)]
         command: SlaCommand,
+    },
+    /// Payment Channel operations (Week 32): propose, accept,
+    /// sign-update, close, finalize, cancel, show, list, and
+    /// dispute-status for bidirectional payment channels between
+    /// two AI entities.
+    Channel {
+        #[command(subcommand)]
+        command: ChannelCommand,
     },
 }
 
@@ -532,6 +540,219 @@ enum SlaCommand {
 
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
+enum ChannelCommand {
+    /// Propose a new payment channel against a counterparty (wraps
+    /// CreateMemoryObject payload v3 with type 15). Party A's
+    /// deposit is debited at create time; party B accepts later via
+    /// `channel accept`.
+    Propose {
+        /// Path to party A's key file (the proposer).
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte party A entity id (must equal the
+        /// signer derived from `--key-file`).
+        #[arg(long)]
+        party_a_entity_id: String,
+        /// Hex-encoded 32-byte party B entity id (the counterparty).
+        #[arg(long)]
+        party_b_entity_id: String,
+        /// Hex-encoded 32-byte SLA reference. Zero (`00..`) means no
+        /// reference; informational only in v1.
+        #[arg(
+            long,
+            default_value = "0000000000000000000000000000000000000000000000000000000000000000"
+        )]
+        sla_object_id: String,
+        /// Party A's deposit (decimal u128).
+        #[arg(long)]
+        deposit_a: u128,
+        /// Party B's deposit (decimal u128). Debited from party B at
+        /// accept time.
+        #[arg(long)]
+        deposit_b: u128,
+        /// Dispute window length in blocks. Must be in
+        /// `[100, 10_000]`. Default = 256.
+        #[arg(long, default_value_t = 256)]
+        dispute_window_blocks: u32,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Accept a PROPOSED payment channel (wraps the ChannelAccept
+    /// signal type 19). Party B's deposit is debited at this step.
+    Accept {
+        /// Path to party B's key file (the accepter).
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte channel memory object id.
+        #[arg(long)]
+        channel_object_id: String,
+        /// Hex-encoded 32-byte party A entity id (memory object owner).
+        #[arg(long)]
+        party_a_entity_id: String,
+        /// Hex-encoded 32-byte party B entity id (must equal the
+        /// signer).
+        #[arg(long)]
+        party_b_entity_id: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// OFFLINE: produce an ed25519 signature over the canonical
+    /// channel state signing bytes. The signing key file MUST
+    /// correspond to the entity pubkey registered on-chain. Outputs
+    /// a hex-encoded 64-byte signature for use with `channel close`.
+    SignUpdate {
+        /// Path to the signer's channel-state key file (32-byte seed).
+        #[arg(long)]
+        signing_key: String,
+        /// Hex-encoded 32-byte channel memory object id.
+        #[arg(long)]
+        channel_object_id: String,
+        /// Hex-encoded 32-byte party A entity id.
+        #[arg(long)]
+        party_a_entity_id: String,
+        /// Hex-encoded 32-byte party B entity id.
+        #[arg(long)]
+        party_b_entity_id: String,
+        /// Off-chain state nonce being signed.
+        #[arg(long)]
+        nonce: u64,
+        /// Party A's balance in this state (decimal u128).
+        #[arg(long)]
+        balance_a: u128,
+        /// Party B's balance in this state (decimal u128).
+        #[arg(long)]
+        balance_b: u128,
+        /// Mark this state as the cooperative-settle final state.
+        /// When set, both parties must sign `is_final = true` and
+        /// the close transition skips the dispute window.
+        #[arg(long)]
+        final_state: bool,
+    },
+    /// Submit a ChannelClose signal (type 20). Both `--sig-a` and
+    /// `--sig-b` (hex-encoded 64-byte signatures) MUST verify on-
+    /// chain; produce them with `channel sign-update`. When
+    /// `--final` is set the close is cooperative (instant settle);
+    /// otherwise it opens or extends the dispute window.
+    Close {
+        /// Path to the submitter's tx-signing key file (must be
+        /// party A or party B per
+        /// `ChannelCloseSubmitterNotParticipant`).
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte channel memory object id.
+        #[arg(long)]
+        channel_object_id: String,
+        /// Hex-encoded 32-byte party A entity id.
+        #[arg(long)]
+        party_a_entity_id: String,
+        /// Hex-encoded 32-byte party B entity id.
+        #[arg(long)]
+        party_b_entity_id: String,
+        /// Off-chain state nonce being applied.
+        #[arg(long)]
+        nonce: u64,
+        /// Party A's balance in this state (decimal u128).
+        #[arg(long)]
+        balance_a: u128,
+        /// Party B's balance in this state (decimal u128).
+        #[arg(long)]
+        balance_b: u128,
+        /// Submit as a cooperative settle (`is_final = 1`).
+        #[arg(long)]
+        final_state: bool,
+        /// Hex-encoded 64-byte signature by party A over the
+        /// canonical state bytes.
+        #[arg(long)]
+        sig_a: String,
+        /// Hex-encoded 64-byte signature by party B over the
+        /// canonical state bytes.
+        #[arg(long)]
+        sig_b: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Submit a ChannelFinalize signal (type 21). Permissionless:
+    /// any active AI entity may submit. Valid only when the channel
+    /// is CLOSING and the dispute deadline has passed.
+    Finalize {
+        /// Path to the submitter's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte channel memory object id.
+        #[arg(long)]
+        channel_object_id: String,
+        /// Hex-encoded 32-byte party A entity id (memory object owner).
+        #[arg(long)]
+        party_a_entity_id: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Cancel a still-PROPOSED channel (wraps DeleteMemoryObject
+    /// payload v5). Party A's deposit is refunded; rejected if the
+    /// channel is OPEN or CLOSING.
+    Cancel {
+        /// Path to party A's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte channel memory object id.
+        #[arg(long)]
+        channel_object_id: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// Show a single channel by `(owner, object_id)`.
+    Show {
+        /// Hex-encoded 32-byte party A entity id (memory object owner).
+        #[arg(long)]
+        owner: String,
+        /// Hex-encoded 32-byte channel memory object id.
+        #[arg(long)]
+        object_id: String,
+    },
+    /// List channels where the entity is party A (memory object owner).
+    ListByPartyA {
+        /// Hex-encoded 32-byte entity id.
+        #[arg(long)]
+        entity_id: String,
+        /// Inclusive lower bound on `created_at` height.
+        #[arg(long, default_value_t = 0)]
+        start_height: u64,
+        /// Inclusive upper bound on `created_at` height.
+        #[arg(long, default_value_t = 10_000)]
+        end_height: u64,
+    },
+    /// List channels where the entity is party B (counterparty).
+    ListByPartyB {
+        /// Hex-encoded 32-byte entity id.
+        #[arg(long)]
+        entity_id: String,
+        /// Inclusive lower bound on `created_at` height.
+        #[arg(long, default_value_t = 0)]
+        start_height: u64,
+        /// Inclusive upper bound on `created_at` height.
+        #[arg(long, default_value_t = 10_000)]
+        end_height: u64,
+    },
+    /// Show dispute-window status for a channel: closing height,
+    /// dispute deadline, current chain height, blocks remaining,
+    /// and a finalize-ready flag.
+    DisputeStatus {
+        /// Hex-encoded 32-byte party A entity id (memory object owner).
+        #[arg(long)]
+        owner: String,
+        /// Hex-encoded 32-byte channel memory object id.
+        #[arg(long)]
+        object_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum SignalCommand {
     /// Publish a signal commitment.
     Publish {
@@ -909,6 +1130,143 @@ async fn main() {
                 end_height,
             } => {
                 sla::run_list_by_seller(&rpc, &entity_id, start_height, end_height, cli.json).await
+            }
+        },
+        Command::Channel { command } => match command {
+            ChannelCommand::Propose {
+                key_file,
+                party_a_entity_id,
+                party_b_entity_id,
+                sla_object_id,
+                deposit_a,
+                deposit_b,
+                dispute_window_blocks,
+                fee,
+            } => {
+                channel::run_propose(
+                    &rpc,
+                    &key_file,
+                    &party_a_entity_id,
+                    &party_b_entity_id,
+                    &sla_object_id,
+                    deposit_a,
+                    deposit_b,
+                    dispute_window_blocks,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            ChannelCommand::Accept {
+                key_file,
+                channel_object_id,
+                party_a_entity_id,
+                party_b_entity_id,
+                fee,
+            } => {
+                channel::run_accept(
+                    &rpc,
+                    &key_file,
+                    &channel_object_id,
+                    &party_a_entity_id,
+                    &party_b_entity_id,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            ChannelCommand::SignUpdate {
+                signing_key,
+                channel_object_id,
+                party_a_entity_id,
+                party_b_entity_id,
+                nonce,
+                balance_a,
+                balance_b,
+                final_state,
+            } => channel::run_sign_update(
+                &signing_key,
+                &channel_object_id,
+                &party_a_entity_id,
+                &party_b_entity_id,
+                nonce,
+                balance_a,
+                balance_b,
+                final_state,
+                cli.json,
+            ),
+            ChannelCommand::Close {
+                key_file,
+                channel_object_id,
+                party_a_entity_id,
+                party_b_entity_id,
+                nonce,
+                balance_a,
+                balance_b,
+                final_state,
+                sig_a,
+                sig_b,
+                fee,
+            } => {
+                channel::run_close(
+                    &rpc,
+                    &key_file,
+                    &channel_object_id,
+                    &party_a_entity_id,
+                    &party_b_entity_id,
+                    nonce,
+                    balance_a,
+                    balance_b,
+                    final_state,
+                    &sig_a,
+                    &sig_b,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            ChannelCommand::Finalize {
+                key_file,
+                channel_object_id,
+                party_a_entity_id,
+                fee,
+            } => {
+                channel::run_finalize(
+                    &rpc,
+                    &key_file,
+                    &channel_object_id,
+                    &party_a_entity_id,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            ChannelCommand::Cancel {
+                key_file,
+                channel_object_id,
+                fee,
+            } => channel::run_cancel(&rpc, &key_file, &channel_object_id, fee, cli.json).await,
+            ChannelCommand::Show { owner, object_id } => {
+                channel::run_show(&rpc, &owner, &object_id, cli.json).await
+            }
+            ChannelCommand::ListByPartyA {
+                entity_id,
+                start_height,
+                end_height,
+            } => {
+                channel::run_list_by_party_a(&rpc, &entity_id, start_height, end_height, cli.json)
+                    .await
+            }
+            ChannelCommand::ListByPartyB {
+                entity_id,
+                start_height,
+                end_height,
+            } => {
+                channel::run_list_by_party_b(&rpc, &entity_id, start_height, end_height, cli.json)
+                    .await
+            }
+            ChannelCommand::DisputeStatus { owner, object_id } => {
+                channel::run_dispute_status(&rpc, &owner, &object_id, cli.json).await
             }
         },
     };

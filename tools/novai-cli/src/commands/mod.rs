@@ -1,5 +1,6 @@
 pub mod account;
 pub mod ai;
+pub mod channel;
 pub mod keygen;
 pub mod memory;
 pub mod service;
