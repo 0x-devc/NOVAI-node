@@ -21,12 +21,15 @@
 
 use novai_ai_entities::{AiEntity, AiSignalType, AutonomyMode, Capabilities};
 use novai_execution::{
-    apply_signal_commitment_tx, decode_payment_record_v1, encode_signal_commitment_payload_v1,
-    payment_by_hash_key, payment_by_payee_key, payment_by_payer_key, read_ai_entity,
-    write_ai_entity_op, ExecError, PaymentRequestExtraV1, PaymentSplit, SignalCommitmentPayloadV1,
-    BPS_DENOMINATOR, KEY_MARKETPLACE_TREASURY, KEY_PREFIX_AI_PAYMENTS_BY_PAYEE,
-    KEY_PREFIX_AI_PAYMENTS_BY_PAYER, MAX_PAYMENT_SPLITS, MIN_PAYMENT_SPLITS_WHEN_PRESENT,
-    PAYMENT_ATTESTATION_STATUS_NONE, PAYMENT_FEE_BPS, PAYMENT_RECORD_LEN,
+    apply_signal_commitment_tx, decode_payment_record_v1, decode_payment_splits_record_v1,
+    encode_signal_commitment_payload_v1, payment_by_hash_key, payment_by_payee_key,
+    payment_by_payer_key, payment_splits_by_hash_key, read_ai_entity, write_ai_entity_op,
+    ExecError, PaymentRequestExtraV1, PaymentSplit, PaymentSplitsRecord, PaymentSplitsRecordEntry,
+    SignalCommitmentPayloadV1, BPS_DENOMINATOR, KEY_MARKETPLACE_TREASURY,
+    KEY_PREFIX_AI_PAYMENTS_BY_PAYEE, KEY_PREFIX_AI_PAYMENTS_BY_PAYER, MAX_PAYMENT_SPLITS,
+    MIN_PAYMENT_SPLITS_WHEN_PRESENT, PAYMENT_ATTESTATION_STATUS_NONE, PAYMENT_FEE_BPS,
+    PAYMENT_RECORD_LEN, PAYMENT_SPLITS_RECORD_ENTRY_SIZE, PAYMENT_SPLITS_RECORD_MAX_LEN,
+    PAYMENT_SPLITS_RECORD_MIN_LEN, PAYMENT_SPLITS_RECORD_V1,
     SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN,
 };
 use novai_state::{ai_entity_by_address_key, decode_fee_pool_v1, Kv, KvBatch, MemKv, WriteOp};
@@ -1334,4 +1337,916 @@ fn payment_split_decoder_bad_count_surfaces_through_handler() {
         ),
         "got {err:?}"
     );
+}
+
+// ============================================================================
+// Week 33 - Phase 3: PaymentSplits execution
+// ============================================================================
+//
+// These tests cover the per-recipient credit distribution wired into the
+// PaymentRequest handler in Phase 3: balance distribution, remainder fold
+// into the primary, sum-of-credits == amount conservation, per-recipient
+// by_payee indexes, per-recipient total_transactions bumps, and the
+// PaymentSplitsRecord aux row persisted at payment_splits_by_hash_key.
+// Service-attestation interaction is also exercised end-to-end against
+// a split payment to confirm the reputation delta still lands only on
+// the primary recipient.
+
+#[test]
+fn payment_split_2_recipients_credits_distributed() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xA0u8; 32], [0xA1u8; 32]);
+    let payee = make_payee(&mut db, [0xA2u8; 32], [0xA3u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xA4, 0xA5, true);
+
+    let amount: u64 = 10_000;
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 6_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xD0u8; 32],
+        payer.id,
+        payee.id,
+        amount,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    let r2_after = read_ai_entity(&db, &r2.id).unwrap().unwrap();
+    assert_eq!(
+        payee_after.economic_balance,
+        PAYEE_BALANCE + 6_000,
+        "primary gets 60 percent"
+    );
+    assert_eq!(r2_after.economic_balance, 4_000, "r2 gets 40 percent");
+}
+
+#[test]
+fn payment_split_3_recipients_credits_distributed() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xB0u8; 32], [0xB1u8; 32]);
+    let payee = make_payee(&mut db, [0xB2u8; 32], [0xB3u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xB4, 0xB5, true);
+    let r3 = make_split_recipient(&mut db, 0xB6, 0xB7, true);
+
+    let amount: u64 = 10_000;
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r3.id,
+            basis_points: 2_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xD1u8; 32],
+        payer.id,
+        payee.id,
+        amount,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    let r2_after = read_ai_entity(&db, &r2.id).unwrap().unwrap();
+    let r3_after = read_ai_entity(&db, &r3.id).unwrap().unwrap();
+    assert_eq!(payee_after.economic_balance, PAYEE_BALANCE + 5_000);
+    assert_eq!(r2_after.economic_balance, 3_000);
+    assert_eq!(r3_after.economic_balance, 2_000);
+}
+
+#[test]
+fn payment_split_8_recipients_credits_distributed() {
+    // 1250 bp each on amount = 80_000 -> 10_000 per recipient.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xC0u8; 32], [0xC1u8; 32]);
+    let payee = make_payee(&mut db, [0xC2u8; 32], [0xC3u8; 32]);
+    let mut others = Vec::with_capacity(MAX_PAYMENT_SPLITS - 1);
+    for i in 0..(MAX_PAYMENT_SPLITS - 1) {
+        let seed = 0xD0u8 + (i as u8);
+        others.push(make_split_recipient(
+            &mut db,
+            seed,
+            seed.wrapping_add(0x40),
+            true,
+        ));
+    }
+    let mut splits = Vec::with_capacity(MAX_PAYMENT_SPLITS);
+    splits.push(PaymentSplit {
+        recipient_entity_id: payee.id,
+        basis_points: 1_250,
+    });
+    for r in &others {
+        splits.push(PaymentSplit {
+            recipient_entity_id: r.id,
+            basis_points: 1_250,
+        });
+    }
+    let payload = build_split_payment_payload(
+        [0xD2u8; 32],
+        payer.id,
+        payee.id,
+        80_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    assert_eq!(payee_after.economic_balance, PAYEE_BALANCE + 10_000);
+    for r in &others {
+        let after = read_ai_entity(&db, &r.id).unwrap().unwrap();
+        assert_eq!(after.economic_balance, 10_000);
+    }
+}
+
+#[test]
+fn payment_split_remainder_folded_into_primary() {
+    // amount = 10_001 with 50/50 split:
+    //   floor(10_001 * 5000 / 10000) = 5000 for each
+    //   sum_floor = 10_000; remainder = 1
+    //   primary gets 5000 + 1 = 5001; other gets 5000.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xE0u8; 32], [0xE1u8; 32]);
+    let payee = make_payee(&mut db, [0xE2u8; 32], [0xE3u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xE4, 0xE5, true);
+
+    let amount: u64 = 10_001;
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 5_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xD3u8; 32],
+        payer.id,
+        payee.id,
+        amount,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    let r2_after = read_ai_entity(&db, &r2.id).unwrap().unwrap();
+    assert_eq!(
+        payee_after.economic_balance,
+        PAYEE_BALANCE + 5_001,
+        "primary takes the remainder"
+    );
+    assert_eq!(r2_after.economic_balance, 5_000);
+}
+
+#[test]
+fn payment_split_3_way_remainder_folded_into_primary() {
+    // amount = 100, splits 3333/3333/3334:
+    //   floor(100 * 3333 / 10000) = 33 (twice)
+    //   floor(100 * 3334 / 10000) = 33
+    //   sum_floor = 99; remainder = 1
+    //   primary = 33 + 1 = 34; others = 33 each.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xE6u8; 32], [0xE7u8; 32]);
+    let payee = make_payee(&mut db, [0xE8u8; 32], [0xE9u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xEA, 0xEB, true);
+    let r3 = make_split_recipient(&mut db, 0xEC, 0xED, true);
+
+    let amount: u64 = 100;
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 3_333,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_333,
+        },
+        PaymentSplit {
+            recipient_entity_id: r3.id,
+            basis_points: 3_334,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xD4u8; 32],
+        payer.id,
+        payee.id,
+        amount,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    let r2_after = read_ai_entity(&db, &r2.id).unwrap().unwrap();
+    let r3_after = read_ai_entity(&db, &r3.id).unwrap().unwrap();
+    assert_eq!(
+        payee_after.economic_balance,
+        PAYEE_BALANCE + 34,
+        "primary takes the floor-loss remainder"
+    );
+    assert_eq!(r2_after.economic_balance, 33);
+    assert_eq!(r3_after.economic_balance, 33);
+}
+
+#[test]
+fn payment_split_balance_conservation_sum_credits_equals_amount() {
+    // Walk multiple split shapes and assert that the sum of credited
+    // recipient balance deltas equals the payment amount exactly.
+    let cases: &[(u64, &[u16])] = &[
+        (10_000, &[6_000, 4_000]),
+        (10_001, &[5_000, 5_000]),
+        (100, &[3_333, 3_333, 3_334]),
+        (80_000, &[1_250; 8]),
+        (1, &[5_000, 5_000]),
+        (3, &[3_333, 3_333, 3_334]),
+    ];
+    for (case_idx, (amount, bps)) in cases.iter().enumerate() {
+        let mut db = MemKv::new();
+        let payer = make_payer(&mut db, [case_idx as u8; 32], [(case_idx + 0x40) as u8; 32]);
+        let payee = make_payee(
+            &mut db,
+            [(case_idx + 0x10) as u8; 32],
+            [(case_idx + 0x50) as u8; 32],
+        );
+        let mut others = Vec::with_capacity(bps.len() - 1);
+        for j in 1..bps.len() {
+            others.push(make_split_recipient(
+                &mut db,
+                (case_idx * 16 + j) as u8 + 0x60,
+                (case_idx * 16 + j) as u8 + 0x80,
+                true,
+            ));
+        }
+        let mut splits = Vec::with_capacity(bps.len());
+        splits.push(PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: bps[0],
+        });
+        for (j, r) in others.iter().enumerate() {
+            splits.push(PaymentSplit {
+                recipient_entity_id: r.id,
+                basis_points: bps[j + 1],
+            });
+        }
+        let payload = build_split_payment_payload(
+            [(0xF0 + case_idx) as u8; 32],
+            payer.id,
+            payee.id,
+            *amount,
+            [0u8; 32],
+            [0u8; 32],
+            EXPIRY_HEIGHT,
+            splits,
+        );
+        let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+        apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT)
+            .unwrap_or_else(|e| panic!("case {case_idx}: {e:?}"));
+
+        // Sum credit deltas across all recipients.
+        let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+        let mut total_credited: u128 = payee_after.economic_balance - PAYEE_BALANCE;
+        for r in &others {
+            let after = read_ai_entity(&db, &r.id).unwrap().unwrap();
+            total_credited += after.economic_balance;
+        }
+        assert_eq!(
+            total_credited,
+            u128::from(*amount),
+            "case {case_idx}: sum of credits must equal amount",
+        );
+    }
+}
+
+#[test]
+fn payment_split_payer_debit_is_amount_plus_one_fee_plus_tx_fee() {
+    // P4: one fee on the total amount (not fee-per-split). Payer
+    // debit equals (amount + fee + tx_fee), identical to the legacy
+    // single-recipient case for the same amount.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x01u8; 32], [0x02u8; 32]);
+    let payee = make_payee(&mut db, [0x03u8; 32], [0x04u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x05, 0x06, true);
+
+    let amount: u64 = 10_000;
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 7_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xD5u8; 32],
+        payer.id,
+        payee.id,
+        amount,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let payer_after = read_ai_entity(&db, &payer.id).unwrap().unwrap();
+    let fee = expected_fee(amount);
+    let total_debit = u128::from(amount) + fee + u128::from(SIGNAL_FEE);
+    assert_eq!(
+        payer_after.economic_balance,
+        PAYER_BALANCE - total_debit,
+        "payer debit matches the single-recipient case exactly",
+    );
+    assert_eq!(read_treasury(&db), fee, "treasury credited the single fee");
+}
+
+#[test]
+fn payment_split_by_payee_index_written_for_every_recipient() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x10u8; 32], [0x11u8; 32]);
+    let payee = make_payee(&mut db, [0x12u8; 32], [0x13u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x14, 0x15, true);
+    let r3 = make_split_recipient(&mut db, 0x16, 0x17, true);
+
+    let signal_hash = [0xD6u8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r3.id,
+            basis_points: 2_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    for recipient_id in [payee.id, r2.id, r3.id] {
+        let key = payment_by_payee_key(&recipient_id, PAYMENT_HEIGHT, &signal_hash);
+        assert!(
+            db.get(&key).unwrap().is_some(),
+            "by_payee marker present for recipient",
+        );
+    }
+}
+
+#[test]
+fn payment_split_total_transactions_bumped_for_every_recipient() {
+    // Interpretation (a) from Phase 0 P3: total_transactions++ on
+    // every recipient (no new rep event constant).
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x20u8; 32], [0x21u8; 32]);
+    let payee = make_payee(&mut db, [0x22u8; 32], [0x23u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x24, 0x25, true);
+    let r3 = make_split_recipient(&mut db, 0x26, 0x27, true);
+
+    let pre_payer_tx = payer.total_transactions;
+    let pre_payee_tx = payee.total_transactions;
+    let pre_r2_tx = r2.total_transactions;
+    let pre_r3_tx = r3.total_transactions;
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r3.id,
+            basis_points: 2_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xD7u8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let payer_after = read_ai_entity(&db, &payer.id).unwrap().unwrap();
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    let r2_after = read_ai_entity(&db, &r2.id).unwrap().unwrap();
+    let r3_after = read_ai_entity(&db, &r3.id).unwrap().unwrap();
+    assert_eq!(payer_after.total_transactions, pre_payer_tx + 1);
+    assert_eq!(payee_after.total_transactions, pre_payee_tx + 1);
+    assert_eq!(r2_after.total_transactions, pre_r2_tx + 1);
+    assert_eq!(r3_after.total_transactions, pre_r3_tx + 1);
+}
+
+#[test]
+fn payment_split_payment_record_payee_is_primary() {
+    // The canonical PaymentRecord stores the primary as `payee` even
+    // for multi-party payments; ServiceAttestation / SLA hooks
+    // continue to resolve against the primary unchanged.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x30u8; 32], [0x31u8; 32]);
+    let payee = make_payee(&mut db, [0x32u8; 32], [0x33u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x34, 0x35, true);
+
+    let signal_hash = [0xD8u8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 6_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let record_bytes = db.get(&payment_by_hash_key(&signal_hash)).unwrap().unwrap();
+    assert_eq!(
+        record_bytes.len(),
+        PAYMENT_RECORD_LEN,
+        "PaymentRecord wire format frozen at 162 bytes",
+    );
+    let record = decode_payment_record_v1(&record_bytes).unwrap();
+    assert_eq!(record.payee, payee.id, "PaymentRecord.payee == primary");
+    assert_eq!(record.amount, 10_000, "amount unchanged");
+}
+
+#[test]
+fn payment_split_aux_record_decodes_with_correct_credits() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x40u8; 32], [0x41u8; 32]);
+    let payee = make_payee(&mut db, [0x42u8; 32], [0x43u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x44, 0x45, true);
+    let r3 = make_split_recipient(&mut db, 0x46, 0x47, true);
+
+    let signal_hash = [0xD9u8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r3.id,
+            basis_points: 2_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let bytes = db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .expect("aux record present");
+    let decoded = decode_payment_splits_record_v1(&bytes).expect("decode succeeds");
+    assert_eq!(decoded.entries.len(), 3);
+    assert_eq!(decoded.entries[0].recipient_entity_id, payee.id);
+    assert_eq!(decoded.entries[0].basis_points, 5_000);
+    assert_eq!(decoded.entries[0].credited_amount, 5_000);
+    assert_eq!(decoded.entries[1].recipient_entity_id, r2.id);
+    assert_eq!(decoded.entries[1].basis_points, 3_000);
+    assert_eq!(decoded.entries[1].credited_amount, 3_000);
+    assert_eq!(decoded.entries[2].recipient_entity_id, r3.id);
+    assert_eq!(decoded.entries[2].basis_points, 2_000);
+    assert_eq!(decoded.entries[2].credited_amount, 2_000);
+}
+
+#[test]
+fn payment_split_aux_record_remainder_visible_in_primary_credit() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x48u8; 32], [0x49u8; 32]);
+    let payee = make_payee(&mut db, [0x4Au8; 32], [0x4Bu8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x4C, 0x4D, true);
+
+    let signal_hash = [0xDAu8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 5_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_001,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let bytes = db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .unwrap();
+    let decoded = decode_payment_splits_record_v1(&bytes).unwrap();
+    assert_eq!(
+        decoded.entries[0].credited_amount, 5_001,
+        "primary credited_amount includes the remainder",
+    );
+    assert_eq!(decoded.entries[1].credited_amount, 5_000);
+}
+
+#[test]
+fn payment_split_aux_record_golden_vector_3_recipients() {
+    // Lock the wire format. Amount = 10_000 with 5000/3000/2000 bp
+    // yields credits 5000/3000/2000 (no remainder). Encoded length
+    // = 2 + 3*42 = 128 bytes.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x50u8; 32], [0x51u8; 32]);
+    let payee = make_payee(&mut db, [0x52u8; 32], [0x53u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x54, 0x55, true);
+    let r3 = make_split_recipient(&mut db, 0x56, 0x57, true);
+
+    let signal_hash = [0xDBu8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r3.id,
+            basis_points: 2_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    let bytes = db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .unwrap();
+    assert_eq!(bytes.len(), 2 + 3 * PAYMENT_SPLITS_RECORD_ENTRY_SIZE);
+    assert_eq!(bytes[0], PAYMENT_SPLITS_RECORD_V1, "version byte");
+    assert_eq!(bytes[1], 3, "count byte");
+    // Entry 0: primary | 5000 bp | 5000 credit.
+    assert_eq!(&bytes[2..34], &payee.id, "entries[0].recipient at 2..34");
+    assert_eq!(
+        &bytes[34..36],
+        &5_000u16.to_be_bytes(),
+        "entries[0].bp at 34..36"
+    );
+    assert_eq!(
+        &bytes[36..44],
+        &5_000u64.to_be_bytes(),
+        "entries[0].credit at 36..44"
+    );
+    // Entry 1: r2 | 3000 bp | 3000 credit (offset 44..86).
+    assert_eq!(&bytes[44..76], &r2.id);
+    assert_eq!(&bytes[76..78], &3_000u16.to_be_bytes());
+    assert_eq!(&bytes[78..86], &3_000u64.to_be_bytes());
+    // Entry 2: r3 | 2000 bp | 2000 credit (offset 86..128).
+    assert_eq!(&bytes[86..118], &r3.id);
+    assert_eq!(&bytes[118..120], &2_000u16.to_be_bytes());
+    assert_eq!(&bytes[120..128], &2_000u64.to_be_bytes());
+}
+
+#[test]
+fn payment_split_legacy_path_writes_no_aux_record() {
+    // Single-recipient payment must NOT produce a PaymentSplitsRecord;
+    // the aux row distinguishes split payments in storage.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x60u8; 32], [0x61u8; 32]);
+    let payee = make_payee(&mut db, [0x62u8; 32], [0x63u8; 32]);
+
+    let signal_hash = [0xDCu8; 32];
+    let payload = build_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        5_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    assert!(
+        db.get(&payment_splits_by_hash_key(&signal_hash))
+            .unwrap()
+            .is_none(),
+        "no aux record for the legacy single-recipient path",
+    );
+}
+
+#[test]
+fn payment_split_service_attestation_rep_applies_to_primary_only() {
+    // P6 invariant: ServiceAttestation's reputation delta still
+    // lands on the recorded payee (= primary), not on split
+    // recipients. Verified end-to-end by issuing a DELIVERED
+    // attestation against a split payment and asserting that
+    // non-primary recipients see no rep change.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x70u8; 32], [0x71u8; 32]);
+    let payee = make_payee(&mut db, [0x72u8; 32], [0x73u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x74, 0x75, true);
+
+    let primary_rep_before = payee.reputation_score;
+    let r2_rep_before = r2.reputation_score;
+
+    let signal_hash = [0xDDu8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 6_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_000,
+        },
+    ];
+    let payment_payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let payment_tx = make_tx(payer.id, 0, SIGNAL_FEE, payment_payload);
+    apply_signal_commitment_tx(&mut db, &payment_tx, PAYMENT_HEIGHT)
+        .expect("split payment settles");
+
+    // Issue a DELIVERED attestation against the split payment.
+    let attest_payload =
+        encode_signal_commitment_payload_v1(&novai_execution::SignalCommitmentPayloadV1 {
+            signal_hash: [0xDEu8; 32],
+            signal_type: AiSignalType::ServiceAttestation,
+            issuer_entity_id: payer.id,
+            reputation: None,
+            purchase: None,
+            stake_deposit: None,
+            stake_withdraw: None,
+            stake_slash: None,
+            composition_check: None,
+            proof_submission: None,
+            subscription_create: None,
+            subscription_cancel: None,
+            payment_request: None,
+            service_attestation: Some(novai_execution::ServiceAttestationExtraV1 {
+                payment_signal_hash: signal_hash,
+                payee_entity_id: payee.id,
+                status: 0, // PAYMENT_ATTESTATION_STATUS_DELIVERED
+            }),
+            sla_accept: None,
+            channel_accept: None,
+            channel_close: None,
+            channel_finalize: None,
+        });
+    let attest_tx = make_tx(payer.id, 1, SIGNAL_FEE, attest_payload);
+    apply_signal_commitment_tx(&mut db, &attest_tx, PAYMENT_HEIGHT + 1)
+        .expect("attestation settles");
+
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    let r2_after = read_ai_entity(&db, &r2.id).unwrap().unwrap();
+    assert!(
+        payee_after.reputation_score > primary_rep_before,
+        "primary's reputation rises on DELIVERED",
+    );
+    assert_eq!(
+        r2_after.reputation_score, r2_rep_before,
+        "non-primary recipient's reputation is unchanged",
+    );
+}
+
+#[test]
+fn payment_split_insufficient_balance_leaves_no_aux_or_payment_record() {
+    // The balance check fires AFTER validation but BEFORE any
+    // mutation. A rejected split payment must leave no PaymentRecord,
+    // no aux PaymentSplitsRecord, and no by_payee markers.
+    let mut db = MemKv::new();
+    let mut payer = make_payer(&mut db, [0x80u8; 32], [0x81u8; 32]);
+    let payee = make_payee(&mut db, [0x82u8; 32], [0x83u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x84, 0x85, true);
+
+    // Drain the payer to leave amount + fee just out of reach.
+    payer.economic_balance = u128::from(SIGNAL_FEE) + 50;
+    store_entity(&mut db, &payer);
+
+    let signal_hash = [0xDFu8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 5_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(err, ExecError::PaymentInsufficientBalance { .. }),
+        "got {err:?}",
+    );
+
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_by_payee_key(
+            &payee.id,
+            PAYMENT_HEIGHT,
+            &signal_hash
+        ))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_by_payee_key(&r2.id, PAYMENT_HEIGHT, &signal_hash))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn payment_split_treasury_fee_charged_once_on_total() {
+    // P4 again, exercised against the treasury balance: regardless
+    // of split count, the marketplace treasury receives exactly
+    // (amount * PAYMENT_FEE_BPS / BPS_DENOMINATOR).
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x86u8; 32], [0x87u8; 32]);
+    let payee = make_payee(&mut db, [0x88u8; 32], [0x89u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x8A, 0x8B, true);
+    let r3 = make_split_recipient(&mut db, 0x8C, 0x8D, true);
+
+    let amount: u64 = 50_000;
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r3.id,
+            basis_points: 2_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xE0u8; 32],
+        payer.id,
+        payee.id,
+        amount,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles");
+
+    assert_eq!(
+        read_treasury(&db),
+        expected_fee(amount),
+        "treasury credited the single fee, not fee-per-split",
+    );
+}
+
+#[test]
+fn payment_split_aux_record_constants_smoke_and_roundtrip() {
+    assert_eq!(PAYMENT_SPLITS_RECORD_ENTRY_SIZE, 42);
+    assert_eq!(PAYMENT_SPLITS_RECORD_MIN_LEN, 1 + 1 + 2 * 42);
+    assert_eq!(PAYMENT_SPLITS_RECORD_MAX_LEN, 1 + 1 + 8 * 42);
+    assert_eq!(PAYMENT_SPLITS_RECORD_V1, 1);
+
+    let r = PaymentSplitsRecord {
+        entries: vec![
+            PaymentSplitsRecordEntry {
+                recipient_entity_id: [0xAAu8; 32],
+                basis_points: 5_000,
+                credited_amount: 5_001,
+            },
+            PaymentSplitsRecordEntry {
+                recipient_entity_id: [0xBBu8; 32],
+                basis_points: 5_000,
+                credited_amount: 5_000,
+            },
+        ],
+    };
+    let bytes = novai_execution::encode_payment_splits_record_v1(&r);
+    assert_eq!(bytes.len(), PAYMENT_SPLITS_RECORD_MIN_LEN);
+    let decoded = decode_payment_splits_record_v1(&bytes).unwrap();
+    assert_eq!(decoded, r);
 }

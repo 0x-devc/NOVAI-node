@@ -1382,6 +1382,38 @@ pub const KEY_PREFIX_AI_PAYMENTS_BY_PAYER: &[u8] = b"ai/payments/by_payer/";
 /// `b"ai/payments/by_payee/" || payee[32] || height_be[8] || signal_hash[32]`.
 pub const KEY_PREFIX_AI_PAYMENTS_BY_PAYEE: &[u8] = b"ai/payments/by_payee/";
 
+/// KV-key prefix for the Week 33 multi-party payment splits aux record
+/// indexed by the payment's `signal_hash`.
+///
+/// Layout: `b"ai/payment_splits/by_hash/" || signal_hash[32]`. Value is
+/// an encoded `PaymentSplitsRecord` (variable length, 86..=338 bytes).
+/// Written only when the `PaymentRequest` carried an explicit splits
+/// trailer; absent for legacy single-recipient payments.
+pub const KEY_PREFIX_AI_PAYMENT_SPLITS_BY_HASH: &[u8] = b"ai/payment_splits/by_hash/";
+
+/// `PaymentSplitsRecord` wire-format version byte (Week 33).
+pub const PAYMENT_SPLITS_RECORD_V1: u8 = 1;
+
+/// Encoded size of a single `PaymentSplitsRecord` entry (Week 33).
+///
+/// Layout: `recipient_entity_id:32 | basis_points_be:2 |
+/// credited_amount_be:8` (32 + 2 + 8 = 42 bytes).
+pub const PAYMENT_SPLITS_RECORD_ENTRY_SIZE: usize = 32 + 2 + 8;
+
+/// Minimum encoded size of a `PaymentSplitsRecord` (Week 33).
+///
+/// `version:1 | count:1 | entries[MIN_PAYMENT_SPLITS_WHEN_PRESENT]`
+/// (= 1 + 1 + 2 * 42 = 86 bytes).
+pub const PAYMENT_SPLITS_RECORD_MIN_LEN: usize =
+    1 + 1 + MIN_PAYMENT_SPLITS_WHEN_PRESENT * PAYMENT_SPLITS_RECORD_ENTRY_SIZE;
+
+/// Maximum encoded size of a `PaymentSplitsRecord` (Week 33).
+///
+/// `version:1 | count:1 | entries[MAX_PAYMENT_SPLITS]`
+/// (= 1 + 1 + 8 * 42 = 338 bytes).
+pub const PAYMENT_SPLITS_RECORD_MAX_LEN: usize =
+    1 + 1 + MAX_PAYMENT_SPLITS * PAYMENT_SPLITS_RECORD_ENTRY_SIZE;
+
 /// KV-key prefix for the Agent Discovery Registry by-category index.
 ///
 /// Each entry's value is a zero-byte marker; the canonical
@@ -3394,6 +3426,151 @@ pub fn payment_by_payee_key(payee: &[u8; 32], height: u64, signal_hash: &[u8; 32
     out.extend_from_slice(KEY_PREFIX_AI_PAYMENTS_BY_PAYEE);
     out.extend_from_slice(payee);
     out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(signal_hash);
+    out
+}
+
+// ============================================================================
+// PAYMENT SPLITS AUX RECORD (Week 33 - multi-party payment splitting)
+// ============================================================================
+
+/// A single entry inside the on-chain `PaymentSplitsRecord` aux row.
+///
+/// Carries the per-recipient breakdown for a multi-party payment.
+/// `credited_amount` is the exact amount credited to this recipient
+/// at execution time, including the floor-division remainder folded
+/// into `splits[0]` (the primary). The sum of `credited_amount`
+/// across all entries equals the payment's total `amount` exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentSplitsRecordEntry {
+    /// AI entity that received this slice of the payment.
+    pub recipient_entity_id: [u8; 32],
+    /// Basis points share declared on the wire (Week 33 codec).
+    pub basis_points: u16,
+    /// Amount actually credited to this recipient (in base units of
+    /// `economic_balance`). For non-primary entries this equals
+    /// `amount * basis_points / BPS_DENOMINATOR` (floor); for the
+    /// primary (index 0) the floor-division remainder is added.
+    pub credited_amount: u64,
+}
+
+/// Aux record persisted under `payment_splits_by_hash_key(signal_hash)`
+/// for every multi-party payment.
+///
+/// Variable wire size 86..=338 bytes:
+/// `version:1 | count:1 | entries[count]` where each entry is
+/// `PAYMENT_SPLITS_RECORD_ENTRY_SIZE = 42` bytes. The presence of
+/// this record alongside the canonical `PaymentRecord` is what
+/// distinguishes a multi-party payment from a single-recipient
+/// payment in storage; the `PaymentRecord` wire format stays
+/// frozen at 162 bytes regardless (Phase 0 pushback P5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentSplitsRecord {
+    /// Split entries in the same order they appeared on the wire.
+    /// `entries[0]` is always the primary (canonical payee).
+    /// Length is in `[MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+    /// MAX_PAYMENT_SPLITS]`.
+    pub entries: Vec<PaymentSplitsRecordEntry>,
+}
+
+/// Deterministically encode a `PaymentSplitsRecord` (variable
+/// `1 + 1 + N * 42` bytes for `N in [2, 8]`).
+///
+/// # Panics
+/// Panics if `r.entries.len()` exceeds `MAX_PAYMENT_SPLITS` (8),
+/// because the count is serialised as a `u8` and a larger value
+/// cannot round-trip through the decoder. Callers MUST construct
+/// `PaymentSplitsRecord` instances with entry counts in
+/// `[MIN_PAYMENT_SPLITS_WHEN_PRESENT, MAX_PAYMENT_SPLITS]`; this
+/// invariant is enforced by `validate_payment_splits` before the
+/// handler builds the record.
+#[must_use]
+pub fn encode_payment_splits_record_v1(r: &PaymentSplitsRecord) -> Vec<u8> {
+    let n = r.entries.len();
+    debug_assert!(n >= MIN_PAYMENT_SPLITS_WHEN_PRESENT);
+    debug_assert!(n <= MAX_PAYMENT_SPLITS);
+    let mut out = Vec::with_capacity(1 + 1 + n * PAYMENT_SPLITS_RECORD_ENTRY_SIZE);
+    out.push(PAYMENT_SPLITS_RECORD_V1);
+    let count_u8 = u8::try_from(n).expect("MAX_PAYMENT_SPLITS (8) fits in u8");
+    out.push(count_u8);
+    for e in &r.entries {
+        out.extend_from_slice(&e.recipient_entity_id);
+        out.extend_from_slice(&e.basis_points.to_be_bytes());
+        out.extend_from_slice(&e.credited_amount.to_be_bytes());
+    }
+    out
+}
+
+/// Deterministically decode a `PaymentSplitsRecord` from the bytes
+/// stored at `payment_splits_by_hash_key`.
+///
+/// # Errors
+/// Returns `ExecError::BadPayloadLength` if the slice length is
+/// outside `[PAYMENT_SPLITS_RECORD_MIN_LEN,
+/// PAYMENT_SPLITS_RECORD_MAX_LEN]` or does not match the inferred
+/// per-count length; `ExecError::BadPayloadVersion` if the leading
+/// version byte does not equal `PAYMENT_SPLITS_RECORD_V1`; or
+/// `ExecError::PaymentSplitsBadCount` if the count byte is
+/// outside `[MIN_PAYMENT_SPLITS_WHEN_PRESENT, MAX_PAYMENT_SPLITS]`.
+pub fn decode_payment_splits_record_v1(bytes: &[u8]) -> Result<PaymentSplitsRecord, ExecError<()>> {
+    if bytes.len() < PAYMENT_SPLITS_RECORD_MIN_LEN || bytes.len() > PAYMENT_SPLITS_RECORD_MAX_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: PAYMENT_SPLITS_RECORD_MIN_LEN,
+            got: bytes.len(),
+        });
+    }
+    if bytes[0] != PAYMENT_SPLITS_RECORD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: PAYMENT_SPLITS_RECORD_V1,
+            got: bytes[0],
+        });
+    }
+    let count = bytes[1] as usize;
+    if !(MIN_PAYMENT_SPLITS_WHEN_PRESENT..=MAX_PAYMENT_SPLITS).contains(&count) {
+        return Err(ExecError::PaymentSplitsBadCount {
+            count,
+            min: MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+            max: MAX_PAYMENT_SPLITS,
+        });
+    }
+    let expected_len = 2 + count * PAYMENT_SPLITS_RECORD_ENTRY_SIZE;
+    if bytes.len() != expected_len {
+        return Err(ExecError::BadPayloadLength {
+            expected: expected_len,
+            got: bytes.len(),
+        });
+    }
+    let mut entries = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = 2 + i * PAYMENT_SPLITS_RECORD_ENTRY_SIZE;
+        let mut recipient = [0u8; 32];
+        recipient.copy_from_slice(&bytes[offset..offset + 32]);
+        let basis_points = u16::from_be_bytes([bytes[offset + 32], bytes[offset + 33]]);
+        let credited_amount = u64::from_be_bytes([
+            bytes[offset + 34],
+            bytes[offset + 35],
+            bytes[offset + 36],
+            bytes[offset + 37],
+            bytes[offset + 38],
+            bytes[offset + 39],
+            bytes[offset + 40],
+            bytes[offset + 41],
+        ]);
+        entries.push(PaymentSplitsRecordEntry {
+            recipient_entity_id: recipient,
+            basis_points,
+            credited_amount,
+        });
+    }
+    Ok(PaymentSplitsRecord { entries })
+}
+
+/// Build the canonical KV key for the multi-party payment splits aux
+/// record: `b"ai/payment_splits/by_hash/" || signal_hash[32]`.
+#[must_use]
+pub fn payment_splits_by_hash_key(signal_hash: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_PAYMENT_SPLITS_BY_HASH.len() + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_PAYMENT_SPLITS_BY_HASH);
     out.extend_from_slice(signal_hash);
     out
 }
@@ -6212,16 +6389,15 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             .economic_balance
             .checked_sub(total_debit)
             .ok_or(ExecError::Overflow)?;
-        payee.economic_balance = payee
-            .economic_balance
-            .checked_add(amount_u128)
-            .ok_or(ExecError::Overflow)?;
 
         // Treasury credit only when fee > 0. amount > 0 is already
         // enforced, but the fee is still zero for amounts below
         // BPS_DENOMINATOR / PAYMENT_FEE_BPS (i.e., below 50 base units).
         // Skipping the treasury write in that case avoids dead state
         // churn and mirrors the SignalPurchase pattern at line 3562.
+        // Single fee on the total amount (Phase 0 pushback P4): a
+        // multi-party split charges the same fee as the equivalent
+        // single-recipient payment.
         if fee > 0 {
             let new_treasury = read_treasury_balance(db, KEY_MARKETPLACE_TREASURY)?
                 .checked_add(fee)
@@ -6236,11 +6412,111 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         }
 
         entity.total_transactions = entity.total_transactions.saturating_add(1);
-        payee.total_transactions = payee.total_transactions.saturating_add(1);
+
+        // Week 33: distribute the credit. The split path computes
+        // per-recipient credits via floor-division, folds the
+        // remainder into `splits[0]` (the primary), and loads /
+        // mutates each non-primary recipient inline. The non-split
+        // path preserves Week 28 single-recipient semantics
+        // byte-for-byte.
+        if let Some(splits) = &extra.splits {
+            // Compute floor credits and accumulate the sum.
+            let mut credits: Vec<u128> = Vec::with_capacity(splits.len());
+            let mut sum_floor: u128 = 0;
+            for s in splits {
+                let credit = amount_u128
+                    .checked_mul(u128::from(s.basis_points))
+                    .ok_or(ExecError::Overflow)?
+                    / BPS_DENOMINATOR;
+                credits.push(credit);
+                sum_floor = sum_floor.checked_add(credit).ok_or(ExecError::Overflow)?;
+            }
+            // Phase 2 guarantees bp_sum == BPS_DENOMINATOR, which
+            // implies sum_floor <= amount_u128 (no recipient is
+            // credited more than its fair share before remainder
+            // distribution). Fold any floor-loss into the primary
+            // so the sum of credits equals `amount` exactly.
+            debug_assert!(sum_floor <= amount_u128);
+            let remainder = amount_u128
+                .checked_sub(sum_floor)
+                .ok_or(ExecError::Overflow)?;
+            credits[0] = credits[0]
+                .checked_add(remainder)
+                .ok_or(ExecError::Overflow)?;
+
+            // Apply the primary credit. `payee` is the in-memory
+            // copy of the primary already loaded above.
+            payee.economic_balance = payee
+                .economic_balance
+                .checked_add(credits[0])
+                .ok_or(ExecError::Overflow)?;
+            payee.total_transactions = payee.total_transactions.saturating_add(1);
+
+            // Apply each non-primary recipient's credit. The Phase 2
+            // validator already confirmed every recipient exists and
+            // is active; the defensive re-checks here are inexpensive
+            // and guard against intervening state mutations within
+            // the same transaction batch (none possible in practice
+            // because the validator and executor run inside the same
+            // call, but they cost a constant number of comparisons
+            // per recipient and document the invariant).
+            for (idx, s) in splits.iter().enumerate().skip(1) {
+                let mut recipient = read_ai_entity(db, &s.recipient_entity_id)?.ok_or(
+                    ExecError::PaymentSplitRecipientNotFound {
+                        recipient: s.recipient_entity_id,
+                    },
+                )?;
+                if !recipient.is_active {
+                    return Err(ExecError::PaymentSplitRecipientNotActive {
+                        recipient: s.recipient_entity_id,
+                    });
+                }
+                recipient.economic_balance = recipient
+                    .economic_balance
+                    .checked_add(credits[idx])
+                    .ok_or(ExecError::Overflow)?;
+                recipient.total_transactions = recipient.total_transactions.saturating_add(1);
+                ops.push(write_ai_entity_op(&recipient));
+                ops.push(WriteOp::Put(
+                    payment_by_payee_key(&recipient.id, current_height, &payload.signal_hash),
+                    Vec::new(),
+                ));
+            }
+
+            // Persist the aux PaymentSplitsRecord. Carries the
+            // per-recipient credit breakdown for the RPC join in
+            // Phase 4 and for off-chain audit consumers. The
+            // canonical `PaymentRecord` wire format stays frozen
+            // (Phase 0 pushback P5).
+            let mut entries = Vec::with_capacity(splits.len());
+            for (i, s) in splits.iter().enumerate() {
+                let credited = u64::try_from(credits[i])
+                    .expect("credit fits in u64 because amount is u64 and credit <= amount");
+                entries.push(PaymentSplitsRecordEntry {
+                    recipient_entity_id: s.recipient_entity_id,
+                    basis_points: s.basis_points,
+                    credited_amount: credited,
+                });
+            }
+            let splits_record = PaymentSplitsRecord { entries };
+            ops.push(WriteOp::Put(
+                payment_splits_by_hash_key(&payload.signal_hash),
+                encode_payment_splits_record_v1(&splits_record),
+            ));
+        } else {
+            payee.economic_balance = payee
+                .economic_balance
+                .checked_add(amount_u128)
+                .ok_or(ExecError::Overflow)?;
+            payee.total_transactions = payee.total_transactions.saturating_add(1);
+        }
 
         // Persist canonical payment record + two scan indexes. The by_hash
         // value carries the full record; the by_payer / by_payee entries
         // are zero-byte markers (the canonical data lives in by_hash).
+        // `PaymentRecord.payee` is always the primary recipient, even for
+        // split payments; this keeps the existing audit / attestation
+        // resolution paths unchanged (Phase 0 pushback P6).
         let record = PaymentRecord {
             payer: entity.id,
             payee: payee.id,
