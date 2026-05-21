@@ -147,6 +147,16 @@ pub struct ExtendedSignalArgs {
     /// handler load it without a global scan.
     #[arg(long)]
     pub buyer_entity_id: Option<String>,
+
+    /// Multi-party payment split entry (payment-request, Week 33).
+    /// Repeatable; each value is `<hex32>:<basis_points>` where the
+    /// hex32 is a recipient entity id and basis_points is a 1/10_000
+    /// share. Provide 2..=8 entries; the FIRST entry MUST be the
+    /// same entity id as `--payee-entity-id` and the basis_points
+    /// across all entries MUST sum to 10_000. Omit `--split`
+    /// entirely to issue a legacy single-recipient payment.
+    #[arg(long = "split", value_name = "HEX32:BP")]
+    pub split: Vec<String>,
 }
 
 /// Parse signal type string.
@@ -197,6 +207,101 @@ fn require_some<T>(value: Option<T>, flag: &str, sig_type: &str) -> Result<T, St
 const PROOF_TYPE_STUB: u8 = 0;
 const PROOF_TYPE_GROTH16: u8 = 1;
 const PROOF_TYPE_GROTH16_REGISTERED: u8 = 3;
+
+/// Maximum split entries the multi-party PaymentRequest accepts
+/// (Week 33). Mirrors `novai_execution::MAX_PAYMENT_SPLITS`.
+const MAX_PAYMENT_SPLITS: usize = 8;
+
+/// Minimum split entries when the trailer is present (Week 33).
+/// Mirrors `novai_execution::MIN_PAYMENT_SPLITS_WHEN_PRESENT`.
+const MIN_PAYMENT_SPLITS_WHEN_PRESENT: usize = 2;
+
+/// Basis-points denominator. Mirrors `novai_execution::BPS_DENOMINATOR`.
+const BASIS_POINTS_TOTAL: u32 = 10_000;
+
+/// Parse one `--split <hex32>:<basis_points>` value into the
+/// canonical (recipient_id, basis_points) tuple.
+fn parse_split_entry(raw: &str) -> Result<([u8; 32], u16), String> {
+    let (id_hex, bp_str) = raw
+        .split_once(':')
+        .ok_or_else(|| format!("--split value must be \"<hex32>:<basis_points>\"; got {raw:?}"))?;
+    let id = parse_hex32(id_hex.trim(), "split recipient_entity_id")?;
+    let bp: u16 = bp_str.trim().parse().map_err(|e| {
+        format!("--split basis_points must parse as u16 (1..=10000); got {bp_str:?}: {e}")
+    })?;
+    if bp == 0 {
+        return Err(format!(
+            "--split basis_points must be non-zero; entry {raw:?} carries 0"
+        ));
+    }
+    if u32::from(bp) > BASIS_POINTS_TOTAL {
+        return Err(format!(
+            "--split basis_points must not exceed {BASIS_POINTS_TOTAL}; entry {raw:?} carries {bp}"
+        ));
+    }
+    Ok((id, bp))
+}
+
+/// Parse and validate every `--split` value supplied on the command
+/// line. Returns `None` if the user passed no `--split` flags (the
+/// caller emits the legacy single-recipient payment). Otherwise
+/// returns the parsed entries after enforcing:
+/// 1. `[MIN_PAYMENT_SPLITS_WHEN_PRESENT, MAX_PAYMENT_SPLITS]` count
+/// 2. `splits[0].id == primary_payee_id` (the existing
+///    `--payee-entity-id` flag is the canonical primary)
+/// 3. No duplicate recipient ids
+/// 4. Sum of basis_points == `BASIS_POINTS_TOTAL`
+///
+/// These are courtesy checks performed before the tx hits the network
+/// so common authoring mistakes surface immediately. The runtime
+/// re-validates every rule via `validate_payment_splits`.
+#[allow(clippy::type_complexity)]
+fn parse_payment_splits_flag(
+    raw: &[String],
+    primary_payee: &[u8; 32],
+) -> Result<Option<Vec<([u8; 32], u16)>>, String> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw.len() < MIN_PAYMENT_SPLITS_WHEN_PRESENT || raw.len() > MAX_PAYMENT_SPLITS {
+        return Err(format!(
+            "--split count must be in [{MIN_PAYMENT_SPLITS_WHEN_PRESENT}, {MAX_PAYMENT_SPLITS}] when present; got {}",
+            raw.len()
+        ));
+    }
+    let mut entries = Vec::with_capacity(raw.len());
+    for r in raw {
+        entries.push(parse_split_entry(r)?);
+    }
+    if entries[0].0 != *primary_payee {
+        return Err(format!(
+            "first --split recipient must equal --payee-entity-id (primary); got {}",
+            hex::encode(entries[0].0)
+        ));
+    }
+    let mut sum: u32 = 0;
+    for (i, (_, bp)) in entries.iter().enumerate() {
+        sum = sum
+            .checked_add(u32::from(*bp))
+            .ok_or_else(|| format!("--split basis_points overflow accumulating entry {i}"))?;
+    }
+    if sum != BASIS_POINTS_TOTAL {
+        return Err(format!(
+            "--split basis_points sum must equal {BASIS_POINTS_TOTAL}; got {sum}"
+        ));
+    }
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            if entries[i].0 == entries[j].0 {
+                return Err(format!(
+                    "--split recipient {} appears more than once",
+                    hex::encode(entries[i].0)
+                ));
+            }
+        }
+    }
+    Ok(Some(entries))
+}
 
 /// Append the v2 ProofSubmission tail (`vk_len_be:4 | vk_bytes |
 /// proof_len_be:4 | proof_bytes`) to `payload`, deriving the contents
@@ -465,6 +570,21 @@ fn build_signal_payload(
             payload.extend_from_slice(&service_descriptor);
             payload.extend_from_slice(&request);
             payload.extend_from_slice(&max_block_height.to_be_bytes());
+
+            // Week 33: optional multi-party splits trailer. When the
+            // user passed one or more `--split` flags, append
+            // `count:1 | (recipient[32] | bp_be[2])*count` to the
+            // legacy 178-byte tail. Courtesy-validated client-side
+            // before submission; the runtime re-validates everything.
+            if let Some(splits) = parse_payment_splits_flag(&extra.split, &payee)? {
+                let count_u8 =
+                    u8::try_from(splits.len()).expect("MAX_PAYMENT_SPLITS (8) fits in u8");
+                payload.push(count_u8);
+                for (recipient, bp) in &splits {
+                    payload.extend_from_slice(recipient);
+                    payload.extend_from_slice(&bp.to_be_bytes());
+                }
+            }
         }
         AiSignalType::ServiceAttestation => {
             let payment_signal_hash = parse_hex32(
@@ -671,6 +791,7 @@ mod tests {
             proof_file: None,
             sla_object_id: Some("00".repeat(32)),
             buyer_entity_id: Some("00".repeat(32)),
+            split: Vec::new(),
         }
     }
 
@@ -918,5 +1039,211 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("stub"), "err = {err}");
         assert!(err.contains("--proof-file"), "err = {err}");
+    }
+
+    // ========================================================================
+    // Week 33 Phase 4 - --split parser
+    // ========================================================================
+
+    #[test]
+    fn test_parse_split_entry_happy_path() {
+        let (id, bp) = parse_split_entry(&format!("{}:5000", "aa".repeat(32))).unwrap();
+        assert_eq!(id, [0xAAu8; 32]);
+        assert_eq!(bp, 5_000);
+    }
+
+    #[test]
+    fn test_parse_split_entry_rejects_missing_colon() {
+        let err = parse_split_entry(&"aa".repeat(32)).unwrap_err();
+        assert!(err.contains("<hex32>:<basis_points>"), "err = {err}");
+    }
+
+    #[test]
+    fn test_parse_split_entry_rejects_zero_basis_points() {
+        let err = parse_split_entry(&format!("{}:0", "aa".repeat(32))).unwrap_err();
+        assert!(err.contains("non-zero"), "err = {err}");
+    }
+
+    #[test]
+    fn test_parse_split_entry_rejects_bp_over_10000() {
+        let err = parse_split_entry(&format!("{}:10001", "aa".repeat(32))).unwrap_err();
+        assert!(err.contains("must not exceed"), "err = {err}");
+    }
+
+    #[test]
+    fn test_parse_split_entry_rejects_bad_hex() {
+        let err = parse_split_entry("zz:5000").unwrap_err();
+        assert!(
+            err.to_ascii_lowercase().contains("hex") || err.contains("split recipient"),
+            "err = {err}",
+        );
+    }
+
+    #[test]
+    fn test_parse_payment_splits_flag_returns_none_when_empty() {
+        let primary = [0xAAu8; 32];
+        assert!(parse_payment_splits_flag(&[], &primary).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_parse_payment_splits_flag_happy_path() {
+        let primary = [0xAAu8; 32];
+        let raw = vec![
+            format!("{}:5000", "aa".repeat(32)),
+            format!("{}:3000", "bb".repeat(32)),
+            format!("{}:2000", "cc".repeat(32)),
+        ];
+        let parsed = parse_payment_splits_flag(&raw, &primary).unwrap().unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].0, [0xAAu8; 32]);
+        assert_eq!(parsed[0].1, 5_000);
+        assert_eq!(parsed[1].0, [0xBBu8; 32]);
+        assert_eq!(parsed[1].1, 3_000);
+        assert_eq!(parsed[2].0, [0xCCu8; 32]);
+        assert_eq!(parsed[2].1, 2_000);
+    }
+
+    #[test]
+    fn test_parse_payment_splits_flag_rejects_count_below_min() {
+        let primary = [0xAAu8; 32];
+        let raw = vec![format!("{}:10000", "aa".repeat(32))];
+        let err = parse_payment_splits_flag(&raw, &primary).unwrap_err();
+        assert!(err.contains("count must be in"), "err = {err}");
+    }
+
+    #[test]
+    fn test_parse_payment_splits_flag_rejects_count_above_max() {
+        let primary = [0xAAu8; 32];
+        let mut raw = Vec::with_capacity(9);
+        raw.push(format!("{}:1250", "aa".repeat(32)));
+        for i in 1u8..=8 {
+            // 9 total entries; bp values irrelevant because count check
+            // fires before the sum check.
+            raw.push(format!("{}:1000", format!("{i:02x}").repeat(32)));
+        }
+        let err = parse_payment_splits_flag(&raw, &primary).unwrap_err();
+        assert!(err.contains("count must be in"), "err = {err}");
+    }
+
+    #[test]
+    fn test_parse_payment_splits_flag_rejects_primary_mismatch() {
+        let primary = [0xAAu8; 32];
+        let raw = vec![
+            format!("{}:5000", "bb".repeat(32)),
+            format!("{}:5000", "cc".repeat(32)),
+        ];
+        let err = parse_payment_splits_flag(&raw, &primary).unwrap_err();
+        assert!(err.contains("first --split"), "err = {err}");
+    }
+
+    #[test]
+    fn test_parse_payment_splits_flag_rejects_sum_below_10000() {
+        let primary = [0xAAu8; 32];
+        let raw = vec![
+            format!("{}:5000", "aa".repeat(32)),
+            format!("{}:4999", "bb".repeat(32)),
+        ];
+        let err = parse_payment_splits_flag(&raw, &primary).unwrap_err();
+        assert!(err.contains("sum must equal"), "err = {err}");
+    }
+
+    #[test]
+    fn test_parse_payment_splits_flag_rejects_sum_above_10000() {
+        let primary = [0xAAu8; 32];
+        let raw = vec![
+            format!("{}:5000", "aa".repeat(32)),
+            format!("{}:5001", "bb".repeat(32)),
+        ];
+        let err = parse_payment_splits_flag(&raw, &primary).unwrap_err();
+        assert!(err.contains("sum must equal"), "err = {err}");
+    }
+
+    #[test]
+    fn test_parse_payment_splits_flag_rejects_duplicate_recipient() {
+        let primary = [0xAAu8; 32];
+        let raw = vec![
+            format!("{}:5000", "aa".repeat(32)),
+            format!("{}:5000", "aa".repeat(32)),
+        ];
+        let err = parse_payment_splits_flag(&raw, &primary).unwrap_err();
+        assert!(err.contains("appears more than once"), "err = {err}");
+    }
+
+    #[test]
+    fn test_payment_request_with_3_splits_payload_bytes() {
+        // End-to-end byte-layout check: the CLI-built payload carries
+        // the legacy 178-byte tail followed by `count:1 |
+        // (recipient[32] | bp_be[2]) * 3` for a total of 281 bytes.
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0x1112_1314_1516_1718),
+            split: vec![
+                format!("{}:5000", "aa".repeat(32)),
+                format!("{}:3000", "11".repeat(32)),
+                format!("{}:2000", "22".repeat(32)),
+            ],
+            ..full_extra()
+        };
+        let payload = build_signal_payload(
+            [0x66u8; 32],
+            AiSignalType::PaymentRequest,
+            [0x55u8; 32],
+            &extra,
+        )
+        .unwrap();
+        assert_eq!(payload.len(), 178 + 1 + 3 * 34, "281 bytes total");
+        assert_eq!(payload[178], 3, "splits count byte = 3");
+        assert_eq!(&payload[179..211], &[0xAAu8; 32], "splits[0].recipient");
+        assert_eq!(&payload[211..213], &5_000u16.to_be_bytes());
+        assert_eq!(&payload[213..245], &[0x11u8; 32]);
+        assert_eq!(&payload[245..247], &3_000u16.to_be_bytes());
+        assert_eq!(&payload[247..279], &[0x22u8; 32]);
+        assert_eq!(&payload[279..281], &2_000u16.to_be_bytes());
+    }
+
+    #[test]
+    fn test_payment_request_without_splits_keeps_178_byte_payload() {
+        // Backward compat: omitting --split entirely produces the
+        // Week 28 178-byte single-recipient payload byte-for-byte.
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(1),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(2),
+            split: Vec::new(),
+            ..full_extra()
+        };
+        let payload =
+            build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+                .unwrap();
+        assert_eq!(payload.len(), 178);
+    }
+
+    #[test]
+    fn test_payment_request_with_splits_propagates_validation_error() {
+        // The CLI courtesy-validates before payload emission. A
+        // primary mismatch surfaces the parse_payment_splits_flag
+        // error rather than producing wire bytes that would later
+        // be rejected by the runtime.
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(2),
+            split: vec![
+                // First entry does not match payee_entity_id.
+                format!("{}:5000", "bb".repeat(32)),
+                format!("{}:5000", "cc".repeat(32)),
+            ],
+            ..full_extra()
+        };
+        let err = build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+            .unwrap_err();
+        assert!(err.contains("first --split"), "err = {err}");
     }
 }

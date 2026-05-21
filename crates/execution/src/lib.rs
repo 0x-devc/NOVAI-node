@@ -4047,7 +4047,7 @@ pub fn get_payments_by_entity<K: Kv>(
 
     for (key, _value) in entries {
         // Key layout (after the role_prefix || entity_id[32] portion):
-        // `height_be[8] || signal_hash[32]` — 40 bytes total.
+        // `height_be[8] || signal_hash[32]` (40 bytes total).
         if key.len() < prefix.len() + 8 + 32 {
             return Err(ExecError::CodecDecode(format!(
                 "payment index key too short: {} bytes",
@@ -4075,6 +4075,85 @@ pub fn get_payments_by_entity<K: Kv>(
         let record = decode_payment_record_v1(&record_bytes)
             .map_err(|_| ExecError::PaymentRecordDecodeFailed)?;
         results.push(record);
+    }
+
+    Ok(results)
+}
+
+/// Week 33: like `get_payments_by_entity` but also resolves the
+/// optional multi-party splits aux record for every returned payment.
+///
+/// Each tuple element is `(PaymentRecord, Option<PaymentSplitsRecord>)`.
+/// The second value is `Some` for payments that carried an inline splits
+/// trailer at submit time (and therefore have an aux row at
+/// `payment_splits_by_hash_key`) and `None` for legacy single-recipient
+/// payments. Same height-windowing and key-corruption semantics as
+/// `get_payments_by_entity`.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the KV scan or follow-up reads fail,
+/// `ExecError::PaymentRecordDecodeFailed` if a referenced `by_hash`
+/// value or aux splits value is malformed, or `ExecError::CodecDecode`
+/// if an index key is shorter than expected.
+#[allow(clippy::type_complexity)]
+pub fn get_payments_with_splits_by_entity<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+    role: PaymentRole,
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<(PaymentRecord, Option<PaymentSplitsRecord>)>, ExecError<K::Error>> {
+    let role_prefix: &[u8] = match role {
+        PaymentRole::Payer => KEY_PREFIX_AI_PAYMENTS_BY_PAYER,
+        PaymentRole::Payee => KEY_PREFIX_AI_PAYMENTS_BY_PAYEE,
+    };
+    let mut prefix = Vec::with_capacity(role_prefix.len() + 32);
+    prefix.extend_from_slice(role_prefix);
+    prefix.extend_from_slice(entity_id);
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+    let mut results = Vec::with_capacity(entries.len());
+
+    for (key, _value) in entries {
+        if key.len() < prefix.len() + 8 + 32 {
+            return Err(ExecError::CodecDecode(format!(
+                "payment index key too short: {} bytes",
+                key.len()
+            )));
+        }
+        let tail = &key[prefix.len()..];
+        let mut height_bytes = [0u8; 8];
+        height_bytes.copy_from_slice(&tail[..8]);
+        let height = u64::from_be_bytes(height_bytes);
+        if height < start_height || height > end_height {
+            continue;
+        }
+        let mut signal_hash = [0u8; 32];
+        signal_hash.copy_from_slice(&tail[8..40]);
+
+        let record_bytes = db
+            .get(&payment_by_hash_key(&signal_hash))
+            .map_err(ExecError::Db)?
+            .ok_or_else(|| {
+                ExecError::CodecDecode(
+                    "payment index entry references missing by_hash record".into(),
+                )
+            })?;
+        let record = decode_payment_record_v1(&record_bytes)
+            .map_err(|_| ExecError::PaymentRecordDecodeFailed)?;
+
+        let splits = match db
+            .get(&payment_splits_by_hash_key(&signal_hash))
+            .map_err(ExecError::Db)?
+        {
+            Some(bytes) => Some(
+                decode_payment_splits_record_v1(&bytes)
+                    .map_err(|_| ExecError::PaymentRecordDecodeFailed)?,
+            ),
+            None => None,
+        };
+
+        results.push((record, splits));
     }
 
     Ok(results)

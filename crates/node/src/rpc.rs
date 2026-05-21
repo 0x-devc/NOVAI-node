@@ -35,13 +35,14 @@ use novai_consensus_types;
 use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_execution::{
     get_active_sla_between, get_channels_by_party_a, get_channels_by_party_b,
-    get_memory_objects_by_entity, get_payment_channel, get_payments_by_entity,
+    get_memory_objects_by_entity, get_payment_channel, get_payments_with_splits_by_entity,
     get_service_descriptors_by_category, get_signals_by_height, get_signals_by_issuer,
     get_signals_by_type, get_sla_agreement, get_slas_by_buyer, get_slas_by_seller,
     get_vk_registration_by_id, get_vk_registrations_by_entity, read_account_or_default,
-    read_ai_entity, PaymentRecord, PaymentRole, PAYMENT_ATTESTATION_STATUS_DELIVERED,
-    PAYMENT_ATTESTATION_STATUS_FAILED, PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16,
-    PROOF_TYPE_GROTH16_REGISTERED, PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
+    read_ai_entity, PaymentRecord, PaymentRole, PaymentSplitsRecord, PaymentSplitsRecordEntry,
+    PAYMENT_ATTESTATION_STATUS_DELIVERED, PAYMENT_ATTESTATION_STATUS_FAILED,
+    PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16, PROOF_TYPE_GROTH16_REGISTERED,
+    PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
 };
 use novai_p2p::{NetworkMessage, PeerManager};
 use novai_types::{Address, TxV1, TxVersion};
@@ -266,15 +267,44 @@ struct GetPaymentsByEntityParams {
     end_height: u64,
 }
 
+/// JSON-serializable single split entry attached to a multi-party
+/// payment (Week 33). `recipient_entity_id` is hex; `credited_amount`
+/// is a decimal string consistent with `PaymentJson.amount`.
+#[derive(Debug, Serialize)]
+struct PaymentSplitJson {
+    /// Hex-encoded 32-byte recipient entity id.
+    recipient_entity_id: String,
+    /// Basis points share of the payment's `amount` for this recipient.
+    basis_points: u16,
+    /// Amount actually credited to this recipient in base units. For
+    /// `splits[0]` this includes the floor-division remainder folded
+    /// in by the executor so the sum of `credited_amount` across all
+    /// entries equals `PaymentJson.amount` exactly.
+    credited_amount: String,
+}
+
+impl From<PaymentSplitsRecordEntry> for PaymentSplitJson {
+    fn from(e: PaymentSplitsRecordEntry) -> Self {
+        Self {
+            recipient_entity_id: hex::encode(e.recipient_entity_id),
+            basis_points: e.basis_points,
+            credited_amount: e.credited_amount.to_string(),
+        }
+    }
+}
+
 /// JSON-serializable PaymentRecord. Amount is rendered as a decimal
 /// string (consistent with the rest of the RPC surface where u64/u128
 /// values are returned as strings to avoid JSON precision loss);
-/// attested_status is rendered as a human-readable label.
+/// attested_status is rendered as a human-readable label. Week 33
+/// adds an optional `splits` array surfaced from the
+/// `PaymentSplitsRecord` aux row when present.
 #[derive(Debug, Serialize)]
 struct PaymentJson {
     /// Hex-encoded 32-byte payer entity id.
     payer: String,
-    /// Hex-encoded 32-byte payee entity id.
+    /// Hex-encoded 32-byte payee entity id. For multi-party payments
+    /// this is the primary recipient (== `splits[0].recipient_entity_id`).
     payee: String,
     /// Payment amount in base units, as a decimal string.
     amount: String,
@@ -294,6 +324,11 @@ struct PaymentJson {
     /// Block height at which the attestation was recorded; `null` when
     /// no attestation has been recorded yet.
     attested_height: Option<u64>,
+    /// Week 33: per-recipient split breakdown for multi-party payments.
+    /// `null` for legacy single-recipient payments (no aux record in
+    /// storage); otherwise a length-2-to-8 array whose
+    /// `credited_amount` values sum to `amount`.
+    splits: Option<Vec<PaymentSplitJson>>,
 }
 
 impl From<PaymentRecord> for PaymentJson {
@@ -317,7 +352,23 @@ impl From<PaymentRecord> for PaymentJson {
             max_block_height: r.max_block_height,
             attested_status,
             attested_height,
+            splits: None,
         }
+    }
+}
+
+impl PaymentJson {
+    /// Build a `PaymentJson` from a `PaymentRecord` plus the optional
+    /// Week 33 splits aux row. When `splits` is `Some`, the returned
+    /// JSON carries a populated `splits` array; when `None`, the field
+    /// serialises as `null` (preserving the Week 28 wire shape for
+    /// legacy single-recipient payments).
+    fn from_record_with_splits(record: PaymentRecord, splits: Option<PaymentSplitsRecord>) -> Self {
+        let mut json = Self::from(record);
+        if let Some(s) = splits {
+            json.splits = Some(s.entries.into_iter().map(PaymentSplitJson::from).collect());
+        }
+        json
     }
 }
 
@@ -2027,7 +2078,7 @@ fn handle_get_payments_by_entity(
     let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
 
     let db = db.lock_or_recover();
-    let payments = get_payments_by_entity(
+    let payments = get_payments_with_splits_by_entity(
         &*db,
         &entity_id,
         role,
@@ -2040,7 +2091,10 @@ fn handle_get_payments_by_entity(
     })?;
 
     Ok(GetPaymentsByEntityResult {
-        payments: payments.into_iter().map(PaymentJson::from).collect(),
+        payments: payments
+            .into_iter()
+            .map(|(r, s)| PaymentJson::from_record_with_splits(r, s))
+            .collect(),
     })
 }
 
@@ -3112,6 +3166,98 @@ mod tests {
         let unknown = serde_json::to_value(PaymentJson::from(mk(0x7Fu8, 30))).unwrap();
         assert_eq!(unknown["attested_status"], "unknown");
         assert_eq!(unknown["attested_height"], 30);
+    }
+
+    // ========================================================================
+    // Week 33 Phase 4 - novai_getPaymentsByEntity splits surface
+    // ========================================================================
+
+    fn sample_payment_record() -> PaymentRecord {
+        PaymentRecord {
+            payer: [0xA1u8; 32],
+            payee: [0xA2u8; 32],
+            amount: 10_000,
+            service_descriptor_hash: [0xA3u8; 32],
+            request_hash: [0xA4u8; 32],
+            payment_height: 500,
+            max_block_height: 600,
+            attested_status: PAYMENT_ATTESTATION_STATUS_NONE,
+            attested_height: 0,
+        }
+    }
+
+    #[test]
+    fn test_payment_json_legacy_payment_renders_splits_null() {
+        // Backward compat: a payment without an aux splits record
+        // serialises with `"splits": null`. Week 28 RPC consumers see
+        // every existing key unchanged.
+        let json = serde_json::to_value(PaymentJson::from(sample_payment_record())).unwrap();
+        assert!(
+            json["splits"].is_null(),
+            "legacy payments serialise splits as null",
+        );
+        // Spot-check that the original Week 28 keys are still present
+        // with their original shapes.
+        assert_eq!(json["amount"], "10000");
+        assert!(json["amount"].is_string());
+    }
+
+    #[test]
+    fn test_payment_json_with_splits_renders_array() {
+        let record = sample_payment_record();
+        let splits = PaymentSplitsRecord {
+            entries: vec![
+                PaymentSplitsRecordEntry {
+                    recipient_entity_id: [0xA2u8; 32],
+                    basis_points: 6_000,
+                    credited_amount: 6_000,
+                },
+                PaymentSplitsRecordEntry {
+                    recipient_entity_id: [0xB1u8; 32],
+                    basis_points: 4_000,
+                    credited_amount: 4_000,
+                },
+            ],
+        };
+        let json = serde_json::to_value(PaymentJson::from_record_with_splits(record, Some(splits)))
+            .unwrap();
+        // The PaymentRecord.payee is still the primary; the splits
+        // array carries the per-recipient breakdown.
+        assert_eq!(json["payee"], "a2".repeat(32));
+        let splits_json = json["splits"].as_array().expect("splits is an array");
+        assert_eq!(splits_json.len(), 2);
+        assert_eq!(splits_json[0]["recipient_entity_id"], "a2".repeat(32));
+        assert_eq!(splits_json[0]["basis_points"], 6_000);
+        assert_eq!(splits_json[0]["credited_amount"], "6000");
+        assert_eq!(splits_json[1]["recipient_entity_id"], "b1".repeat(32));
+        assert_eq!(splits_json[1]["basis_points"], 4_000);
+        assert_eq!(splits_json[1]["credited_amount"], "4000");
+    }
+
+    #[test]
+    fn test_payment_json_splits_credited_amount_is_decimal_string() {
+        // u64 amounts serialised as decimal strings (consistent with
+        // PaymentJson.amount and the rest of the RPC surface).
+        let record = sample_payment_record();
+        let splits = PaymentSplitsRecord {
+            entries: vec![
+                PaymentSplitsRecordEntry {
+                    recipient_entity_id: [0u8; 32],
+                    basis_points: 5_000,
+                    credited_amount: u64::MAX,
+                },
+                PaymentSplitsRecordEntry {
+                    recipient_entity_id: [1u8; 32],
+                    basis_points: 5_000,
+                    credited_amount: 0,
+                },
+            ],
+        };
+        let json = serde_json::to_value(PaymentJson::from_record_with_splits(record, Some(splits)))
+            .unwrap();
+        assert_eq!(json["splits"][0]["credited_amount"], u64::MAX.to_string());
+        assert!(json["splits"][0]["credited_amount"].is_string());
+        assert_eq!(json["splits"][1]["credited_amount"], "0");
     }
 
     // ========================================================================
