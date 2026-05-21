@@ -3398,6 +3398,120 @@ pub fn payment_by_payee_key(payee: &[u8; 32], height: u64, signal_hash: &[u8; 32
     out
 }
 
+// ============================================================================
+// PAYMENT SPLITS VALIDATION (Week 33 - multi-party payment splitting)
+// ============================================================================
+
+/// Validate the splits trailer attached to a `PaymentRequest` payload.
+///
+/// The decoder already guarantees that `splits.len()` is in
+/// `[MIN_PAYMENT_SPLITS_WHEN_PRESENT, MAX_PAYMENT_SPLITS]`; this
+/// function enforces every remaining rule from Phase 0 design
+/// review (P2 / P3 / P5 / P7), in order from cheapest to most
+/// expensive:
+///
+/// 1. `splits[0].recipient_entity_id == primary_payee_id` else
+///    `PaymentSplitPrimaryMismatch`. Pushback P2: the canonical
+///    primary recipient is always the tail's `payee_entity_id`;
+///    splits[0] carries the same id and the remainder of the
+///    floor-division at execution time.
+/// 2. Every entry's `basis_points` is non-zero else
+///    `PaymentSplitZeroBasisPoints { index }`. Zero-share splits
+///    inflate the count without economic content.
+/// 3. Sum of `basis_points` equals `BPS_DENOMINATOR` else
+///    `PaymentSplitsBasisPointsSumInvalid`. Off-by-one mistakes
+///    (9 999 / 10 001) are the most common authoring bug; the
+///    runtime refuses to settle them.
+/// 4. No entry's recipient is the issuer (payer) else
+///    `PaymentSplitSelfPayment`. Mirrors the existing
+///    `PaymentSelfReferential` rule on the primary payee field.
+/// 5. No two entries share the same recipient else
+///    `PaymentSplitDuplicateRecipient`. Per-recipient credits at
+///    execution time must be atomic; dedup keeps the credit loop
+///    one-pass.
+/// 6. Every non-primary recipient is registered AND active
+///    (`read_ai_entity` returns `Some` and `is_active == true`)
+///    else `PaymentSplitRecipientNotFound` or
+///    `PaymentSplitRecipientNotActive`. The primary is already
+///    checked by the caller via the existing
+///    `PaymentPayeeNotFound` / `PaymentPayeeNotActive` rules so
+///    that the W28 path is unaffected.
+///
+/// # Errors
+/// Returns the first violation encountered; the function does
+/// NOT mutate state and is safe to call after the primary
+/// `payee` has been loaded.
+fn validate_payment_splits<K: Kv>(
+    db: &K,
+    splits: &[PaymentSplit],
+    primary_payee_id: &[u8; 32],
+    payer_id: &[u8; 32],
+) -> Result<(), ExecError<K::Error>> {
+    // Defence-in-depth: the decoder already enforces this band,
+    // but the handler may call the validator on a hand-built
+    // splits vec in tests or future code paths.
+    debug_assert!(splits.len() >= MIN_PAYMENT_SPLITS_WHEN_PRESENT);
+    debug_assert!(splits.len() <= MAX_PAYMENT_SPLITS);
+
+    // Rule 1: splits[0] must equal the primary payee field.
+    if splits[0].recipient_entity_id != *primary_payee_id {
+        return Err(ExecError::PaymentSplitPrimaryMismatch);
+    }
+
+    // Rule 2 + 3: zero-bp check and accumulate sum in one pass.
+    // u32 holds the worst-case sum (8 * u16::MAX = 524_280) safely.
+    let mut sum: u32 = 0;
+    for (i, s) in splits.iter().enumerate() {
+        if s.basis_points == 0 {
+            return Err(ExecError::PaymentSplitZeroBasisPoints { index: i });
+        }
+        sum += u32::from(s.basis_points);
+    }
+    let expected = u32::try_from(BPS_DENOMINATOR).expect("BPS_DENOMINATOR (10_000) fits in u32");
+    if sum != expected {
+        return Err(ExecError::PaymentSplitsBasisPointsSumInvalid { sum, expected });
+    }
+
+    // Rule 4: no recipient equals the issuer (payer).
+    for s in splits {
+        if s.recipient_entity_id == *payer_id {
+            return Err(ExecError::PaymentSplitSelfPayment);
+        }
+    }
+
+    // Rule 5: no duplicate recipients. O(N^2) is fine for
+    // N <= MAX_PAYMENT_SPLITS (= 8); at most 28 comparisons and
+    // no need for a hash-based set.
+    for i in 0..splits.len() {
+        for j in (i + 1)..splits.len() {
+            if splits[i].recipient_entity_id == splits[j].recipient_entity_id {
+                return Err(ExecError::PaymentSplitDuplicateRecipient {
+                    recipient: splits[i].recipient_entity_id,
+                });
+            }
+        }
+    }
+
+    // Rule 6: every non-primary recipient is registered and
+    // active. Skip the primary (splits[0]); it was already
+    // resolved by the caller via the existing
+    // PaymentPayeeNotFound / PaymentPayeeNotActive rules.
+    for s in splits.iter().skip(1) {
+        let recipient = read_ai_entity(db, &s.recipient_entity_id)?.ok_or(
+            ExecError::PaymentSplitRecipientNotFound {
+                recipient: s.recipient_entity_id,
+            },
+        )?;
+        if !recipient.is_active {
+            return Err(ExecError::PaymentSplitRecipientNotActive {
+                recipient: s.recipient_entity_id,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// Build the canonical KV key for the Agent Discovery Registry
 /// by-category scan index entry:
 /// `b"ai/service_descriptors/by_category/" || category[1] || owner[32] || object_id[32]`.
@@ -5238,6 +5352,9 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         ExecError::RegisteredVkBadIdLength { actual } => {
             ExecError::RegisteredVkBadIdLength { actual }
         }
+        ExecError::PaymentSplitsBadCount { count, min, max } => {
+            ExecError::PaymentSplitsBadCount { count, min, max }
+        }
         _ => ExecError::Overflow,
     })?;
 
@@ -6055,6 +6172,16 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             read_ai_entity(db, &extra.payee_entity_id)?.ok_or(ExecError::PaymentPayeeNotFound)?;
         if !payee.is_active {
             return Err(ExecError::PaymentPayeeNotActive);
+        }
+
+        // Week 33: validate the optional splits trailer. Runs after
+        // the primary payee is resolved so the splits[0] equality
+        // check can rely on `extra.payee_entity_id` being a known
+        // active recipient, and BEFORE the replay guard so a
+        // rejected splits payload does NOT consume the by_hash
+        // seen-set slot for this signal_hash.
+        if let Some(splits) = &extra.splits {
+            validate_payment_splits(db, splits, &extra.payee_entity_id, &entity.id)?;
         }
 
         // Replay guard. The by_hash record is the canonical seen-set

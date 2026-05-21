@@ -23,10 +23,11 @@ use novai_ai_entities::{AiEntity, AiSignalType, AutonomyMode, Capabilities};
 use novai_execution::{
     apply_signal_commitment_tx, decode_payment_record_v1, encode_signal_commitment_payload_v1,
     payment_by_hash_key, payment_by_payee_key, payment_by_payer_key, read_ai_entity,
-    write_ai_entity_op, ExecError, PaymentRequestExtraV1, SignalCommitmentPayloadV1,
+    write_ai_entity_op, ExecError, PaymentRequestExtraV1, PaymentSplit, SignalCommitmentPayloadV1,
     BPS_DENOMINATOR, KEY_MARKETPLACE_TREASURY, KEY_PREFIX_AI_PAYMENTS_BY_PAYEE,
-    KEY_PREFIX_AI_PAYMENTS_BY_PAYER, PAYMENT_ATTESTATION_STATUS_NONE, PAYMENT_FEE_BPS,
-    PAYMENT_RECORD_LEN, SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN,
+    KEY_PREFIX_AI_PAYMENTS_BY_PAYER, MAX_PAYMENT_SPLITS, MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+    PAYMENT_ATTESTATION_STATUS_NONE, PAYMENT_FEE_BPS, PAYMENT_RECORD_LEN,
+    SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN,
 };
 use novai_state::{ai_entity_by_address_key, decode_fee_pool_v1, Kv, KvBatch, MemKv, WriteOp};
 use novai_types::{TxV1, TxVersion};
@@ -744,5 +745,593 @@ fn payment_request_record_bytes_lock_layout() {
         &record_bytes[154..162],
         &0u64.to_be_bytes(),
         "attested_height_be at 154..162 (zero pre-attestation)"
+    );
+}
+
+// ============================================================================
+// Week 33 - Phase 2: PaymentSplits validation
+// ============================================================================
+//
+// These tests exercise the `validate_payment_splits` hook wired into the
+// `PaymentRequest` handler. Each rule has at least one dedicated rejection
+// test; the happy-path tests assert that validation accepts the payload
+// (the executor still settles single-recipient-style until Phase 3 lands
+// the split-credit loop, so the tests do NOT assert per-split balance
+// deltas yet; Phase 3 does that).
+
+fn make_split_recipient(
+    db: &mut MemKv,
+    code_seed: u8,
+    creator_seed: u8,
+    is_active: bool,
+) -> AiEntity {
+    let mut e = build_entity([code_seed; 32], [creator_seed; 32], payment_caps());
+    e.economic_balance = 0;
+    e.is_active = is_active;
+    store_entity(db, &e);
+    e
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_split_payment_payload(
+    signal_hash: [u8; 32],
+    payer: [u8; 32],
+    primary_payee: [u8; 32],
+    amount: u64,
+    service: [u8; 32],
+    request: [u8; 32],
+    max_block_height: u64,
+    splits: Vec<PaymentSplit>,
+) -> Vec<u8> {
+    encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash,
+        signal_type: AiSignalType::PaymentRequest,
+        issuer_entity_id: payer,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
+        payment_request: Some(PaymentRequestExtraV1 {
+            payee_entity_id: primary_payee,
+            amount,
+            service_descriptor_hash: service,
+            request_hash: request,
+            max_block_height,
+            splits: Some(splits),
+        }),
+        service_attestation: None,
+        sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
+    })
+}
+
+#[test]
+fn payment_split_primary_must_equal_payee_field() {
+    // splits[0].recipient != extra.payee_entity_id -> PaymentSplitPrimaryMismatch.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x10u8; 32], [0x20u8; 32]);
+    let payee = make_payee(&mut db, [0x11u8; 32], [0x21u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x12, 0x22, true);
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: r2.id, // WRONG: not the primary
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xAAu8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0xBBu8; 32],
+        [0xCCu8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(err, ExecError::PaymentSplitPrimaryMismatch),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn payment_split_zero_basis_points_rejected() {
+    // Any single zero-bp entry -> PaymentSplitZeroBasisPoints { index }.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x30u8; 32], [0x40u8; 32]);
+    let payee = make_payee(&mut db, [0x31u8; 32], [0x41u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x32, 0x42, true);
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 10_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 0, // zero share at index 1
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xABu8; 32],
+        payer.id,
+        payee.id,
+        1_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(err, ExecError::PaymentSplitZeroBasisPoints { index: 1 }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn payment_split_basis_points_sum_below_10000_rejected() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x50u8; 32], [0x60u8; 32]);
+    let payee = make_payee(&mut db, [0x51u8; 32], [0x61u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x52, 0x62, true);
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 6_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_999, // sum = 9_999
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xACu8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitsBasisPointsSumInvalid {
+                sum: 9_999,
+                expected: 10_000,
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn payment_split_basis_points_sum_above_10000_rejected() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x70u8; 32], [0x80u8; 32]);
+    let payee = make_payee(&mut db, [0x71u8; 32], [0x81u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x72, 0x82, true);
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 6_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_001, // sum = 10_001
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xADu8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitsBasisPointsSumInvalid {
+                sum: 10_001,
+                expected: 10_000,
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn payment_split_self_payment_primary_rejected() {
+    // splits[0] = payee but payee == payer would already trip
+    // PaymentSelfReferential in the existing handler step; this test
+    // covers the case where splits[1..] names the issuer. The primary
+    // self-payment is already covered by `payment_request_self_payment_rejected`.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x90u8; 32], [0xA0u8; 32]);
+    let payee = make_payee(&mut db, [0x91u8; 32], [0xA1u8; 32]);
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 6_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: payer.id, // SELF
+            basis_points: 4_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xAEu8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(err, ExecError::PaymentSplitSelfPayment),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn payment_split_duplicate_recipients_rejected() {
+    // splits[1].recipient == splits[2].recipient -> PaymentSplitDuplicateRecipient.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xB0u8; 32], [0xC0u8; 32]);
+    let payee = make_payee(&mut db, [0xB1u8; 32], [0xC1u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xB2, 0xC2, true);
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 4_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id, // DUP
+            basis_points: 3_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xAFu8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitDuplicateRecipient { recipient } if recipient == r2.id
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn payment_split_recipient_not_found_rejected() {
+    // Non-primary recipient does not exist in state.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xD0u8; 32], [0xE0u8; 32]);
+    let payee = make_payee(&mut db, [0xD1u8; 32], [0xE1u8; 32]);
+    let phantom_id = [0xF5u8; 32]; // never stored
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: phantom_id,
+            basis_points: 5_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xBAu8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitRecipientNotFound { recipient } if recipient == phantom_id
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn payment_split_recipient_not_active_rejected() {
+    // Non-primary recipient exists but is_active == false.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xE2u8; 32], [0xF2u8; 32]);
+    let payee = make_payee(&mut db, [0xE3u8; 32], [0xF3u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xE4, 0xF4, false);
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 5_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xBBu8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitRecipientNotActive { recipient } if recipient == r2.id
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn payment_split_validation_accepts_2_recipients_at_min_boundary() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x05u8; 32], [0x06u8; 32]);
+    let payee = make_payee(&mut db, [0x07u8; 32], [0x08u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x09, 0x0A, true);
+
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 7_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        [0xC0u8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    // Validation must accept; settlement proceeds via the legacy
+    // single-recipient executor path in Phase 2 (Phase 3 will swap
+    // in the split-credit loop). The test only asserts that the
+    // apply returns Ok and that the by_hash record was written.
+    assert_eq!(MIN_PAYMENT_SPLITS_WHEN_PRESENT, 2);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT)
+        .expect("validation accepts the 2-recipient split");
+    let record = db
+        .get(&payment_by_hash_key(&[0xC0u8; 32]))
+        .unwrap()
+        .expect("by_hash record written");
+    assert_eq!(record.len(), PAYMENT_RECORD_LEN);
+}
+
+#[test]
+fn payment_split_validation_accepts_8_recipients_at_max_boundary() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x15u8; 32], [0x16u8; 32]);
+    let payee = make_payee(&mut db, [0x17u8; 32], [0x18u8; 32]);
+    // Build 7 additional recipients (primary + 7 = 8 total).
+    let mut recipients = Vec::with_capacity(MAX_PAYMENT_SPLITS - 1);
+    for i in 0..(MAX_PAYMENT_SPLITS - 1) {
+        let seed = 0x20u8 + (i as u8);
+        recipients.push(make_split_recipient(
+            &mut db,
+            seed,
+            seed.wrapping_add(0x40),
+            true,
+        ));
+    }
+
+    // 1250 bp each across 8 entries sums to exactly 10_000.
+    let mut splits = Vec::with_capacity(MAX_PAYMENT_SPLITS);
+    splits.push(PaymentSplit {
+        recipient_entity_id: payee.id,
+        basis_points: 1_250,
+    });
+    for r in &recipients {
+        splits.push(PaymentSplit {
+            recipient_entity_id: r.id,
+            basis_points: 1_250,
+        });
+    }
+    assert_eq!(splits.len(), MAX_PAYMENT_SPLITS);
+
+    let payload = build_split_payment_payload(
+        [0xC1u8; 32],
+        payer.id,
+        payee.id,
+        80_000, // divisible by 8 to keep the Phase 3 remainder visible later
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT)
+        .expect("validation accepts the 8-recipient split");
+    assert!(db
+        .get(&payment_by_hash_key(&[0xC1u8; 32]))
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn payment_split_validation_rule_order_primary_mismatch_beats_sum_check() {
+    // Defence-in-depth: the validator runs the cheap checks before
+    // the sum check, so a payload that violates BOTH the primary-
+    // mismatch rule and the sum rule must surface PrimaryMismatch
+    // (the cheaper rule that fires first).
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x35u8; 32], [0x36u8; 32]);
+    let payee = make_payee(&mut db, [0x37u8; 32], [0x38u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x39, 0x3A, true);
+
+    let splits = vec![
+        // splits[0] != payee.id (primary mismatch).
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_999,
+        },
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 4_999,
+        },
+        // sum = 9_998 (also wrong) but the primary mismatch fires first.
+    ];
+    let payload = build_split_payment_payload(
+        [0xC2u8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(err, ExecError::PaymentSplitPrimaryMismatch),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn payment_split_failed_validation_leaves_no_by_hash_record() {
+    // A rejected split payment must NOT write the by_hash record;
+    // otherwise the dedup slot would be consumed and a future
+    // (correctly authored) payment with the same signal_hash would
+    // be rejected as already-settled.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x45u8; 32], [0x46u8; 32]);
+    let payee = make_payee(&mut db, [0x47u8; 32], [0x48u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x49, 0x4A, true);
+
+    let bad_splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_999, // sum = 9_999
+        },
+    ];
+    let signal_hash = [0xC3u8; 32];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        bad_splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let _ = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+
+    let record = db.get(&payment_by_hash_key(&signal_hash)).unwrap();
+    assert!(record.is_none(), "no by_hash record after rejected splits");
+}
+
+#[test]
+fn payment_split_decoder_bad_count_surfaces_through_handler() {
+    // End-to-end check that a hand-crafted payload claiming an
+    // out-of-range split count surfaces `PaymentSplitsBadCount`
+    // through the dispatcher's error-mapping wrapper (NOT the
+    // catch-all `Overflow` variant). The Phase 1 decoder test
+    // calls decode directly; this one exercises the full path
+    // including the wrapper plumbing added in Phase 2.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x55u8; 32], [0x56u8; 32]);
+    let payee = make_payee(&mut db, [0x57u8; 32], [0x58u8; 32]);
+
+    let mut payload = build_payment_payload(
+        [0xC4u8; 32],
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+    );
+    payload.push(1u8); // count = 1, below MIN
+    payload.extend_from_slice(&[0xAAu8; 32]);
+    payload.extend_from_slice(&10_000u16.to_be_bytes());
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitsBadCount {
+                count: 1,
+                min: MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+                max: MAX_PAYMENT_SPLITS,
+            }
+        ),
+        "got {err:?}"
     );
 }
