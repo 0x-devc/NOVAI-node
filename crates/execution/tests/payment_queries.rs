@@ -95,6 +95,7 @@ fn payment_payload(
             service_descriptor_hash: [0xBBu8; 32],
             request_hash: [0xCCu8; 32],
             max_block_height: EXPIRY_HEIGHT,
+            splits: None,
         }),
         service_attestation: None,
         sla_accept: None,

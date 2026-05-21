@@ -110,6 +110,7 @@ fn build_payment_payload(
             service_descriptor_hash: service,
             request_hash: request,
             max_block_height,
+            splits: None,
         }),
         service_attestation: None,
         sla_accept: None,

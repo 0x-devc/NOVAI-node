@@ -967,6 +967,77 @@ pub enum ExecError<E> {
         /// Current `status` byte of the channel.
         status: u8,
     },
+    // Week 33 - Multi-party payment splitting errors.
+    /// `PaymentRequest` decoder: the trailing splits-count byte
+    /// resolved to a value outside
+    /// `[MIN_PAYMENT_SPLITS_WHEN_PRESENT, MAX_PAYMENT_SPLITS]`.
+    /// When splits are absent the payload length must equal
+    /// `SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN` exactly;
+    /// any larger length is interpreted as the with-splits shape
+    /// and the count is checked here.
+    PaymentSplitsBadCount {
+        /// Count byte as decoded from the payload (already widened).
+        count: usize,
+        /// Minimum allowed split count when the splits trailer is
+        /// present (`MIN_PAYMENT_SPLITS_WHEN_PRESENT`).
+        min: usize,
+        /// Maximum allowed split count (`MAX_PAYMENT_SPLITS`).
+        max: usize,
+    },
+    /// `PaymentRequest` (with splits): the sum of `basis_points`
+    /// across all split entries does not equal `BPS_DENOMINATOR`
+    /// (`10_000`). Enforced at validation time; the wire format does
+    /// not constrain the sum.
+    PaymentSplitsBasisPointsSumInvalid {
+        /// Sum of `basis_points` across the payload's split entries.
+        sum: u32,
+        /// Expected sum (`BPS_DENOMINATOR`, `10_000`).
+        expected: u32,
+    },
+    /// `PaymentRequest` (with splits): two split entries name the
+    /// same recipient entity id. Deduplication is enforced so each
+    /// recipient is credited atomically once.
+    PaymentSplitDuplicateRecipient {
+        /// 32-byte entity id that appears in more than one split entry.
+        recipient: [u8; 32],
+    },
+    /// `PaymentRequest` (with splits): a split entry names the
+    /// payer (signal issuer) as a recipient. Self-payments would
+    /// drain the payer's balance to themselves and are rejected
+    /// at validation time, consistent with the existing
+    /// `PaymentSelfReferential` rule on the primary payee field.
+    PaymentSplitSelfPayment,
+    /// `PaymentRequest` (with splits): a split entry's
+    /// `basis_points` is zero. Zero-share splits inflate the count
+    /// without economic content; rejected so the wire format
+    /// encodes only meaningful recipients.
+    PaymentSplitZeroBasisPoints {
+        /// Index of the offending split entry (0-based, into the
+        /// payload's splits array).
+        index: usize,
+    },
+    /// `PaymentRequest` (with splits): a split entry names a
+    /// recipient entity id that does not exist in state. Mirrors
+    /// the existing `PaymentPayeeNotFound` rule on the primary
+    /// payee.
+    PaymentSplitRecipientNotFound {
+        /// 32-byte entity id the payload referenced.
+        recipient: [u8; 32],
+    },
+    /// `PaymentRequest` (with splits): a split entry names a
+    /// recipient entity that exists but has `is_active == false`.
+    /// Mirrors `PaymentPayeeNotActive` on the primary payee.
+    PaymentSplitRecipientNotActive {
+        /// 32-byte entity id the payload referenced.
+        recipient: [u8; 32],
+    },
+    /// `PaymentRequest` (with splits): `splits[0].recipient_entity_id`
+    /// is not equal to the tail's `payee_entity_id` field. The
+    /// canonical primary recipient is always the wire `payee`
+    /// field; `splits[0]` carries the same id and the bp share
+    /// (plus the remainder) for the primary. SLA / attestation
+    /// hooks resolve against the primary, so the two must agree.
+    PaymentSplitPrimaryMismatch,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -1124,9 +1195,71 @@ pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN: usize =
 /// request_hash:32 | max_block_height_be:8`.
 pub const PAYMENT_REQUEST_EXTRA_LEN: usize = 32 + 8 + 32 + 32 + 8;
 
-/// Total size of a `PaymentRequest` signal payload (base + extra).
+/// Total size of a `PaymentRequest` signal payload in its
+/// single-recipient (no-splits) wire shape.
+///
+/// 178 bytes (base 66 + 112-byte extra). Week 33 introduces an
+/// optional trailing splits section appended to this base; see
+/// `SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MIN_LEN`
+/// and `..._MAX_LEN` for the with-splits shape. A payload of
+/// length exactly this constant decodes as a single-recipient
+/// payment (identical to the Week 28 wire format).
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + PAYMENT_REQUEST_EXTRA_LEN;
+
+/// Maximum number of split recipients that can be attached to a
+/// `PaymentRequest` payload (Week 33).
+///
+/// The cap bounds both the per-payment wire footprint (178 + 1 +
+/// 8 × 34 = 451 bytes maximum) and the per-payment work the
+/// executor performs in a single transaction.
+pub const MAX_PAYMENT_SPLITS: usize = 8;
+
+/// Minimum number of split recipients when the trailing splits
+/// section is present on a `PaymentRequest` payload (Week 33).
+///
+/// A 1-entry splits section is semantically identical to the
+/// no-splits form and is therefore rejected to keep the wire
+/// format canonical: callers wanting a single-recipient payment
+/// MUST use the no-splits shape.
+pub const MIN_PAYMENT_SPLITS_WHEN_PRESENT: usize = 2;
+
+/// Encoded size of a single split entry in the `PaymentRequest`
+/// splits trailer (Week 33).
+///
+/// Layout: `recipient_entity_id:32 | basis_points_be:2`.
+pub const PAYMENT_SPLIT_SIZE: usize = 32 + 2;
+
+/// Length of the count prefix byte that precedes the per-recipient
+/// split entries when the `PaymentRequest` splits trailer is
+/// present (Week 33).
+///
+/// The count byte is unsigned; the decoder enforces `count in
+/// [MIN_PAYMENT_SPLITS_WHEN_PRESENT, MAX_PAYMENT_SPLITS]` before
+/// reading any entries.
+pub const PAYMENT_SPLITS_COUNT_PREFIX_LEN: usize = 1;
+
+/// Minimum total `PaymentRequest` payload size when the splits
+/// trailer is present (Week 33).
+///
+/// Legacy 178 bytes plus the count byte plus the smallest legal
+/// entry count (`MIN_PAYMENT_SPLITS_WHEN_PRESENT *
+/// PAYMENT_SPLIT_SIZE`). Equals 247 bytes.
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MIN_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN
+        + PAYMENT_SPLITS_COUNT_PREFIX_LEN
+        + MIN_PAYMENT_SPLITS_WHEN_PRESENT * PAYMENT_SPLIT_SIZE;
+
+/// Maximum total `PaymentRequest` payload size when the splits
+/// trailer is present (Week 33).
+///
+/// Legacy 178 bytes plus the count byte plus the largest legal
+/// entry count (`MAX_PAYMENT_SPLITS * PAYMENT_SPLIT_SIZE`).
+/// Equals 451 bytes.
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MAX_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN
+        + PAYMENT_SPLITS_COUNT_PREFIX_LEN
+        + MAX_PAYMENT_SPLITS * PAYMENT_SPLIT_SIZE;
 
 /// Inline-extra size for a `ServiceAttestation` signal payload.
 /// `payment_signal_hash:32 | payee_entity_id:32 | status:1`.
@@ -1650,21 +1783,70 @@ pub struct SubscriptionCancelExtraV1 {
     pub subscription_id: [u8; 32],
 }
 
-/// Inline payment-request tail carried in `PaymentRequest` signal
-/// payloads (Week 28, native x402 rail).
+/// Single split-recipient entry attached to a multi-party
+/// `PaymentRequest` payload (Week 33). On the wire this is exactly
+/// `PAYMENT_SPLIT_SIZE = 34` bytes: `recipient_entity_id:32 |
+/// basis_points_be:2`.
 ///
-/// Wire layout (112 bytes): `payee_entity_id:32 | amount_be:8 |
-/// service_descriptor_hash:32 | request_hash:32 | max_block_height_be:8`.
-/// The handler debits the issuer's `economic_balance` by `amount + fee`
-/// (where `fee = amount * PAYMENT_FEE_BPS / BPS_DENOMINATOR`), credits
-/// the payee's `economic_balance` by `amount`, and routes the fee to
-/// `KEY_MARKETPLACE_TREASURY`. Replay protection is enforced by writing a
-/// `PaymentRecord` under `payment_by_hash_key(signal_hash)` and refusing
-/// any subsequent `PaymentRequest` whose `signal_hash` already has a
-/// record.
+/// `basis_points` is a `1/10_000` share of the payment's `amount`.
+/// The runtime validator (Phase 2) enforces: sum of all entries'
+/// `basis_points` equals `BPS_DENOMINATOR`, no entry is zero, no
+/// recipient appears twice, every recipient is a registered active
+/// AI entity, and `splits[0].recipient_entity_id` equals the
+/// containing `PaymentRequestExtraV1.payee_entity_id`. The executor
+/// (Phase 3) credits each recipient
+/// `(amount * basis_points / BPS_DENOMINATOR)` with any floor-
+/// division remainder folded into `splits[0]` so the sum of credits
+/// equals `amount` exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentSplit {
+    /// AI entity id of this split recipient.
+    pub recipient_entity_id: [u8; 32],
+    /// Basis points share of the payment's `amount` for this
+    /// recipient. The runtime validator requires the sum across all
+    /// entries to equal `BPS_DENOMINATOR` (`10_000`). Individual
+    /// entries must be non-zero.
+    pub basis_points: u16,
+}
+
+/// Inline payment-request tail carried in `PaymentRequest` signal
+/// payloads (Week 28, native x402 rail; extended Week 33 with the
+/// optional multi-party splits trailer).
+///
+/// Wire layout, single-recipient (legacy, 112 bytes):
+/// `payee_entity_id:32 | amount_be:8 | service_descriptor_hash:32 |
+/// request_hash:32 | max_block_height_be:8`. The full signal
+/// payload is exactly `SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN`
+/// (178 bytes).
+///
+/// Wire layout, with splits (Week 33, variable; 247..=451 bytes):
+/// the legacy 112-byte tail is followed by a 1-byte split count
+/// and N × 34-byte split entries
+/// (`recipient_entity_id:32 | basis_points_be:2`), where N is in
+/// `[MIN_PAYMENT_SPLITS_WHEN_PRESENT, MAX_PAYMENT_SPLITS]`. The
+/// decoder distinguishes the two shapes by total payload length;
+/// 178 means no splits, anything larger MUST match
+/// `178 + 1 + N * 34` exactly.
+///
+/// Single-recipient behaviour (no splits) is identical to the
+/// Week 28 wire: the handler debits the issuer's
+/// `economic_balance` by `amount + fee` (where
+/// `fee = amount * PAYMENT_FEE_BPS / BPS_DENOMINATOR`), credits the
+/// payee's `economic_balance` by `amount`, and routes the fee to
+/// `KEY_MARKETPLACE_TREASURY`. Replay protection is enforced by
+/// writing a `PaymentRecord` under `payment_by_hash_key(signal_hash)`
+/// and refusing any subsequent `PaymentRequest` whose `signal_hash`
+/// already has a record. With splits present, the fee is still
+/// computed against the full `amount` (one fee per payment, not
+/// fee-per-split), and the credits are distributed across split
+/// recipients per their `basis_points` share with the floor-
+/// division remainder folded into `splits[0]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaymentRequestExtraV1 {
-    /// AI entity that receives the payment.
+    /// AI entity that receives the payment. With splits present
+    /// this is the PRIMARY recipient: `splits[0].recipient_entity_id`
+    /// MUST equal this field, and SLA / attestation hooks always
+    /// resolve against this id.
     pub payee_entity_id: [u8; 32],
     /// Payment amount, in base units of `economic_balance`. Must be
     /// non-zero (the handler rejects zero-amount payments with
@@ -1683,6 +1865,15 @@ pub struct PaymentRequestExtraV1 {
     /// valid. The handler rejects with `PaymentExpired` if
     /// `current_height > max_block_height`.
     pub max_block_height: u64,
+    /// Optional multi-party split breakdown (Week 33). `None`
+    /// reproduces the Week 28 single-recipient wire and semantics
+    /// byte-for-byte. `Some` carries `[2, MAX_PAYMENT_SPLITS]`
+    /// entries whose `basis_points` sum to `BPS_DENOMINATOR`;
+    /// `splits[0].recipient_entity_id` MUST equal `payee_entity_id`
+    /// and is the primary recipient (gets the floor-division
+    /// remainder, drives SLA matching, receives attestation rep
+    /// deltas).
+    pub splits: Option<Vec<PaymentSplit>>,
 }
 
 /// Inline service-attestation tail carried in `ServiceAttestation` signal
@@ -1834,6 +2025,9 @@ pub struct ChannelFinalizeExtraV1 {
 ///   `... [subscription_id:32]`
 /// - `PaymentRequest` (signal type 16): 178 bytes (base + 112-byte tail)
 ///   `... [payee_id:32][amount_be:8][service_descriptor_hash:32][request_hash:32][max_block_height_be:8]`
+///   Optional Week 33 splits trailer (247..=451 bytes total) appends
+///   `[count:1][recipient:32 | basis_points_be:2]*count` after the
+///   legacy tail; the decoder picks the shape by payload length.
 /// - `ServiceAttestation` (signal type 17): 131 bytes (base + 65-byte tail)
 ///   `... [payment_signal_hash:32][payee_id:32][status:1]`
 /// - `SlaAccept` (signal type 18): 130 bytes (base + 64-byte tail)
@@ -2055,7 +2249,14 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
     } else if is_subscription_cancel {
         SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN
     } else if is_payment_request {
-        SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN
+        let splits_extra = p
+            .payment_request
+            .as_ref()
+            .and_then(|e| e.splits.as_ref())
+            .map_or(0, |v| {
+                PAYMENT_SPLITS_COUNT_PREFIX_LEN + v.len() * PAYMENT_SPLIT_SIZE
+            });
+        SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN + splits_extra
     } else if is_service_attestation {
         SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN
     } else if is_sla_accept {
@@ -2171,6 +2372,20 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             out.extend_from_slice(&extra.service_descriptor_hash);
             out.extend_from_slice(&extra.request_hash);
             out.extend_from_slice(&extra.max_block_height.to_be_bytes());
+            if let Some(splits) = &extra.splits {
+                debug_assert!(
+                    splits.len() >= MIN_PAYMENT_SPLITS_WHEN_PRESENT
+                        && splits.len() <= MAX_PAYMENT_SPLITS,
+                    "splits, if Some, must contain [{MIN_PAYMENT_SPLITS_WHEN_PRESENT}, {MAX_PAYMENT_SPLITS}] entries"
+                );
+                let count_u8 =
+                    u8::try_from(splits.len()).expect("MAX_PAYMENT_SPLITS (8) fits in u8");
+                out.push(count_u8);
+                for split in splits {
+                    out.extend_from_slice(&split.recipient_entity_id);
+                    out.extend_from_slice(&split.basis_points.to_be_bytes());
+                }
+            }
         } else {
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; PAYMENT_REQUEST_EXTRA_LEN]);
@@ -2239,7 +2454,9 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
 /// - 100 bytes for `CompositionCheck`
 /// - 131 bytes for `ProofSubmission` (stub) or variable for v2 layouts
 /// - 115 bytes for `SubscriptionCreate`, 98 bytes for `SubscriptionCancel`
-/// - 178 bytes for `PaymentRequest`
+/// - 178 bytes for `PaymentRequest` (no splits) or
+///   `178 + 1 + N * 34` for the Week 33 with-splits shape
+///   (`N` in `[MIN_PAYMENT_SPLITS_WHEN_PRESENT, MAX_PAYMENT_SPLITS]`)
 /// - 131 bytes for `ServiceAttestation`
 ///
 /// Length-vs-signal-type mismatch is rejected.
@@ -2702,12 +2919,54 @@ pub fn decode_signal_commitment_payload_v1(
             None,
         )
     } else if is_payment_request {
-        if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN {
-            return Err(ExecError::BadPayloadLength {
-                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN,
-                got: payload.len(),
-            });
-        }
+        let base = SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN;
+        let len = payload.len();
+        let splits_opt = match len.cmp(&base) {
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Less => {
+                return Err(ExecError::BadPayloadLength {
+                    expected: base,
+                    got: len,
+                });
+            }
+            std::cmp::Ordering::Greater => {
+                if len < base + PAYMENT_SPLITS_COUNT_PREFIX_LEN {
+                    return Err(ExecError::BadPayloadLength {
+                        expected: base,
+                        got: len,
+                    });
+                }
+                let count = payload[base] as usize;
+                if !(MIN_PAYMENT_SPLITS_WHEN_PRESENT..=MAX_PAYMENT_SPLITS).contains(&count) {
+                    return Err(ExecError::PaymentSplitsBadCount {
+                        count,
+                        min: MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+                        max: MAX_PAYMENT_SPLITS,
+                    });
+                }
+                let expected_len =
+                    base + PAYMENT_SPLITS_COUNT_PREFIX_LEN + count * PAYMENT_SPLIT_SIZE;
+                if len != expected_len {
+                    return Err(ExecError::BadPayloadLength {
+                        expected: expected_len,
+                        got: len,
+                    });
+                }
+                let mut splits = Vec::with_capacity(count);
+                for i in 0..count {
+                    let offset = base + PAYMENT_SPLITS_COUNT_PREFIX_LEN + i * PAYMENT_SPLIT_SIZE;
+                    let mut recipient = [0u8; 32];
+                    recipient.copy_from_slice(&payload[offset..offset + 32]);
+                    let basis_points =
+                        u16::from_be_bytes([payload[offset + 32], payload[offset + 33]]);
+                    splits.push(PaymentSplit {
+                        recipient_entity_id: recipient,
+                        basis_points,
+                    });
+                }
+                Some(splits)
+            }
+        };
         let mut payee_entity_id = [0u8; 32];
         payee_entity_id.copy_from_slice(&payload[66..98]);
         let amount = u64::from_be_bytes([
@@ -2750,6 +3009,7 @@ pub fn decode_signal_commitment_payload_v1(
                 service_descriptor_hash,
                 request_hash,
                 max_block_height,
+                splits: splits_opt,
             }),
             None,
             None,
@@ -11968,6 +12228,7 @@ mod tests {
             service_descriptor_hash: [0xBBu8; 32],
             request_hash: [0xCCu8; 32],
             max_block_height: 0x1112_1314_1516_1718,
+            splits: None,
         }
     }
 
@@ -12151,6 +12412,333 @@ mod tests {
                     expected: SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN,
                     got: 177
                 }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // Week 33 - Multi-Party Payment Splitting (Phase 1: types and codec)
+    // ========================================================================
+
+    fn make_payment_request_extra_with_splits(splits: Vec<PaymentSplit>) -> PaymentRequestExtraV1 {
+        // splits[0] must equal payee_entity_id; the helper does not enforce
+        // this so individual tests can deliberately violate the rule and
+        // assert the resulting validation/decoder behaviour.
+        PaymentRequestExtraV1 {
+            payee_entity_id: [0xAAu8; 32],
+            amount: 0x0102_0304_0506_0708,
+            service_descriptor_hash: [0xBBu8; 32],
+            request_hash: [0xCCu8; 32],
+            max_block_height: 0x1112_1314_1516_1718,
+            splits: Some(splits),
+        }
+    }
+
+    fn make_payment_request_with_splits_payload(
+        issuer: [u8; 32],
+        signal_hash: [u8; 32],
+        splits: Vec<PaymentSplit>,
+    ) -> Vec<u8> {
+        let p = SignalCommitmentPayloadV1 {
+            signal_hash,
+            signal_type: novai_ai_entities::AiSignalType::PaymentRequest,
+            issuer_entity_id: issuer,
+            reputation: None,
+            purchase: None,
+            stake_deposit: None,
+            stake_withdraw: None,
+            stake_slash: None,
+            composition_check: None,
+            proof_submission: None,
+            subscription_create: None,
+            subscription_cancel: None,
+            payment_request: Some(make_payment_request_extra_with_splits(splits)),
+            service_attestation: None,
+            sla_accept: None,
+            channel_accept: None,
+            channel_close: None,
+            channel_finalize: None,
+        };
+        encode_signal_commitment_payload_v1(&p)
+    }
+
+    fn three_split_recipients() -> Vec<PaymentSplit> {
+        // Primary matches the make_payment_request_extra payee
+        // ([0xAA; 32]) so the validator (Phase 2) accepts the layout.
+        // 5000 + 3000 + 2000 = 10000 bp.
+        vec![
+            PaymentSplit {
+                recipient_entity_id: [0xAAu8; 32],
+                basis_points: 5_000,
+            },
+            PaymentSplit {
+                recipient_entity_id: [0x11u8; 32],
+                basis_points: 3_000,
+            },
+            PaymentSplit {
+                recipient_entity_id: [0x22u8; 32],
+                basis_points: 2_000,
+            },
+        ]
+    }
+
+    #[test]
+    fn payment_split_constants_smoke() {
+        assert_eq!(MAX_PAYMENT_SPLITS, 8);
+        assert_eq!(MIN_PAYMENT_SPLITS_WHEN_PRESENT, 2);
+        assert_eq!(PAYMENT_SPLIT_SIZE, 34);
+        assert_eq!(PAYMENT_SPLITS_COUNT_PREFIX_LEN, 1);
+        assert_eq!(
+            SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MIN_LEN,
+            178 + 1 + 2 * 34
+        );
+        assert_eq!(
+            SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MAX_LEN,
+            178 + 1 + 8 * 34
+        );
+        // BPS_DENOMINATOR is reused as the splits basis-points total.
+        assert_eq!(BPS_DENOMINATOR, 10_000);
+    }
+
+    #[test]
+    fn payment_request_with_splits_payload_roundtrip() {
+        let issuer = [0x33u8; 32];
+        let signal_hash = [0x44u8; 32];
+        let splits = three_split_recipients();
+        let bytes = make_payment_request_with_splits_payload(issuer, signal_hash, splits.clone());
+        assert_eq!(bytes.len(), 178 + 1 + 3 * 34);
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.signal_hash, signal_hash);
+        assert_eq!(
+            decoded.signal_type,
+            novai_ai_entities::AiSignalType::PaymentRequest
+        );
+        assert_eq!(decoded.issuer_entity_id, issuer);
+        let extra = decoded
+            .payment_request
+            .expect("payment_request tail present");
+        assert_eq!(extra.payee_entity_id, [0xAAu8; 32]);
+        assert_eq!(extra.amount, 0x0102_0304_0506_0708);
+        assert_eq!(extra.splits.as_ref().map(Vec::len), Some(3));
+        assert_eq!(extra.splits, Some(splits));
+    }
+
+    #[test]
+    fn golden_vector_payment_request_with_3_splits_payload_281_bytes() {
+        let issuer = [0x55u8; 32];
+        let signal_hash = [0x66u8; 32];
+        let splits = three_split_recipients();
+        let bytes = make_payment_request_with_splits_payload(issuer, signal_hash, splits);
+        // Total = 178 (legacy) + 1 (count) + 3 * 34 (entries) = 281 bytes.
+        assert_eq!(bytes.len(), 281);
+        // Bytes 0..178 are identical to the no-splits payload golden vector.
+        assert_eq!(bytes[0], SIGNAL_COMMITMENT_PAYLOAD_V1);
+        assert_eq!(&bytes[1..33], &signal_hash, "signal_hash at 1..33");
+        assert_eq!(
+            bytes[33],
+            novai_ai_entities::AiSignalType::PaymentRequest.to_byte(),
+            "signal_type byte = 16"
+        );
+        assert_eq!(&bytes[34..66], &issuer, "issuer_entity_id at 34..66");
+        assert_eq!(&bytes[66..98], &[0xAAu8; 32], "payee_entity_id at 66..98");
+        assert_eq!(
+            &bytes[98..106],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "amount_be at 98..106"
+        );
+        assert_eq!(
+            &bytes[106..138],
+            &[0xBBu8; 32],
+            "service_descriptor_hash at 106..138"
+        );
+        assert_eq!(&bytes[138..170], &[0xCCu8; 32], "request_hash at 138..170");
+        assert_eq!(
+            &bytes[170..178],
+            &0x1112_1314_1516_1718u64.to_be_bytes(),
+            "max_block_height_be at 170..178"
+        );
+        // Week 33: trailing splits section.
+        assert_eq!(bytes[178], 3, "splits count byte at offset 178");
+        // Split 0: primary, [0xAA; 32], 5000 bp.
+        assert_eq!(&bytes[179..211], &[0xAAu8; 32], "splits[0].recipient");
+        assert_eq!(&bytes[211..213], &5_000u16.to_be_bytes(), "splits[0].bp");
+        // Split 1: [0x11; 32], 3000 bp.
+        assert_eq!(&bytes[213..245], &[0x11u8; 32], "splits[1].recipient");
+        assert_eq!(&bytes[245..247], &3_000u16.to_be_bytes(), "splits[1].bp");
+        // Split 2: [0x22; 32], 2000 bp.
+        assert_eq!(&bytes[247..279], &[0x22u8; 32], "splits[2].recipient");
+        assert_eq!(&bytes[279..281], &2_000u16.to_be_bytes(), "splits[2].bp");
+    }
+
+    #[test]
+    fn payment_request_min_2_splits_payload_decodes() {
+        let issuer = [0x77u8; 32];
+        let signal_hash = [0x88u8; 32];
+        let splits = vec![
+            PaymentSplit {
+                recipient_entity_id: [0xAAu8; 32],
+                basis_points: 7_000,
+            },
+            PaymentSplit {
+                recipient_entity_id: [0x33u8; 32],
+                basis_points: 3_000,
+            },
+        ];
+        let bytes = make_payment_request_with_splits_payload(issuer, signal_hash, splits.clone());
+        assert_eq!(
+            bytes.len(),
+            SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MIN_LEN
+        );
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.payment_request.unwrap().splits, Some(splits));
+    }
+
+    #[test]
+    fn payment_request_max_8_splits_payload_decodes() {
+        let issuer = [0x99u8; 32];
+        let signal_hash = [0xAAu8; 32];
+        // 8 entries summing to 10000: 1250 each.
+        let mut splits = Vec::with_capacity(8);
+        splits.push(PaymentSplit {
+            recipient_entity_id: [0xAAu8; 32],
+            basis_points: 1_250,
+        });
+        for i in 1..MAX_PAYMENT_SPLITS {
+            let mut id = [0u8; 32];
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                id[0] = i as u8;
+            }
+            splits.push(PaymentSplit {
+                recipient_entity_id: id,
+                basis_points: 1_250,
+            });
+        }
+        let bytes = make_payment_request_with_splits_payload(issuer, signal_hash, splits.clone());
+        assert_eq!(
+            bytes.len(),
+            SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MAX_LEN
+        );
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        assert_eq!(
+            decoded.payment_request.unwrap().splits.unwrap().len(),
+            MAX_PAYMENT_SPLITS
+        );
+    }
+
+    #[test]
+    fn payment_request_legacy_no_splits_178_bytes_still_decodes() {
+        // Backward compat: the Week 28 no-splits wire shape must
+        // continue to decode byte-for-byte identically with the new
+        // codec; splits resolves to None.
+        let issuer = [0xBBu8; 32];
+        let signal_hash = [0xCCu8; 32];
+        let bytes = make_payment_request_payload(issuer, signal_hash);
+        assert_eq!(bytes.len(), 178);
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        let extra = decoded
+            .payment_request
+            .expect("payment_request tail present");
+        assert!(extra.splits.is_none(), "legacy payload decodes splits=None");
+    }
+
+    #[test]
+    fn payment_request_splits_count_below_min_rejected() {
+        // Hand-craft a payload with count=1 (below MIN=2). Length is
+        // 178 + 1 + 1 * 34 = 213. Decoder must reject with
+        // PaymentSplitsBadCount, NOT BadPayloadLength.
+        let issuer = [0xDDu8; 32];
+        let signal_hash = [0xEEu8; 32];
+        let mut bytes = make_payment_request_payload(issuer, signal_hash);
+        bytes.push(1u8); // count = 1
+        bytes.extend_from_slice(&[0xAAu8; 32]); // recipient
+        bytes.extend_from_slice(&10_000u16.to_be_bytes()); // bp
+        assert_eq!(bytes.len(), 178 + 1 + PAYMENT_SPLIT_SIZE);
+        let err = decode_signal_commitment_payload_v1(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExecError::PaymentSplitsBadCount {
+                    count: 1,
+                    min: MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+                    max: MAX_PAYMENT_SPLITS,
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn payment_request_splits_count_zero_rejected() {
+        // Count=0 length is 178 + 1 = 179. Reject with
+        // PaymentSplitsBadCount (count below MIN).
+        let issuer = [0xDDu8; 32];
+        let signal_hash = [0xEFu8; 32];
+        let mut bytes = make_payment_request_payload(issuer, signal_hash);
+        bytes.push(0u8);
+        assert_eq!(bytes.len(), 179);
+        let err = decode_signal_commitment_payload_v1(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExecError::PaymentSplitsBadCount {
+                    count: 0,
+                    min: MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+                    max: MAX_PAYMENT_SPLITS,
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn payment_request_splits_count_above_max_rejected() {
+        // Hand-craft a payload claiming count=9 (above MAX=8).
+        // Decoder must reject with PaymentSplitsBadCount before
+        // attempting to parse any entries.
+        let issuer = [0xF0u8; 32];
+        let signal_hash = [0xF1u8; 32];
+        let mut bytes = make_payment_request_payload(issuer, signal_hash);
+        bytes.push(9u8);
+        // Pad with 9 * 34 zero bytes so length is at least the
+        // computed expected_len; the count check fires first.
+        bytes.extend_from_slice(&vec![0u8; 9 * PAYMENT_SPLIT_SIZE]);
+        let err = decode_signal_commitment_payload_v1(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExecError::PaymentSplitsBadCount {
+                    count: 9,
+                    min: MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+                    max: MAX_PAYMENT_SPLITS,
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn payment_request_splits_length_mismatch_rejected() {
+        // Count byte claims 3 splits but payload truncated after
+        // 2 entries. Decoder rejects with BadPayloadLength after
+        // count check passes.
+        let issuer = [0xF2u8; 32];
+        let signal_hash = [0xF3u8; 32];
+        let mut bytes = make_payment_request_payload(issuer, signal_hash);
+        bytes.push(3u8); // count
+        bytes.extend_from_slice(&[0xAAu8; 32]);
+        bytes.extend_from_slice(&5_000u16.to_be_bytes());
+        bytes.extend_from_slice(&[0x11u8; 32]);
+        bytes.extend_from_slice(&3_000u16.to_be_bytes());
+        // Missing the third 34-byte entry.
+        let err = decode_signal_commitment_payload_v1(&bytes).unwrap_err();
+        let expected_len = 178 + 1 + 3 * PAYMENT_SPLIT_SIZE;
+        assert!(
+            matches!(
+                err,
+                ExecError::BadPayloadLength { expected, got }
+                    if expected == expected_len && got == bytes.len()
             ),
             "got {err:?}"
         );
