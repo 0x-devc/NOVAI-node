@@ -2250,3 +2250,348 @@ fn payment_split_aux_record_constants_smoke_and_roundtrip() {
     let decoded = decode_payment_splits_record_v1(&bytes).unwrap();
     assert_eq!(decoded, r);
 }
+
+// ============================================================================
+// Week 33 - Phase 5: Adversarial tests
+// ============================================================================
+//
+// Each test below frames an attack vector against the multi-party payment
+// rail and asserts that the runtime invariants hold. Where earlier phases
+// already prove the validation/decoder rule, Phase 5 tightens the
+// assertion to "no partial state mutation" (the attacker also cannot
+// half-credit a recipient or partially write the aux record).
+
+#[test]
+fn adversarial_inactive_split_recipient_no_partial_credits() {
+    // Attack: payer submits a split payment where a non-primary
+    // recipient is inactive. The runtime must reject the whole
+    // payment and leave NO partial state behind (no balance change
+    // on primary, no aux row, no by_payee marker for either).
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x90u8; 32], [0x91u8; 32]);
+    let payee = make_payee(&mut db, [0x92u8; 32], [0x93u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x94, 0x95, false);
+
+    let signal_hash = [0xE1u8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 5_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitRecipientNotActive { recipient } if recipient == r2.id
+        ),
+        "got {err:?}",
+    );
+
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    assert_eq!(payee_after.economic_balance, PAYEE_BALANCE);
+    let r2_after = read_ai_entity(&db, &r2.id).unwrap().unwrap();
+    assert_eq!(r2_after.economic_balance, 0);
+    assert_eq!(read_treasury(&db), 0);
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_by_payee_key(
+            &payee.id,
+            PAYMENT_HEIGHT,
+            &signal_hash
+        ))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_by_payee_key(&r2.id, PAYMENT_HEIGHT, &signal_hash))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn adversarial_off_by_one_bp_sum_no_partial_settle() {
+    // Attack: payload arrives with bp summing to 9_999 (one short).
+    // The runtime rejects the whole payment; no partial settle.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xA0u8; 32], [0xA1u8; 32]);
+    let payee = make_payee(&mut db, [0xA2u8; 32], [0xA3u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xA4, 0xA5, true);
+
+    let signal_hash = [0xE2u8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 5_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_999,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitsBasisPointsSumInvalid {
+                sum: 9_999,
+                expected: 10_000,
+            }
+        ),
+        "got {err:?}",
+    );
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    let r2_after = read_ai_entity(&db, &r2.id).unwrap().unwrap();
+    assert_eq!(payee_after.economic_balance, PAYEE_BALANCE);
+    assert_eq!(r2_after.economic_balance, 0);
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn adversarial_duplicate_recipient_double_credit_attempt_rejected() {
+    // Attack: payer stuffs the same recipient twice to double-credit
+    // them. Validator rejects with PaymentSplitDuplicateRecipient.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xB0u8; 32], [0xB1u8; 32]);
+    let payee = make_payee(&mut db, [0xB2u8; 32], [0xB3u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xB4, 0xB5, true);
+
+    let signal_hash = [0xE3u8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 4_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 3_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitDuplicateRecipient { recipient } if recipient == r2.id
+        ),
+        "got {err:?}",
+    );
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    let r2_after = read_ai_entity(&db, &r2.id).unwrap().unwrap();
+    assert_eq!(payee_after.economic_balance, PAYEE_BALANCE);
+    assert_eq!(r2_after.economic_balance, 0);
+}
+
+#[test]
+fn adversarial_split_payment_does_not_touch_channel_keys() {
+    // Orthogonality assertion (Phase 0 pushback P6): a multi-party
+    // PaymentRequest must not touch the `ai/channels/` key prefix.
+    // Pre-populate sentinel keys under the channel prefix, settle a
+    // split payment, then assert the sentinel KV entries are
+    // byte-identical.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xC0u8; 32], [0xC1u8; 32]);
+    let payee = make_payee(&mut db, [0xC2u8; 32], [0xC3u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xC4, 0xC5, true);
+
+    let sentinel_a_key = b"ai/channels/by_party_a/sentinel_for_orthogonality_test".to_vec();
+    let sentinel_a_value = b"WEEK32_CHANNEL_STATE_DO_NOT_TOUCH".to_vec();
+    let sentinel_b_key = b"ai/channels/by_party_b/sentinel_two".to_vec();
+    let sentinel_b_value = b"other_channel_marker".to_vec();
+    db.apply_batch(&[
+        WriteOp::Put(sentinel_a_key.clone(), sentinel_a_value.clone()),
+        WriteOp::Put(sentinel_b_key.clone(), sentinel_b_value.clone()),
+    ])
+    .unwrap();
+
+    let signal_hash = [0xE4u8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 6_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_000,
+        },
+    ];
+    let payload = build_split_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+        splits,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("split settles");
+
+    assert_eq!(
+        db.get(&sentinel_a_key).unwrap().unwrap(),
+        sentinel_a_value,
+        "channel by_party_a sentinel must be untouched by split payment",
+    );
+    assert_eq!(
+        db.get(&sentinel_b_key).unwrap().unwrap(),
+        sentinel_b_value,
+        "channel by_party_b sentinel must be untouched by split payment",
+    );
+
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_some());
+    assert!(db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn adversarial_nine_recipients_over_cap_decoder_rejects() {
+    // Attack: payer constructs a payload claiming 9 split recipients
+    // to exceed the MAX_PAYMENT_SPLITS cap. The decoder rejects with
+    // PaymentSplitsBadCount BEFORE reading any entries.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xD0u8; 32], [0xD1u8; 32]);
+    let payee = make_payee(&mut db, [0xD2u8; 32], [0xD3u8; 32]);
+
+    let signal_hash = [0xE5u8; 32];
+    let mut payload = build_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+    );
+    payload.push(9u8);
+    payload.extend_from_slice(&vec![0u8; 9 * 34]);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentSplitsBadCount {
+                count: 9,
+                min: MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+                max: MAX_PAYMENT_SPLITS,
+            }
+        ),
+        "got {err:?}",
+    );
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn adversarial_garbage_trailing_bytes_after_splits_rejected() {
+    // Attack: payload carries a syntactically valid 2-recipient
+    // splits trailer plus garbage trailing bytes. The decoder
+    // enforces an exact length match against `base + 1 + count * 34`
+    // and rejects with BadPayloadLength.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0xE0u8; 32], [0xE1u8; 32]);
+    let payee = make_payee(&mut db, [0xE2u8; 32], [0xE3u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0xE4, 0xE5, true);
+
+    let signal_hash = [0xE6u8; 32];
+    let mut payload = build_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0u8; 32],
+        [0u8; 32],
+        EXPIRY_HEIGHT,
+    );
+    payload.push(2u8);
+    payload.extend_from_slice(&payee.id);
+    payload.extend_from_slice(&5_000u16.to_be_bytes());
+    payload.extend_from_slice(&r2.id);
+    payload.extend_from_slice(&5_000u16.to_be_bytes());
+    payload.extend_from_slice(&[0xFFu8; 7]);
+    let expected_len = SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN + 1 + 2 * 34;
+    assert!(payload.len() > expected_len);
+
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::BadPayloadLength { expected, got: _ }
+                if expected == expected_len
+        ),
+        "got {err:?}",
+    );
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+}

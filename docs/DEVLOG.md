@@ -17965,3 +17965,430 @@ surface, and a complete CLI including the off-chain `sign-update`
 helper. The end-to-end propose -> accept -> close -> finalize
 lifecycle test in `channel_finalize.rs` proves balance
 conservation across the whole flow.
+
+---
+
+## Week 33: Multi-Party Payment Splitting
+
+### 1. Overview - Objectives & Deliverables
+
+Week 33 generalises the Week 28 native x402 payment rail from one
+payee to up to eight recipients per payment, atomically credited
+by predefined basis-point shares. The motivating use case is the
+cloud-compute wedge that the previous weeks built up: an AI agent
+paying for inference rarely pays a single vendor, because real
+inference touches the model provider, the data provider, and the
+hosting provider in one logical request. Week 33 lets that whole
+multi-vendor settlement land on chain as one PaymentRequest, one
+fee, one signal_hash for replay protection, one ServiceAttestation
+target for reputation effects.
+
+**Goal Statement.** Extend `PaymentRequestExtraV1` with an optional
+splits trailer (no new tx type, no new signal type), distribute the
+payment amount across up to eight recipients with floor-division
+plus a remainder fold to the primary, surface the per-recipient
+breakdown through the existing `novai_getPaymentsByEntity` RPC, and
+add a repeatable `--split` flag to the existing `novai-cli signal
+publish` payment-request invocation. Every existing Week 28 wire
+shape and every existing Week 28 test continues to pass without
+modification.
+
+**Deliverables.**
+
+- D33.1: Wire-format extension. `PaymentRequestExtraV1` grows an
+  optional `splits: Option<Vec<PaymentSplit>>` field carrying up
+  to eight `(recipient_entity_id: [u8;32], basis_points: u16)`
+  entries. On the wire the legacy 178-byte tail is followed by
+  `count:1 | entries[count]` with `count in [2, 8]`; the encoder
+  emits exactly 178 bytes when `splits` is `None` and exactly
+  `178 + 1 + N * 34` bytes (247..=451) when `Some`. The decoder
+  picks the shape by total payload length and rejects 1-entry
+  splits sections to keep the wire canonical (a 1-entry split is
+  semantically identical to no-splits).
+- D33.2: `validate_payment_splits` enforces six rules before any
+  state mutation: `splits[0].recipient == payee_entity_id`, every
+  `basis_points > 0`, sum of `basis_points == BPS_DENOMINATOR`
+  (10_000), no entry names the issuer (no self-payment in any
+  position), no duplicate recipients, every non-primary recipient
+  is registered and active. Hooked into the `PaymentRequest`
+  handler immediately after the primary payee is resolved and
+  before the by_hash replay guard; a rejected splits payload does
+  NOT consume the dedup slot for its signal_hash.
+- D33.3: Per-recipient credit distribution. The executor computes
+  `credits[i] = floor(amount * basis_points[i] / 10_000)`, sums
+  them, and folds the remainder into `credits[0]` so the sum of
+  per-recipient credits equals the payment amount exactly. The
+  payer's debit is unchanged (one fee on the total amount); the
+  treasury credit is unchanged (one fee, not fee-per-split);
+  `total_transactions` is bumped for every recipient. Non-primary
+  recipients are loaded inline and their `economic_balance` and
+  `total_transactions` mutated in the same atomic ops batch as
+  the primary.
+- D33.4: Aux on-chain record. A new `PaymentSplitsRecord` is
+  persisted at `ai/payment_splits/by_hash/<signal_hash>` for
+  every multi-party payment, carrying `(recipient, basis_points,
+  credited_amount)` per entry. The canonical Week 28
+  `PaymentRecord` wire format stays frozen at 162 bytes; the aux
+  row is the discriminator between single-recipient and
+  multi-party payments in storage.
+- D33.5: RPC and CLI. `novai_getPaymentsByEntity` JSON output
+  carries a new `splits: Option<Vec<PaymentSplitJson>>` field;
+  legacy single-recipient payments serialise `"splits": null`.
+  `novai-cli signal publish` takes a repeatable
+  `--split <hex32>:<bp>` flag whose parser enforces the same six
+  rules as the runtime validator as a courtesy before the
+  transaction hits the network.
+
+**Final Metrics.**
+
+- 66 net new tests across the five phases (10 codec unit tests in
+  `crates/execution/src/lib.rs`, 13 validation rejection tests +
+  18 execution distribution tests + 6 adversarial tests in
+  `crates/execution/tests/payment_system.rs`, 3 RPC JSON shape
+  tests in `crates/node/src/rpc.rs`, 16 CLI parser tests in
+  `tools/novai-cli/src/commands/signal.rs`).
+- 1,719 tests passing total (1,653 Week 32 baseline + 66 net
+  new), 0 failing.
+- Zero clippy warnings under `--all-targets -- -D warnings`.
+- `cargo deny check licenses` passes.
+- One commit per phase across five phases, five pushes.
+
+### 2. Design Pushbacks (Approved in Phase 0)
+
+Seven pushbacks against the initial prompt were accepted before
+any code was written.
+
+- **P1: Wire shape is length-discriminated, not a separate signal
+  type or a mandatory count byte.** A payload of exactly 178 bytes
+  decodes as a legacy single-recipient payment unchanged
+  byte-for-byte; any longer length MUST match
+  `178 + 1 + N * 34` exactly. A mandatory count byte (with
+  `count=0` meaning "no splits") would bump every legacy payload
+  to 179 bytes and break every existing golden vector. Rejected.
+- **P2: `splits[0].recipient_entity_id` MUST equal the existing
+  `payee_entity_id` field, and `splits.len() >= 2` when present.**
+  The Week 28 wire already carries a primary recipient; splits
+  represent the breakdown including that primary. A 1-entry split
+  is degenerate with the no-splits form so the canonical
+  encoding rules require at least two entries when the trailer is
+  present.
+- **P3: "PaymentReceived event" means `total_transactions++` for
+  every recipient.** No new reputation constant is introduced;
+  the existing field bump pattern (already applied to both
+  parties on Week 28 single-recipient payments) extends naturally
+  to N recipients. The `ServiceAttestation` reputation delta
+  stays primary-only because the payee field on the canonical
+  `PaymentRecord` is the primary; the attestation handler
+  resolves against that single id unchanged.
+- **P4: One fee on the total amount, not fee-per-split.** A
+  multi-party split charges the same `amount * PAYMENT_FEE_BPS /
+  BPS_DENOMINATOR` as the equivalent single-recipient payment.
+  Per-split fees would accumulate floor-loss and add a "fee
+  remainder" dust hazard for zero economic gain.
+- **P5: Splits live in a NEW aux record, not in an extended
+  `PaymentRecord`.** Week 28's `PaymentRecord` is golden-vector
+  locked at 162 bytes. Extending it would break every existing
+  decoder test. The aux record at
+  `ai/payment_splits/by_hash/<signal_hash>` is variable-length
+  (86..=338 bytes) and only present for multi-party payments.
+  Per-recipient `by_payee` writes are added so a non-primary
+  recipient querying `novai_getPaymentsByEntity` as payee sees
+  the payment.
+- **P6: NAP payment splits and Week 32 payment channels do NOT
+  interact in v1.** They are sibling primitives, not nested:
+  splits is a NAP extension and bilateral channels are
+  independent. The orthogonality is enforced at the key-prefix
+  level (`ai/payments/...` vs `ai/channels/...`) and tested in
+  Phase 5.
+- **P7: Hard reject on any inactive or unknown recipient; no
+  partial settle.** Mirrors the existing `PaymentPayeeNotActive`
+  rule on the primary payee. A "skip and redistribute" semantic
+  would violate atomicity (basis points no longer sum to 10_000
+  after a skip), require complex remainder logic, and surprise
+  operators expecting a stable distribution.
+
+### 3. Wire Layouts (locked by golden vector tests)
+
+**PaymentRequest signal payload, with splits trailer (variable, 247..=451 bytes).**
+
+```
+0       1   version (SIGNAL_COMMITMENT_PAYLOAD_V1 = 2)
+1      32   signal_hash
+33      1   signal_type (PaymentRequest = 16)
+34     32   issuer_entity_id (payer)
+66     32   payee_entity_id (primary recipient)
+98      8   amount_be
+106    32   service_descriptor_hash
+138    32   request_hash
+170     8   max_block_height_be
+                                   (Week 28 legacy ends at byte 178.)
+178     1   splits_count (1 byte; in [2, 8] when trailer present)
+179    34   split[0] (recipient[32] | basis_points_be[2])
+213    34   split[1]
+                                   ...
+{178 + 1 + N*34}   end of payload
+```
+
+A payload of exactly 178 bytes decodes with `splits = None` and
+the Week 28 wire shape is preserved unchanged.
+
+**PaymentSplitsRecord aux row (variable, 86..=338 bytes).**
+
+```
+0       1   version (PAYMENT_SPLITS_RECORD_V1 = 1)
+1       1   count (in [2, 8])
+2      42   entry[0]:
+              0..32  recipient_entity_id
+              32..34 basis_points_be
+              34..42 credited_amount_be (u64 BE; what the executor
+                     actually credited, including the floor-division
+                     remainder folded into entry[0])
+44     42   entry[1]
+                                   ...
+{2 + N*42}   end of record
+```
+
+Persisted under `ai/payment_splits/by_hash/<signal_hash>` whenever
+the PaymentRequest carried an inline splits trailer. Absent for
+legacy single-recipient payments.
+
+### 4. Constants
+
+```rust
+// crates/execution/src/lib.rs
+pub const MAX_PAYMENT_SPLITS: usize = 8;
+pub const MIN_PAYMENT_SPLITS_WHEN_PRESENT: usize = 2;
+pub const PAYMENT_SPLIT_SIZE: usize = 34;            // 32 + 2
+pub const PAYMENT_SPLITS_COUNT_PREFIX_LEN: usize = 1;
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MIN_LEN: usize = 247;
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MAX_LEN: usize = 451;
+
+pub const PAYMENT_SPLITS_RECORD_V1: u8 = 1;
+pub const PAYMENT_SPLITS_RECORD_ENTRY_SIZE: usize = 42;   // 32 + 2 + 8
+pub const PAYMENT_SPLITS_RECORD_MIN_LEN: usize = 86;
+pub const PAYMENT_SPLITS_RECORD_MAX_LEN: usize = 338;
+
+pub const KEY_PREFIX_AI_PAYMENT_SPLITS_BY_HASH: &[u8] = b"ai/payment_splits/by_hash/";
+```
+
+`BPS_DENOMINATOR` (= 10_000) is reused for the basis-points total;
+no new fee constant is introduced. No new reputation event is
+introduced (Phase 0 pushback P3).
+
+### 5. Validation Rule Ordering (validate_payment_splits)
+
+The validator runs cheap-then-expensive so the cheapest mismatch
+fires first:
+
+```
+1. splits[0].recipient_entity_id == primary_payee_id
+   else PaymentSplitPrimaryMismatch
+2. every splits[i].basis_points > 0
+   else PaymentSplitZeroBasisPoints { index: i }
+3. sum(basis_points) == BPS_DENOMINATOR (10_000)
+   else PaymentSplitsBasisPointsSumInvalid { sum, expected: 10000 }
+4. no splits[i].recipient_entity_id == payer.id
+   else PaymentSplitSelfPayment
+5. no two entries share the same recipient_entity_id (O(N^2),
+   trivial for N <= 8)
+   else PaymentSplitDuplicateRecipient { recipient }
+6. every non-primary recipient is registered (read_ai_entity ==
+   Some) and is_active == true
+   else PaymentSplitRecipientNotFound or PaymentSplitRecipientNotActive
+```
+
+The primary (`splits[0]`) is already resolved as `payee` by the
+caller via the existing `PaymentPayeeNotFound` /
+`PaymentPayeeNotActive` rules, so the validator skips a redundant
+read for splits[0]. Phase 5's "no partial credits" adversarial
+tests assert that none of these rejections produce any state
+mutation (no balance change, no aux row, no by_payee marker).
+
+### 6. Distribution Math and Balance Conservation
+
+The executor branch:
+
+```rust
+let amount = u128::from(extra.amount);
+let fee = amount * PAYMENT_FEE_BPS / BPS_DENOMINATOR;
+let total_debit = amount + fee;
+
+entity.economic_balance -= total_debit;       // single fee, P4
+treasury.balance += fee;                       // unchanged from W28
+entity.total_transactions += 1;
+
+if let Some(splits) = &extra.splits {
+    let mut credits = Vec::with_capacity(splits.len());
+    let mut sum_floor: u128 = 0;
+    for s in splits {
+        let c = amount * u128::from(s.basis_points) / BPS_DENOMINATOR;
+        credits.push(c);
+        sum_floor += c;
+    }
+    let remainder = amount - sum_floor;        // sum_floor <= amount when bp_sum == 10_000
+    credits[0] += remainder;                   // primary absorbs the dust
+
+    payee.economic_balance += credits[0];      // primary already loaded
+    payee.total_transactions += 1;
+    for (idx, s) in splits.iter().enumerate().skip(1) {
+        let mut r = read_ai_entity(db, &s.recipient_entity_id)?.unwrap();
+        r.economic_balance += credits[idx];
+        r.total_transactions += 1;
+        ops.push(write_ai_entity_op(&r));
+        ops.push(WriteOp::Put(payment_by_payee_key(&r.id, current_height, &signal_hash), Vec::new()));
+    }
+    ops.push(WriteOp::Put(payment_splits_by_hash_key(&signal_hash), encode_payment_splits_record_v1(...)));
+} else {
+    payee.economic_balance += amount;
+    payee.total_transactions += 1;
+}
+```
+
+**Balance conservation lemma.** `sum_i(floor(a * bp_i / 10_000)) <= a`
+when `sum_i(bp_i) == 10_000`, by the standard "sum of floors is at
+most the floor of the sum" identity. Hence
+`remainder = a - sum_floor >= 0`, and after folding the remainder
+into `credits[0]`, `sum_i(credits_i) == a` exactly. Phase 3's
+`payment_split_balance_conservation_sum_credits_equals_amount`
+test walks six split shapes (including the dust cases
+`amount = 1` and `amount = 3` with 3-way splits) and asserts the
+identity end to end.
+
+### 7. Storage Layout
+
+```
+Existing (Week 28, unchanged):
+  ai/payments/by_hash/<signal_hash>           -> PaymentRecord (162 bytes)
+  ai/payments/by_payer/<payer>/<height_be>/<signal_hash>  -> empty marker
+  ai/payments/by_payee/<payee>/<height_be>/<signal_hash>  -> empty marker
+
+New (Week 33):
+  ai/payment_splits/by_hash/<signal_hash>     -> PaymentSplitsRecord
+                                                  (86..=338 bytes;
+                                                   present iff splits trailer was on the wire)
+
+Per-recipient by_payee writes:
+  Phase 3 writes ai/payments/by_payee/<recipient>/... for EVERY
+  split recipient (not just the primary). A non-primary recipient
+  querying novai_getPaymentsByEntity(role=payee) sees the payment;
+  the JSON `splits` array tells them what share they got.
+```
+
+The Week 28 `PaymentRecord` value bytes are unchanged: `payee` is
+always the primary, the canonical attestation/SLA target.
+
+### 8. RPC
+
+```
+Method: novai_getPaymentsByEntity
+Params: { entity_id, role, start_height, end_height } (unchanged)
+
+PaymentJson (Week 33 surface):
+{
+  "payer": "<hex32>",
+  "payee": "<hex32>",            // primary
+  "amount": "10000",
+  "service_descriptor_hash": "<hex32>",
+  "request_hash": "<hex32>",
+  "payment_height": 500,
+  "max_block_height": 600,
+  "attested_status": null | "delivered" | "failed" | "unknown",
+  "attested_height": null | <u64>,
+  "splits": null | [
+    { "recipient_entity_id": "<hex32>", "basis_points": 6000, "credited_amount": "6001" },
+    { "recipient_entity_id": "<hex32>", "basis_points": 4000, "credited_amount": "4000" }
+  ]
+}
+```
+
+`splits == null` reproduces the Week 28 JSON shape byte-for-byte
+for legacy single-recipient payments. Decimal-string encoding on
+`credited_amount` matches the existing decimal-string encoding on
+`amount` (and the rest of the RPC surface's u64/u128 fields).
+
+A new public helper `get_payments_with_splits_by_entity` was added
+in `crates/execution/src/lib.rs` alongside the existing
+`get_payments_by_entity`; the latter is unchanged and its 11 test
+callsites continue to work.
+
+### 9. CLI
+
+```
+novai-cli signal publish \
+  --key-file alice.key \
+  --signal-hash <hex32> \
+  --signal-type payment-request \
+  --issuer-entity-id <alice-hex32> \
+  --payee-entity-id <alice-hex32> \
+  --payment-amount 10000 \
+  --service-descriptor-hash <hex32> \
+  --request-hash <hex32> \
+  --max-block-height 12500 \
+  --split <alice-hex32>:5000 \
+  --split <bob-hex32>:3000 \
+  --split <carol-hex32>:2000 \
+  --fee 1000
+```
+
+`--split` is repeatable; each value is `<hex32>:<basis_points>`.
+The CLI parser enforces the same six rules as the runtime
+validator client-side as a courtesy so common authoring mistakes
+(off-by-one bp sum, duplicate recipient, primary mismatch) fail
+before the transaction hits the network. Omitting `--split`
+entirely produces the Week 28 178-byte single-recipient payload
+unchanged.
+
+### 10. Test Surface
+
+| File | Phase | Tests | What it covers |
+|------|-------|-------|---------------|
+| crates/execution/src/lib.rs | 1 | 10 | constants smoke, 3-split roundtrip, 281-byte golden vector, MIN/MAX boundary decodes, legacy 178-byte path still decodes, count below MIN / count = 0 / count above MAX / length mismatch decoder rejections |
+| crates/execution/tests/payment_system.rs | 2 | 13 | primary mismatch, zero bp, sum below/above 10_000, self-payment in non-primary slot, duplicate recipients, recipient not found, recipient not active, MIN=2 boundary accepts, MAX=8 boundary accepts, validation rule ordering, failed validation leaves no by_hash record, decoder bad-count surfaces through handler |
+| crates/execution/tests/payment_system.rs | 3 | 18 | 2/3/8-recipient distribution, remainder folded into primary (10_001 / 50:50 and 100 / 3333:3333:3334), balance conservation across six shapes, payer debit identity vs single-recipient case, per-recipient by_payee written, per-recipient total_transactions bumped, PaymentRecord.payee stays primary, aux record decodes correctly, aux record remainder visibility, 128-byte aux record golden vector, legacy path writes no aux record, ServiceAttestation rep applies to primary only, insufficient-balance rejection leaves no aux / no PaymentRecord / no by_payee markers, treasury fee charged once on total, aux record constants smoke + roundtrip |
+| crates/node/src/rpc.rs | 4 | 3 | legacy payment renders splits=null, with-splits renders the expected JSON array shape, credited_amount remains a decimal string at u64::MAX |
+| tools/novai-cli/src/commands/signal.rs | 4 | 16 | parse_split_entry happy / missing colon / zero bp / bp > 10_000 / bad hex; parse_payment_splits_flag returns None on empty / happy path 3 entries / rejects count < MIN / count > MAX / primary mismatch / sum below 10_000 / sum above 10_000 / duplicate recipient; end-to-end 3-split 281-byte payload byte layout; no-splits keeps the 178-byte payload; validation error propagates through build_signal_payload |
+| crates/execution/tests/payment_system.rs | 5 | 6 | inactive recipient -> no partial credits (no balance change, no treasury credit, no aux, no by_payee), off-by-one bp sum -> no partial settle, duplicate recipient double-credit attempt rejected, split payment does not touch ai/channels/ key prefix (P6 orthogonality), 9 recipients over cap rejected at the decoder, garbage trailing bytes after a valid 2-recipient trailer rejected |
+
+### 11. Outstanding Work Items
+
+- **Service-attestation rep delta on N recipients.** Pushback P3
+  locked `total_transactions++` per recipient with no new rep
+  event constant; the attestation +1 / -3 delta still lands on
+  the primary only. A future variant could fan the rep delta
+  across all recipients (e.g. partial credit for failure-via-
+  subcontractor), but that requires a new rep event type and a
+  way to scope it (the attestation only sees the primary on the
+  current wire). v2.
+- **Splits on multi-party payment channels.** Channels remain
+  strictly bilateral (P6). A future "split channel close" could
+  let a channel close credit N parties instead of two, but the
+  doubly-signed update format binds exactly two pubkeys today
+  and would need a redesign.
+- **Stake-weighted rep effects on split recipients.** A failed
+  payment's rep delta could be scaled by each recipient's stake
+  contribution to the joint service; deferred. The current
+  primary-only rule is the most conservative.
+- **Refund flow for partial-quality multi-party delivery.** No
+  on-chain primitive lets a buyer claw back a fraction of a
+  multi-party payment (e.g. "data provider delivered, inference
+  did not"). Today the buyer issues a single FAILED
+  ServiceAttestation against the primary; that costs the primary
+  reputation but the funds stay with the recipients. A future
+  RefundRequest signal could route partial refunds.
+- **Aux-record pruning.** The `PaymentSplitsRecord` rows
+  accumulate forever, like the Week 28 `PaymentRecord` rows. A
+  governance-driven pruning sweep keyed by `payment_height`
+  expiry would mirror the W28 outstanding item; the two prune
+  policies should align.
+
+**Week 33 Status: COMPLETE.** Five phases shipped across five
+commits, all 1,719 tests passing, zero clippy warnings, cargo
+deny check licenses passes. NOVAI's payment rail now atomically
+credits up to eight recipients per request with floor-division
+plus remainder-to-primary distribution, balance conservation
+enforced under tests, single fee on the total, primary-only
+attestation / SLA semantics preserved, channel orthogonality
+verified, and a complete RPC + CLI surface for the multi-party
+lifecycle. The chain can now settle real cloud-compute payments
+that touch the model provider, the data provider, and the
+hosting provider as one signed transaction.
