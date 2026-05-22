@@ -1038,6 +1038,23 @@ pub enum ExecError<E> {
     /// (plus the remainder) for the primary. SLA / attestation
     /// hooks resolve against the primary, so the two must agree.
     PaymentSplitPrimaryMismatch,
+    // Week 34 - Entity upgrade errors (D34)
+    /// Entity upgrade target entity does not exist in state.
+    EntityUpgradeEntityNotFound,
+    /// Entity upgrade submitter is not the entity's original creator.
+    EntityUpgradeNotCreator,
+    /// Entity upgrade target entity is not active.
+    EntityUpgradeEntityNotActive,
+    /// Entity upgrade new code hash equals the entity's current code hash.
+    EntityUpgradeSameCodeHash,
+    /// Entity upgrade attempted before the per-entity cooldown elapsed.
+    EntityUpgradeCooldownActive {
+        last_upgrade_height: u64,
+        current_height: u64,
+        next_allowed_height: u64,
+    },
+    /// A stored `UpgradeRecord` or `UpgradeSummary` row failed to decode.
+    EntityUpgradeRecordDecodeFailed,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -4409,6 +4426,253 @@ pub fn decode_register_ai_entity_with_key_payload_v1(
         capabilities,
         initial_balance,
     })
+}
+
+// ============================================================================
+// ENTITY UPGRADE (Week 34) - types and codec
+//
+// PURPOSE: Let an entity's original creator swap its code_hash (ship a new
+// model version) while preserving the entity_id and every id-keyed piece of
+// state: reputation, stake, balance, open SLAs, open payment channels, and
+// memory objects.
+//
+// INVARIANTS:
+// - entity_id is NEVER recomputed on upgrade. compute_id is only ever called
+//   at registration; the upgraded entity keeps the id derived from its
+//   original code_hash. Only the code_hash field changes value in place.
+// - AiEntity stays at the V5 (270-byte) encoding. Upgrade bookkeeping
+//   (last_upgrade_height, upgrade_count) lives in aux rows, not on the struct.
+// - The 1000-block per-entity cooldown guarantees at most one UpgradeRecord
+//   per (entity_id, height), so the by_entity history key is collision-free.
+//
+// FAILURE MODES:
+// - A non-canonical payload or aux row (wrong length / version byte) is
+//   rejected at decode with BadPayloadLength / BadPayloadVersion. The handler
+//   maps a corrupt stored row to EntityUpgradeRecordDecodeFailed.
+// ============================================================================
+
+/// Entity upgrade payload version / transaction type byte (Week 34).
+pub const ENTITY_UPGRADE_PAYLOAD_V1: u8 = 11;
+
+/// Encoded length of `EntityUpgradePayloadV1`:
+/// `[version:1][entity_id:32][new_code_hash:32][reason_hash:32]`.
+pub const ENTITY_UPGRADE_PAYLOAD_LEN: usize = 97;
+
+/// Minimum blocks between two upgrades of the same entity. Prevents rapid
+/// `code_hash` cycling for reputation gaming. Per-entity, not global.
+pub const MIN_UPGRADE_INTERVAL_BLOCKS: u64 = 1000;
+
+/// `UpgradeRecord` aux-row version byte.
+pub const UPGRADE_RECORD_V1: u8 = 1;
+
+/// Encoded length of an `UpgradeRecord` history row:
+/// `[version:1][old_code_hash:32][new_code_hash:32][upgrade_height_be:8]`
+/// `[upgrade_count_be:4][reason_hash:32]`.
+pub const UPGRADE_RECORD_LEN: usize = 109;
+
+/// `UpgradeSummary` aux-row version byte.
+pub const UPGRADE_SUMMARY_V1: u8 = 1;
+
+/// Encoded length of an `UpgradeSummary` row:
+/// `[version:1][upgrade_count_be:4][last_upgrade_height_be:8]`.
+pub const UPGRADE_SUMMARY_LEN: usize = 13;
+
+/// Key prefix for the per-entity latest-upgrade summary row.
+pub const KEY_PREFIX_AI_ENTITY_UPGRADES_SUMMARY: &[u8] = b"ai/entity_upgrades/summary/";
+
+/// Key prefix for the height-ordered per-entity upgrade history rows.
+pub const KEY_PREFIX_AI_ENTITY_UPGRADES_BY_ENTITY: &[u8] = b"ai/entity_upgrades/by_entity/";
+
+/// Entity upgrade transaction payload (Week 34).
+///
+/// `[version:1][entity_id:32][new_code_hash:32][reason_hash:32]`, 97 bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityUpgradePayloadV1 {
+    /// Target entity. Its id is unchanged by the upgrade.
+    pub entity_id: [u8; 32],
+    /// New code hash to install on the entity. Must differ from the current one.
+    pub new_code_hash: [u8; 32],
+    /// Optional blake3 commitment to an off-chain reason. All-zero means none.
+    pub reason_hash: [u8; 32],
+}
+
+/// Deterministically encode an entity upgrade payload.
+#[must_use]
+pub fn encode_entity_upgrade_payload_v1(
+    p: &EntityUpgradePayloadV1,
+) -> [u8; ENTITY_UPGRADE_PAYLOAD_LEN] {
+    let mut out = [0u8; ENTITY_UPGRADE_PAYLOAD_LEN];
+    out[0] = ENTITY_UPGRADE_PAYLOAD_V1;
+    out[1..33].copy_from_slice(&p.entity_id);
+    out[33..65].copy_from_slice(&p.new_code_hash);
+    out[65..97].copy_from_slice(&p.reason_hash);
+    out
+}
+
+/// Deterministically decode an entity upgrade payload.
+///
+/// # Errors
+/// Returns `BadPayloadLength` / `BadPayloadVersion` on a non-canonical payload.
+pub fn decode_entity_upgrade_payload_v1(
+    payload: &[u8],
+) -> Result<EntityUpgradePayloadV1, ExecError<()>> {
+    if payload.len() != ENTITY_UPGRADE_PAYLOAD_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: ENTITY_UPGRADE_PAYLOAD_LEN,
+            got: payload.len(),
+        });
+    }
+    if payload[0] != ENTITY_UPGRADE_PAYLOAD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: ENTITY_UPGRADE_PAYLOAD_V1,
+            got: payload[0],
+        });
+    }
+    let mut entity_id = [0u8; 32];
+    entity_id.copy_from_slice(&payload[1..33]);
+    let mut new_code_hash = [0u8; 32];
+    new_code_hash.copy_from_slice(&payload[33..65]);
+    let mut reason_hash = [0u8; 32];
+    reason_hash.copy_from_slice(&payload[65..97]);
+    Ok(EntityUpgradePayloadV1 {
+        entity_id,
+        new_code_hash,
+        reason_hash,
+    })
+}
+
+/// One historical upgrade event for an entity (aux history row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpgradeRecord {
+    /// Code hash before this upgrade.
+    pub old_code_hash: [u8; 32],
+    /// Code hash installed by this upgrade.
+    pub new_code_hash: [u8; 32],
+    /// Block height at which the upgrade was applied.
+    pub upgrade_height: u64,
+    /// 1-based ordinal of this upgrade for the entity.
+    pub upgrade_count: u32,
+    /// Optional reason commitment (zero = none).
+    pub reason_hash: [u8; 32],
+}
+
+/// Deterministically encode an `UpgradeRecord` history row.
+#[must_use]
+pub fn encode_upgrade_record_v1(r: &UpgradeRecord) -> [u8; UPGRADE_RECORD_LEN] {
+    let mut out = [0u8; UPGRADE_RECORD_LEN];
+    out[0] = UPGRADE_RECORD_V1;
+    out[1..33].copy_from_slice(&r.old_code_hash);
+    out[33..65].copy_from_slice(&r.new_code_hash);
+    out[65..73].copy_from_slice(&r.upgrade_height.to_be_bytes());
+    out[73..77].copy_from_slice(&r.upgrade_count.to_be_bytes());
+    out[77..109].copy_from_slice(&r.reason_hash);
+    out
+}
+
+/// Deterministically decode an `UpgradeRecord` history row.
+///
+/// # Errors
+/// Returns `BadPayloadLength` / `BadPayloadVersion` on a non-canonical row.
+pub fn decode_upgrade_record_v1(bytes: &[u8]) -> Result<UpgradeRecord, ExecError<()>> {
+    if bytes.len() != UPGRADE_RECORD_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: UPGRADE_RECORD_LEN,
+            got: bytes.len(),
+        });
+    }
+    if bytes[0] != UPGRADE_RECORD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: UPGRADE_RECORD_V1,
+            got: bytes[0],
+        });
+    }
+    let mut old_code_hash = [0u8; 32];
+    old_code_hash.copy_from_slice(&bytes[1..33]);
+    let mut new_code_hash = [0u8; 32];
+    new_code_hash.copy_from_slice(&bytes[33..65]);
+    let mut h = [0u8; 8];
+    h.copy_from_slice(&bytes[65..73]);
+    let upgrade_height = u64::from_be_bytes(h);
+    let mut c = [0u8; 4];
+    c.copy_from_slice(&bytes[73..77]);
+    let upgrade_count = u32::from_be_bytes(c);
+    let mut reason_hash = [0u8; 32];
+    reason_hash.copy_from_slice(&bytes[77..109]);
+    Ok(UpgradeRecord {
+        old_code_hash,
+        new_code_hash,
+        upgrade_height,
+        upgrade_count,
+        reason_hash,
+    })
+}
+
+/// Latest upgrade state for an entity. Backs the O(1) cooldown check and the
+/// `novai_getAiEntity` upgrade fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpgradeSummary {
+    /// Number of upgrades applied to the entity so far.
+    pub upgrade_count: u32,
+    /// Block height of the most recent upgrade.
+    pub last_upgrade_height: u64,
+}
+
+/// Deterministically encode an `UpgradeSummary` row.
+#[must_use]
+pub fn encode_upgrade_summary_v1(s: &UpgradeSummary) -> [u8; UPGRADE_SUMMARY_LEN] {
+    let mut out = [0u8; UPGRADE_SUMMARY_LEN];
+    out[0] = UPGRADE_SUMMARY_V1;
+    out[1..5].copy_from_slice(&s.upgrade_count.to_be_bytes());
+    out[5..13].copy_from_slice(&s.last_upgrade_height.to_be_bytes());
+    out
+}
+
+/// Deterministically decode an `UpgradeSummary` row.
+///
+/// # Errors
+/// Returns `BadPayloadLength` / `BadPayloadVersion` on a non-canonical row.
+pub fn decode_upgrade_summary_v1(bytes: &[u8]) -> Result<UpgradeSummary, ExecError<()>> {
+    if bytes.len() != UPGRADE_SUMMARY_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: UPGRADE_SUMMARY_LEN,
+            got: bytes.len(),
+        });
+    }
+    if bytes[0] != UPGRADE_SUMMARY_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: UPGRADE_SUMMARY_V1,
+            got: bytes[0],
+        });
+    }
+    let mut c = [0u8; 4];
+    c.copy_from_slice(&bytes[1..5]);
+    let upgrade_count = u32::from_be_bytes(c);
+    let mut h = [0u8; 8];
+    h.copy_from_slice(&bytes[5..13]);
+    let last_upgrade_height = u64::from_be_bytes(h);
+    Ok(UpgradeSummary {
+        upgrade_count,
+        last_upgrade_height,
+    })
+}
+
+/// Key for the per-entity latest-upgrade summary row:
+/// `ai/entity_upgrades/summary/<entity_id>`.
+#[must_use]
+pub fn entity_upgrade_summary_key(entity_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = KEY_PREFIX_AI_ENTITY_UPGRADES_SUMMARY.to_vec();
+    k.extend_from_slice(entity_id);
+    k
+}
+
+/// Key for one upgrade history row, height big-endian for ascending scans:
+/// `ai/entity_upgrades/by_entity/<entity_id>/<height_be>`.
+#[must_use]
+pub fn entity_upgrade_by_entity_key(entity_id: &[u8; 32], height: u64) -> Vec<u8> {
+    let mut k = KEY_PREFIX_AI_ENTITY_UPGRADES_BY_ENTITY.to_vec();
+    k.extend_from_slice(entity_id);
+    k.extend_from_slice(&height.to_be_bytes());
+    k
 }
 
 /// Submit Proposal payload (D24.3):
@@ -11831,6 +12095,216 @@ mod tests {
                 got: 50
             })
         ));
+    }
+
+    // ========================================================================
+    // Week 34 - EntityUpgrade types and codec (Phase 1)
+    // ========================================================================
+
+    #[test]
+    fn entity_upgrade_constants_smoke() {
+        assert_eq!(ENTITY_UPGRADE_PAYLOAD_V1, 11);
+        assert_eq!(ENTITY_UPGRADE_PAYLOAD_LEN, 97);
+        assert_eq!(MIN_UPGRADE_INTERVAL_BLOCKS, 1000);
+        assert_eq!(UPGRADE_RECORD_V1, 1);
+        assert_eq!(UPGRADE_RECORD_LEN, 109);
+        assert_eq!(UPGRADE_SUMMARY_V1, 1);
+        assert_eq!(UPGRADE_SUMMARY_LEN, 13);
+    }
+
+    #[test]
+    fn entity_upgrade_payload_roundtrip() {
+        let p = EntityUpgradePayloadV1 {
+            entity_id: [0x11; 32],
+            new_code_hash: [0x22; 32],
+            reason_hash: [0x33; 32],
+        };
+        let encoded = encode_entity_upgrade_payload_v1(&p);
+        assert_eq!(encoded.len(), ENTITY_UPGRADE_PAYLOAD_LEN);
+        let decoded = decode_entity_upgrade_payload_v1(&encoded).unwrap();
+        assert_eq!(decoded, p);
+    }
+
+    #[test]
+    fn entity_upgrade_payload_golden_vector() {
+        let p = EntityUpgradePayloadV1 {
+            entity_id: [0x11; 32],
+            new_code_hash: [0x22; 32],
+            reason_hash: [0x33; 32],
+        };
+        let encoded = encode_entity_upgrade_payload_v1(&p);
+
+        let mut expected = [0u8; 97];
+        expected[0] = 11;
+        expected[1..33].copy_from_slice(&[0x11; 32]);
+        expected[33..65].copy_from_slice(&[0x22; 32]);
+        expected[65..97].copy_from_slice(&[0x33; 32]);
+        assert_eq!(encoded, expected, "97-byte EntityUpgrade payload layout");
+    }
+
+    #[test]
+    fn entity_upgrade_payload_zero_reason_is_none_marker() {
+        let p = EntityUpgradePayloadV1 {
+            entity_id: [0x44; 32],
+            new_code_hash: [0x55; 32],
+            reason_hash: [0u8; 32],
+        };
+        let decoded =
+            decode_entity_upgrade_payload_v1(&encode_entity_upgrade_payload_v1(&p)).unwrap();
+        assert_eq!(decoded.reason_hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn entity_upgrade_payload_bad_length_rejected() {
+        let result = decode_entity_upgrade_payload_v1(&[11u8; 96]);
+        assert!(matches!(
+            result,
+            Err(ExecError::BadPayloadLength {
+                expected: 97,
+                got: 96
+            })
+        ));
+    }
+
+    #[test]
+    fn entity_upgrade_payload_bad_version_rejected() {
+        let mut bytes = encode_entity_upgrade_payload_v1(&EntityUpgradePayloadV1 {
+            entity_id: [0x11; 32],
+            new_code_hash: [0x22; 32],
+            reason_hash: [0x33; 32],
+        });
+        bytes[0] = 99;
+        let result = decode_entity_upgrade_payload_v1(&bytes);
+        assert!(matches!(
+            result,
+            Err(ExecError::BadPayloadVersion {
+                expected: 11,
+                got: 99
+            })
+        ));
+    }
+
+    #[test]
+    fn upgrade_record_roundtrip() {
+        let r = UpgradeRecord {
+            old_code_hash: [0x11; 32],
+            new_code_hash: [0x22; 32],
+            upgrade_height: 123_456,
+            upgrade_count: 7,
+            reason_hash: [0x33; 32],
+        };
+        let decoded = decode_upgrade_record_v1(&encode_upgrade_record_v1(&r)).unwrap();
+        assert_eq!(decoded, r);
+    }
+
+    #[test]
+    fn upgrade_record_golden_vector() {
+        let r = UpgradeRecord {
+            old_code_hash: [0x11; 32],
+            new_code_hash: [0x22; 32],
+            upgrade_height: 0x0102_0304_0506_0708,
+            upgrade_count: 0x0A0B_0C0D,
+            reason_hash: [0x33; 32],
+        };
+        let encoded = encode_upgrade_record_v1(&r);
+        assert_eq!(encoded.len(), 109);
+        assert_eq!(encoded[0], 1);
+        assert_eq!(&encoded[1..33], &[0x11; 32]);
+        assert_eq!(&encoded[33..65], &[0x22; 32]);
+        assert_eq!(
+            &encoded[65..73],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
+        assert_eq!(&encoded[73..77], &[0x0A, 0x0B, 0x0C, 0x0D]);
+        assert_eq!(&encoded[77..109], &[0x33; 32]);
+    }
+
+    #[test]
+    fn upgrade_record_bad_length_and_version_rejected() {
+        assert!(matches!(
+            decode_upgrade_record_v1(&[1u8; 108]),
+            Err(ExecError::BadPayloadLength {
+                expected: 109,
+                got: 108
+            })
+        ));
+        let mut bytes = encode_upgrade_record_v1(&UpgradeRecord {
+            old_code_hash: [0; 32],
+            new_code_hash: [1; 32],
+            upgrade_height: 1,
+            upgrade_count: 1,
+            reason_hash: [0; 32],
+        });
+        bytes[0] = 9;
+        assert!(matches!(
+            decode_upgrade_record_v1(&bytes),
+            Err(ExecError::BadPayloadVersion {
+                expected: 1,
+                got: 9
+            })
+        ));
+    }
+
+    #[test]
+    fn upgrade_summary_roundtrip_and_golden_vector() {
+        let s = UpgradeSummary {
+            upgrade_count: 0x0A0B_0C0D,
+            last_upgrade_height: 0x0102_0304_0506_0708,
+        };
+        let encoded = encode_upgrade_summary_v1(&s);
+        assert_eq!(encoded.len(), 13);
+        assert_eq!(encoded[0], 1);
+        assert_eq!(&encoded[1..5], &[0x0A, 0x0B, 0x0C, 0x0D]);
+        assert_eq!(
+            &encoded[5..13],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
+        assert_eq!(decode_upgrade_summary_v1(&encoded).unwrap(), s);
+    }
+
+    #[test]
+    fn upgrade_summary_bad_length_and_version_rejected() {
+        assert!(matches!(
+            decode_upgrade_summary_v1(&[1u8; 12]),
+            Err(ExecError::BadPayloadLength {
+                expected: 13,
+                got: 12
+            })
+        ));
+        let mut bytes = encode_upgrade_summary_v1(&UpgradeSummary {
+            upgrade_count: 1,
+            last_upgrade_height: 1,
+        });
+        bytes[0] = 9;
+        assert!(matches!(
+            decode_upgrade_summary_v1(&bytes),
+            Err(ExecError::BadPayloadVersion {
+                expected: 1,
+                got: 9
+            })
+        ));
+    }
+
+    #[test]
+    fn entity_upgrade_keys_shape_and_ordering() {
+        let id = [0x11u8; 32];
+        let summary = entity_upgrade_summary_key(&id);
+        assert!(summary.starts_with(KEY_PREFIX_AI_ENTITY_UPGRADES_SUMMARY));
+        assert_eq!(
+            summary.len(),
+            KEY_PREFIX_AI_ENTITY_UPGRADES_SUMMARY.len() + 32
+        );
+        assert_eq!(&summary[KEY_PREFIX_AI_ENTITY_UPGRADES_SUMMARY.len()..], &id);
+
+        let k1 = entity_upgrade_by_entity_key(&id, 1);
+        let k2 = entity_upgrade_by_entity_key(&id, 2);
+        assert!(k1.starts_with(KEY_PREFIX_AI_ENTITY_UPGRADES_BY_ENTITY));
+        assert_eq!(
+            k1.len(),
+            KEY_PREFIX_AI_ENTITY_UPGRADES_BY_ENTITY.len() + 32 + 8
+        );
+        // Big-endian height suffix => ascending height sorts ascending in scans.
+        assert!(k1 < k2, "by_entity keys must sort by ascending height");
     }
 
     #[test]
