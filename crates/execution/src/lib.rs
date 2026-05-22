@@ -8019,6 +8019,126 @@ pub fn apply_register_ai_entity_with_key_tx<K: KvBatch>(
     Ok(entity_id)
 }
 
+// ============================================================================
+// ENTITY UPGRADE EXECUTION (Week 34 - Type 11)
+// ============================================================================
+
+/// Apply an entity upgrade transaction (type 11).
+///
+/// Swaps the target entity's `code_hash` to `payload.new_code_hash`, preserving
+/// the `entity_id` and every id-keyed piece of state (reputation, stake,
+/// balance, open SLAs, open payment channels, memory objects). Writes an
+/// `UpgradeRecord` history row and refreshes the `UpgradeSummary`. The submitter
+/// is the entity's creator, paying the fee from a normal account exactly like
+/// `RegisterAiEntity`.
+///
+/// # Returns
+/// The 32-byte entity id (unchanged by the upgrade).
+///
+/// # Errors
+/// Returns the relevant `ExecError` on any failed gate. No state is mutated on
+/// a rejection (validation runs before any write and the writes are one atomic
+/// batch).
+pub fn apply_entity_upgrade_tx<K: KvBatch>(
+    db: &mut K,
+    tx: &TxV1,
+    current_height: u64,
+) -> Result<[u8; 32], ExecError<K::Error>> {
+    // 1. Decode payload.
+    let payload = decode_entity_upgrade_payload_v1(&tx.payload).map_err(|e| match e {
+        ExecError::BadPayloadLength { expected, got } => {
+            ExecError::BadPayloadLength { expected, got }
+        }
+        ExecError::BadPayloadVersion { expected, got } => {
+            ExecError::BadPayloadVersion { expected, got }
+        }
+        _ => ExecError::Overflow,
+    })?;
+
+    // 2. Global AI kill switch (P8), mirroring the register-with-key handler.
+    if read_ai_kill_switch(db)? {
+        return Err(ExecError::AiKillSwitchActive);
+    }
+
+    // 3. Creator account + nonce (creator pays, like RegisterAiEntity).
+    let mut creator_acct = read_account_or_default(db, &tx.from)?;
+    if tx.nonce != creator_acct.nonce {
+        return Err(ExecError::NonceMismatch {
+            expected: creator_acct.nonce,
+            got: tx.nonce,
+        });
+    }
+
+    // 4. All five upgrade rules (exists, creator, active, code-hash-differs,
+    //    cooldown, fee balance). validate performs no mutation.
+    validate_entity_upgrade(db, &payload, &tx.from, tx.fee, current_height)?;
+
+    // 5. Load fresh copies for mutation (validate already proved existence).
+    let mut entity =
+        read_ai_entity(db, &payload.entity_id)?.ok_or(ExecError::EntityUpgradeEntityNotFound)?;
+    let prior = read_upgrade_summary(db, &payload.entity_id)?;
+    let new_count = prior.map_or(0, |s| s.upgrade_count).saturating_add(1);
+    let old_code_hash = entity.code_hash;
+
+    // 6. Mutate ONLY code_hash + last_active_at. id, capabilities, autonomy,
+    //    balances, stake, and reputation are all left untouched (P6).
+    entity.code_hash = payload.new_code_hash;
+    entity.last_active_at = current_height;
+
+    // 7. Debit fee from creator, bump nonce, credit fee pool.
+    let fee_u128 = u128::from(tx.fee);
+    creator_acct.balance = creator_acct
+        .balance
+        .checked_sub(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+    creator_acct.nonce = creator_acct
+        .nonce
+        .checked_add(1)
+        .ok_or(ExecError::NonceOverflow)?;
+    let mut fee_pool = read_fee_pool_or_default(db)?;
+    fee_pool.balance = fee_pool
+        .balance
+        .checked_add(fee_u128)
+        .ok_or(ExecError::Overflow)?;
+
+    // 8. Build aux rows.
+    let record = UpgradeRecord {
+        old_code_hash,
+        new_code_hash: payload.new_code_hash,
+        upgrade_height: current_height,
+        upgrade_count: new_count,
+        reason_hash: payload.reason_hash,
+    };
+    let summary = UpgradeSummary {
+        upgrade_count: new_count,
+        last_upgrade_height: current_height,
+    };
+
+    // 9. Atomic batch: account, fee pool, entity, summary, history row.
+    let ops = vec![
+        WriteOp::Put(
+            account_key(&tx.from),
+            encode_account_v1(&creator_acct).to_vec(),
+        ),
+        WriteOp::Put(
+            KEY_FEE_POOL.to_vec(),
+            encode_fee_pool_v1(&fee_pool).to_vec(),
+        ),
+        write_ai_entity_op(&entity),
+        WriteOp::Put(
+            entity_upgrade_summary_key(&payload.entity_id),
+            encode_upgrade_summary_v1(&summary).to_vec(),
+        ),
+        WriteOp::Put(
+            entity_upgrade_by_entity_key(&payload.entity_id, current_height),
+            encode_upgrade_record_v1(&record).to_vec(),
+        ),
+    ];
+    db.apply_batch(&ops).map_err(ExecError::Db)?;
+
+    Ok(payload.entity_id)
+}
+
 /// Look up an AI entity by sender address via reverse index.
 ///
 /// Returns `Some(entity)` if the address maps to a registered AI entity, `None` otherwise.
@@ -10611,6 +10731,9 @@ pub const MIN_FEE_CREDIT_AI_ENTITY: u64 = 100;
 /// Minimum fee for registering an AI entity with key (same as register, 50x base).
 pub const MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY: u64 = 5_000;
 
+/// Minimum fee for upgrading an AI entity's code hash (same as register, 50x base).
+pub const MIN_FEE_ENTITY_UPGRADE: u64 = 5_000;
+
 /// Tiered fee schedule with minimum fees per transaction type.
 ///
 /// All values are floor minimums — senders can pay MORE but never less.
@@ -10627,6 +10750,7 @@ pub struct FeeSchedule {
     pub governance_execute: u64,
     pub register_ai_entity: u64,
     pub credit_ai_entity: u64,
+    pub entity_upgrade: u64,
 }
 
 impl FeeSchedule {
@@ -10641,6 +10765,7 @@ impl FeeSchedule {
             governance_execute: MIN_FEE_GOVERNANCE_EXECUTE,
             register_ai_entity: MIN_FEE_REGISTER_AI_ENTITY,
             credit_ai_entity: MIN_FEE_CREDIT_AI_ENTITY,
+            entity_upgrade: MIN_FEE_ENTITY_UPGRADE,
         }
     }
 }
@@ -10668,6 +10793,7 @@ pub fn minimum_fee_for_tx(tx: &TxV1) -> Result<u64, ExecError<()>> {
         REGISTER_AI_ENTITY_PAYLOAD_V1 => Ok(MIN_FEE_REGISTER_AI_ENTITY),
         CREDIT_AI_ENTITY_PAYLOAD_V1 => Ok(MIN_FEE_CREDIT_AI_ENTITY),
         REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1 => Ok(MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY),
+        ENTITY_UPGRADE_PAYLOAD_V1 => Ok(MIN_FEE_ENTITY_UPGRADE),
         other => Err(ExecError::UnknownPayloadVersion { version: other }),
     }
 }
@@ -10954,6 +11080,7 @@ pub fn dispatch_tx<K: KvBatch>(
         REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1 => {
             apply_register_ai_entity_with_key_tx(db, tx, current_height).map(|_| ())
         }
+        ENTITY_UPGRADE_PAYLOAD_V1 => apply_entity_upgrade_tx(db, tx, current_height).map(|_| ()),
         other => Err(ExecError::UnknownPayloadVersion { version: other }),
     }
 }
