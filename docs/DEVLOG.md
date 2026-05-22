@@ -18392,3 +18392,261 @@ verified, and a complete RPC + CLI surface for the multi-party
 lifecycle. The chain can now settle real cloud-compute payments
 that touch the model provider, the data provider, and the
 hosting provider as one signed transaction.
+
+---
+
+## Week 34: Agent Upgrade (EntityUpgrade)
+
+### 1. Overview - Objectives & Deliverables
+
+Week 34 lets an AI agent ship a new model version without losing its
+identity. Until now a new `code_hash` meant registering a brand new
+entity and abandoning all reputation, stake, balance, open SLAs, open
+payment channels, memory objects, and transaction history. That blocked
+any integration partner who iterates their model. The new `EntityUpgrade`
+transaction (type 11) lets the entity's original creator swap the
+`code_hash` in place while the `entity_id` and every id-keyed piece of
+state survive untouched.
+
+**Goal Statement.** Ship a creator-authorized upgrade transaction that
+mutates only the entity's `code_hash`, records the change in an on-chain
+history, enforces a per-entity cooldown against reputation-gaming, and
+surfaces the upgrade state through RPC and CLI. The canonical `AiEntity`
+V5 (270-byte) encoding stays frozen; all upgrade bookkeeping lives in
+aux rows.
+
+**Deliverables.**
+
+- D34.1: Transaction type byte 11 (`EntityUpgrade`) and the fixed 97-byte
+  `EntityUpgradePayloadV1` (`entity_id`, `new_code_hash`, optional
+  `reason_hash` commitment), golden-vector locked.
+- D34.2: `validate_entity_upgrade`, a standalone validator enforcing the
+  five rules (creator-only, exists, active, code-hash-differs, per-entity
+  cooldown, fee balance) before any state mutation.
+- D34.3: `apply_entity_upgrade_tx` handler. Mutates only `code_hash` and
+  `last_active_at`, debits the fee from the creator's normal account,
+  writes an `UpgradeRecord` history row and an `UpgradeSummary`. One
+  atomic batch. Wired into `dispatch_tx`, `minimum_fee_for_tx`, and the
+  `FeeSchedule`.
+- D34.4: Two aux records keyed by `entity_id`: `UpgradeSummary` (13 bytes:
+  `upgrade_count`, `last_upgrade_height`) backing the O(1) cooldown check
+  and the RPC fields, and the height-ordered `UpgradeRecord` (109 bytes)
+  history. `AiEntity` is NOT extended (stays V5).
+- D34.5: RPC and CLI. `novai_getAiEntity` JSON gains `upgrade_count` and
+  `last_upgrade_height` (the current `code_hash` was already present);
+  new `novai_getUpgradeHistory` method; `get_upgrade_history` execution
+  helper. CLI gains `novai-cli ai upgrade` and
+  `novai-cli ai upgrade-history`.
+
+**Final Metrics.**
+
+- 49 net new tests across the five phases (12 codec unit tests in
+  `crates/execution/src/lib.rs` plus 1 history-helper test, 12 validation
+  tests, 14 execution tests, 5 RPC/CLI surface tests, 5 adversarial
+  tests).
+- 1,768 tests passing total (1,719 Week 33 baseline + 49 net new), 0
+  failing.
+- Zero clippy warnings under `--all-targets -- -D warnings`.
+- `cargo deny check licenses` passes.
+- One commit per phase across five phases, five pushes.
+
+### 2. Design Pushbacks (Approved in Phase 0)
+
+Eight pushbacks against the initial prompt were accepted before any code
+was written.
+
+- **P1: Do NOT add `last_upgrade_height` / `upgrade_count` to `AiEntity`.**
+  The struct is golden-vector locked at V5 (270 bytes). Adding fields
+  forces a V6 codec and touches the most consensus-sensitive struct in
+  the tree, the exact move Week 31 P3 refused for `locked_stake_for_slas`.
+  The counters live in a per-entity aux summary row instead; `code_hash`
+  updates in place (that field already exists, value-only change).
+- **P2: Creator-key authorization, no governance vote for v1.** The
+  entity already carries `creator`; authorization is `tx.from ==
+  entity.creator`, mirroring how `RegisterAiEntity` is creator-funded.
+  The safety net (`ModuleActivation` / `ModuleRollback`, kill switch)
+  already exists to neutralize a misbehaving entity after the fact.
+- **P3: In-flight `ServiceAttestation`s and all open agreements are
+  unaffected.** Nothing in the runtime references `code_hash`: payments,
+  SLAs, channels, memory objects, and every scan index key off
+  `entity_id`. An upgrade changes only the entity's own `code_hash` field.
+- **P4: Cooldown is per-entity, not global.** A global cooldown would let
+  one entity's upgrade block every other entity's upgrade. Tracked via the
+  summary's `last_upgrade_height`; first upgrade always allowed.
+  `MIN_UPGRADE_INTERVAL_BLOCKS = 1000`, inclusive boundary
+  (`last + 1000 == current` passes).
+- **P5: Instant upgrade, not propose-then-execute.** A two-phase flow adds
+  a second tx type and an execution window to defend a risk the cooldown
+  plus creator-only plus governance rollback already cover. Timelocked
+  upgrades are a v2 item.
+- **P6: Capabilities, autonomy_mode, pubkey, balances, stake, and
+  reputation stay FROZEN; only `code_hash` changes.** Otherwise a
+  code_hash bump could silently escalate a read-only advisor into an
+  autonomous executor. Capability changes remain a governance path.
+- **P7: Accept that `code_hash` is no longer globally unique after an
+  upgrade.** `compute_id(new_hash, creator)` is a different, empty id, so
+  a fresh entity running the new hash can still be registered separately;
+  the old hash still resolves to the upgraded entity, so it cannot be
+  re-registered. Benign: `code_hash` was never a uniqueness key and
+  nothing looks entities up by it.
+- **P8: EntityUpgrade respects the AI kill switch and requires
+  `is_active`.** Swapping executable code is at least as sensitive as
+  registration-with-key, which already checks the switch.
+
+### 3. Wire Layouts (locked by golden vector tests)
+
+```
+EntityUpgradePayloadV1 (97 bytes; transaction type 11):
+  version          u8        byte  0      (= 11)
+  entity_id        [u8; 32]  bytes 1..33
+  new_code_hash    [u8; 32]  bytes 33..65
+  reason_hash      [u8; 32]  bytes 65..97  (blake3 commitment; zero = none)
+
+UpgradeRecord aux row (109 bytes):
+  version          u8        byte  0       (= 1)
+  old_code_hash    [u8; 32]  bytes 1..33
+  new_code_hash    [u8; 32]  bytes 33..65
+  upgrade_height   u64 BE    bytes 65..73
+  upgrade_count    u32 BE    bytes 73..77
+  reason_hash      [u8; 32]  bytes 77..109
+
+UpgradeSummary aux row (13 bytes):
+  version              u8     byte  0      (= 1)
+  upgrade_count        u32 BE bytes 1..5
+  last_upgrade_height  u64 BE bytes 5..13
+```
+
+### 4. Constants
+
+```rust
+// crates/execution/src/lib.rs
+pub const ENTITY_UPGRADE_PAYLOAD_V1: u8 = 11;
+pub const ENTITY_UPGRADE_PAYLOAD_LEN: usize = 97;
+pub const MIN_UPGRADE_INTERVAL_BLOCKS: u64 = 1000;
+pub const MIN_FEE_ENTITY_UPGRADE: u64 = 5_000;
+pub const UPGRADE_RECORD_V1: u8 = 1;
+pub const UPGRADE_RECORD_LEN: usize = 109;
+pub const UPGRADE_SUMMARY_V1: u8 = 1;
+pub const UPGRADE_SUMMARY_LEN: usize = 13;
+pub const KEY_PREFIX_AI_ENTITY_UPGRADES_SUMMARY: &[u8] = b"ai/entity_upgrades/summary/";
+pub const KEY_PREFIX_AI_ENTITY_UPGRADES_BY_ENTITY: &[u8] = b"ai/entity_upgrades/by_entity/";
+
+// 6 new ExecError variants
+EntityUpgradeEntityNotFound, EntityUpgradeNotCreator, EntityUpgradeEntityNotActive,
+EntityUpgradeSameCodeHash,
+EntityUpgradeCooldownActive { last_upgrade_height, current_height, next_allowed_height },
+EntityUpgradeRecordDecodeFailed
+```
+
+### 5. Storage Layout
+
+```
+ai/entity_upgrades/summary/<entity_id>            -> UpgradeSummary (13 bytes)
+    O(1) cooldown check + RPC fields. Absent => never upgraded.
+
+ai/entity_upgrades/by_entity/<entity_id>/<height_be> -> UpgradeRecord (109 bytes)
+    Height-ordered history. The 1000-block cooldown guarantees at most one
+    row per (entity_id, height), so the height suffix is collision-free.
+    Big-endian height makes get_upgrade_history scans ascending for free.
+```
+
+The `AiEntity` record (V5, 270 bytes) is unchanged. The upgrade mutates
+only the `code_hash` and `last_active_at` field values inside it; the
+layout and golden vectors are untouched.
+
+### 6. Handler Validation Order (`apply_entity_upgrade_tx`)
+
+```
+1. Decode 97-byte payload (BadPayloadLength / BadPayloadVersion).
+2. AI kill switch off, else AiKillSwitchActive (P8).
+3. Read creator account; tx.nonce == creator.nonce else NonceMismatch.
+4. validate_entity_upgrade (no mutation):
+     a. entity exists                 else EntityUpgradeEntityNotFound
+     b. entity.creator == tx.from     else EntityUpgradeNotCreator
+     c. entity.is_active              else EntityUpgradeEntityNotActive
+     d. new_code_hash != code_hash    else EntityUpgradeSameCodeHash
+     e. cooldown elapsed              else EntityUpgradeCooldownActive
+     f. creator.balance >= fee        else InsufficientFunds
+5. Mutate ONLY code_hash + last_active_at (id, capabilities, autonomy,
+   balances, stake, reputation untouched).
+6. Debit fee from creator, bump nonce, credit fee pool.
+7. Atomic batch: account, fee pool, entity, summary, history row.
+```
+
+### 7. RPC
+
+```
+Method: novai_getAiEntity (extended)
+  AiEntityJson gains: upgrade_count (u32), last_upgrade_height (u64).
+  code_hash already present and now reflects the live code. Absent
+  summary serializes 0 / 0.
+
+Method: novai_getUpgradeHistory
+Params: { entity_id: hex32, start_height: u64, end_height: u64 }
+Response: { upgrades: [UpgradeRecordJson, ...] }   // ascending by height
+UpgradeRecordJson { old_code_hash (hex), new_code_hash (hex),
+                    upgrade_height, upgrade_count, reason_hash (hex) }
+```
+
+Same `MAX_SIGNAL_QUERY_RANGE = 10_000` height-window cap as the other
+height-windowed queries. Backed by the `get_upgrade_history` execution
+helper (a single ordered prefix scan; the by_entity value IS the record,
+so no second lookup).
+
+### 8. CLI
+
+```
+novai-cli ai upgrade \
+  --key-file creator.key \
+  --entity-id <hex32> \
+  --new-code-hash <hex32> \
+  [--reason-hash <hex32>] \
+  --fee 5000
+
+novai-cli ai upgrade-history --entity-id <hex32> [--start-height 0] [--end-height 10000]
+```
+
+`ai upgrade` builds the 97-byte type-11 payload (reason defaults to 32
+zero bytes) and signs/submits it from the creator account, mirroring
+`ai credit`. `ai upgrade-history` prints each `#count at height: old -> new`.
+
+### 9. Test Surface
+
+| File | Phase | Tests | What it covers |
+|------|-------|-------|---------------|
+| crates/execution/src/lib.rs | 1 | 12 | constants smoke, 97-byte payload roundtrip + golden vector + zero-reason marker + bad length/version, UpgradeRecord roundtrip + 109-byte golden vector + rejections, UpgradeSummary roundtrip + 13-byte golden vector + rejections, key shape + ascending ordering |
+| crates/execution/tests/entity_upgrade_validation.rs | 2 | 12 | each rejection (not-found, not-creator, not-active, same-hash, cooldown, insufficient-fee), cooldown boundary exact-allowed / one-before-rejected, first-upgrade-no-summary, reason zero-and-set, per-entity creator binding |
+| crates/execution/src/lib.rs | 4 | 1 | get_upgrade_history empty / all-ascending / window-filtered |
+| crates/execution/tests/entity_upgrade_execution.rs | 3 | 14 | code_hash swapped + id preserved, record/summary written, reputation / balance / stake / capabilities / autonomy / pubkey / roots preserved, fee debited + pool credited, second upgrade after cooldown increments count, dispatch happy path + below-min-fee, kill-switch block, nonce mismatch, no-mutation-on-rejection for same-hash and cooldown |
+| crates/node/src/rpc.rs | 4 | 2 | AiEntityJson includes the two new fields, UpgradeRecordJson hex/number shape, getUpgradeHistory params deserialize |
+| tools/novai-cli/src/commands/ai.rs | 4 | 3 | 97-byte upgrade payload layout, default reason zero, bad-hex rejection |
+| crates/execution/tests/entity_upgrade_adversarial.rs | 5 | 5 | upgrade during an OPEN payment channel (channel byte-identical, entity balance untouched), upgrade during an ACTIVE SLA (SLA unchanged, seller stake preserved), rapid upgrade within cooldown rejected, non-creator rejected, same-code-hash rejected |
+
+### 10. Outstanding Work Items
+
+- **Governance-gated upgrades**: v1 is creator-key only. A future variant
+  could route high-impact upgrades through the Week 19 governance timelock
+  for entities above a stake or reputation threshold.
+- **Timelocked / announced upgrades**: deferred per P5. A propose-then-
+  execute flow backed by the existing timelock machinery could give
+  counterparties advance notice of a code swap.
+- **Capability changes during upgrade**: deliberately excluded per P6.
+  Capability or autonomy escalation stays a separate governance path; a
+  future "capability upgrade" proposal type could handle it under a vote.
+- **Upgrade-record pruning**: like the Week 28 `PaymentRecord` and Week 33
+  `PaymentSplitsRecord` rows, history rows accumulate forever. A
+  governance-driven prune keyed by `upgrade_height` would align with the
+  other prune policies.
+- **`code_hash` -> entity reverse index**: P7 accepts that `code_hash` is
+  not globally unique post-upgrade. If a future feature needs "which
+  entities run code X" it would add a dedicated index rather than relying
+  on id derivation.
+
+**Week 34 Status: COMPLETE.** Five phases shipped across five commits,
+all 1,768 tests passing, zero clippy warnings, cargo deny check licenses
+passes. An AI agent can now ship a new model version with one
+creator-signed transaction, preserving its entity id, reputation, stake,
+balance, open SLAs, open payment channels, and memory objects, with the
+code change recorded on chain and a 1000-block cooldown guarding against
+reputation-gaming. The `AiEntity` V5 encoding and every prior golden
+vector are unchanged.
