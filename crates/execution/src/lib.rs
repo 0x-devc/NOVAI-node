@@ -4675,6 +4675,95 @@ pub fn entity_upgrade_by_entity_key(entity_id: &[u8; 32], height: u64) -> Vec<u8
     k
 }
 
+/// Read the per-entity latest-upgrade summary row, if present.
+///
+/// # Errors
+/// Returns `Db` on a storage error, or `EntityUpgradeRecordDecodeFailed` if a
+/// stored summary row cannot be decoded.
+pub fn read_upgrade_summary<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+) -> Result<Option<UpgradeSummary>, ExecError<K::Error>> {
+    match db
+        .get(&entity_upgrade_summary_key(entity_id))
+        .map_err(ExecError::Db)?
+    {
+        None => Ok(None),
+        Some(bytes) => {
+            let summary = decode_upgrade_summary_v1(&bytes)
+                .map_err(|_| ExecError::EntityUpgradeRecordDecodeFailed)?;
+            Ok(Some(summary))
+        }
+    }
+}
+
+/// Validate an entity upgrade before any state mutation (Week 34).
+///
+/// Performs the five Week 34 checks in cheap-first order: the target exists,
+/// the submitter is its original creator, the entity is active, the new code
+/// hash differs from the current one, the per-entity cooldown has elapsed, and
+/// the submitter can cover the fee. The AI kill-switch gate and the nonce check
+/// are handler-level, mirroring the register handlers.
+///
+/// A missing summary row means this is the entity's first upgrade, which is
+/// always allowed (no prior upgrade to cool down from).
+///
+/// # Errors
+/// Returns the matching `EntityUpgrade*` variant or `InsufficientFunds` on the
+/// first failing rule, or `Db` on a storage error.
+pub fn validate_entity_upgrade<K: Kv>(
+    db: &K,
+    payload: &EntityUpgradePayloadV1,
+    submitter: &Address,
+    fee: u64,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
+    // 1. Target entity must exist.
+    let entity =
+        read_ai_entity(db, &payload.entity_id)?.ok_or(ExecError::EntityUpgradeEntityNotFound)?;
+
+    // 2. Submitter must be the entity's original creator.
+    if entity.creator != *submitter {
+        return Err(ExecError::EntityUpgradeNotCreator);
+    }
+
+    // 3. Entity must be active.
+    if !entity.is_active {
+        return Err(ExecError::EntityUpgradeEntityNotActive);
+    }
+
+    // 4. New code hash must differ from the current one.
+    if payload.new_code_hash == entity.code_hash {
+        return Err(ExecError::EntityUpgradeSameCodeHash);
+    }
+
+    // 5. Per-entity cooldown. Absent summary => first upgrade, always allowed.
+    if let Some(summary) = read_upgrade_summary(db, &payload.entity_id)? {
+        let next_allowed_height = summary
+            .last_upgrade_height
+            .saturating_add(MIN_UPGRADE_INTERVAL_BLOCKS);
+        if current_height < next_allowed_height {
+            return Err(ExecError::EntityUpgradeCooldownActive {
+                last_upgrade_height: summary.last_upgrade_height,
+                current_height,
+                next_allowed_height,
+            });
+        }
+    }
+
+    // 6. Submitter must cover the fee.
+    let submitter_acct = read_account_or_default(db, submitter)?;
+    let fee_u128 = u128::from(fee);
+    if submitter_acct.balance < fee_u128 {
+        return Err(ExecError::InsufficientFunds {
+            balance: submitter_acct.balance,
+            needed: fee_u128,
+        });
+    }
+
+    Ok(())
+}
+
 /// Submit Proposal payload (D24.3):
 /// `[version:1][proposal_type:1][gate_id:32][data_len_be:4][proposal_data:var]`
 ///
