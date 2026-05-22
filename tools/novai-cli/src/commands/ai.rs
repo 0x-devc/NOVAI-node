@@ -246,3 +246,114 @@ pub async fn run_info(rpc: &RpcClient, entity_id_hex: &str, json: bool) -> Resul
     }
     Ok(())
 }
+
+/// Build the EntityUpgrade payload bytes (type 11, 97 bytes). Pure helper.
+fn build_upgrade_payload(
+    entity_id: &[u8; 32],
+    new_code_hash: &[u8; 32],
+    reason_hash: &[u8; 32],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(97);
+    payload.push(11);
+    payload.extend_from_slice(entity_id);
+    payload.extend_from_slice(new_code_hash);
+    payload.extend_from_slice(reason_hash);
+    payload
+}
+
+/// Upgrade an AI entity's code hash (payload type 11, 97 bytes).
+///
+/// Preserves the entity id and all id-keyed state; only the code hash changes.
+pub async fn run_upgrade(
+    rpc: &RpcClient,
+    key_file: &str,
+    entity_id_hex: &str,
+    new_code_hash_hex: &str,
+    reason_hash_hex: Option<&str>,
+    fee: u64,
+    json: bool,
+) -> Result<(), String> {
+    let entity_id = parse_hex32(entity_id_hex, "entity_id")?;
+    let new_code_hash = parse_hex32(new_code_hash_hex, "new_code_hash")?;
+    let reason_hash = match reason_hash_hex {
+        Some(h) => parse_hex32(h, "reason_hash")?,
+        None => [0u8; 32],
+    };
+
+    let payload = build_upgrade_payload(&entity_id, &new_code_hash, &reason_hash);
+    let txid = sign_and_submit(rpc, key_file, payload, fee).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "entity_id": entity_id_hex,
+                "new_code_hash": new_code_hash_hex,
+                "txid": txid,
+            })
+        );
+    } else {
+        println!("AI entity upgrade submitted");
+        println!("Entity ID:     {entity_id_hex}");
+        println!("New Code Hash: {new_code_hash_hex}");
+        println!("TxID:          {txid}");
+    }
+    Ok(())
+}
+
+/// Query an AI entity's upgrade history.
+pub async fn run_upgrade_history(
+    rpc: &RpcClient,
+    entity_id_hex: &str,
+    start_height: u64,
+    end_height: u64,
+    json: bool,
+) -> Result<(), String> {
+    let upgrades = rpc
+        .get_upgrade_history(entity_id_hex, start_height, end_height)
+        .await?;
+
+    if json {
+        println!("{}", serde_json::json!({ "upgrades": upgrades }));
+    } else if upgrades.is_empty() {
+        println!("No upgrades for entity {entity_id_hex} in [{start_height}, {end_height}]");
+    } else {
+        println!("Upgrade history for {entity_id_hex}:");
+        for u in &upgrades {
+            println!(
+                "  #{} at height {}: {} -> {}",
+                u["upgrade_count"].as_u64().unwrap_or(0),
+                u["upgrade_height"].as_u64().unwrap_or(0),
+                u["old_code_hash"].as_str().unwrap_or("?"),
+                u["new_code_hash"].as_str().unwrap_or("?"),
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_payload_layout_is_97_bytes() {
+        let p = build_upgrade_payload(&[0x11; 32], &[0x22; 32], &[0x33; 32]);
+        assert_eq!(p.len(), 97);
+        assert_eq!(p[0], 11);
+        assert_eq!(&p[1..33], &[0x11; 32]);
+        assert_eq!(&p[33..65], &[0x22; 32]);
+        assert_eq!(&p[65..97], &[0x33; 32]);
+    }
+
+    #[test]
+    fn upgrade_default_reason_is_zero() {
+        let p = build_upgrade_payload(&[0x11; 32], &[0x22; 32], &[0u8; 32]);
+        assert_eq!(&p[65..97], &[0u8; 32]);
+    }
+
+    #[test]
+    fn upgrade_bad_hex_entity_id_rejected() {
+        assert!(parse_hex32("not-hex", "entity_id").is_err());
+    }
+}

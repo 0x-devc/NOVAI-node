@@ -156,6 +156,26 @@ impl RpcClient {
         }
     }
 
+    /// Query an entity's upgrade history within a height window.
+    pub async fn get_upgrade_history(
+        &self,
+        entity_id_hex: &str,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_getUpgradeHistory",
+                serde_json::json!({
+                    "entity_id": entity_id_hex,
+                    "start_height": start_height,
+                    "end_height": end_height,
+                }),
+            )
+            .await?;
+        Ok(result["upgrades"].as_array().cloned().unwrap_or_default())
+    }
+
     /// Query memory objects for an entity.
     pub async fn get_memory_objects(
         &self,

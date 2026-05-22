@@ -38,8 +38,9 @@ use novai_execution::{
     get_memory_objects_by_entity, get_payment_channel, get_payments_with_splits_by_entity,
     get_service_descriptors_by_category, get_signals_by_height, get_signals_by_issuer,
     get_signals_by_type, get_sla_agreement, get_slas_by_buyer, get_slas_by_seller,
-    get_vk_registration_by_id, get_vk_registrations_by_entity, read_account_or_default,
-    read_ai_entity, PaymentRecord, PaymentRole, PaymentSplitsRecord, PaymentSplitsRecordEntry,
+    get_upgrade_history, get_vk_registration_by_id, get_vk_registrations_by_entity,
+    read_account_or_default, read_ai_entity, read_upgrade_summary, PaymentRecord, PaymentRole,
+    PaymentSplitsRecord, PaymentSplitsRecordEntry, UpgradeRecord,
     PAYMENT_ATTESTATION_STATUS_DELIVERED, PAYMENT_ATTESTATION_STATUS_FAILED,
     PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16, PROOF_TYPE_GROTH16_REGISTERED,
     PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
@@ -908,12 +909,50 @@ struct AiEntityJson {
     reputation_events_count: u32,
     stake_balance: String,
     stake_locked_until: u64,
+    upgrade_count: u32,
+    last_upgrade_height: u64,
 }
 
 /// Result for novai_getAiEntity.
 #[derive(Debug, Serialize)]
 struct GetAiEntityResult {
     entity: Option<AiEntityJson>,
+}
+
+/// Parameters for novai_getUpgradeHistory.
+#[derive(Debug, Deserialize)]
+struct GetUpgradeHistoryParams {
+    entity_id: String, // Hex-encoded 32-byte entity ID
+    start_height: u64,
+    end_height: u64,
+}
+
+/// JSON-serializable upgrade history row.
+#[derive(Debug, Serialize)]
+struct UpgradeRecordJson {
+    old_code_hash: String,
+    new_code_hash: String,
+    upgrade_height: u64,
+    upgrade_count: u32,
+    reason_hash: String,
+}
+
+impl UpgradeRecordJson {
+    fn from_record(r: UpgradeRecord) -> Self {
+        Self {
+            old_code_hash: hex::encode(r.old_code_hash),
+            new_code_hash: hex::encode(r.new_code_hash),
+            upgrade_height: r.upgrade_height,
+            upgrade_count: r.upgrade_count,
+            reason_hash: hex::encode(r.reason_hash),
+        }
+    }
+}
+
+/// Result for novai_getUpgradeHistory.
+#[derive(Debug, Serialize)]
+struct GetUpgradeHistoryResult {
+    upgrades: Vec<UpgradeRecordJson>,
 }
 
 /// Parameters for novai_getMemoryObjects.
@@ -1614,6 +1653,24 @@ pub fn start_rpc_server_with_state(
                     }
                 },
                 "novai_getAiEntity" => match handle_get_ai_entity(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_getUpgradeHistory" => match handle_get_upgrade_history(&rpc_request, &db) {
                     Ok(result) => {
                         let response = RpcResponse {
                             jsonrpc: "2.0",
@@ -2559,27 +2616,83 @@ fn handle_get_ai_entity(
         message: "State query failed".to_string(),
     })?;
 
+    let entity_json = match entity {
+        None => None,
+        Some(e) => {
+            // Join the per-entity upgrade summary (absent => never upgraded).
+            let summary = read_upgrade_summary(&*db, &entity_id).map_err(|_| RpcError {
+                code: -32002,
+                message: "State query failed".to_string(),
+            })?;
+            let (upgrade_count, last_upgrade_height) =
+                summary.map_or((0, 0), |s| (s.upgrade_count, s.last_upgrade_height));
+            Some(AiEntityJson {
+                id: hex::encode(e.id),
+                code_hash: hex::encode(e.code_hash),
+                creator: hex::encode(e.creator),
+                autonomy_mode: e.autonomy_mode.to_byte(),
+                capabilities: e.capabilities.to_byte(),
+                economic_balance: e.economic_balance.to_string(),
+                nonce: e.nonce,
+                pubkey: hex::encode(e.pubkey),
+                memory_root: hex::encode(e.memory_root),
+                params_root: hex::encode(e.params_root),
+                registered_at: e.registered_at,
+                last_active_at: e.last_active_at,
+                is_active: e.is_active,
+                reputation_score: e.reputation_score,
+                total_transactions: e.total_transactions,
+                reputation_events_count: e.reputation_events_count,
+                stake_balance: e.stake_balance.to_string(),
+                stake_locked_until: e.stake_locked_until,
+                upgrade_count,
+                last_upgrade_height,
+            })
+        }
+    };
+
     Ok(GetAiEntityResult {
-        entity: entity.map(|e| AiEntityJson {
-            id: hex::encode(e.id),
-            code_hash: hex::encode(e.code_hash),
-            creator: hex::encode(e.creator),
-            autonomy_mode: e.autonomy_mode.to_byte(),
-            capabilities: e.capabilities.to_byte(),
-            economic_balance: e.economic_balance.to_string(),
-            nonce: e.nonce,
-            pubkey: hex::encode(e.pubkey),
-            memory_root: hex::encode(e.memory_root),
-            params_root: hex::encode(e.params_root),
-            registered_at: e.registered_at,
-            last_active_at: e.last_active_at,
-            is_active: e.is_active,
-            reputation_score: e.reputation_score,
-            total_transactions: e.total_transactions,
-            reputation_events_count: e.reputation_events_count,
-            stake_balance: e.stake_balance.to_string(),
-            stake_locked_until: e.stake_locked_until,
-        }),
+        entity: entity_json,
+    })
+}
+
+/// Handle novai_getUpgradeHistory RPC method (Week 34).
+///
+/// Returns the entity's `UpgradeRecord` rows whose `upgrade_height` falls within
+/// `[start_height, end_height]`, ascending by height. Enforces the same range
+/// cap as the other height-windowed queries (`MAX_SIGNAL_QUERY_RANGE` heights).
+fn handle_get_upgrade_history(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetUpgradeHistoryResult, RpcError> {
+    let params: GetUpgradeHistoryParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
+            ),
+        });
+    }
+
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+    let db = db.lock_or_recover();
+    let records = get_upgrade_history(&*db, &entity_id, params.start_height, params.end_height)
+        .map_err(|_| RpcError {
+            code: -32002,
+            message: "State query failed".to_string(),
+        })?;
+
+    Ok(GetUpgradeHistoryResult {
+        upgrades: records
+            .into_iter()
+            .map(UpgradeRecordJson::from_record)
+            .collect(),
     })
 }
 
@@ -3067,6 +3180,8 @@ mod tests {
             reputation_events_count: 7,
             stake_balance: "5000000000000000000".to_string(),
             stake_locked_until: 12345,
+            upgrade_count: 3,
+            last_upgrade_height: 9000,
         };
 
         let json = serde_json::to_value(&entity).unwrap();
@@ -3076,6 +3191,8 @@ mod tests {
         assert_eq!(json["reputation_events_count"], 7);
         assert_eq!(json["stake_balance"], "5000000000000000000");
         assert_eq!(json["stake_locked_until"], 12345);
+        assert_eq!(json["upgrade_count"], 3);
+        assert_eq!(json["last_upgrade_height"], 9000);
 
         assert!(json["stake_balance"].is_string());
         assert!(json["economic_balance"].is_string());
@@ -3083,6 +3200,42 @@ mod tests {
         assert!(json["total_transactions"].is_number());
         assert!(json["reputation_events_count"].is_number());
         assert!(json["stake_locked_until"].is_number());
+        assert!(json["upgrade_count"].is_number());
+        assert!(json["last_upgrade_height"].is_number());
+    }
+
+    // ========================================================================
+    // Week 34 Phase 4 - novai_getUpgradeHistory wire shape
+    // ========================================================================
+
+    #[test]
+    fn upgrade_record_json_serializes_hex_and_numbers() {
+        let row = UpgradeRecordJson::from_record(UpgradeRecord {
+            old_code_hash: [0x11u8; 32],
+            new_code_hash: [0x22u8; 32],
+            upgrade_height: 5000,
+            upgrade_count: 2,
+            reason_hash: [0x33u8; 32],
+        });
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["old_code_hash"], "11".repeat(32));
+        assert_eq!(json["new_code_hash"], "22".repeat(32));
+        assert_eq!(json["reason_hash"], "33".repeat(32));
+        assert_eq!(json["upgrade_height"], 5000);
+        assert_eq!(json["upgrade_count"], 2);
+    }
+
+    #[test]
+    fn get_upgrade_history_params_deserializes() {
+        let json = serde_json::json!({
+            "entity_id": "aa".repeat(32),
+            "start_height": 0,
+            "end_height": 10_000,
+        });
+        let params: GetUpgradeHistoryParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.entity_id, "aa".repeat(32));
+        assert_eq!(params.start_height, 0);
+        assert_eq!(params.end_height, 10_000);
     }
 
     // ========================================================================

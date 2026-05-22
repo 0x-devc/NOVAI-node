@@ -4764,6 +4764,48 @@ pub fn validate_entity_upgrade<K: Kv>(
     Ok(())
 }
 
+/// Read the height-windowed upgrade history for an entity (Week 34).
+///
+/// Scans `ai/entity_upgrades/by_entity/<entity_id>/` and returns every
+/// `UpgradeRecord` whose `upgrade_height` falls in `[start_height, end_height]`,
+/// ascending by height (the big-endian height suffix makes the scan ordered).
+///
+/// # Errors
+/// Returns `Db` on a storage error, `CodecDecode` on a malformed index key, or
+/// `EntityUpgradeRecordDecodeFailed` if a stored row cannot be decoded.
+pub fn get_upgrade_history<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<UpgradeRecord>, ExecError<K::Error>> {
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_ENTITY_UPGRADES_BY_ENTITY.len() + 32);
+    prefix.extend_from_slice(KEY_PREFIX_AI_ENTITY_UPGRADES_BY_ENTITY);
+    prefix.extend_from_slice(entity_id);
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+    let mut results = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        // Key tail after the prefix is `height_be[8]`.
+        if key.len() < prefix.len() + 8 {
+            return Err(ExecError::CodecDecode(format!(
+                "upgrade index key too short: {} bytes",
+                key.len()
+            )));
+        }
+        let mut height_bytes = [0u8; 8];
+        height_bytes.copy_from_slice(&key[prefix.len()..prefix.len() + 8]);
+        let height = u64::from_be_bytes(height_bytes);
+        if height < start_height || height > end_height {
+            continue;
+        }
+        let record = decode_upgrade_record_v1(&value)
+            .map_err(|_| ExecError::EntityUpgradeRecordDecodeFailed)?;
+        results.push(record);
+    }
+    Ok(results)
+}
+
 /// Submit Proposal payload (D24.3):
 /// `[version:1][proposal_type:1][gate_id:32][data_len_be:4][proposal_data:var]`
 ///
@@ -12521,6 +12563,48 @@ mod tests {
         );
         // Big-endian height suffix => ascending height sorts ascending in scans.
         assert!(k1 < k2, "by_entity keys must sort by ascending height");
+    }
+
+    #[test]
+    fn get_upgrade_history_returns_window_in_order() {
+        let mut db = MemKv::new();
+        let id = [0x11u8; 32];
+        for (h, c, old_fill, new_fill) in [
+            (100u64, 1u32, 0x01u8, 0x02u8),
+            (1100, 2, 0x02, 0x03),
+            (2100, 3, 0x03, 0x04),
+        ] {
+            let rec = UpgradeRecord {
+                old_code_hash: [old_fill; 32],
+                new_code_hash: [new_fill; 32],
+                upgrade_height: h,
+                upgrade_count: c,
+                reason_hash: [0u8; 32],
+            };
+            db.apply_batch(&[WriteOp::Put(
+                entity_upgrade_by_entity_key(&id, h),
+                encode_upgrade_record_v1(&rec).to_vec(),
+            )])
+            .unwrap();
+        }
+
+        // Unknown entity yields nothing.
+        assert!(get_upgrade_history(&db, &[0x99u8; 32], 0, u64::MAX)
+            .unwrap()
+            .is_empty());
+
+        // All three rows, ascending by height.
+        let all = get_upgrade_history(&db, &id, 0, u64::MAX).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].upgrade_height, 100);
+        assert_eq!(all[1].upgrade_height, 1100);
+        assert_eq!(all[2].upgrade_height, 2100);
+        assert_eq!(all[0].upgrade_count, 1);
+
+        // Window filter keeps only the middle row.
+        let win = get_upgrade_history(&db, &id, 101, 1100).unwrap();
+        assert_eq!(win.len(), 1);
+        assert_eq!(win[0].upgrade_height, 1100);
     }
 
     #[test]

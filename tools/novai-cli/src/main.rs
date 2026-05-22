@@ -181,6 +181,36 @@ enum AiCommand {
         #[arg(long)]
         entity_id: String,
     },
+    /// Upgrade an AI entity's code hash (preserves the entity id and all state).
+    Upgrade {
+        /// Path to creator's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte entity ID to upgrade.
+        #[arg(long)]
+        entity_id: String,
+        /// Hex-encoded 32-byte new code hash.
+        #[arg(long)]
+        new_code_hash: String,
+        /// Optional hex-encoded 32-byte reason commitment.
+        #[arg(long)]
+        reason_hash: Option<String>,
+        /// Transaction fee (default: 5000).
+        #[arg(long, default_value_t = 5000)]
+        fee: u64,
+    },
+    /// Query an AI entity's upgrade history.
+    UpgradeHistory {
+        /// Hex-encoded 32-byte entity ID.
+        #[arg(long)]
+        entity_id: String,
+        /// Inclusive start height.
+        #[arg(long, default_value_t = 0)]
+        start_height: u64,
+        /// Inclusive end height.
+        #[arg(long, default_value_t = 10_000)]
+        end_height: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -876,6 +906,31 @@ async fn main() {
                 fee,
             } => ai::run_credit(&rpc, &key_file, &entity_id, amount, fee, cli.json).await,
             AiCommand::Info { entity_id } => ai::run_info(&rpc, &entity_id, cli.json).await,
+            AiCommand::Upgrade {
+                key_file,
+                entity_id,
+                new_code_hash,
+                reason_hash,
+                fee,
+            } => {
+                ai::run_upgrade(
+                    &rpc,
+                    &key_file,
+                    &entity_id,
+                    &new_code_hash,
+                    reason_hash.as_deref(),
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            AiCommand::UpgradeHistory {
+                entity_id,
+                start_height,
+                end_height,
+            } => {
+                ai::run_upgrade_history(&rpc, &entity_id, start_height, end_height, cli.json).await
+            }
         },
         Command::Memory { command } => match command {
             MemoryCommand::Create {
