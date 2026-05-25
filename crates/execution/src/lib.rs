@@ -3719,6 +3719,60 @@ pub fn oracle_anchor_summary_key(entity_id: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+/// Validate an `OracleAnchor` signal before any state mutation (Week 35).
+///
+/// Checks, in order: the issuer is active; the issuer holds the
+/// `post_oracle_anchors` capability (static or delegated); `data_hash` is
+/// non-zero; `external_timestamp` is non-zero; `data_tag` length is in
+/// `[1, ORACLE_ANCHOR_DATA_TAG_MAX_LEN]`; and no anchor with this
+/// `signal_hash` already exists (the by-hash record is the replay guard).
+///
+/// The external timestamp is checked only for being non-zero: it is opaque
+/// oracle-attested metadata, and the chain has no deterministic wall-clock
+/// to bound it against. Consumers judge freshness using the recorded
+/// `anchor_height` (and the advisory `expiry_height`), not this value.
+///
+/// The caller (`apply_signal_commitment_tx_inner`) enforces the generic
+/// signal preconditions (kill switch off, `emit_proposals`, nonce, fee
+/// balance) before dispatching here.
+///
+/// # Errors
+/// Returns the matching `ExecError::OracleAnchor*` variant,
+/// `ExecError::EntityNotActive`, `ExecError::IssuerMissingCapability`, or
+/// `ExecError::Db`.
+pub fn validate_oracle_anchor<K: Kv>(
+    db: &K,
+    issuer: &AiEntity,
+    current_height: u64,
+    signal_hash: &[u8; 32],
+    extra: &OracleAnchorExtraV1,
+) -> Result<(), ExecError<K::Error>> {
+    if !issuer.is_active {
+        return Err(ExecError::EntityNotActive);
+    }
+    requires_capability(db, issuer, current_height, |c| c.post_oracle_anchors)?;
+    if extra.data_hash == [0u8; 32] {
+        return Err(ExecError::OracleAnchorZeroDataHash);
+    }
+    if extra.external_timestamp == 0 {
+        return Err(ExecError::OracleAnchorZeroTimestamp);
+    }
+    let tag_len = extra.data_tag.len();
+    if tag_len == 0 || tag_len > ORACLE_ANCHOR_DATA_TAG_MAX_LEN {
+        return Err(ExecError::OracleAnchorInvalidTag { len: tag_len });
+    }
+    if db
+        .get(&oracle_anchor_by_hash_key(signal_hash))
+        .map_err(ExecError::Db)?
+        .is_some()
+    {
+        return Err(ExecError::OracleAnchorAlreadyExists {
+            signal_hash: *signal_hash,
+        });
+    }
+    Ok(())
+}
+
 // ============================================================================
 // PAYMENT RECORDS (Week 28 - native x402 rail)
 // ============================================================================
