@@ -8149,6 +8149,70 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         ));
     }
 
+    // OracleAnchor (Week 35): the issuer (an entity holding the
+    // post_oracle_anchors capability) publishes a commitment to external
+    // off-chain data. validate_oracle_anchor enforces the capability, the
+    // field rules, and the by-hash replay guard before any write. On
+    // success we persist the canonical OracleAnchorRecord (which doubles as
+    // the replay guard), the height-ordered by-entity and by-tag scan
+    // markers, and the per-entity summary, and bump total_transactions.
+    // Reputation is neutral on post (accuracy challenges are a future week).
+    if payload.signal_type == AiSignalType::OracleAnchor {
+        let extra = payload
+            .oracle_anchor
+            .as_ref()
+            .ok_or_else(|| ExecError::CodecDecode("OracleAnchor missing extra".into()))?;
+        validate_oracle_anchor(db, &entity, current_height, &payload.signal_hash, extra)?;
+
+        let record = OracleAnchorRecord {
+            issuer_entity_id: entity.id,
+            data_hash: extra.data_hash,
+            external_timestamp: extra.external_timestamp,
+            source_hash: extra.source_hash,
+            expiry_height: extra.expiry_height,
+            anchor_height: current_height,
+            data_tag: extra.data_tag.clone(),
+        };
+        // Canonical record + replay guard.
+        ops.push(WriteOp::Put(
+            oracle_anchor_by_hash_key(&payload.signal_hash),
+            encode_oracle_anchor_record_v1(&record),
+        ));
+        // Height-ordered scan markers (by entity, by tag-hash). Empty values:
+        // the by-hash record is the canonical store and the signal_hash is in
+        // the key, so a scan recovers it without a second value read.
+        ops.push(WriteOp::Put(
+            oracle_anchor_by_entity_key(&entity.id, current_height, &payload.signal_hash),
+            Vec::new(),
+        ));
+        ops.push(WriteOp::Put(
+            oracle_anchor_by_tag_key(
+                &oracle_anchor_tag_hash(&extra.data_tag),
+                current_height,
+                &payload.signal_hash,
+            ),
+            Vec::new(),
+        ));
+        // Per-entity summary: anchor_count++ and last_anchor_height. Absent
+        // row means this is the entity's first anchor.
+        let mut summary = match db
+            .get(&oracle_anchor_summary_key(&entity.id))
+            .map_err(ExecError::Db)?
+        {
+            Some(bytes) => decode_oracle_anchor_summary_v1(&bytes)
+                .map_err(|_| ExecError::OracleAnchorRecordDecodeFailed)?,
+            None => OracleAnchorSummary::default(),
+        };
+        summary.anchor_count = summary.anchor_count.saturating_add(1);
+        summary.last_anchor_height = current_height;
+        ops.push(WriteOp::Put(
+            oracle_anchor_summary_key(&entity.id),
+            encode_oracle_anchor_summary_v1(&summary).to_vec(),
+        ));
+        // Neutral reputation on post: count the activity, no score delta.
+        entity.total_transactions = entity.total_transactions.saturating_add(1);
+    }
+
     ops.push(write_ai_entity_op(&entity));
 
     // Apply all changes atomically
