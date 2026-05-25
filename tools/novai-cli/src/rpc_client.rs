@@ -176,6 +176,65 @@ impl RpcClient {
         Ok(result["upgrades"].as_array().cloned().unwrap_or_default())
     }
 
+    /// List an entity's oracle anchors within a height window (Week 35).
+    pub async fn get_oracle_anchors_by_entity(
+        &self,
+        entity_id_hex: &str,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_getOracleAnchorsByEntity",
+                serde_json::json!({
+                    "entity_id": entity_id_hex,
+                    "start_height": start_height,
+                    "end_height": end_height,
+                }),
+            )
+            .await?;
+        Ok(result["anchors"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// List anchors posted under a tag within a height window (Week 35).
+    pub async fn get_oracle_anchors_by_tag(
+        &self,
+        data_tag: &str,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_getOracleAnchorsByTag",
+                serde_json::json!({
+                    "data_tag": data_tag,
+                    "start_height": start_height,
+                    "end_height": end_height,
+                }),
+            )
+            .await?;
+        Ok(result["anchors"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// Fetch a single oracle anchor by its signal hash (Week 35).
+    pub async fn get_oracle_anchor(
+        &self,
+        signal_hash_hex: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let result = self
+            .call(
+                "novai_getOracleAnchor",
+                serde_json::json!({ "signal_hash": signal_hash_hex }),
+            )
+            .await?;
+        let anchor = &result["anchor"];
+        if anchor.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(anchor.clone()))
+        }
+    }
+
     /// Query memory objects for an entity.
     pub async fn get_memory_objects(
         &self,

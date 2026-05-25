@@ -3,6 +3,7 @@ pub mod ai;
 pub mod channel;
 pub mod keygen;
 pub mod memory;
+pub mod oracle;
 pub mod service;
 pub mod signal;
 pub mod sla;

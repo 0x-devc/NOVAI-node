@@ -3,7 +3,7 @@ mod rpc_client;
 
 use clap::{Parser, Subcommand};
 use commands::signal::ExtendedSignalArgs;
-use commands::{account, ai, channel, keygen, memory, service, signal, sla, vk};
+use commands::{account, ai, channel, keygen, memory, oracle, service, signal, sla, vk};
 use rpc_client::RpcClient;
 
 /// NOVAI CLI — interact with NOVAI blockchain nodes.
@@ -110,6 +110,13 @@ enum Command {
     Channel {
         #[command(subcommand)]
         command: ChannelCommand,
+    },
+    /// Oracle anchoring operations (Week 35): post-anchor and query
+    /// commitments to external off-chain data (price feeds, API
+    /// responses) from registered, reputation-bearing oracle entities.
+    Oracle {
+        #[command(subcommand)]
+        command: OracleCommand,
     },
 }
 
@@ -782,6 +789,70 @@ enum ChannelCommand {
 }
 
 #[derive(Subcommand)]
+enum OracleCommand {
+    /// Post an oracle data anchor (signal type 22). The signing key must
+    /// belong to the issuing entity, which must hold the
+    /// `post_oracle_anchors` capability. The signal hash is derived from
+    /// the anchor content, so re-posting identical data is rejected.
+    PostAnchor {
+        /// Path to the issuing entity's key file.
+        #[arg(long)]
+        key_file: String,
+        /// Hex-encoded 32-byte issuing entity id.
+        #[arg(long)]
+        issuer_entity_id: String,
+        /// Hex-encoded 32-byte blake3 commitment to the off-chain data.
+        #[arg(long)]
+        data_hash: String,
+        /// External (oracle-attested) timestamp of the data; must be non-zero.
+        #[arg(long)]
+        external_timestamp: u64,
+        /// Optional hex-encoded 32-byte commitment to the data source.
+        #[arg(long)]
+        source_hash: Option<String>,
+        /// Advisory intended-valid-until chain height (0 = none).
+        #[arg(long, default_value_t = 0)]
+        expiry_height: u64,
+        /// Category tag, 1..=32 bytes (e.g. "price/ETH-USD").
+        #[arg(long)]
+        data_tag: String,
+        /// Transaction fee.
+        #[arg(long, default_value_t = 1000)]
+        fee: u64,
+    },
+    /// List an entity's anchors within an inclusive chain-height window.
+    GetAnchorsByEntity {
+        /// Hex-encoded 32-byte entity id.
+        #[arg(long)]
+        entity_id: String,
+        /// Inclusive lower bound on anchor height.
+        #[arg(long, default_value_t = 0)]
+        start_height: u64,
+        /// Inclusive upper bound on anchor height.
+        #[arg(long, default_value_t = 10_000)]
+        end_height: u64,
+    },
+    /// List anchors posted under a tag within an inclusive height window.
+    GetAnchorsByTag {
+        /// Category tag (1..=32 bytes).
+        #[arg(long)]
+        data_tag: String,
+        /// Inclusive lower bound on anchor height.
+        #[arg(long, default_value_t = 0)]
+        start_height: u64,
+        /// Inclusive upper bound on anchor height.
+        #[arg(long, default_value_t = 10_000)]
+        end_height: u64,
+    },
+    /// Show a single anchor by its signal hash.
+    Show {
+        /// Hex-encoded 32-byte anchor signal hash.
+        #[arg(long)]
+        signal_hash: String,
+    },
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum SignalCommand {
     /// Publish a signal commitment.
@@ -1322,6 +1393,57 @@ async fn main() {
             }
             ChannelCommand::DisputeStatus { owner, object_id } => {
                 channel::run_dispute_status(&rpc, &owner, &object_id, cli.json).await
+            }
+        },
+        Command::Oracle { command } => match command {
+            OracleCommand::PostAnchor {
+                key_file,
+                issuer_entity_id,
+                data_hash,
+                external_timestamp,
+                source_hash,
+                expiry_height,
+                data_tag,
+                fee,
+            } => {
+                oracle::run_post_anchor(
+                    &rpc,
+                    &key_file,
+                    &issuer_entity_id,
+                    &data_hash,
+                    external_timestamp,
+                    source_hash.as_deref(),
+                    expiry_height,
+                    &data_tag,
+                    fee,
+                    cli.json,
+                )
+                .await
+            }
+            OracleCommand::GetAnchorsByEntity {
+                entity_id,
+                start_height,
+                end_height,
+            } => {
+                oracle::run_get_anchors_by_entity(
+                    &rpc,
+                    &entity_id,
+                    start_height,
+                    end_height,
+                    cli.json,
+                )
+                .await
+            }
+            OracleCommand::GetAnchorsByTag {
+                data_tag,
+                start_height,
+                end_height,
+            } => {
+                oracle::run_get_anchors_by_tag(&rpc, &data_tag, start_height, end_height, cli.json)
+                    .await
+            }
+            OracleCommand::Show { signal_hash } => {
+                oracle::run_show(&rpc, &signal_hash, cli.json).await
             }
         },
     };

@@ -35,15 +35,16 @@ use novai_consensus_types;
 use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_execution::{
     get_active_sla_between, get_channels_by_party_a, get_channels_by_party_b,
-    get_memory_objects_by_entity, get_payment_channel, get_payments_with_splits_by_entity,
+    get_memory_objects_by_entity, get_oracle_anchor, get_oracle_anchors_by_entity,
+    get_oracle_anchors_by_tag, get_payment_channel, get_payments_with_splits_by_entity,
     get_service_descriptors_by_category, get_signals_by_height, get_signals_by_issuer,
     get_signals_by_type, get_sla_agreement, get_slas_by_buyer, get_slas_by_seller,
     get_upgrade_history, get_vk_registration_by_id, get_vk_registrations_by_entity,
-    read_account_or_default, read_ai_entity, read_upgrade_summary, PaymentRecord, PaymentRole,
-    PaymentSplitsRecord, PaymentSplitsRecordEntry, UpgradeRecord,
-    PAYMENT_ATTESTATION_STATUS_DELIVERED, PAYMENT_ATTESTATION_STATUS_FAILED,
-    PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16, PROOF_TYPE_GROTH16_REGISTERED,
-    PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
+    read_account_or_default, read_ai_entity, read_upgrade_summary, OracleAnchorRecord,
+    PaymentRecord, PaymentRole, PaymentSplitsRecord, PaymentSplitsRecordEntry, UpgradeRecord,
+    ORACLE_ANCHOR_DATA_TAG_MAX_LEN, PAYMENT_ATTESTATION_STATUS_DELIVERED,
+    PAYMENT_ATTESTATION_STATUS_FAILED, PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16,
+    PROOF_TYPE_GROTH16_REGISTERED, PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
 };
 use novai_p2p::{NetworkMessage, PeerManager};
 use novai_types::{Address, TxV1, TxVersion};
@@ -955,6 +956,88 @@ struct GetUpgradeHistoryResult {
     upgrades: Vec<UpgradeRecordJson>,
 }
 
+/// Parameters for novai_getOracleAnchorsByEntity (Week 35).
+///
+/// `start_height`/`end_height` are the inclusive chain-height window
+/// (indexed). `ts_min`/`ts_max` are an optional in-memory filter on the
+/// external (oracle-attested) timestamp.
+#[derive(Debug, Deserialize)]
+struct GetOracleAnchorsByEntityParams {
+    entity_id: String,
+    start_height: u64,
+    end_height: u64,
+    #[serde(default)]
+    ts_min: Option<u64>,
+    #[serde(default)]
+    ts_max: Option<u64>,
+}
+
+/// Parameters for novai_getOracleAnchorsByTag (Week 35). `data_tag` is the
+/// raw tag string (1..=32 bytes); it is matched by its domain-separated hash.
+#[derive(Debug, Deserialize)]
+struct GetOracleAnchorsByTagParams {
+    data_tag: String,
+    start_height: u64,
+    end_height: u64,
+    #[serde(default)]
+    ts_min: Option<u64>,
+    #[serde(default)]
+    ts_max: Option<u64>,
+}
+
+/// Parameters for novai_getOracleAnchor (point query by signal hash).
+#[derive(Debug, Deserialize)]
+struct GetOracleAnchorParams {
+    signal_hash: String,
+}
+
+/// JSON-serializable oracle anchor record. `data_tag` is a lossy UTF-8 view
+/// for readability; `data_tag_hex` carries the exact opaque tag bytes.
+#[derive(Debug, Serialize)]
+struct OracleAnchorJson {
+    issuer_entity_id: String,
+    data_hash: String,
+    external_timestamp: u64,
+    source_hash: String,
+    expiry_height: u64,
+    anchor_height: u64,
+    data_tag: String,
+    data_tag_hex: String,
+}
+
+impl OracleAnchorJson {
+    fn from_record(r: OracleAnchorRecord) -> Self {
+        Self {
+            issuer_entity_id: hex::encode(r.issuer_entity_id),
+            data_hash: hex::encode(r.data_hash),
+            external_timestamp: r.external_timestamp,
+            source_hash: hex::encode(r.source_hash),
+            expiry_height: r.expiry_height,
+            anchor_height: r.anchor_height,
+            data_tag: String::from_utf8_lossy(&r.data_tag).into_owned(),
+            data_tag_hex: hex::encode(&r.data_tag),
+        }
+    }
+}
+
+/// Result for the oracle-anchor list methods.
+#[derive(Debug, Serialize)]
+struct GetOracleAnchorsResult {
+    anchors: Vec<OracleAnchorJson>,
+}
+
+/// Result for novai_getOracleAnchor (point query).
+#[derive(Debug, Serialize)]
+struct GetOracleAnchorResult {
+    anchor: Option<OracleAnchorJson>,
+}
+
+/// True if `ts` falls within the optional inclusive `[ts_min, ts_max]`
+/// external-timestamp filter (an absent bound does not constrain).
+fn oracle_ts_in_range(ts: u64, ts_min: Option<u64>, ts_max: Option<u64>) -> bool {
+    ts_min.is_none_or(|lo| ts >= lo) && ts_max.is_none_or(|hi| ts <= hi)
+}
+
 /// Parameters for novai_getMemoryObjects.
 #[derive(Debug, Deserialize)]
 struct GetMemoryObjectsParams {
@@ -1671,6 +1754,64 @@ pub fn start_rpc_server_with_state(
                     }
                 },
                 "novai_getUpgradeHistory" => match handle_get_upgrade_history(&rpc_request, &db) {
+                    Ok(result) => {
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            result: serde_json::to_value(&result).unwrap(),
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                    Err(error) => {
+                        let response = RpcErrorResponse {
+                            jsonrpc: "2.0",
+                            error,
+                            id: rpc_request.id,
+                        };
+                        json_response(response)
+                    }
+                },
+                "novai_getOracleAnchorsByEntity" => {
+                    match handle_get_oracle_anchors_by_entity(&rpc_request, &db) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                    }
+                }
+                "novai_getOracleAnchorsByTag" => {
+                    match handle_get_oracle_anchors_by_tag(&rpc_request, &db) {
+                        Ok(result) => {
+                            let response = RpcResponse {
+                                jsonrpc: "2.0",
+                                result: serde_json::to_value(&result).unwrap(),
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                        Err(error) => {
+                            let response = RpcErrorResponse {
+                                jsonrpc: "2.0",
+                                error,
+                                id: rpc_request.id,
+                            };
+                            json_response(response)
+                        }
+                    }
+                }
+                "novai_getOracleAnchor" => match handle_get_oracle_anchor(&rpc_request, &db) {
                     Ok(result) => {
                         let response = RpcResponse {
                             jsonrpc: "2.0",
@@ -2696,6 +2837,112 @@ fn handle_get_upgrade_history(
     })
 }
 
+/// Handle novai_getOracleAnchorsByEntity RPC method (Week 35).
+fn handle_get_oracle_anchors_by_entity(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetOracleAnchorsResult, RpcError> {
+    let params: GetOracleAnchorsByEntityParams = serde_json::from_value(request.params.clone())
+        .map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
+            ),
+        });
+    }
+
+    let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
+    let db = db.lock_or_recover();
+    let records =
+        get_oracle_anchors_by_entity(&*db, &entity_id, params.start_height, params.end_height)
+            .map_err(|_| RpcError {
+                code: -32002,
+                message: "State query failed".to_string(),
+            })?;
+
+    Ok(GetOracleAnchorsResult {
+        anchors: records
+            .into_iter()
+            .filter(|r| oracle_ts_in_range(r.external_timestamp, params.ts_min, params.ts_max))
+            .map(OracleAnchorJson::from_record)
+            .collect(),
+    })
+}
+
+/// Handle novai_getOracleAnchorsByTag RPC method (Week 35).
+fn handle_get_oracle_anchors_by_tag(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetOracleAnchorsResult, RpcError> {
+    let params: GetOracleAnchorsByTagParams = serde_json::from_value(request.params.clone())
+        .map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+
+    if params.end_height.saturating_sub(params.start_height) > MAX_SIGNAL_QUERY_RANGE {
+        return Err(RpcError {
+            code: -32602,
+            message: format!(
+                "Height range too large: max {MAX_SIGNAL_QUERY_RANGE} heights per query"
+            ),
+        });
+    }
+
+    let tag_bytes = params.data_tag.as_bytes();
+    if tag_bytes.is_empty() || tag_bytes.len() > ORACLE_ANCHOR_DATA_TAG_MAX_LEN {
+        return Err(RpcError {
+            code: -32602,
+            message: format!("data_tag must be 1..={ORACLE_ANCHOR_DATA_TAG_MAX_LEN} bytes"),
+        });
+    }
+
+    let db = db.lock_or_recover();
+    let records =
+        get_oracle_anchors_by_tag(&*db, tag_bytes, params.start_height, params.end_height)
+            .map_err(|_| RpcError {
+                code: -32002,
+                message: "State query failed".to_string(),
+            })?;
+
+    Ok(GetOracleAnchorsResult {
+        anchors: records
+            .into_iter()
+            .filter(|r| oracle_ts_in_range(r.external_timestamp, params.ts_min, params.ts_max))
+            .map(OracleAnchorJson::from_record)
+            .collect(),
+    })
+}
+
+/// Handle novai_getOracleAnchor RPC method (Week 35, point query).
+fn handle_get_oracle_anchor(
+    request: &RpcRequest,
+    db: &Arc<Mutex<Storage>>,
+) -> Result<GetOracleAnchorResult, RpcError> {
+    let params: GetOracleAnchorParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| RpcError {
+            code: -32602,
+            message: format!("Invalid params: {e}"),
+        })?;
+
+    let signal_hash = parse_hex32(&params.signal_hash, "signal_hash")?;
+    let db = db.lock_or_recover();
+    let record = get_oracle_anchor(&*db, &signal_hash).map_err(|_| RpcError {
+        code: -32002,
+        message: "State query failed".to_string(),
+    })?;
+
+    Ok(GetOracleAnchorResult {
+        anchor: record.map(OracleAnchorJson::from_record),
+    })
+}
+
 /// Handle novai_getMemoryObjects RPC method.
 fn handle_get_memory_objects(
     request: &RpcRequest,
@@ -3608,5 +3855,100 @@ mod tests {
             "plonk-registered"
         );
         assert_eq!(proof_type_label(99), "unknown");
+    }
+
+    // ========================================================================
+    // Week 35 Phase 4 - oracle anchor RPC wire shapes
+    // ========================================================================
+
+    #[test]
+    fn oracle_anchor_json_serializes_hex_and_tag() {
+        let row = OracleAnchorJson::from_record(OracleAnchorRecord {
+            issuer_entity_id: [0x11u8; 32],
+            data_hash: [0x22u8; 32],
+            external_timestamp: 1_700_000_000,
+            source_hash: [0x33u8; 32],
+            expiry_height: 5000,
+            anchor_height: 900,
+            data_tag: b"price/ETH-USD".to_vec(),
+        });
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["issuer_entity_id"], "11".repeat(32));
+        assert_eq!(json["data_hash"], "22".repeat(32));
+        assert_eq!(json["source_hash"], "33".repeat(32));
+        assert_eq!(json["external_timestamp"], 1_700_000_000u64);
+        assert_eq!(json["expiry_height"], 5000);
+        assert_eq!(json["anchor_height"], 900);
+        assert_eq!(json["data_tag"], "price/ETH-USD");
+        assert_eq!(json["data_tag_hex"], hex::encode(b"price/ETH-USD"));
+    }
+
+    #[test]
+    fn oracle_anchor_json_handles_non_utf8_tag() {
+        let row = OracleAnchorJson::from_record(OracleAnchorRecord {
+            issuer_entity_id: [0u8; 32],
+            data_hash: [1u8; 32],
+            external_timestamp: 1,
+            source_hash: [0u8; 32],
+            expiry_height: 0,
+            anchor_height: 1,
+            data_tag: vec![0xFF, 0xFE], // not valid UTF-8
+        });
+        // Lossy UTF-8 view must not panic; the hex view is exact.
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["data_tag_hex"], "fffe");
+    }
+
+    #[test]
+    fn get_oracle_anchors_by_entity_params_deserialize() {
+        let json = serde_json::json!({
+            "entity_id": "aa".repeat(32),
+            "start_height": 0,
+            "end_height": 10_000,
+        });
+        let p: GetOracleAnchorsByEntityParams = serde_json::from_value(json).unwrap();
+        assert_eq!(p.entity_id, "aa".repeat(32));
+        assert_eq!(p.end_height, 10_000);
+        assert!(p.ts_min.is_none());
+        assert!(p.ts_max.is_none());
+
+        let with_ts = serde_json::json!({
+            "entity_id": "aa".repeat(32),
+            "start_height": 100,
+            "end_height": 200,
+            "ts_min": 1_000,
+            "ts_max": 2_000,
+        });
+        let p2: GetOracleAnchorsByEntityParams = serde_json::from_value(with_ts).unwrap();
+        assert_eq!(p2.ts_min, Some(1_000));
+        assert_eq!(p2.ts_max, Some(2_000));
+    }
+
+    #[test]
+    fn get_oracle_anchors_by_tag_params_deserialize() {
+        let json = serde_json::json!({
+            "data_tag": "price/ETH-USD",
+            "start_height": 0,
+            "end_height": 500,
+        });
+        let p: GetOracleAnchorsByTagParams = serde_json::from_value(json).unwrap();
+        assert_eq!(p.data_tag, "price/ETH-USD");
+        assert_eq!(p.end_height, 500);
+    }
+
+    #[test]
+    fn get_oracle_anchor_params_deserialize() {
+        let json = serde_json::json!({ "signal_hash": "10".repeat(32) });
+        let p: GetOracleAnchorParams = serde_json::from_value(json).unwrap();
+        assert_eq!(p.signal_hash, "10".repeat(32));
+    }
+
+    #[test]
+    fn oracle_ts_in_range_filters_correctly() {
+        assert!(oracle_ts_in_range(100, None, None));
+        assert!(oracle_ts_in_range(100, Some(100), Some(100)));
+        assert!(oracle_ts_in_range(150, Some(100), Some(200)));
+        assert!(!oracle_ts_in_range(99, Some(100), None));
+        assert!(!oracle_ts_in_range(201, None, Some(200)));
     }
 }

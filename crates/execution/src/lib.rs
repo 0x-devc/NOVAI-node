@@ -3773,6 +3773,129 @@ pub fn validate_oracle_anchor<K: Kv>(
     Ok(())
 }
 
+/// Read the canonical `OracleAnchorRecord` for a signal hash, if present.
+///
+/// # Errors
+/// Returns `ExecError::Db` on a KV failure or
+/// `ExecError::OracleAnchorRecordDecodeFailed` if the stored value is malformed.
+pub fn get_oracle_anchor<K: Kv>(
+    db: &K,
+    signal_hash: &[u8; 32],
+) -> Result<Option<OracleAnchorRecord>, ExecError<K::Error>> {
+    match db
+        .get(&oracle_anchor_by_hash_key(signal_hash))
+        .map_err(ExecError::Db)?
+    {
+        Some(bytes) => Ok(Some(
+            decode_oracle_anchor_record_v1(&bytes)
+                .map_err(|_| ExecError::OracleAnchorRecordDecodeFailed)?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Read an entity's `OracleAnchorSummary`, returning the default
+/// (`anchor_count = 0`, `last_anchor_height = 0`) when the entity has never
+/// posted an anchor.
+///
+/// # Errors
+/// Returns `ExecError::Db` or `ExecError::OracleAnchorRecordDecodeFailed`.
+pub fn get_oracle_anchor_summary<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+) -> Result<OracleAnchorSummary, ExecError<K::Error>> {
+    db.get(&oracle_anchor_summary_key(entity_id))
+        .map_err(ExecError::Db)?
+        .map_or_else(
+            || Ok(OracleAnchorSummary::default()),
+            |bytes| {
+                decode_oracle_anchor_summary_v1(&bytes)
+                    .map_err(|_| ExecError::OracleAnchorRecordDecodeFailed)
+            },
+        )
+}
+
+/// Shared scan over an oracle-anchor index prefix
+/// (`prefix || height_be[8] || signal_hash[32]`), collecting the canonical
+/// records whose chain height falls in the inclusive window. Big-endian
+/// heights make the scan ascending by height for free.
+fn collect_oracle_anchors<K: Kv>(
+    db: &K,
+    prefix: &[u8],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<OracleAnchorRecord>, ExecError<K::Error>> {
+    let entries = db.scan_prefix(prefix).map_err(ExecError::Db)?;
+    let mut results = Vec::with_capacity(entries.len());
+    for (key, _value) in entries {
+        if key.len() < prefix.len() + 8 + 32 {
+            return Err(ExecError::CodecDecode(format!(
+                "oracle anchor index key too short: {} bytes",
+                key.len()
+            )));
+        }
+        let tail = &key[prefix.len()..];
+        let mut height_bytes = [0u8; 8];
+        height_bytes.copy_from_slice(&tail[..8]);
+        let height = u64::from_be_bytes(height_bytes);
+        if height < start_height || height > end_height {
+            continue;
+        }
+        let mut signal_hash = [0u8; 32];
+        signal_hash.copy_from_slice(&tail[8..40]);
+        let record_bytes = db
+            .get(&oracle_anchor_by_hash_key(&signal_hash))
+            .map_err(ExecError::Db)?
+            .ok_or_else(|| {
+                ExecError::CodecDecode(
+                    "oracle anchor index entry references missing by_hash record".into(),
+                )
+            })?;
+        let record = decode_oracle_anchor_record_v1(&record_bytes)
+            .map_err(|_| ExecError::OracleAnchorRecordDecodeFailed)?;
+        results.push(record);
+    }
+    Ok(results)
+}
+
+/// List an entity's oracle anchors within an inclusive chain-height window,
+/// ascending by height.
+///
+/// # Errors
+/// Returns `ExecError::Db`, `ExecError::OracleAnchorRecordDecodeFailed`, or
+/// `ExecError::CodecDecode` on a malformed index key.
+pub fn get_oracle_anchors_by_entity<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<OracleAnchorRecord>, ExecError<K::Error>> {
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_ENTITY.len() + 32);
+    prefix.extend_from_slice(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_ENTITY);
+    prefix.extend_from_slice(entity_id);
+    collect_oracle_anchors(db, &prefix, start_height, end_height)
+}
+
+/// List anchors posted under a given `data_tag` within an inclusive
+/// chain-height window, ascending by height. The tag is matched by its
+/// domain-separated hash, so callers pass the raw tag bytes.
+///
+/// # Errors
+/// Returns `ExecError::Db`, `ExecError::OracleAnchorRecordDecodeFailed`, or
+/// `ExecError::CodecDecode` on a malformed index key.
+pub fn get_oracle_anchors_by_tag<K: Kv>(
+    db: &K,
+    data_tag: &[u8],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<OracleAnchorRecord>, ExecError<K::Error>> {
+    let tag_hash = oracle_anchor_tag_hash(data_tag);
+    let mut prefix = Vec::with_capacity(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_TAG.len() + 32);
+    prefix.extend_from_slice(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_TAG);
+    prefix.extend_from_slice(&tag_hash);
+    collect_oracle_anchors(db, &prefix, start_height, end_height)
+}
+
 // ============================================================================
 // PAYMENT RECORDS (Week 28 - native x402 rail)
 // ============================================================================
