@@ -124,8 +124,11 @@ pub struct Capabilities {
     pub read_nnpx_derived: bool,
     /// Can submit ReputationUpdate signals (oracle entities).
     pub submit_reputation_updates: bool,
+    /// Can post oracle data anchors (Week 35). Required to issue
+    /// `AiSignalType::OracleAnchor` signals.
+    pub post_oracle_anchors: bool,
     /// Reserved for future capabilities.
-    pub _reserved: [bool; 2],
+    pub _reserved: [bool; 1],
 }
 
 impl Capabilities {
@@ -150,6 +153,9 @@ impl Capabilities {
         if self.submit_reputation_updates {
             flags |= 1 << 5;
         }
+        if self.post_oracle_anchors {
+            flags |= 1 << 6;
+        }
         flags
     }
 
@@ -162,7 +168,8 @@ impl Capabilities {
             request_execution: (byte & (1 << 3)) != 0,
             read_nnpx_derived: (byte & (1 << 4)) != 0,
             submit_reputation_updates: (byte & (1 << 5)) != 0,
-            _reserved: [false; 2],
+            post_oracle_anchors: (byte & (1 << 6)) != 0,
+            _reserved: [false; 1],
         }
     }
 
@@ -175,7 +182,8 @@ impl Capabilities {
             request_execution: false,
             read_nnpx_derived: false,
             submit_reputation_updates: false,
-            _reserved: [false; 2],
+            post_oracle_anchors: false,
+            _reserved: [false; 1],
         }
     }
 
@@ -188,7 +196,8 @@ impl Capabilities {
             request_execution: false,
             read_nnpx_derived: false,
             submit_reputation_updates: false,
-            _reserved: [false; 2],
+            post_oracle_anchors: false,
+            _reserved: [false; 1],
         }
     }
 
@@ -201,7 +210,25 @@ impl Capabilities {
             request_execution: true,
             read_nnpx_derived: false,
             submit_reputation_updates: false,
-            _reserved: [false; 2],
+            post_oracle_anchors: false,
+            _reserved: [false; 1],
+        }
+    }
+
+    /// Create an oracle capability set (Week 35): read access plus the
+    /// ability to post data anchors. Includes `emit_proposals` because
+    /// `OracleAnchor` is dispatched through the signal path, which
+    /// requires `emit_proposals`.
+    pub fn oracle() -> Self {
+        Self {
+            read_public_chain: true,
+            read_memory_objects: true,
+            emit_proposals: true,
+            request_execution: false,
+            read_nnpx_derived: false,
+            submit_reputation_updates: false,
+            post_oracle_anchors: true,
+            _reserved: [false; 1],
         }
     }
 
@@ -220,10 +247,8 @@ impl Capabilities {
             read_nnpx_derived: self.read_nnpx_derived || other.read_nnpx_derived,
             submit_reputation_updates: self.submit_reputation_updates
                 || other.submit_reputation_updates,
-            _reserved: [
-                self._reserved[0] || other._reserved[0],
-                self._reserved[1] || other._reserved[1],
-            ],
+            post_oracle_anchors: self.post_oracle_anchors || other.post_oracle_anchors,
+            _reserved: [self._reserved[0] || other._reserved[0]],
         }
     }
 }
@@ -378,6 +403,7 @@ impl AiEntity {
             "request_execution" => self.capabilities.request_execution,
             "read_nnpx_derived" => self.capabilities.read_nnpx_derived,
             "submit_reputation_updates" => self.capabilities.submit_reputation_updates,
+            "post_oracle_anchors" => self.capabilities.post_oracle_anchors,
             _ => false,
         }
     }
@@ -513,6 +539,7 @@ mod tests {
             caps.submit_reputation_updates,
             decoded.submit_reputation_updates
         );
+        assert_eq!(caps.post_oracle_anchors, decoded.post_oracle_anchors);
     }
 
     #[test]
@@ -526,6 +553,20 @@ mod tests {
         let decoded = Capabilities::from_byte(byte);
         assert!(decoded.submit_reputation_updates);
         assert!(!decoded.read_public_chain);
+    }
+
+    #[test]
+    fn capabilities_bit6_is_post_oracle_anchors() {
+        let caps = Capabilities {
+            post_oracle_anchors: true,
+            ..Capabilities::default()
+        };
+        let byte = caps.to_byte();
+        assert_eq!(byte, 1 << 6, "post_oracle_anchors must occupy bit 6");
+        let decoded = Capabilities::from_byte(byte);
+        assert!(decoded.post_oracle_anchors);
+        assert!(!decoded.read_public_chain);
+        assert!(!decoded.submit_reputation_updates);
     }
 
     #[test]
@@ -557,6 +598,14 @@ mod tests {
         assert!(gated.emit_proposals);
         assert!(gated.request_execution);
         assert!(!gated.submit_reputation_updates);
+        assert!(!gated.post_oracle_anchors);
+
+        let oracle = Capabilities::oracle();
+        assert!(oracle.read_public_chain);
+        assert!(oracle.emit_proposals);
+        assert!(oracle.post_oracle_anchors);
+        assert!(!oracle.request_execution);
+        assert!(!oracle.submit_reputation_updates);
     }
 
     #[test]
@@ -671,14 +720,15 @@ mod tests {
     #[test]
     fn capabilities_or_merges_reserved_bits() {
         let a = Capabilities {
-            _reserved: [true, false],
+            _reserved: [true],
             ..Capabilities::default()
         };
         let b = Capabilities {
-            _reserved: [false, true],
+            post_oracle_anchors: true,
             ..Capabilities::default()
         };
         let merged = a.or(&b);
-        assert_eq!(merged._reserved, [true, true]);
+        assert_eq!(merged._reserved, [true]);
+        assert!(merged.post_oracle_anchors);
     }
 }

@@ -48,7 +48,8 @@ fn caps() -> Capabilities {
         request_execution: true,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -153,6 +154,7 @@ fn accept_sla(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,
@@ -234,6 +236,7 @@ fn attest(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,

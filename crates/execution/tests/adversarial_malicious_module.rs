@@ -51,7 +51,8 @@ fn max_capability_entity() -> AiEntity {
         request_execution: true,
         read_nnpx_derived: true,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     };
     AiEntity::new(
         [0xAAu8; 32],
@@ -312,7 +313,8 @@ fn test_malicious_module_cannot_access_other_module_state() {
             emit_proposals: false,
             request_execution: false,
             submit_reputation_updates: false,
-            _reserved: [false; 2],
+            post_oracle_anchors: false,
+            _reserved: [false; 1],
         },
         1000,
     );
@@ -424,7 +426,8 @@ fn test_malicious_module_cannot_emit_invalid_write_ops() {
         emit_proposals: true,
         request_execution: true,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     };
     let result: Result<(), ExecError<()>> = validate_ai_entity_no_nnpx_capability(&malicious_caps);
     assert!(

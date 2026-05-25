@@ -39,7 +39,8 @@ fn caps() -> Capabilities {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -102,6 +103,7 @@ fn payment_payload(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -135,6 +137,7 @@ fn attestation_payload(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 

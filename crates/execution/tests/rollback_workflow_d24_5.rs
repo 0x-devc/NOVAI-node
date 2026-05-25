@@ -186,6 +186,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
             channel_accept: None,
             channel_close: None,
             channel_finalize: None,
+            oracle_anchor: None,
         };
         let signal_tx = TxV1 {
             version: TxVersion::V1,
@@ -237,6 +238,7 @@ fn d24_5_rollback_workflow_activate_problem_rollback_deactivate() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     };
     let anomaly_tx = TxV1 {
         version: TxVersion::V1,

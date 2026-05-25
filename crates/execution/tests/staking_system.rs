@@ -40,7 +40,8 @@ fn staker_caps() -> Capabilities {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -52,7 +53,8 @@ fn slasher_caps() -> Capabilities {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: true,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -108,6 +110,7 @@ fn build_stake_deposit_payload(issuer: [u8; 32], amount: u128) -> Vec<u8> {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -131,6 +134,7 @@ fn build_stake_withdraw_payload(issuer: [u8; 32], amount: u128) -> Vec<u8> {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -165,6 +169,7 @@ fn build_stake_slash_payload(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -645,6 +650,7 @@ fn entity_with_zero_stake_can_still_operate() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     apply_signal_commitment_tx(
         &mut db,

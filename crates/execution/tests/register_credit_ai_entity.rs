@@ -561,6 +561,7 @@ fn register_then_signal() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
 
     // Signal tx is from the entity itself (entity pays fee from its balance)

@@ -43,7 +43,8 @@ fn oracle_caps() -> Capabilities {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: true,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -101,6 +102,7 @@ fn build_reputation_payload(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -372,6 +374,7 @@ fn non_reputation_signal_unchanged_behavior() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     let tx = make_tx(entity.id, 0, SIGNAL_FEE, payload);
     apply_signal_commitment_tx(&mut db, &tx, 100).expect("non-reputation must still work");
@@ -411,6 +414,7 @@ fn reputation_payload_is_101_bytes() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     assert_eq!(payload.len(), 101);
     assert_eq!(payload.len(), SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN);

@@ -58,7 +58,8 @@ fn caps() -> Capabilities {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 

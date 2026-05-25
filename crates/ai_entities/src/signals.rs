@@ -149,6 +149,20 @@ pub enum AiSignalType {
     /// gated on a specific participant's liveness). Carries a 64-byte
     /// tail: channel_object_id:32 | party_a_entity_id:32.
     ChannelFinalize = 21,
+    /// Oracle data anchor (Week 35): an entity holding the
+    /// `post_oracle_anchors` capability publishes a commitment to
+    /// external off-chain data (a price feed, an API response, an
+    /// external timestamp) so other agents and future protocol
+    /// mechanisms can reference it from a registered, reputation-bearing
+    /// source. The handler writes an `OracleAnchorRecord` KV aux row
+    /// under `ai/oracle_anchors/by_hash/<signal_hash>` (which doubles as
+    /// the replay guard) plus by-entity and by-tag scan indexes, and
+    /// bumps the issuer's `total_transactions` (reputation-neutral on
+    /// post; accuracy challenges are deferred to a future week). Carries
+    /// a variable-length tail: data_hash:32 | external_timestamp_be:8 |
+    /// source_hash:32 | expiry_height_be:8 | data_tag_len:1 |
+    /// data_tag:[1..=32].
+    OracleAnchor = 22,
 }
 
 impl AiSignalType {
@@ -182,6 +196,7 @@ impl AiSignalType {
             19 => Some(AiSignalType::ChannelAccept),
             20 => Some(AiSignalType::ChannelClose),
             21 => Some(AiSignalType::ChannelFinalize),
+            22 => Some(AiSignalType::OracleAnchor),
             _ => None,
         }
     }
@@ -318,8 +333,13 @@ mod tests {
         );
         assert_eq!(
             AiSignalType::from_byte(22),
+            Some(AiSignalType::OracleAnchor),
+            "22 must decode to OracleAnchor (Week 35)"
+        );
+        assert_eq!(
+            AiSignalType::from_byte(23),
             None,
-            "22 must be rejected as unknown signal type"
+            "23 must be rejected as unknown signal type"
         );
         assert_eq!(AiSignalType::CompositionCheck.to_byte(), 12);
         assert_eq!(AiSignalType::ProofSubmission.to_byte(), 13);
@@ -331,6 +351,7 @@ mod tests {
         assert_eq!(AiSignalType::ChannelAccept.to_byte(), 19);
         assert_eq!(AiSignalType::ChannelClose.to_byte(), 20);
         assert_eq!(AiSignalType::ChannelFinalize.to_byte(), 21);
+        assert_eq!(AiSignalType::OracleAnchor.to_byte(), 22);
     }
 
     #[test]

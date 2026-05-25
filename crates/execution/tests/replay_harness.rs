@@ -119,6 +119,7 @@ fn mk_signal_commitment(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     TxV1 {
         version: TxVersion::V1,

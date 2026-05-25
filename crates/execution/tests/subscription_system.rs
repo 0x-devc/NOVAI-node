@@ -55,7 +55,8 @@ fn subscription_caps() -> Capabilities {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -115,6 +116,7 @@ fn build_create_payload(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -138,6 +140,7 @@ fn build_cancel_payload(subscriber: [u8; 32], subscription_id: [u8; 32]) -> Vec<
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -633,6 +636,7 @@ fn non_subscription_signals_still_work() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     let tx = make_tx(issuer.id, 0, SIGNAL_FEE, payload);
     apply_signal_commitment_tx(&mut db, &tx, CREATE_HEIGHT)

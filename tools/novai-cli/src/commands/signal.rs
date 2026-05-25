@@ -643,6 +643,16 @@ fn build_signal_payload(
                 signal_type
             ));
         }
+        AiSignalType::OracleAnchor => {
+            // Week 35 oracle anchors carry a variable-length tag tail and
+            // are posted via the dedicated `novai-cli oracle post-anchor`
+            // subcommand (wired in Week 35 Phase 4), not the generic
+            // `signal publish` path.
+            return Err(
+                "signal type OracleAnchor must be published via `novai-cli oracle post-anchor`, not the raw `signal publish` path"
+                    .to_string(),
+            );
+        }
     }
 
     Ok(payload)

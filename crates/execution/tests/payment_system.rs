@@ -56,7 +56,8 @@ fn payment_caps() -> Capabilities {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -121,6 +122,7 @@ fn build_payment_payload(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -812,6 +814,7 @@ fn build_split_payment_payload(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -2097,6 +2100,7 @@ fn payment_split_service_attestation_rep_applies_to_primary_only() {
             channel_accept: None,
             channel_close: None,
             channel_finalize: None,
+            oracle_anchor: None,
         });
     let attest_tx = make_tx(payer.id, 1, SIGNAL_FEE, attest_payload);
     apply_signal_commitment_tx(&mut db, &attest_tx, PAYMENT_HEIGHT + 1)

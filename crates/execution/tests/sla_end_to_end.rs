@@ -59,7 +59,8 @@ fn caps() -> Capabilities {
         request_execution: true,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -154,6 +155,7 @@ fn accept(db: &mut MemKv, seller: &AiEntity, nonce: u64, sla_id: [u8; 32], buyer
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,
@@ -231,6 +233,7 @@ fn attest_failed(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,

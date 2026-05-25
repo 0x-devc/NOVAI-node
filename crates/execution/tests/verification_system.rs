@@ -57,7 +57,8 @@ fn issuer_caps() -> Capabilities {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -130,6 +131,7 @@ fn build_proof_submission_payload_v2(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     })
 }
 
@@ -393,6 +395,7 @@ fn non_proof_signals_still_work() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, anomaly), HEIGHT)
         .expect("base anomaly still applies; ProofSubmission doesn't break it");

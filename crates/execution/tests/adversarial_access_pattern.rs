@@ -47,7 +47,8 @@ fn entity_with_derived_cap() -> AiEntity {
         emit_proposals: true,
         request_execution: true,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     };
     AiEntity::new([0xAAu8; 32], [0xBBu8; 32], AutonomyMode::Gated, caps, 1000)
 }
@@ -567,7 +568,8 @@ fn test_ai_cannot_read_derived_view_with_forged_capability() {
         request_execution: true,
         read_nnpx_derived: false, // The critical one is OFF
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     };
     let entity_max_no_derived = AiEntity::new(
         [0xEEu8; 32],

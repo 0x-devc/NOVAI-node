@@ -408,7 +408,8 @@ impl GenesisGenerator {
                     request_execution: caps.request_execution,
                     read_nnpx_derived: caps.read_nnpx_derived,
                     submit_reputation_updates: caps.submit_reputation_updates,
-                    _reserved: [false; 2],
+                    post_oracle_anchors: false,
+                    _reserved: [false; 1],
                 },
             );
 

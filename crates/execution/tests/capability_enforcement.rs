@@ -122,6 +122,7 @@ fn create_signal_payload(issuer: [u8; 32]) -> Vec<u8> {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }
@@ -323,7 +324,8 @@ fn entity_without_read_memory_cannot_create_memory() {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     };
     let entity = create_entity(b"no_memory_entity", 100_000, true, caps);
     store_entity(&mut db, &entity);

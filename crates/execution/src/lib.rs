@@ -1055,6 +1055,24 @@ pub enum ExecError<E> {
     },
     /// A stored `UpgradeRecord` or `UpgradeSummary` row failed to decode.
     EntityUpgradeRecordDecodeFailed,
+    // Week 35 - Oracle anchor errors (D35)
+    /// Oracle anchor `data_hash` is all-zero (not a valid commitment).
+    OracleAnchorZeroDataHash,
+    /// Oracle anchor `external_timestamp` is zero.
+    OracleAnchorZeroTimestamp,
+    /// Oracle anchor `data_tag` length is outside `[1, ORACLE_ANCHOR_DATA_TAG_MAX_LEN]`,
+    /// or does not match the remaining payload bytes.
+    OracleAnchorInvalidTag {
+        /// Tag length the payload declared.
+        len: usize,
+    },
+    /// An oracle anchor with this `signal_hash` already exists (replay guard).
+    OracleAnchorAlreadyExists {
+        /// The signal hash that already has a stored record.
+        signal_hash: [u8; 32],
+    },
+    /// A stored `OracleAnchorRecord` or `OracleAnchorSummary` row failed to decode.
+    OracleAnchorRecordDecodeFailed,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -1360,6 +1378,58 @@ pub const NOVAI_CHANNEL_CHAIN_ID: u64 = 1;
 /// Total size of a `ServiceAttestation` signal payload (base + extra).
 pub const SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN: usize =
     SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + SERVICE_ATTESTATION_EXTRA_LEN;
+
+// ============================================================================
+// WEEK 35 - ORACLE ANCHORING (D35)
+// ============================================================================
+
+/// Maximum length of an oracle anchor `data_tag`, in bytes.
+pub const ORACLE_ANCHOR_DATA_TAG_MAX_LEN: usize = 32;
+/// Fixed portion of the `OracleAnchorExtraV1` signal tail, in bytes
+/// (everything before the variable-length `data_tag`). See the struct for
+/// the full field layout.
+pub const ORACLE_ANCHOR_EXTRA_FIXED_LEN: usize = 32 + 8 + 32 + 8 + 1; // 81
+/// Minimum total `OracleAnchorExtraV1` tail length (fixed + 1-byte tag).
+pub const ORACLE_ANCHOR_EXTRA_MIN_LEN: usize = ORACLE_ANCHOR_EXTRA_FIXED_LEN + 1; // 82
+/// Maximum total `OracleAnchorExtraV1` tail length (fixed + 32-byte tag).
+pub const ORACLE_ANCHOR_EXTRA_MAX_LEN: usize =
+    ORACLE_ANCHOR_EXTRA_FIXED_LEN + ORACLE_ANCHOR_DATA_TAG_MAX_LEN; // 113
+/// Minimum total `OracleAnchor` signal payload length (base + min tail).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MIN_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + ORACLE_ANCHOR_EXTRA_MIN_LEN; // 148
+/// Maximum total `OracleAnchor` signal payload length (base + max tail).
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MAX_LEN: usize =
+    SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + ORACLE_ANCHOR_EXTRA_MAX_LEN; // 179
+
+/// Version byte for the `OracleAnchorRecord` KV aux value.
+pub const ORACLE_ANCHOR_RECORD_V1: u8 = 1;
+/// Fixed portion of an `OracleAnchorRecord`, in bytes (everything before
+/// the variable-length `data_tag`). See the struct for the full layout.
+pub const ORACLE_ANCHOR_RECORD_FIXED_LEN: usize = 1 + 32 + 32 + 8 + 32 + 8 + 8 + 1; // 122
+/// Minimum `OracleAnchorRecord` length (fixed + 1-byte tag).
+pub const ORACLE_ANCHOR_RECORD_MIN_LEN: usize = ORACLE_ANCHOR_RECORD_FIXED_LEN + 1; // 123
+/// Maximum `OracleAnchorRecord` length (fixed + 32-byte tag).
+pub const ORACLE_ANCHOR_RECORD_MAX_LEN: usize =
+    ORACLE_ANCHOR_RECORD_FIXED_LEN + ORACLE_ANCHOR_DATA_TAG_MAX_LEN; // 154
+
+/// Version byte for the `OracleAnchorSummary` KV aux value.
+pub const ORACLE_ANCHOR_SUMMARY_V1: u8 = 1;
+/// `OracleAnchorSummary` length in bytes (`version` + `anchor_count` + `last_anchor_height`).
+pub const ORACLE_ANCHOR_SUMMARY_LEN: usize = 1 + 4 + 8; // 13
+
+/// Domain separator for the oracle anchor tag hash (the by-tag index key segment).
+pub const ORACLE_ANCHOR_TAG_HASH_DOMAIN: &[u8] = b"NOVAI_ORACLE_ANCHOR_TAG_V1";
+
+/// Canonical KV record + replay guard: `ai/oracle_anchors/by_hash/<signal_hash>`.
+pub const KEY_PREFIX_AI_ORACLE_ANCHORS_BY_HASH: &[u8] = b"ai/oracle_anchors/by_hash/";
+/// Height-ordered per-entity scan index:
+/// `ai/oracle_anchors/by_entity/<id>/<height_be>/<signal_hash>`.
+pub const KEY_PREFIX_AI_ORACLE_ANCHORS_BY_ENTITY: &[u8] = b"ai/oracle_anchors/by_entity/";
+/// Height-ordered per-tag scan index:
+/// `ai/oracle_anchors/by_tag/<tag_hash>/<height_be>/<signal_hash>`.
+pub const KEY_PREFIX_AI_ORACLE_ANCHORS_BY_TAG: &[u8] = b"ai/oracle_anchors/by_tag/";
+/// Per-entity summary row: `ai/oracle_anchors/summary/<id>`.
+pub const KEY_PREFIX_AI_ORACLE_ANCHORS_SUMMARY: &[u8] = b"ai/oracle_anchors/summary/";
 
 /// `ServiceAttestation` status discriminant: service was delivered.
 pub const PAYMENT_ATTESTATION_STATUS_DELIVERED: u8 = 0;
@@ -2137,6 +2207,9 @@ pub struct SignalCommitmentPayloadV1 {
     /// Inline channel-finalize tail. MUST be `Some` iff
     /// `signal_type == ChannelFinalize`.
     pub channel_finalize: Option<ChannelFinalizeExtraV1>,
+    /// Inline oracle-anchor tail. MUST be `Some` iff
+    /// `signal_type == OracleAnchor`.
+    pub oracle_anchor: Option<OracleAnchorExtraV1>,
 }
 
 /// Deterministically encode a signal commitment payload.
@@ -2174,6 +2247,7 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
     let is_channel_accept = p.signal_type == novai_ai_entities::AiSignalType::ChannelAccept;
     let is_channel_close = p.signal_type == novai_ai_entities::AiSignalType::ChannelClose;
     let is_channel_finalize = p.signal_type == novai_ai_entities::AiSignalType::ChannelFinalize;
+    let is_oracle_anchor = p.signal_type == novai_ai_entities::AiSignalType::OracleAnchor;
     debug_assert_eq!(
         is_reputation,
         p.reputation.is_some(),
@@ -2249,6 +2323,11 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         p.channel_finalize.is_some(),
         "channel_finalize tail presence must match signal_type"
     );
+    debug_assert_eq!(
+        is_oracle_anchor,
+        p.oracle_anchor.is_some(),
+        "oracle_anchor tail presence must match signal_type"
+    );
     debug_assert!(
         u8::from(is_reputation)
             + u8::from(is_purchase)
@@ -2265,6 +2344,7 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             + u8::from(is_channel_accept)
             + u8::from(is_channel_close)
             + u8::from(is_channel_finalize)
+            + u8::from(is_oracle_anchor)
             <= 1,
         "tails are mutually exclusive"
     );
@@ -2316,6 +2396,12 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
         SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_CLOSE_LEN
     } else if is_channel_finalize {
         SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_FINALIZE_LEN
+    } else if is_oracle_anchor {
+        let tag_len = p
+            .oracle_anchor
+            .as_ref()
+            .map_or(1, |e| e.data_tag.len().min(ORACLE_ANCHOR_DATA_TAG_MAX_LEN));
+        SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + ORACLE_ANCHOR_EXTRA_FIXED_LEN + tag_len
     } else {
         SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN
     };
@@ -2486,6 +2572,22 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // Zero-tail in the inconsistent-release-build path.
             out.extend_from_slice(&[0u8; CHANNEL_FINALIZE_EXTRA_LEN]);
         }
+    } else if is_oracle_anchor {
+        if let Some(extra) = &p.oracle_anchor {
+            let tag_len = extra.data_tag.len().min(ORACLE_ANCHOR_DATA_TAG_MAX_LEN);
+            out.extend_from_slice(&extra.data_hash);
+            out.extend_from_slice(&extra.external_timestamp.to_be_bytes());
+            out.extend_from_slice(&extra.source_hash);
+            out.extend_from_slice(&extra.expiry_height.to_be_bytes());
+            out.push(
+                u8::try_from(tag_len).expect("tag_len <= ORACLE_ANCHOR_DATA_TAG_MAX_LEN (32)"),
+            );
+            out.extend_from_slice(&extra.data_tag[..tag_len]);
+        } else {
+            // Zero-tail in the inconsistent-release-build path (matches the
+            // capacity calc's default 1-byte tag: fixed portion + 1 tag byte).
+            out.extend_from_slice(&[0u8; ORACLE_ANCHOR_EXTRA_FIXED_LEN + 1]);
+        }
     }
 
     debug_assert_eq!(out.len(), total);
@@ -2540,7 +2642,7 @@ pub fn decode_signal_commitment_payload_v1(
 
     let signal_type = novai_ai_entities::AiSignalType::from_byte(payload[33]).ok_or(
         ExecError::BadPayloadVersion {
-            expected: 21, // max valid signal type (Week 32: ChannelFinalize = 21)
+            expected: 22, // max valid signal type (Week 35: OracleAnchor = 22)
             got: payload[33],
         },
     )?;
@@ -2563,6 +2665,7 @@ pub fn decode_signal_commitment_payload_v1(
     let is_channel_accept = signal_type == novai_ai_entities::AiSignalType::ChannelAccept;
     let is_channel_close = signal_type == novai_ai_entities::AiSignalType::ChannelClose;
     let is_channel_finalize = signal_type == novai_ai_entities::AiSignalType::ChannelFinalize;
+    let is_oracle_anchor = signal_type == novai_ai_entities::AiSignalType::OracleAnchor;
     let (
         reputation,
         purchase,
@@ -2579,6 +2682,7 @@ pub fn decode_signal_commitment_payload_v1(
         channel_accept,
         channel_close,
         channel_finalize,
+        oracle_anchor,
     ) = if is_reputation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_REP_LEN {
             return Err(ExecError::BadPayloadLength {
@@ -2596,6 +2700,7 @@ pub fn decode_signal_commitment_payload_v1(
                 event_type,
                 points_delta,
             }),
+            None,
             None,
             None,
             None,
@@ -2651,6 +2756,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_stake_deposit {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_STAKE_DEPOSIT_LEN {
@@ -2666,6 +2772,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeDepositExtraV1 { amount }),
+            None,
             None,
             None,
             None,
@@ -2694,6 +2801,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(StakeWithdrawExtraV1 { amount }),
+            None,
             None,
             None,
             None,
@@ -2741,6 +2849,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_composition_check {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_COMPOSITION_CHECK_LEN {
@@ -2769,6 +2878,7 @@ pub fn decode_signal_commitment_payload_v1(
                 failed_dependency_idx,
                 failure_reason,
             }),
+            None,
             None,
             None,
             None,
@@ -2888,6 +2998,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_subscription_create {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CREATE_LEN {
@@ -2940,6 +3051,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_subscription_cancel {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN {
@@ -2960,6 +3072,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             Some(SubscriptionCancelExtraV1 { subscription_id }),
+            None,
             None,
             None,
             None,
@@ -3065,6 +3178,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_service_attestation {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN {
@@ -3101,6 +3215,7 @@ pub fn decode_signal_commitment_payload_v1(
             None,
             None,
             None,
+            None,
         )
     } else if is_sla_accept {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_SLA_ACCEPT_LEN {
@@ -3129,6 +3244,7 @@ pub fn decode_signal_commitment_payload_v1(
                 sla_object_id,
                 buyer_entity_id,
             }),
+            None,
             None,
             None,
             None,
@@ -3161,6 +3277,7 @@ pub fn decode_signal_commitment_payload_v1(
                 channel_object_id,
                 party_a_entity_id,
             }),
+            None,
             None,
             None,
         )
@@ -3224,6 +3341,7 @@ pub fn decode_signal_commitment_payload_v1(
                 sig_b,
             }),
             None,
+            None,
         )
     } else if is_channel_finalize {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_CHANNEL_FINALIZE_LEN {
@@ -3255,6 +3373,60 @@ pub fn decode_signal_commitment_payload_v1(
                 channel_object_id,
                 party_a_entity_id,
             }),
+            None,
+        )
+    } else if is_oracle_anchor {
+        if payload.len() < SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MIN_LEN
+            || payload.len() > SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MAX_LEN
+        {
+            return Err(ExecError::BadPayloadLength {
+                expected: SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MIN_LEN,
+                got: payload.len(),
+            });
+        }
+        let mut data_hash = [0u8; 32];
+        data_hash.copy_from_slice(&payload[66..98]);
+        let mut ts = [0u8; 8];
+        ts.copy_from_slice(&payload[98..106]);
+        let external_timestamp = u64::from_be_bytes(ts);
+        let mut source_hash = [0u8; 32];
+        source_hash.copy_from_slice(&payload[106..138]);
+        let mut exp = [0u8; 8];
+        exp.copy_from_slice(&payload[138..146]);
+        let expiry_height = u64::from_be_bytes(exp);
+        let tag_len = usize::from(payload[146]);
+        if tag_len == 0 || tag_len > ORACLE_ANCHOR_DATA_TAG_MAX_LEN {
+            return Err(ExecError::OracleAnchorInvalidTag { len: tag_len });
+        }
+        if payload.len()
+            != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + ORACLE_ANCHOR_EXTRA_FIXED_LEN + tag_len
+        {
+            return Err(ExecError::OracleAnchorInvalidTag { len: tag_len });
+        }
+        let data_tag = payload[147..147 + tag_len].to_vec();
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(OracleAnchorExtraV1 {
+                data_hash,
+                external_timestamp,
+                source_hash,
+                expiry_height,
+                data_tag,
+            }),
         )
     } else {
         if payload.len() != SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN {
@@ -3265,7 +3437,7 @@ pub fn decode_signal_commitment_payload_v1(
         }
         (
             None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None,
+            None, None,
         )
     };
 
@@ -3288,7 +3460,263 @@ pub fn decode_signal_commitment_payload_v1(
         channel_accept,
         channel_close,
         channel_finalize,
+        oracle_anchor,
     })
+}
+
+// ============================================================================
+// WEEK 35 - ORACLE ANCHORING: types, aux-record codecs, key helpers (D35)
+// ============================================================================
+
+/// Inline tail carried by `AiSignalType::OracleAnchor` signal commitment
+/// payloads (Week 35).
+///
+/// Wire layout (variable, 82..=113 bytes): `data_hash:32 |
+/// external_timestamp_be:8 | source_hash:32 | expiry_height_be:8 |
+/// data_tag_len:1 | data_tag:[1..=32]`.
+///
+/// `data_hash` is a blake3 commitment to the actual off-chain data and
+/// MUST be non-zero. `external_timestamp` is the data's own timestamp as
+/// attested by the oracle; it MUST be non-zero but is opaque to the chain
+/// (there is no deterministic on-chain wall-clock to bound it against).
+/// `source_hash` is an optional blake3 commitment to the data source URL
+/// or identifier (all-zero = none). `expiry_height` is an advisory
+/// intended-valid-until chain height that the runtime stores but does NOT
+/// enforce (0 = no declared expiry); consumers judge freshness using
+/// `expiry_height` and the recorded `anchor_height`. `data_tag` is an
+/// opaque, bounded category tag (e.g. `b"price/ETH-USD"`); the by-tag
+/// index keys off `oracle_anchor_tag_hash(data_tag)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OracleAnchorExtraV1 {
+    /// blake3 commitment to the off-chain data. MUST be non-zero.
+    pub data_hash: [u8; 32],
+    /// External timestamp of the data, as attested by the oracle. MUST be
+    /// non-zero. Opaque to the chain (no deterministic wall-clock exists).
+    pub external_timestamp: u64,
+    /// Optional blake3 commitment to the data source (all-zero = none).
+    pub source_hash: [u8; 32],
+    /// Advisory intended-valid-until chain height (0 = none). Stored, not enforced.
+    pub expiry_height: u64,
+    /// Opaque bounded category tag, length in `[1, ORACLE_ANCHOR_DATA_TAG_MAX_LEN]`.
+    pub data_tag: Vec<u8>,
+}
+
+/// Canonical on-chain record for an oracle anchor (Week 35), stored at
+/// `oracle_anchor_by_hash_key(signal_hash)`.
+///
+/// Doubles as the replay guard: any subsequent `OracleAnchor` carrying the
+/// same `signal_hash` is rejected with `OracleAnchorAlreadyExists` before
+/// any state mutation.
+///
+/// Wire layout (variable, 123..=154 bytes): `version:1 | issuer:32 |
+/// data_hash:32 | external_timestamp_be:8 | source_hash:32 |
+/// expiry_height_be:8 | anchor_height_be:8 | data_tag_len:1 |
+/// data_tag:[1..=32]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OracleAnchorRecord {
+    /// The oracle entity that posted the anchor.
+    pub issuer_entity_id: [u8; 32],
+    /// blake3 commitment to the off-chain data.
+    pub data_hash: [u8; 32],
+    /// External timestamp of the data, as attested by the oracle.
+    pub external_timestamp: u64,
+    /// Optional blake3 commitment to the data source (all-zero = none).
+    pub source_hash: [u8; 32],
+    /// Advisory intended-valid-until chain height (0 = none).
+    pub expiry_height: u64,
+    /// Chain height at which the anchor was posted (deterministic).
+    pub anchor_height: u64,
+    /// Opaque bounded category tag.
+    pub data_tag: Vec<u8>,
+}
+
+/// Per-entity oracle anchor summary (Week 35), stored at
+/// `oracle_anchor_summary_key(entity_id)`.
+///
+/// Absent means the entity has never posted an anchor. Backs the RPC stats
+/// and is the O(1) seam where a future per-entity rate limit would plug in.
+///
+/// Wire layout (13 bytes): `version:1 | anchor_count_be:4 |
+/// last_anchor_height_be:8`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OracleAnchorSummary {
+    /// Total anchors this entity has posted.
+    pub anchor_count: u32,
+    /// Chain height of the entity's most recent anchor.
+    pub last_anchor_height: u64,
+}
+
+/// Deterministically encode an `OracleAnchorRecord` (123..=154 bytes).
+///
+/// # Panics
+/// Never in practice: `tag_len` is clamped to `ORACLE_ANCHOR_DATA_TAG_MAX_LEN`
+/// (32), which always fits in a `u8`.
+#[must_use]
+pub fn encode_oracle_anchor_record_v1(r: &OracleAnchorRecord) -> Vec<u8> {
+    let tag_len = r.data_tag.len().min(ORACLE_ANCHOR_DATA_TAG_MAX_LEN);
+    let mut out = Vec::with_capacity(ORACLE_ANCHOR_RECORD_FIXED_LEN + tag_len);
+    out.push(ORACLE_ANCHOR_RECORD_V1);
+    out.extend_from_slice(&r.issuer_entity_id);
+    out.extend_from_slice(&r.data_hash);
+    out.extend_from_slice(&r.external_timestamp.to_be_bytes());
+    out.extend_from_slice(&r.source_hash);
+    out.extend_from_slice(&r.expiry_height.to_be_bytes());
+    out.extend_from_slice(&r.anchor_height.to_be_bytes());
+    out.push(u8::try_from(tag_len).expect("tag_len <= ORACLE_ANCHOR_DATA_TAG_MAX_LEN (32)"));
+    out.extend_from_slice(&r.data_tag[..tag_len]);
+    out
+}
+
+/// Deterministically decode an `OracleAnchorRecord`.
+///
+/// # Errors
+/// Returns `BadPayloadLength` / `BadPayloadVersion` on malformed input, and
+/// `OracleAnchorInvalidTag` if the declared tag length is out of range or
+/// does not match the remaining bytes.
+pub fn decode_oracle_anchor_record_v1(bytes: &[u8]) -> Result<OracleAnchorRecord, ExecError<()>> {
+    if bytes.len() < ORACLE_ANCHOR_RECORD_MIN_LEN || bytes.len() > ORACLE_ANCHOR_RECORD_MAX_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: ORACLE_ANCHOR_RECORD_FIXED_LEN,
+            got: bytes.len(),
+        });
+    }
+    if bytes[0] != ORACLE_ANCHOR_RECORD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: ORACLE_ANCHOR_RECORD_V1,
+            got: bytes[0],
+        });
+    }
+    let mut issuer_entity_id = [0u8; 32];
+    issuer_entity_id.copy_from_slice(&bytes[1..33]);
+    let mut data_hash = [0u8; 32];
+    data_hash.copy_from_slice(&bytes[33..65]);
+    let mut ts = [0u8; 8];
+    ts.copy_from_slice(&bytes[65..73]);
+    let external_timestamp = u64::from_be_bytes(ts);
+    let mut source_hash = [0u8; 32];
+    source_hash.copy_from_slice(&bytes[73..105]);
+    let mut exp = [0u8; 8];
+    exp.copy_from_slice(&bytes[105..113]);
+    let expiry_height = u64::from_be_bytes(exp);
+    let mut anchor = [0u8; 8];
+    anchor.copy_from_slice(&bytes[113..121]);
+    let anchor_height = u64::from_be_bytes(anchor);
+    let tag_len = usize::from(bytes[121]);
+    if tag_len == 0 || tag_len > ORACLE_ANCHOR_DATA_TAG_MAX_LEN {
+        return Err(ExecError::OracleAnchorInvalidTag { len: tag_len });
+    }
+    if bytes.len() != ORACLE_ANCHOR_RECORD_FIXED_LEN + tag_len {
+        return Err(ExecError::OracleAnchorInvalidTag { len: tag_len });
+    }
+    let data_tag = bytes[122..122 + tag_len].to_vec();
+    Ok(OracleAnchorRecord {
+        issuer_entity_id,
+        data_hash,
+        external_timestamp,
+        source_hash,
+        expiry_height,
+        anchor_height,
+        data_tag,
+    })
+}
+
+/// Deterministically encode an `OracleAnchorSummary` (13 bytes).
+#[must_use]
+pub fn encode_oracle_anchor_summary_v1(s: &OracleAnchorSummary) -> [u8; ORACLE_ANCHOR_SUMMARY_LEN] {
+    let mut out = [0u8; ORACLE_ANCHOR_SUMMARY_LEN];
+    out[0] = ORACLE_ANCHOR_SUMMARY_V1;
+    out[1..5].copy_from_slice(&s.anchor_count.to_be_bytes());
+    out[5..13].copy_from_slice(&s.last_anchor_height.to_be_bytes());
+    out
+}
+
+/// Deterministically decode an `OracleAnchorSummary`.
+///
+/// # Errors
+/// Returns `BadPayloadLength` / `BadPayloadVersion` on malformed input.
+pub fn decode_oracle_anchor_summary_v1(bytes: &[u8]) -> Result<OracleAnchorSummary, ExecError<()>> {
+    if bytes.len() != ORACLE_ANCHOR_SUMMARY_LEN {
+        return Err(ExecError::BadPayloadLength {
+            expected: ORACLE_ANCHOR_SUMMARY_LEN,
+            got: bytes.len(),
+        });
+    }
+    if bytes[0] != ORACLE_ANCHOR_SUMMARY_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: ORACLE_ANCHOR_SUMMARY_V1,
+            got: bytes[0],
+        });
+    }
+    let mut c = [0u8; 4];
+    c.copy_from_slice(&bytes[1..5]);
+    let mut h = [0u8; 8];
+    h.copy_from_slice(&bytes[5..13]);
+    Ok(OracleAnchorSummary {
+        anchor_count: u32::from_be_bytes(c),
+        last_anchor_height: u64::from_be_bytes(h),
+    })
+}
+
+/// `blake3(ORACLE_ANCHOR_TAG_HASH_DOMAIN || data_tag)`: the by-tag index
+/// key segment.
+///
+/// Domain-separated so a tag can never collide with another index's key
+/// space, and fixed-length so a tag containing the key path separator
+/// cannot inject into the key.
+#[must_use]
+pub fn oracle_anchor_tag_hash(data_tag: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(ORACLE_ANCHOR_TAG_HASH_DOMAIN);
+    hasher.update(data_tag);
+    *hasher.finalize().as_bytes()
+}
+
+/// `ai/oracle_anchors/by_hash/<signal_hash>`.
+#[must_use]
+pub fn oracle_anchor_by_hash_key(signal_hash: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_HASH.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_HASH);
+    k.extend_from_slice(signal_hash);
+    k
+}
+
+/// `ai/oracle_anchors/by_entity/<entity_id>/<height_be>/<signal_hash>`.
+#[must_use]
+pub fn oracle_anchor_by_entity_key(
+    entity_id: &[u8; 32],
+    height: u64,
+    signal_hash: &[u8; 32],
+) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_ENTITY.len() + 32 + 8 + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_ENTITY);
+    k.extend_from_slice(entity_id);
+    k.extend_from_slice(&height.to_be_bytes());
+    k.extend_from_slice(signal_hash);
+    k
+}
+
+/// `ai/oracle_anchors/by_tag/<tag_hash>/<height_be>/<signal_hash>`.
+#[must_use]
+pub fn oracle_anchor_by_tag_key(
+    tag_hash: &[u8; 32],
+    height: u64,
+    signal_hash: &[u8; 32],
+) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_TAG.len() + 32 + 8 + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_TAG);
+    k.extend_from_slice(tag_hash);
+    k.extend_from_slice(&height.to_be_bytes());
+    k.extend_from_slice(signal_hash);
+    k
+}
+
+/// `ai/oracle_anchors/summary/<entity_id>`.
+#[must_use]
+pub fn oracle_anchor_summary_key(entity_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(KEY_PREFIX_AI_ORACLE_ANCHORS_SUMMARY.len() + 32);
+    k.extend_from_slice(KEY_PREFIX_AI_ORACLE_ANCHORS_SUMMARY);
+    k.extend_from_slice(entity_id);
+    k
 }
 
 // ============================================================================
@@ -13508,6 +13936,7 @@ mod tests {
             channel_accept: None,
             channel_close: None,
             channel_finalize: None,
+            oracle_anchor: None,
         };
         encode_signal_commitment_payload_v1(&p)
     }
@@ -13540,6 +13969,7 @@ mod tests {
             channel_accept: None,
             channel_close: None,
             channel_finalize: None,
+            oracle_anchor: None,
         };
         encode_signal_commitment_payload_v1(&p)
     }
@@ -13715,6 +14145,7 @@ mod tests {
             channel_accept: None,
             channel_close: None,
             channel_finalize: None,
+            oracle_anchor: None,
         };
         encode_signal_commitment_payload_v1(&p)
     }
@@ -14287,8 +14718,9 @@ mod tests {
         // Smoke test that the execution crate's view of AiSignalType
         // matches the ai_entities crate. Week 28 added PaymentRequest
         // and ServiceAttestation at 16/17; Week 31 added SlaAccept at
-        // 18; Week 32 added ChannelAccept/Close/Finalize at 19/20/21
-        // and shifted the first invalid byte to 22.
+        // 18; Week 32 added ChannelAccept/Close/Finalize at 19/20/21;
+        // Week 35 added OracleAnchor at 22 and shifted the first
+        // invalid byte to 23.
         assert_eq!(
             novai_ai_entities::AiSignalType::from_byte(16),
             Some(novai_ai_entities::AiSignalType::PaymentRequest),
@@ -14313,7 +14745,11 @@ mod tests {
             novai_ai_entities::AiSignalType::from_byte(21),
             Some(novai_ai_entities::AiSignalType::ChannelFinalize),
         );
-        assert_eq!(novai_ai_entities::AiSignalType::from_byte(22), None);
+        assert_eq!(
+            novai_ai_entities::AiSignalType::from_byte(22),
+            Some(novai_ai_entities::AiSignalType::OracleAnchor),
+        );
+        assert_eq!(novai_ai_entities::AiSignalType::from_byte(23), None);
     }
 
     // ========================================================================
@@ -14380,5 +14816,313 @@ mod tests {
         assert_eq!(SERVICE_STATUS_PAUSED, 1);
         assert_eq!(SERVICE_STATUS_DEPRECATED, 2);
         assert_eq!(SERVICE_STATUS_MAX, SERVICE_STATUS_DEPRECATED);
+    }
+
+    // ====================================================================
+    // WEEK 35 - ORACLE ANCHORING codec tests (D35 Phase 1)
+    // ====================================================================
+
+    fn oracle_anchor_payload(
+        signal_hash: [u8; 32],
+        issuer: [u8; 32],
+        extra: OracleAnchorExtraV1,
+    ) -> SignalCommitmentPayloadV1 {
+        SignalCommitmentPayloadV1 {
+            signal_hash,
+            signal_type: novai_ai_entities::AiSignalType::OracleAnchor,
+            issuer_entity_id: issuer,
+            reputation: None,
+            purchase: None,
+            stake_deposit: None,
+            stake_withdraw: None,
+            stake_slash: None,
+            composition_check: None,
+            proof_submission: None,
+            subscription_create: None,
+            subscription_cancel: None,
+            payment_request: None,
+            service_attestation: None,
+            sla_accept: None,
+            channel_accept: None,
+            channel_close: None,
+            channel_finalize: None,
+            oracle_anchor: Some(extra),
+        }
+    }
+
+    fn sample_anchor_extra(tag: &[u8]) -> OracleAnchorExtraV1 {
+        OracleAnchorExtraV1 {
+            data_hash: [0xAB; 32],
+            external_timestamp: 1_700_000_000,
+            source_hash: [0xCD; 32],
+            expiry_height: 5000,
+            data_tag: tag.to_vec(),
+        }
+    }
+
+    fn sample_anchor_record(tag: &[u8]) -> OracleAnchorRecord {
+        OracleAnchorRecord {
+            issuer_entity_id: [0x11; 32],
+            data_hash: [0xAB; 32],
+            external_timestamp: 1_700_000_000,
+            source_hash: [0xCD; 32],
+            expiry_height: 5000,
+            anchor_height: 900,
+            data_tag: tag.to_vec(),
+        }
+    }
+
+    #[test]
+    fn oracle_anchor_constants_are_consistent() {
+        assert_eq!(ORACLE_ANCHOR_DATA_TAG_MAX_LEN, 32);
+        assert_eq!(ORACLE_ANCHOR_EXTRA_FIXED_LEN, 81);
+        assert_eq!(ORACLE_ANCHOR_EXTRA_MIN_LEN, 82);
+        assert_eq!(ORACLE_ANCHOR_EXTRA_MAX_LEN, 113);
+        assert_eq!(SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MIN_LEN, 148);
+        assert_eq!(SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MAX_LEN, 179);
+        assert_eq!(ORACLE_ANCHOR_RECORD_FIXED_LEN, 122);
+        assert_eq!(ORACLE_ANCHOR_RECORD_MIN_LEN, 123);
+        assert_eq!(ORACLE_ANCHOR_RECORD_MAX_LEN, 154);
+        assert_eq!(ORACLE_ANCHOR_SUMMARY_LEN, 13);
+        assert_eq!(
+            SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MIN_LEN,
+            SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + ORACLE_ANCHOR_EXTRA_MIN_LEN
+        );
+    }
+
+    #[test]
+    fn oracle_anchor_extra_roundtrips_through_payload() {
+        for tag in [b"a".to_vec(), b"price/ETH-USD".to_vec(), vec![0x7Au8; 32]] {
+            let extra = sample_anchor_extra(&tag);
+            let p = oracle_anchor_payload([0x11; 32], [0x22; 32], extra.clone());
+            let bytes = encode_signal_commitment_payload_v1(&p);
+            assert_eq!(
+                bytes.len(),
+                SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN + ORACLE_ANCHOR_EXTRA_FIXED_LEN + tag.len()
+            );
+            let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decodes");
+            assert_eq!(
+                decoded.signal_type,
+                novai_ai_entities::AiSignalType::OracleAnchor
+            );
+            assert_eq!(decoded.oracle_anchor, Some(extra));
+            assert!(decoded.payment_request.is_none());
+            assert!(decoded.channel_finalize.is_none());
+        }
+    }
+
+    #[test]
+    fn oracle_anchor_payload_golden_vector() {
+        let extra = OracleAnchorExtraV1 {
+            data_hash: [0x01; 32],
+            external_timestamp: 0x0102_0304_0506_0708,
+            source_hash: [0x02; 32],
+            expiry_height: 0x1122_3344_5566_7788,
+            data_tag: b"price/ETH-USD".to_vec(),
+        };
+        let bytes = encode_signal_commitment_payload_v1(&oracle_anchor_payload(
+            [0x03; 32], [0x04; 32], extra,
+        ));
+        assert_eq!(bytes.len(), 160); // base 66 + fixed 81 + tag 13
+        assert_eq!(bytes[0], SIGNAL_COMMITMENT_PAYLOAD_V1);
+        assert_eq!(bytes[33], 22); // OracleAnchor discriminant
+        assert_eq!(&bytes[34..66], &[0x04u8; 32]); // issuer
+        assert_eq!(&bytes[66..98], &[0x01u8; 32]); // data_hash
+        assert_eq!(&bytes[98..106], &0x0102_0304_0506_0708u64.to_be_bytes());
+        assert_eq!(&bytes[106..138], &[0x02u8; 32]); // source_hash
+        assert_eq!(&bytes[138..146], &0x1122_3344_5566_7788u64.to_be_bytes());
+        assert_eq!(bytes[146], 13); // tag_len
+        assert_eq!(&bytes[147..160], b"price/ETH-USD");
+    }
+
+    #[test]
+    fn oracle_anchor_payload_rejects_bad_tag_length() {
+        let mut bytes = encode_signal_commitment_payload_v1(&oracle_anchor_payload(
+            [0x11; 32],
+            [0x22; 32],
+            sample_anchor_extra(b"abc"),
+        ));
+        // tag_len byte is at offset 146 (base 66 + 80 fixed-before-taglen).
+        bytes[146] = 31; // <= MAX but != actual (3)
+        assert!(matches!(
+            decode_signal_commitment_payload_v1(&bytes),
+            Err(ExecError::OracleAnchorInvalidTag { len: 31 })
+        ));
+        let mut zero = encode_signal_commitment_payload_v1(&oracle_anchor_payload(
+            [0x11; 32],
+            [0x22; 32],
+            sample_anchor_extra(b"a"),
+        ));
+        zero[146] = 0;
+        assert!(matches!(
+            decode_signal_commitment_payload_v1(&zero),
+            Err(ExecError::OracleAnchorInvalidTag { len: 0 })
+        ));
+    }
+
+    #[test]
+    fn oracle_anchor_payload_rejects_out_of_range_length() {
+        let min_ok = encode_signal_commitment_payload_v1(&oracle_anchor_payload(
+            [0x11; 32],
+            [0x22; 32],
+            sample_anchor_extra(b"a"),
+        ));
+        assert_eq!(
+            min_ok.len(),
+            SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MIN_LEN
+        );
+        assert!(matches!(
+            decode_signal_commitment_payload_v1(&min_ok[..min_ok.len() - 1]),
+            Err(ExecError::BadPayloadLength { .. })
+        ));
+        let max_ok = encode_signal_commitment_payload_v1(&oracle_anchor_payload(
+            [0x11; 32],
+            [0x22; 32],
+            sample_anchor_extra(&[0x5Au8; 32]),
+        ));
+        assert_eq!(
+            max_ok.len(),
+            SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MAX_LEN
+        );
+        let mut too_long = max_ok;
+        too_long.push(0);
+        assert!(matches!(
+            decode_signal_commitment_payload_v1(&too_long),
+            Err(ExecError::BadPayloadLength { .. })
+        ));
+    }
+
+    #[test]
+    fn oracle_anchor_record_roundtrips() {
+        for tag in [b"x".to_vec(), b"api/weather".to_vec(), vec![0x33u8; 32]] {
+            let r = sample_anchor_record(&tag);
+            let bytes = encode_oracle_anchor_record_v1(&r);
+            assert_eq!(bytes.len(), ORACLE_ANCHOR_RECORD_FIXED_LEN + tag.len());
+            assert_eq!(bytes[0], ORACLE_ANCHOR_RECORD_V1);
+            assert_eq!(decode_oracle_anchor_record_v1(&bytes).expect("decodes"), r);
+        }
+    }
+
+    #[test]
+    fn oracle_anchor_record_golden_vector() {
+        let r = OracleAnchorRecord {
+            issuer_entity_id: [0x01; 32],
+            data_hash: [0x02; 32],
+            external_timestamp: 0x0102_0304_0506_0708,
+            source_hash: [0x03; 32],
+            expiry_height: 0x1122_3344_5566_7788,
+            anchor_height: 0x00AA_00BB_00CC_00DD,
+            data_tag: b"api/weather".to_vec(),
+        };
+        let bytes = encode_oracle_anchor_record_v1(&r);
+        assert_eq!(bytes.len(), 133); // fixed 122 + tag 11
+        assert_eq!(bytes[0], 1);
+        assert_eq!(&bytes[1..33], &[0x01u8; 32]);
+        assert_eq!(&bytes[33..65], &[0x02u8; 32]);
+        assert_eq!(&bytes[65..73], &0x0102_0304_0506_0708u64.to_be_bytes());
+        assert_eq!(&bytes[73..105], &[0x03u8; 32]);
+        assert_eq!(&bytes[105..113], &0x1122_3344_5566_7788u64.to_be_bytes());
+        assert_eq!(&bytes[113..121], &0x00AA_00BB_00CC_00DDu64.to_be_bytes());
+        assert_eq!(bytes[121], 11);
+        assert_eq!(&bytes[122..133], b"api/weather");
+    }
+
+    #[test]
+    fn oracle_anchor_record_decode_rejections() {
+        let good = encode_oracle_anchor_record_v1(&sample_anchor_record(b"abc"));
+        let mut bad_ver = good.clone();
+        bad_ver[0] = 2;
+        assert!(matches!(
+            decode_oracle_anchor_record_v1(&bad_ver),
+            Err(ExecError::BadPayloadVersion { .. })
+        ));
+        assert!(matches!(
+            decode_oracle_anchor_record_v1(&good[..ORACLE_ANCHOR_RECORD_MIN_LEN - 1]),
+            Err(ExecError::BadPayloadLength { .. })
+        ));
+        let mut bad_tag = good;
+        bad_tag[121] = 31;
+        assert!(matches!(
+            decode_oracle_anchor_record_v1(&bad_tag),
+            Err(ExecError::OracleAnchorInvalidTag { .. })
+        ));
+        let mut zero_tag = encode_oracle_anchor_record_v1(&sample_anchor_record(b"a"));
+        zero_tag[121] = 0;
+        assert!(matches!(
+            decode_oracle_anchor_record_v1(&zero_tag),
+            Err(ExecError::OracleAnchorInvalidTag { len: 0 })
+        ));
+    }
+
+    #[test]
+    fn oracle_anchor_summary_roundtrips_and_golden() {
+        let s = OracleAnchorSummary {
+            anchor_count: 0x0102_0304,
+            last_anchor_height: 0x1122_3344_5566_7788,
+        };
+        let bytes = encode_oracle_anchor_summary_v1(&s);
+        assert_eq!(bytes.len(), 13);
+        assert_eq!(bytes[0], 1);
+        assert_eq!(&bytes[1..5], &0x0102_0304u32.to_be_bytes());
+        assert_eq!(&bytes[5..13], &0x1122_3344_5566_7788u64.to_be_bytes());
+        assert_eq!(decode_oracle_anchor_summary_v1(&bytes).expect("decodes"), s);
+
+        let mut bad = bytes;
+        bad[0] = 9;
+        assert!(matches!(
+            decode_oracle_anchor_summary_v1(&bad),
+            Err(ExecError::BadPayloadVersion { .. })
+        ));
+        assert!(matches!(
+            decode_oracle_anchor_summary_v1(&[1u8; 12]),
+            Err(ExecError::BadPayloadLength { .. })
+        ));
+    }
+
+    #[test]
+    fn oracle_anchor_key_helpers_are_deterministic_and_prefixed() {
+        let id = [0x11u8; 32];
+        let sh = [0x22u8; 32];
+        let th = oracle_anchor_tag_hash(b"price/ETH-USD");
+
+        let bh = oracle_anchor_by_hash_key(&sh);
+        assert!(bh.starts_with(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_HASH));
+        assert_eq!(bh, oracle_anchor_by_hash_key(&sh));
+        assert_eq!(bh.len(), KEY_PREFIX_AI_ORACLE_ANCHORS_BY_HASH.len() + 32);
+
+        let be = oracle_anchor_by_entity_key(&id, 900, &sh);
+        assert!(be.starts_with(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_ENTITY));
+        assert_eq!(
+            be.len(),
+            KEY_PREFIX_AI_ORACLE_ANCHORS_BY_ENTITY.len() + 32 + 8 + 32
+        );
+        // Big-endian height makes lower heights sort first (free range scans).
+        assert!(
+            oracle_anchor_by_entity_key(&id, 1, &sh) < oracle_anchor_by_entity_key(&id, 2, &sh)
+        );
+
+        let bt = oracle_anchor_by_tag_key(&th, 900, &sh);
+        assert!(bt.starts_with(KEY_PREFIX_AI_ORACLE_ANCHORS_BY_TAG));
+        assert_eq!(
+            bt.len(),
+            KEY_PREFIX_AI_ORACLE_ANCHORS_BY_TAG.len() + 32 + 8 + 32
+        );
+
+        let sk = oracle_anchor_summary_key(&id);
+        assert!(sk.starts_with(KEY_PREFIX_AI_ORACLE_ANCHORS_SUMMARY));
+        assert_eq!(sk.len(), KEY_PREFIX_AI_ORACLE_ANCHORS_SUMMARY.len() + 32);
+    }
+
+    #[test]
+    fn oracle_anchor_tag_hash_separates_tags_and_is_domain_separated() {
+        let a = oracle_anchor_tag_hash(b"price/ETH-USD");
+        assert_eq!(a, oracle_anchor_tag_hash(b"price/ETH-USD"), "deterministic");
+        assert_ne!(
+            a,
+            oracle_anchor_tag_hash(b"price/BTC-USD"),
+            "different tags must hash differently"
+        );
+        let raw = *blake3::hash(b"price/ETH-USD").as_bytes();
+        assert_ne!(a, raw, "tag hash must be domain-separated");
     }
 }

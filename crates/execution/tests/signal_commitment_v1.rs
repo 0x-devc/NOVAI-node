@@ -63,6 +63,7 @@ fn create_signal_payload(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }
@@ -509,6 +510,7 @@ fn subscription_create_payload_roundtrip() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     };
     let encoded = encode_signal_commitment_payload_v1(&original);
     assert_eq!(
@@ -546,6 +548,7 @@ fn subscription_cancel_payload_roundtrip() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     };
     let encoded = encode_signal_commitment_payload_v1(&original);
     assert_eq!(
@@ -583,6 +586,7 @@ fn subscription_create_byte_layout_locked() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     };
     let encoded = encode_signal_commitment_payload_v1(&original);
     // Base header lock (offsets 0..66 already covered by other roundtrip
@@ -632,6 +636,7 @@ fn subscription_cancel_byte_layout_locked() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     };
     let encoded = encode_signal_commitment_payload_v1(&original);
     assert_eq!(
@@ -668,6 +673,7 @@ fn subscription_create_with_wrong_length_rejected() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     let mut truncated = payload.clone();
     truncated.truncate(payload.len() - 1);
@@ -700,6 +706,7 @@ fn subscription_cancel_with_wrong_length_rejected() {
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     let mut truncated = payload.clone();
     truncated.truncate(payload.len() - 1);
@@ -710,17 +717,17 @@ fn subscription_cancel_with_wrong_length_rejected() {
 }
 
 #[test]
-fn unknown_signal_type_byte_22_rejected_by_decoder() {
-    // Build a base-length (66 byte) payload with signal_type byte = 22
-    // (one past the current max, ChannelFinalize = 21). The decoder
-    // runs from_byte() at offset 33 and must reject with a version-
-    // style error (the "max valid signal type" guard).
+fn unknown_signal_type_byte_23_rejected_by_decoder() {
+    // Build a base-length (66 byte) payload with signal_type byte = 23
+    // (one past the current max, OracleAnchor = 22). The decoder runs
+    // from_byte() at offset 33 and must reject with a version-style
+    // error (the "max valid signal type" guard).
     let mut payload = vec![0u8; 66];
     payload[0] = 2; // version
-    payload[33] = 22; // unknown signal_type
+    payload[33] = 23; // unknown signal_type
     let result = decode_signal_commitment_payload_v1(&payload);
     assert!(
         matches!(result, Err(ExecError::BadPayloadVersion { .. })),
-        "byte 22 must be rejected as unknown signal type, got {result:?}"
+        "byte 23 must be rejected as unknown signal type, got {result:?}"
     );
 }

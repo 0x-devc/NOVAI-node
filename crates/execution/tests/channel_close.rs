@@ -66,7 +66,8 @@ fn caps() -> Capabilities {
         request_execution: false,
         read_nnpx_derived: false,
         submit_reputation_updates: false,
-        _reserved: [false; 2],
+        post_oracle_anchors: false,
+        _reserved: [false; 1],
     }
 }
 
@@ -184,6 +185,7 @@ fn accept(
         }),
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     });
     let tx = TxV1 {
         version: TxVersion::V1,
@@ -238,6 +240,7 @@ fn make_close_tx(
             sig_b,
         }),
         channel_finalize: None,
+        oracle_anchor: None,
     });
     TxV1 {
         version: TxVersion::V1,

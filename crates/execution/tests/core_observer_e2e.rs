@@ -70,6 +70,7 @@ fn create_signal_payload(
         channel_accept: None,
         channel_close: None,
         channel_finalize: None,
+        oracle_anchor: None,
     };
     encode_signal_commitment_payload_v1(&payload)
 }
