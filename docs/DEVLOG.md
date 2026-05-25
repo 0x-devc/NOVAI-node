@@ -18650,3 +18650,300 @@ balance, open SLAs, open payment channels, and memory objects, with the
 code change recorded on chain and a 1000-block cooldown guarding against
 reputation-gaming. The `AiEntity` V5 encoding and every prior golden
 vector are unchanged.
+
+---
+
+## Week 35: Oracle Anchoring
+
+### 1. Overview - Objectives & Deliverables
+
+Week 35 gives AI agents a way to reference external data (price feeds,
+API responses, external timestamps) on chain in a verifiable, attributable
+way. An entity holding a new `post_oracle_anchors` capability publishes an
+`OracleAnchor` signal that commits to the data (a blake3 `data_hash`), tags
+it with a bounded category (`data_tag`, e.g. `price/ETH-USD`), and carries
+the data's external timestamp plus an optional source commitment. The
+anchor is attributed to the oracle's persistent, reputation-bearing
+identity, so consumers can weigh it by the issuer's on-chain reputation and
+stake. This is the prerequisite for Week 36 Conditional Execution, which
+needs verifiable external inputs to condition payments on.
+
+**Goal Statement.** Ship a new signal type (`OracleAnchor = 22`) gated by a
+new capability bit, persist each anchor as a KV aux record queryable by
+entity, by tag, and by chain-height window, and surface the lifecycle
+through RPC and a dedicated CLI subcommand. The challenge / dispute
+mechanism is deferred. The `AiEntity` V5 (270-byte) encoding and every
+prior wire format stay frozen.
+
+**Deliverables.**
+
+- D35.1: `AiSignalType::OracleAnchor = 22`, the variable-length
+  `OracleAnchorExtraV1` signal tail (82..=113 bytes), and the
+  `post_oracle_anchors` capability at bit 6 (plus `Capabilities::oracle()`).
+  Golden-vector locked.
+- D35.2: `validate_oracle_anchor`, a standalone validator enforcing
+  active-issuer, capability, non-zero `data_hash`, non-zero
+  `external_timestamp`, tag bounds, and the by-hash replay guard before any
+  state mutation.
+- D35.3: Handler branch in `apply_signal_commitment_tx_inner`. Persists the
+  canonical `OracleAnchorRecord` (123..=154 bytes, also the replay guard),
+  height-ordered by-entity and by-tag scan markers, the per-entity
+  `OracleAnchorSummary` (13 bytes), and bumps `total_transactions`.
+  Reputation is neutral on post.
+- D35.4: Query helpers (`get_oracle_anchor`, `get_oracle_anchor_summary`,
+  `get_oracle_anchors_by_entity`, `get_oracle_anchors_by_tag`), three RPC
+  methods, and the `OracleAnchorJson` shape.
+- D35.5: `novai-cli oracle` subcommand with `post-anchor`,
+  `get-anchors-by-entity`, `get-anchors-by-tag`, and `show`. `post-anchor`
+  derives a content-addressed signal hash so identical data is rejected as
+  a duplicate.
+
+**Final Metrics.**
+
+- 56 net new tests across the five phases (12 codec unit in Phase 1, 13
+  validation in Phase 2, 12 execution in Phase 3, 12 RPC + CLI in Phase 4,
+  7 adversarial in Phase 5).
+- 1,824 tests passing total (1,768 Week 34 baseline + 56 net new), 0
+  failing.
+- Zero clippy warnings under `--all-targets -- -D warnings`.
+- `cargo deny check licenses` passes.
+- One commit per phase across five phases, five pushes.
+
+### 2. Design Pushbacks (Approved in Phase 0)
+
+Six pushbacks against the initial prompt were accepted before any code was
+written.
+
+- **P1: Anchors are KV aux records, NOT memory objects.** The prompt said
+  "stored as memory objects", but Week 28 pushback B already killed that
+  pattern for high-frequency append-only data:
+  `MAX_MEMORY_OBJECTS_PER_ENTITY = 100`, so a price oracle posting once a
+  minute exhausts the cap in ~100 minutes. Anchors are append-only events
+  (like `PaymentRecord`), not mutable per-entity state (like a
+  `ServiceDescriptor`). The model is Week 28's `PaymentRecord`: a canonical
+  by-hash record that doubles as the replay guard, plus zero-byte
+  height-ordered scan markers. No per-entity cap, no CRUD.
+- **P2: Signal type, not a new transaction type.** The oracle entity posts
+  its own data, signing with its own key and paying from its own
+  `economic_balance`. That is the signal-actor model (`ProofSubmission` is
+  the closest precedent: an entity submitting a verifiable claim about
+  off-chain work). New tx types are creator/account-submitted and
+  `check_ai_entity_sender` denies them to entities.
+- **P3: Defer the challenge / dispute protocol.** A real challenge needs a
+  resolution mechanism (governance vote or an oracle quorum, neither of
+  which exists today) plus stake escrow during the window. v1 ships post +
+  query; the `data_hash` and `source_hash` commitments are the substrate a
+  future challenge resolves against. Consistent with the W28/W31/W32
+  pattern of shipping the narrow primitive first.
+- **P4: Neutral reputation on post; advisory `expiry_height`; no TTL.**
+  Awarding reputation just for posting is a farming attack (pay the fee,
+  mint reputation), so a post bumps `total_transactions` only (W33's
+  "PaymentReceived" precedent, no new `REP_EVENT`). Reputation deltas
+  arrive with challenge resolution (v2). Anchors do not expire and are
+  never swept; an optional advisory `expiry_height` lets the oracle declare
+  intended validity, which the runtime stores but does not enforce.
+- **P5: New capability bit `post_oracle_anchors` at bit 6.** There is no
+  `PersistentOracle` entity type in the current capability-based model;
+  "oracle" today just means an entity with `submit_reputation_updates`
+  (bit 5). A price-feed oracle and a reputation oracle are different trust
+  domains, so bit 6 is a dedicated gate, not an overload of bit 5. Bit 6
+  was one of the two free reserved bits, so the `AiEntity` V5 (270-byte)
+  encoding is unchanged (the capabilities byte is 1 byte regardless;
+  existing entities have bit 6 = 0).
+- **P6: `external_timestamp != 0` only, no "far future" check.** The
+  validation spec asked to reject a far-future timestamp, but the
+  deterministic runtime has no wall-clock to bound it against (there is no
+  consensus block timestamp; determinism forbids one). The external
+  timestamp is opaque oracle-attested metadata, checked only for being
+  non-zero. Freshness is judged by consumers using the recorded
+  `anchor_height` (the deterministic chain height at post). No protocol
+  rate limit either: the existing `MIN_FEE_SIGNAL_COMMITMENT = 1000`
+  per-post fee is the spam control, and the summary row is the O(1) seam
+  where a future rate limit would plug in.
+
+### 3. Wire Layouts (locked by golden vector tests)
+
+```
+OracleAnchorExtraV1 (signal type 22 tail, variable 82..=113 bytes):
+  data_hash           [u8;32]  bytes 0..32     (blake3 of data; non-zero)
+  external_timestamp  u64 BE   bytes 32..40    (non-zero; opaque metadata)
+  source_hash         [u8;32]  bytes 40..72    (zero = none)
+  expiry_height       u64 BE   bytes 72..80    (0 = none; advisory, unenforced)
+  data_tag_len        u8       byte  80        (1..=32)
+  data_tag            [u8;len] bytes 81..81+len
+Full OracleAnchor signal payload = 66 base + tail = 148..=179 bytes.
+
+OracleAnchorRecord (KV aux value at by_hash, variable 123..=154 bytes):
+  version             u8       byte  0         (= 1)
+  issuer_entity_id    [u8;32]  bytes 1..33
+  data_hash           [u8;32]  bytes 33..65
+  external_timestamp  u64 BE   bytes 65..73
+  source_hash         [u8;32]  bytes 73..105
+  expiry_height       u64 BE   bytes 105..113
+  anchor_height       u64 BE   bytes 113..121  (deterministic chain height at post)
+  data_tag_len        u8       byte  121
+  data_tag            [u8;len] bytes 122..122+len
+
+OracleAnchorSummary (13 bytes):
+  version             u8       byte  0          (= 1)
+  anchor_count        u32 BE   bytes 1..5
+  last_anchor_height  u64 BE   bytes 5..13
+```
+
+### 4. Constants
+
+```rust
+// crates/ai_entities/src/signals.rs
+AiSignalType::OracleAnchor = 22
+
+// crates/ai_entities/src/lib.rs
+Capabilities.post_oracle_anchors  // bit 6; Capabilities::oracle() constructor
+
+// crates/execution/src/lib.rs
+pub const ORACLE_ANCHOR_DATA_TAG_MAX_LEN: usize = 32;
+pub const ORACLE_ANCHOR_EXTRA_FIXED_LEN: usize = 81;   // MIN 82, MAX 113
+pub const SIGNAL_COMMITMENT_PAYLOAD_V1_ORACLE_ANCHOR_MIN_LEN: usize = 148;  // MAX 179
+pub const ORACLE_ANCHOR_RECORD_V1: u8 = 1;
+pub const ORACLE_ANCHOR_RECORD_FIXED_LEN: usize = 122; // MIN 123, MAX 154
+pub const ORACLE_ANCHOR_SUMMARY_V1: u8 = 1;
+pub const ORACLE_ANCHOR_SUMMARY_LEN: usize = 13;
+pub const ORACLE_ANCHOR_TAG_HASH_DOMAIN: &[u8] = b"NOVAI_ORACLE_ANCHOR_TAG_V1";
+pub const KEY_PREFIX_AI_ORACLE_ANCHORS_BY_HASH:   &[u8] = b"ai/oracle_anchors/by_hash/";
+pub const KEY_PREFIX_AI_ORACLE_ANCHORS_BY_ENTITY: &[u8] = b"ai/oracle_anchors/by_entity/";
+pub const KEY_PREFIX_AI_ORACLE_ANCHORS_BY_TAG:    &[u8] = b"ai/oracle_anchors/by_tag/";
+pub const KEY_PREFIX_AI_ORACLE_ANCHORS_SUMMARY:   &[u8] = b"ai/oracle_anchors/summary/";
+
+// 5 new ExecError variants
+OracleAnchorZeroDataHash, OracleAnchorZeroTimestamp,
+OracleAnchorInvalidTag { len }, OracleAnchorAlreadyExists { signal_hash },
+OracleAnchorRecordDecodeFailed
+```
+
+No new fee constant (the existing `MIN_FEE_SIGNAL_COMMITMENT` floor
+applies) and no new reputation event (P4).
+
+### 5. Storage Layout
+
+```
+ai/oracle_anchors/by_hash/<signal_hash>                          -> OracleAnchorRecord (+ replay guard)
+ai/oracle_anchors/by_entity/<entity_id>/<height_be>/<signal_hash> -> empty marker
+ai/oracle_anchors/by_tag/<tag_hash>/<height_be>/<signal_hash>     -> empty marker
+ai/oracle_anchors/summary/<entity_id>                            -> OracleAnchorSummary
+```
+
+`tag_hash = blake3(ORACLE_ANCHOR_TAG_HASH_DOMAIN || data_tag)`. Hashing the
+tag for the index key keeps keys fixed-length and stops a tag containing
+the key path separator from injecting into the key. Big-endian heights make
+the by-entity and by-tag scans ascending by height for free.
+
+### 6. Handler Validation Order (validate_oracle_anchor, then execute)
+
+```
+1. issuer.is_active                          else EntityNotActive
+2. post_oracle_anchors (static or delegated) else IssuerMissingCapability
+3. data_hash != 0                            else OracleAnchorZeroDataHash
+4. external_timestamp != 0                   else OracleAnchorZeroTimestamp
+5. data_tag length in [1, 32]                else OracleAnchorInvalidTag
+6. by_hash(signal_hash) absent               else OracleAnchorAlreadyExists
+Then (one atomic batch with the generic commitment writes + fee debit):
+  write OracleAnchorRecord at by_hash; write by_entity + by_tag markers;
+  upsert summary (count++, last_height); total_transactions++ (neutral rep).
+```
+
+The generic signal preconditions (kill switch off, `emit_proposals`,
+issuer-id match, nonce, fee balance) are enforced by the dispatch before
+the branch. Via the public `apply_signal_commitment_tx` wrapper a rejected
+post commits nothing at all (single batch at the end), so it leaves no
+record, no index, no summary change, and no fee debit.
+
+### 7. RPC
+
+```
+Method: novai_getOracleAnchorsByEntity
+Params: { entity_id, start_height, end_height, ts_min?, ts_max? }
+Method: novai_getOracleAnchorsByTag
+Params: { data_tag, start_height, end_height, ts_min?, ts_max? }
+Method: novai_getOracleAnchor
+Params: { signal_hash }
+
+OracleAnchorJson {
+  issuer_entity_id, data_hash, source_hash (hex),
+  external_timestamp, expiry_height, anchor_height (u64),
+  data_tag (lossy UTF-8), data_tag_hex (exact bytes)
+}
+```
+
+The height window is the indexed range (capped at `MAX_SIGNAL_QUERY_RANGE =
+10_000`); `ts_min`/`ts_max` are an optional in-memory filter on the
+external timestamp, so "by time range" is served both by chain height
+(indexed) and by external timestamp (filtered).
+
+### 8. CLI
+
+```
+novai-cli oracle post-anchor \
+  --key-file oracle.key \
+  --issuer-entity-id <hex32> \
+  --data-hash <hex32> \
+  --external-timestamp 1700000000 \
+  [--source-hash <hex32>] [--expiry-height 0] \
+  --data-tag "price/ETH-USD" \
+  [--fee 1000]
+
+novai-cli oracle get-anchors-by-entity --entity-id <hex32> [--start-height 0] [--end-height 10000]
+novai-cli oracle get-anchors-by-tag    --data-tag "price/ETH-USD" [--start-height 0] [--end-height 10000]
+novai-cli oracle show --signal-hash <hex32>
+```
+
+`post-anchor` derives the signal hash as
+`blake3("novai-oracle-anchor-v1" || issuer || data_hash || ts_be ||
+source_hash || tag_len_be || data_tag)`, so re-posting identical data
+collides on the by-hash key and is rejected on chain. The generic
+`signal publish` path explicitly routes `OracleAnchor` here rather than
+building the variable-length tail itself.
+
+### 9. Test Surface
+
+| File | Phase | Tests | What it covers |
+|------|-------|-------|---------------|
+| crates/ai_entities/src/lib.rs | 1 | bit-6 capability roundtrip + constructors |
+| crates/ai_entities/src/signals.rs + tests/signal_verification_vectors.rs | 1 | type byte 22 valid, 23 first-invalid boundary |
+| crates/execution/src/lib.rs | 1 | 12 codec unit: constants, extra roundtrip + golden payload, record roundtrip + golden + rejections, summary roundtrip + golden, key helpers + tag-hash separation |
+| crates/execution/tests/oracle_anchor_validation.rs | 2 | 13: happy, min/max tag, missing + wrong-domain capability, inactive, zero hash/timestamp, empty/oversized tag, duplicate, two ordering checks |
+| crates/execution/tests/oracle_anchor_system.rs | 3 | 12: record fields, anchor_height = chain height, by-entity/by-tag markers, summary, fee debit + neutral reputation, multi-anchor increment, multi-entity shared tag, duplicate no-state-change, capability/zero-hash/inactive rejections, min/max tag posts |
+| crates/node/src/rpc.rs | 4 | 6: JSON shape incl. non-UTF-8 tag, three params deserialize, ts-range filter |
+| tools/novai-cli/src/commands/oracle.rs | 4 | 6: payload layout, tag bounds, content-addressed hash, bad hex |
+| crates/execution/tests/oracle_anchor_adversarial.rs | 5 | 7: no-capability, zero hash, post-after-deactivation, far-future timestamp accepted verbatim, zero timestamp, 10 rapid posts (no rate limit), global cross-entity replay guard |
+
+### 10. Outstanding Work Items
+
+- **Challenge / dispute protocol**: deferred per P3. A future
+  `OracleChallenge` signal plus a resolution mechanism (governance or an
+  oracle quorum) and stake escrow would let the original oracle lose
+  reputation and stake on an upheld challenge, and the challenger lose
+  reputation on a failed one. The v1 `data_hash` / `source_hash`
+  commitments are the substrate this resolves against.
+- **Stake-to-post requirement**: lands with challenges. Requiring an oracle
+  to hold `min_stake` before posting only matters once there is a slashing
+  path; until then the capability bit plus visible reputation / stake are
+  the credibility signal.
+- **Anchor pruning**: like the Week 28 `PaymentRecord` and Week 33/34
+  rows, anchors accumulate forever. A governance-driven prune keyed on
+  `anchor_height` (or the advisory `expiry_height`) would align with the
+  other prune policies.
+- **Non-UTF-8 tags over RPC**: the by-tag RPC accepts the tag as a UTF-8
+  string. A `data_tag_hex` query variant would let callers match a binary
+  tag exactly; the on-chain index already keys off the raw tag bytes.
+- **Per-entity rate limit**: intentionally absent (P6). The summary row
+  (`last_anchor_height`) is the O(1) seam where a cooldown would plug in
+  without a wire change, if production shows fee-only spam control is
+  insufficient.
+
+**Week 35 Status: COMPLETE.** Five phases shipped across five commits, all
+1,824 tests passing, zero clippy warnings, cargo deny check licenses
+passes. AI agents can now publish verifiable, attributable commitments to
+external data on chain, queryable by entity, by tag, and by height window,
+from registered reputation-bearing oracle entities. The `AiEntity` V5
+encoding and every prior golden vector are unchanged, and the data_hash /
+source_hash commitments lay the groundwork for Week 36 Conditional
+Execution and a future challenge mechanism.
