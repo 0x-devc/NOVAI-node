@@ -1090,14 +1090,12 @@ pub enum ExecError<E> {
     /// `PaymentRequest` condition: the referenced oracle anchor does not
     /// exist in state. Fails `AnchorExists` and blocks evaluation of every
     /// other anchor-referencing kind.
-    #[allow(dead_code)]
     PaymentConditionAnchorNotFound {
         /// `signal_hash` of the anchor the condition referenced.
         anchor_signal_hash: [u8; 32],
     },
     /// `PaymentRequest` condition (`AnchorDataHashEquals`): the referenced
     /// anchor's `data_hash` does not equal the required value.
-    #[allow(dead_code)]
     PaymentConditionDataHashMismatch {
         /// Required `data_hash` from the condition.
         expected: [u8; 32],
@@ -1106,11 +1104,9 @@ pub enum ExecError<E> {
     },
     /// `PaymentRequest` condition (`AnchorTagEquals`): the referenced
     /// anchor's `data_tag` does not equal the required value.
-    #[allow(dead_code)]
     PaymentConditionTagMismatch,
     /// `PaymentRequest` condition (`AnchorNotExpired`): the referenced
     /// anchor's `expiry_height` is non-zero and below `current_height`.
-    #[allow(dead_code)]
     PaymentConditionAnchorExpired {
         /// The anchor's stored `expiry_height`.
         expiry_height: u64,
@@ -2073,6 +2069,22 @@ impl PaymentCondition {
             Self::AnchorDataHashEquals { .. } => PAYMENT_CONDITION_KIND_ANCHOR_DATA_HASH_EQUALS,
             Self::AnchorTagEquals { .. } => PAYMENT_CONDITION_KIND_ANCHOR_TAG_EQUALS,
             Self::AnchorNotExpired { .. } => PAYMENT_CONDITION_KIND_ANCHOR_NOT_EXPIRED,
+        }
+    }
+
+    /// `signal_hash` of the oracle anchor this condition references. Every
+    /// v1 kind references exactly one anchor.
+    #[must_use]
+    pub const fn anchor_signal_hash(&self) -> &[u8; 32] {
+        match self {
+            Self::AnchorExists { anchor_signal_hash }
+            | Self::AnchorDataHashEquals {
+                anchor_signal_hash, ..
+            }
+            | Self::AnchorTagEquals {
+                anchor_signal_hash, ..
+            }
+            | Self::AnchorNotExpired { anchor_signal_hash } => anchor_signal_hash,
         }
     }
 
@@ -4674,6 +4686,70 @@ fn validate_payment_splits<K: Kv>(
     }
 
     Ok(())
+}
+
+/// Evaluate a Week 36 payment condition against committed on-chain state.
+///
+/// Pure and read-only: the caller runs this BEFORE any balance mutation
+/// and, on `Err`, lets the whole transaction revert (no fee charged). All
+/// v1 kinds first require the referenced oracle anchor to exist; a missing
+/// anchor is `PaymentConditionAnchorNotFound`. An anchor is an immutable
+/// historical record, so evaluation reads only the stored
+/// `OracleAnchorRecord` and never consults the issuing oracle's current
+/// `is_active` status (a deactivated oracle's anchor still satisfies a
+/// condition).
+///
+/// # Errors
+/// Returns `PaymentConditionAnchorNotFound`,
+/// `PaymentConditionDataHashMismatch`, `PaymentConditionTagMismatch`, or
+/// `PaymentConditionAnchorExpired` when the condition does not hold, or
+/// `ExecError::Db` / `ExecError::OracleAnchorRecordDecodeFailed` on a KV
+/// read failure.
+// Fully unit-tested here in Phase 2; wired into the PaymentRequest handler
+// in Phase 3, hence allow(dead_code) until the call site exists.
+#[allow(dead_code)]
+fn validate_payment_condition<K: Kv>(
+    db: &K,
+    condition: &PaymentCondition,
+    current_height: u64,
+) -> Result<(), ExecError<K::Error>> {
+    let record = get_oracle_anchor(db, condition.anchor_signal_hash())?.ok_or(
+        ExecError::PaymentConditionAnchorNotFound {
+            anchor_signal_hash: *condition.anchor_signal_hash(),
+        },
+    )?;
+    match condition {
+        PaymentCondition::AnchorExists { .. } => Ok(()),
+        PaymentCondition::AnchorDataHashEquals {
+            expected_data_hash, ..
+        } => {
+            if record.data_hash == *expected_data_hash {
+                Ok(())
+            } else {
+                Err(ExecError::PaymentConditionDataHashMismatch {
+                    expected: *expected_data_hash,
+                    actual: record.data_hash,
+                })
+            }
+        }
+        PaymentCondition::AnchorTagEquals { expected_tag, .. } => {
+            if record.data_tag == *expected_tag {
+                Ok(())
+            } else {
+                Err(ExecError::PaymentConditionTagMismatch)
+            }
+        }
+        PaymentCondition::AnchorNotExpired { .. } => {
+            if record.expiry_height == 0 || record.expiry_height >= current_height {
+                Ok(())
+            } else {
+                Err(ExecError::PaymentConditionAnchorExpired {
+                    expiry_height: record.expiry_height,
+                    current_height,
+                })
+            }
+        }
+    }
 }
 
 /// Build the canonical KV key for the Agent Discovery Registry
@@ -15113,6 +15189,186 @@ mod tests {
         assert!(matches!(
             decode_signal_commitment_payload_v1(&bytes),
             Err(ExecError::PaymentConditionInvalidTag { len: 33 })
+        ));
+    }
+
+    fn write_oracle_anchor_record(
+        db: &mut MemKv,
+        signal_hash: &[u8; 32],
+        data_hash: [u8; 32],
+        data_tag: Vec<u8>,
+        expiry_height: u64,
+    ) {
+        let record = OracleAnchorRecord {
+            issuer_entity_id: [0x01u8; 32],
+            data_hash,
+            external_timestamp: 1,
+            source_hash: [0u8; 32],
+            expiry_height,
+            anchor_height: 10,
+            data_tag,
+        };
+        db.apply_batch(&[WriteOp::Put(
+            oracle_anchor_by_hash_key(signal_hash),
+            encode_oracle_anchor_record_v1(&record),
+        )])
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_condition_anchor_exists_passes() {
+        let mut db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        write_oracle_anchor_record(&mut db, &anchor, [0xABu8; 32], b"price/ETH-USD".to_vec(), 0);
+        let condition = PaymentCondition::AnchorExists {
+            anchor_signal_hash: anchor,
+        };
+        assert!(validate_payment_condition(&db, &condition, 100).is_ok());
+    }
+
+    #[test]
+    fn validate_condition_anchor_exists_missing_fails() {
+        let db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        let condition = PaymentCondition::AnchorExists {
+            anchor_signal_hash: anchor,
+        };
+        assert!(matches!(
+            validate_payment_condition(&db, &condition, 100),
+            Err(ExecError::PaymentConditionAnchorNotFound { anchor_signal_hash })
+                if anchor_signal_hash == anchor
+        ));
+    }
+
+    #[test]
+    fn validate_condition_data_hash_equals_passes() {
+        let mut db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        write_oracle_anchor_record(&mut db, &anchor, [0xCDu8; 32], b"tag".to_vec(), 0);
+        let condition = PaymentCondition::AnchorDataHashEquals {
+            anchor_signal_hash: anchor,
+            expected_data_hash: [0xCDu8; 32],
+        };
+        assert!(validate_payment_condition(&db, &condition, 100).is_ok());
+    }
+
+    #[test]
+    fn validate_condition_data_hash_equals_mismatch_fails() {
+        let mut db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        write_oracle_anchor_record(&mut db, &anchor, [0xCDu8; 32], b"tag".to_vec(), 0);
+        let condition = PaymentCondition::AnchorDataHashEquals {
+            anchor_signal_hash: anchor,
+            expected_data_hash: [0xEEu8; 32],
+        };
+        assert!(matches!(
+            validate_payment_condition(&db, &condition, 100),
+            Err(ExecError::PaymentConditionDataHashMismatch { expected, actual })
+                if expected == [0xEEu8; 32] && actual == [0xCDu8; 32]
+        ));
+    }
+
+    #[test]
+    fn validate_condition_data_hash_equals_missing_anchor_fails() {
+        let db = MemKv::new();
+        let condition = PaymentCondition::AnchorDataHashEquals {
+            anchor_signal_hash: [0x77u8; 32],
+            expected_data_hash: [0xEEu8; 32],
+        };
+        assert!(matches!(
+            validate_payment_condition(&db, &condition, 100),
+            Err(ExecError::PaymentConditionAnchorNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_condition_tag_equals_passes() {
+        let mut db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        write_oracle_anchor_record(&mut db, &anchor, [0x01u8; 32], b"price/ETH-USD".to_vec(), 0);
+        let condition = PaymentCondition::AnchorTagEquals {
+            anchor_signal_hash: anchor,
+            expected_tag: b"price/ETH-USD".to_vec(),
+        };
+        assert!(validate_payment_condition(&db, &condition, 100).is_ok());
+    }
+
+    #[test]
+    fn validate_condition_tag_equals_mismatch_fails() {
+        let mut db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        write_oracle_anchor_record(&mut db, &anchor, [0x01u8; 32], b"price/ETH-USD".to_vec(), 0);
+        let condition = PaymentCondition::AnchorTagEquals {
+            anchor_signal_hash: anchor,
+            expected_tag: b"price/BTC-USD".to_vec(),
+        };
+        assert!(matches!(
+            validate_payment_condition(&db, &condition, 100),
+            Err(ExecError::PaymentConditionTagMismatch)
+        ));
+    }
+
+    #[test]
+    fn validate_condition_not_expired_zero_expiry_passes() {
+        let mut db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        // expiry_height 0 = no expiry: passes at any height.
+        write_oracle_anchor_record(&mut db, &anchor, [0x01u8; 32], b"t".to_vec(), 0);
+        let condition = PaymentCondition::AnchorNotExpired {
+            anchor_signal_hash: anchor,
+        };
+        assert!(validate_payment_condition(&db, &condition, u64::MAX).is_ok());
+    }
+
+    #[test]
+    fn validate_condition_not_expired_future_passes() {
+        let mut db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        write_oracle_anchor_record(&mut db, &anchor, [0x01u8; 32], b"t".to_vec(), 100);
+        let condition = PaymentCondition::AnchorNotExpired {
+            anchor_signal_hash: anchor,
+        };
+        assert!(validate_payment_condition(&db, &condition, 50).is_ok());
+    }
+
+    #[test]
+    fn validate_condition_not_expired_boundary_passes() {
+        let mut db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        // expiry_height == current_height stays valid (>=).
+        write_oracle_anchor_record(&mut db, &anchor, [0x01u8; 32], b"t".to_vec(), 50);
+        let condition = PaymentCondition::AnchorNotExpired {
+            anchor_signal_hash: anchor,
+        };
+        assert!(validate_payment_condition(&db, &condition, 50).is_ok());
+    }
+
+    #[test]
+    fn validate_condition_not_expired_past_fails() {
+        let mut db = MemKv::new();
+        let anchor = [0x77u8; 32];
+        write_oracle_anchor_record(&mut db, &anchor, [0x01u8; 32], b"t".to_vec(), 40);
+        let condition = PaymentCondition::AnchorNotExpired {
+            anchor_signal_hash: anchor,
+        };
+        assert!(matches!(
+            validate_payment_condition(&db, &condition, 50),
+            Err(ExecError::PaymentConditionAnchorExpired {
+                expiry_height: 40,
+                current_height: 50
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_condition_not_expired_missing_anchor_fails() {
+        let db = MemKv::new();
+        let condition = PaymentCondition::AnchorNotExpired {
+            anchor_signal_hash: [0x77u8; 32],
+        };
+        assert!(matches!(
+            validate_payment_condition(&db, &condition, 50),
+            Err(ExecError::PaymentConditionAnchorNotFound { .. })
         ));
     }
 
