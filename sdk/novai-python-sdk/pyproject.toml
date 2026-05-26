@@ -61,9 +61,9 @@ include = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers -m 'not integration'"
 markers = [
-    "integration: tests that require a running NOVAI devnet (deselect with '-m \"not integration\"')",
+    "integration: tests that require a running NOVAI devnet (run with 'pytest -m integration')",
 ]
 
 [tool.mypy]
