@@ -1073,6 +1073,50 @@ pub enum ExecError<E> {
     },
     /// A stored `OracleAnchorRecord` or `OracleAnchorSummary` row failed to decode.
     OracleAnchorRecordDecodeFailed,
+    // Week 36 - Conditional execution (payment condition) errors.
+    /// `PaymentRequest` condition decoder: the condition-kind byte is not
+    /// one of the supported kinds (`PAYMENT_CONDITION_KIND_*`).
+    PaymentConditionInvalidKind {
+        /// The unrecognized kind byte.
+        byte: u8,
+    },
+    /// `PaymentRequest` condition decoder: an `AnchorTagEquals` condition
+    /// declared an `expected_tag` length outside
+    /// `[1, ORACLE_ANCHOR_DATA_TAG_MAX_LEN]`.
+    PaymentConditionInvalidTag {
+        /// Tag length the payload declared.
+        len: usize,
+    },
+    /// `PaymentRequest` condition: the referenced oracle anchor does not
+    /// exist in state. Fails `AnchorExists` and blocks evaluation of every
+    /// other anchor-referencing kind.
+    #[allow(dead_code)]
+    PaymentConditionAnchorNotFound {
+        /// `signal_hash` of the anchor the condition referenced.
+        anchor_signal_hash: [u8; 32],
+    },
+    /// `PaymentRequest` condition (`AnchorDataHashEquals`): the referenced
+    /// anchor's `data_hash` does not equal the required value.
+    #[allow(dead_code)]
+    PaymentConditionDataHashMismatch {
+        /// Required `data_hash` from the condition.
+        expected: [u8; 32],
+        /// Actual `data_hash` stored on the anchor.
+        actual: [u8; 32],
+    },
+    /// `PaymentRequest` condition (`AnchorTagEquals`): the referenced
+    /// anchor's `data_tag` does not equal the required value.
+    #[allow(dead_code)]
+    PaymentConditionTagMismatch,
+    /// `PaymentRequest` condition (`AnchorNotExpired`): the referenced
+    /// anchor's `expiry_height` is non-zero and below `current_height`.
+    #[allow(dead_code)]
+    PaymentConditionAnchorExpired {
+        /// The anchor's stored `expiry_height`.
+        expiry_height: u64,
+        /// Block height at which the payment was evaluated.
+        current_height: u64,
+    },
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -1295,6 +1339,42 @@ pub const SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_WITH_SPLITS_MAX_LEN: usiz
     SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN
         + PAYMENT_SPLITS_COUNT_PREFIX_LEN
         + MAX_PAYMENT_SPLITS * PAYMENT_SPLIT_SIZE;
+
+// Week 36 - Conditional execution (payment conditions).
+/// Marker byte that opts a `PaymentRequest` payload into the Week 36
+/// extended trailer format.
+///
+/// Written at offset `SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN`
+/// (178), where the Week 33 splits count byte would otherwise sit. The
+/// extended format carries an oracle-anchor condition, optionally followed
+/// by the Week 33 splits sub-block. The marker value is deliberately
+/// outside `[MIN_PAYMENT_SPLITS_WHEN_PRESENT, MAX_PAYMENT_SPLITS]` (and
+/// distinct from the count values 0/1/9 that existing reject tests assert
+/// against) so a legacy splits count byte is never confused with it. The
+/// decoder dispatches on the byte's value: `2..=8` is a legacy splits
+/// count, `0xC1` is the condition marker, anything else is the unchanged
+/// `PaymentSplitsBadCount` error.
+pub const PAYMENT_CONDITION_MARKER: u8 = 0xC1;
+
+/// Length of the extended-format header preceding the condition body: the
+/// marker byte plus the 1-byte condition-kind discriminant.
+pub const PAYMENT_CONDITION_HEADER_LEN: usize = 2;
+
+/// Condition kind: passes iff the referenced oracle anchor exists in
+/// state. Body: `anchor_signal_hash:32`.
+pub const PAYMENT_CONDITION_KIND_ANCHOR_EXISTS: u8 = 1;
+
+/// Condition kind: passes iff the referenced anchor's `data_hash` equals a
+/// specified value. Body: `anchor_signal_hash:32 | expected_data_hash:32`.
+pub const PAYMENT_CONDITION_KIND_ANCHOR_DATA_HASH_EQUALS: u8 = 2;
+
+/// Condition kind: passes iff the referenced anchor's `data_tag` equals a
+/// specified value. Body: `anchor_signal_hash:32 | tag_len:1 | tag[tag_len]`.
+pub const PAYMENT_CONDITION_KIND_ANCHOR_TAG_EQUALS: u8 = 3;
+
+/// Condition kind: passes iff the referenced anchor's `expiry_height` is 0
+/// (no expiry) or `>= current_height`. Body: `anchor_signal_hash:32`.
+pub const PAYMENT_CONDITION_KIND_ANCHOR_NOT_EXPIRED: u8 = 4;
 
 /// Inline-extra size for a `ServiceAttestation` signal payload.
 /// `payment_signal_hash:32 | payee_entity_id:32 | status:1`.
@@ -1928,6 +2008,204 @@ pub struct PaymentSplit {
     pub basis_points: u16,
 }
 
+/// Optional condition gating a `PaymentRequest` (Week 36, conditional
+/// execution).
+///
+/// When present, the handler evaluates the condition against committed
+/// on-chain state BEFORE moving any funds; if it does not hold the entire
+/// transaction reverts (no fee charged, consistent with every other
+/// `PaymentRequest` rejection) and nothing is persisted.
+///
+/// All v1 kinds reference a single Week 35 oracle anchor by its
+/// `signal_hash`. The referenced anchor is read with `get_oracle_anchor`;
+/// an anchor is an immutable historical commitment, so a condition
+/// evaluates purely against the stored `OracleAnchorRecord` and does NOT
+/// consult the issuing oracle's current `is_active` status.
+///
+/// Wire framing lives in `encode_/decode_signal_commitment_payload_v1`:
+/// when a condition is present, byte `PAYMENT_CONDITION_MARKER` (0xC1) is
+/// written at offset `SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN`
+/// (178), followed by a 1-byte kind discriminant and a kind-specific body,
+/// optionally followed by the same splits sub-block used by Week 33.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaymentCondition {
+    /// `PAYMENT_CONDITION_KIND_ANCHOR_EXISTS`: passes iff an
+    /// `OracleAnchorRecord` exists at `anchor_signal_hash`.
+    AnchorExists {
+        /// `signal_hash` of the referenced oracle anchor.
+        anchor_signal_hash: [u8; 32],
+    },
+    /// `PAYMENT_CONDITION_KIND_ANCHOR_DATA_HASH_EQUALS`: passes iff the
+    /// referenced anchor exists and its `data_hash` equals
+    /// `expected_data_hash`.
+    AnchorDataHashEquals {
+        /// `signal_hash` of the referenced oracle anchor.
+        anchor_signal_hash: [u8; 32],
+        /// Required value of the anchor's `data_hash`.
+        expected_data_hash: [u8; 32],
+    },
+    /// `PAYMENT_CONDITION_KIND_ANCHOR_TAG_EQUALS`: passes iff the
+    /// referenced anchor exists and its `data_tag` equals `expected_tag`
+    /// byte-for-byte. `expected_tag` is bounded
+    /// `[1, ORACLE_ANCHOR_DATA_TAG_MAX_LEN]`.
+    AnchorTagEquals {
+        /// `signal_hash` of the referenced oracle anchor.
+        anchor_signal_hash: [u8; 32],
+        /// Required value of the anchor's `data_tag` (1..=32 bytes).
+        expected_tag: Vec<u8>,
+    },
+    /// `PAYMENT_CONDITION_KIND_ANCHOR_NOT_EXPIRED`: passes iff the
+    /// referenced anchor exists and its `expiry_height` is 0 (no expiry)
+    /// or `>= current_height`.
+    AnchorNotExpired {
+        /// `signal_hash` of the referenced oracle anchor.
+        anchor_signal_hash: [u8; 32],
+    },
+}
+
+impl PaymentCondition {
+    /// Wire discriminant byte for this condition kind
+    /// (`PAYMENT_CONDITION_KIND_*`).
+    #[must_use]
+    pub const fn kind_byte(&self) -> u8 {
+        match self {
+            Self::AnchorExists { .. } => PAYMENT_CONDITION_KIND_ANCHOR_EXISTS,
+            Self::AnchorDataHashEquals { .. } => PAYMENT_CONDITION_KIND_ANCHOR_DATA_HASH_EQUALS,
+            Self::AnchorTagEquals { .. } => PAYMENT_CONDITION_KIND_ANCHOR_TAG_EQUALS,
+            Self::AnchorNotExpired { .. } => PAYMENT_CONDITION_KIND_ANCHOR_NOT_EXPIRED,
+        }
+    }
+
+    /// Encoded length of the kind-specific body (the bytes after the
+    /// marker and kind discriminant).
+    // Not a `const fn`: the `AnchorTagEquals` arm calls `Vec::len`, which
+    // reaches the slice length through `Vec`'s non-const `Deref`.
+    #[allow(clippy::missing_const_for_fn)]
+    fn body_len(&self) -> usize {
+        match self {
+            Self::AnchorExists { .. } | Self::AnchorNotExpired { .. } => 32,
+            Self::AnchorDataHashEquals { .. } => 64,
+            Self::AnchorTagEquals { expected_tag, .. } => 32 + 1 + expected_tag.len(),
+        }
+    }
+}
+
+/// Parse `count` consecutive 34-byte split entries starting at
+/// `entries_offset`. The caller MUST have validated that the payload
+/// contains exactly `entries_offset + count * PAYMENT_SPLIT_SIZE` bytes.
+/// Shared by the Week 33 legacy splits trailer and the Week 36 extended
+/// (condition + splits) trailer so both paths decode entries identically.
+fn decode_payment_splits(payload: &[u8], entries_offset: usize, count: usize) -> Vec<PaymentSplit> {
+    let mut splits = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = entries_offset + i * PAYMENT_SPLIT_SIZE;
+        let mut recipient = [0u8; 32];
+        recipient.copy_from_slice(&payload[offset..offset + 32]);
+        let basis_points = u16::from_be_bytes([payload[offset + 32], payload[offset + 33]]);
+        splits.push(PaymentSplit {
+            recipient_entity_id: recipient,
+            basis_points,
+        });
+    }
+    splits
+}
+
+/// Parse a Week 36 payment-condition trailer whose marker byte sits at
+/// `marker_offset` (== `SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN`).
+/// The caller has already checked `payload[marker_offset] ==
+/// PAYMENT_CONDITION_MARKER`. Returns the decoded condition and the offset
+/// immediately past its body, where an optional splits sub-block would
+/// begin. Rejects an unknown kind byte (`PaymentConditionInvalidKind`) and
+/// an out-of-range tag length (`PaymentConditionInvalidTag`); every other
+/// malformed length surfaces as `BadPayloadLength`.
+#[allow(clippy::similar_names)]
+fn decode_payment_condition(
+    payload: &[u8],
+    marker_offset: usize,
+) -> Result<(PaymentCondition, usize), ExecError<()>> {
+    let len = payload.len();
+    let kind_off = marker_offset + 1;
+    if len < kind_off + 1 {
+        return Err(ExecError::BadPayloadLength {
+            expected: kind_off + 1,
+            got: len,
+        });
+    }
+    let kind = payload[kind_off];
+    let body_off = kind_off + 1;
+    match kind {
+        PAYMENT_CONDITION_KIND_ANCHOR_EXISTS | PAYMENT_CONDITION_KIND_ANCHOR_NOT_EXPIRED => {
+            let end = body_off + 32;
+            if len < end {
+                return Err(ExecError::BadPayloadLength {
+                    expected: end,
+                    got: len,
+                });
+            }
+            let mut anchor_signal_hash = [0u8; 32];
+            anchor_signal_hash.copy_from_slice(&payload[body_off..end]);
+            let condition = if kind == PAYMENT_CONDITION_KIND_ANCHOR_EXISTS {
+                PaymentCondition::AnchorExists { anchor_signal_hash }
+            } else {
+                PaymentCondition::AnchorNotExpired { anchor_signal_hash }
+            };
+            Ok((condition, end))
+        }
+        PAYMENT_CONDITION_KIND_ANCHOR_DATA_HASH_EQUALS => {
+            let end = body_off + 64;
+            if len < end {
+                return Err(ExecError::BadPayloadLength {
+                    expected: end,
+                    got: len,
+                });
+            }
+            let mut anchor_signal_hash = [0u8; 32];
+            anchor_signal_hash.copy_from_slice(&payload[body_off..body_off + 32]);
+            let mut expected_data_hash = [0u8; 32];
+            expected_data_hash.copy_from_slice(&payload[body_off + 32..end]);
+            Ok((
+                PaymentCondition::AnchorDataHashEquals {
+                    anchor_signal_hash,
+                    expected_data_hash,
+                },
+                end,
+            ))
+        }
+        PAYMENT_CONDITION_KIND_ANCHOR_TAG_EQUALS => {
+            let tag_len_off = body_off + 32;
+            if len < tag_len_off + 1 {
+                return Err(ExecError::BadPayloadLength {
+                    expected: tag_len_off + 1,
+                    got: len,
+                });
+            }
+            let tag_len = payload[tag_len_off] as usize;
+            if tag_len == 0 || tag_len > ORACLE_ANCHOR_DATA_TAG_MAX_LEN {
+                return Err(ExecError::PaymentConditionInvalidTag { len: tag_len });
+            }
+            let tag_start = tag_len_off + 1;
+            let end = tag_start + tag_len;
+            if len < end {
+                return Err(ExecError::BadPayloadLength {
+                    expected: end,
+                    got: len,
+                });
+            }
+            let mut anchor_signal_hash = [0u8; 32];
+            anchor_signal_hash.copy_from_slice(&payload[body_off..body_off + 32]);
+            let expected_tag = payload[tag_start..end].to_vec();
+            Ok((
+                PaymentCondition::AnchorTagEquals {
+                    anchor_signal_hash,
+                    expected_tag,
+                },
+                end,
+            ))
+        }
+        other => Err(ExecError::PaymentConditionInvalidKind { byte: other }),
+    }
+}
+
 /// Inline payment-request tail carried in `PaymentRequest` signal
 /// payloads (Week 28, native x402 rail; extended Week 33 with the
 /// optional multi-party splits trailer).
@@ -1993,6 +2271,13 @@ pub struct PaymentRequestExtraV1 {
     /// remainder, drives SLA matching, receives attestation rep
     /// deltas).
     pub splits: Option<Vec<PaymentSplit>>,
+    /// Optional condition gating this payment (Week 36, conditional
+    /// execution). `None` reproduces the Week 28/33 wire and semantics
+    /// byte-for-byte. `Some` gates fund movement on a Week 35 oracle
+    /// anchor; if the condition does not hold the whole transaction
+    /// reverts. May be combined with `splits`: the condition is checked
+    /// first, then the splits distribute.
+    pub condition: Option<PaymentCondition>,
 }
 
 /// Inline service-attestation tail carried in `ServiceAttestation` signal
@@ -2378,14 +2663,18 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
     } else if is_subscription_cancel {
         SIGNAL_COMMITMENT_PAYLOAD_V1_SUBSCRIPTION_CANCEL_LEN
     } else if is_payment_request {
-        let splits_extra = p
-            .payment_request
-            .as_ref()
-            .and_then(|e| e.splits.as_ref())
-            .map_or(0, |v| {
-                PAYMENT_SPLITS_COUNT_PREFIX_LEN + v.len() * PAYMENT_SPLIT_SIZE
-            });
-        SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN + splits_extra
+        let extra = p.payment_request.as_ref();
+        // Week 36 condition trailer (marker + kind + kind-specific body),
+        // present only when a condition is set.
+        let cond_extra = extra
+            .and_then(|e| e.condition.as_ref())
+            .map_or(0, |c| PAYMENT_CONDITION_HEADER_LEN + c.body_len());
+        // Week 33 splits sub-block (count byte + entries). Contributes the
+        // same bytes whether it follows the legacy tail or a condition.
+        let splits_extra = extra.and_then(|e| e.splits.as_ref()).map_or(0, |v| {
+            PAYMENT_SPLITS_COUNT_PREFIX_LEN + v.len() * PAYMENT_SPLIT_SIZE
+        });
+        SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN + cond_extra + splits_extra
     } else if is_service_attestation {
         SIGNAL_COMMITMENT_PAYLOAD_V1_SERVICE_ATTESTATION_LEN
     } else if is_sla_accept {
@@ -2507,6 +2796,41 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             out.extend_from_slice(&extra.service_descriptor_hash);
             out.extend_from_slice(&extra.request_hash);
             out.extend_from_slice(&extra.max_block_height.to_be_bytes());
+            // Week 36 condition trailer: marker byte at offset 178, then a
+            // kind byte and the kind-specific body. Written only when a
+            // condition is present; absent conditions reproduce the Week
+            // 28/33 wire byte-for-byte (offset 178 is then either the start
+            // of the legacy splits count byte or the end of the payload).
+            if let Some(condition) = &extra.condition {
+                out.push(PAYMENT_CONDITION_MARKER);
+                out.push(condition.kind_byte());
+                match condition {
+                    PaymentCondition::AnchorExists { anchor_signal_hash }
+                    | PaymentCondition::AnchorNotExpired { anchor_signal_hash } => {
+                        out.extend_from_slice(anchor_signal_hash);
+                    }
+                    PaymentCondition::AnchorDataHashEquals {
+                        anchor_signal_hash,
+                        expected_data_hash,
+                    } => {
+                        out.extend_from_slice(anchor_signal_hash);
+                        out.extend_from_slice(expected_data_hash);
+                    }
+                    PaymentCondition::AnchorTagEquals {
+                        anchor_signal_hash,
+                        expected_tag,
+                    } => {
+                        out.extend_from_slice(anchor_signal_hash);
+                        let tag_len = u8::try_from(expected_tag.len())
+                            .expect("expected_tag len bounded by ORACLE_ANCHOR_DATA_TAG_MAX_LEN");
+                        out.push(tag_len);
+                        out.extend_from_slice(expected_tag);
+                    }
+                }
+            }
+            // Week 33 splits sub-block: count byte then 34-byte entries.
+            // When a condition precedes it this is the extended form; with
+            // no condition it is the legacy trailer at offset 178.
             if let Some(splits) = &extra.splits {
                 debug_assert!(
                     splits.len() >= MIN_PAYMENT_SPLITS_WHEN_PRESENT
@@ -3083,8 +3407,8 @@ pub fn decode_signal_commitment_payload_v1(
     } else if is_payment_request {
         let base = SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN;
         let len = payload.len();
-        let splits_opt = match len.cmp(&base) {
-            std::cmp::Ordering::Equal => None,
+        let (condition_opt, splits_opt) = match len.cmp(&base) {
+            std::cmp::Ordering::Equal => (None, None),
             std::cmp::Ordering::Less => {
                 return Err(ExecError::BadPayloadLength {
                     expected: base,
@@ -3092,41 +3416,81 @@ pub fn decode_signal_commitment_payload_v1(
                 });
             }
             std::cmp::Ordering::Greater => {
+                // At least one trailing byte; the byte at `base` (offset
+                // 178) discriminates the wire shape.
                 if len < base + PAYMENT_SPLITS_COUNT_PREFIX_LEN {
                     return Err(ExecError::BadPayloadLength {
                         expected: base,
                         got: len,
                     });
                 }
-                let count = payload[base] as usize;
-                if !(MIN_PAYMENT_SPLITS_WHEN_PRESENT..=MAX_PAYMENT_SPLITS).contains(&count) {
-                    return Err(ExecError::PaymentSplitsBadCount {
+                let disc = payload[base];
+                if (MIN_PAYMENT_SPLITS_WHEN_PRESENT..=MAX_PAYMENT_SPLITS).contains(&(disc as usize))
+                {
+                    // Week 33 splits trailer, no condition: count byte at
+                    // offset `base`, then `count` 34-byte entries.
+                    let count = disc as usize;
+                    let expected_len =
+                        base + PAYMENT_SPLITS_COUNT_PREFIX_LEN + count * PAYMENT_SPLIT_SIZE;
+                    if len != expected_len {
+                        return Err(ExecError::BadPayloadLength {
+                            expected: expected_len,
+                            got: len,
+                        });
+                    }
+                    let splits = decode_payment_splits(
+                        payload,
+                        base + PAYMENT_SPLITS_COUNT_PREFIX_LEN,
                         count,
+                    );
+                    (None, Some(splits))
+                } else if disc == PAYMENT_CONDITION_MARKER {
+                    // Week 36 extended trailer: a condition body, optionally
+                    // followed by a splits sub-block.
+                    let (condition, after) = decode_payment_condition(payload, base)?;
+                    let splits_opt = if after == len {
+                        None
+                    } else {
+                        if len < after + PAYMENT_SPLITS_COUNT_PREFIX_LEN {
+                            return Err(ExecError::BadPayloadLength {
+                                expected: after + PAYMENT_SPLITS_COUNT_PREFIX_LEN,
+                                got: len,
+                            });
+                        }
+                        let count = payload[after] as usize;
+                        if !(MIN_PAYMENT_SPLITS_WHEN_PRESENT..=MAX_PAYMENT_SPLITS).contains(&count)
+                        {
+                            return Err(ExecError::PaymentSplitsBadCount {
+                                count,
+                                min: MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+                                max: MAX_PAYMENT_SPLITS,
+                            });
+                        }
+                        let expected_len =
+                            after + PAYMENT_SPLITS_COUNT_PREFIX_LEN + count * PAYMENT_SPLIT_SIZE;
+                        if len != expected_len {
+                            return Err(ExecError::BadPayloadLength {
+                                expected: expected_len,
+                                got: len,
+                            });
+                        }
+                        Some(decode_payment_splits(
+                            payload,
+                            after + PAYMENT_SPLITS_COUNT_PREFIX_LEN,
+                            count,
+                        ))
+                    };
+                    (Some(condition), splits_opt)
+                } else {
+                    // Neither a legal splits count nor the condition marker:
+                    // preserve the Week 33 error so existing reject tests
+                    // (count 0/1/9) keep returning PaymentSplitsBadCount.
+                    return Err(ExecError::PaymentSplitsBadCount {
+                        count: disc as usize,
                         min: MIN_PAYMENT_SPLITS_WHEN_PRESENT,
                         max: MAX_PAYMENT_SPLITS,
                     });
                 }
-                let expected_len =
-                    base + PAYMENT_SPLITS_COUNT_PREFIX_LEN + count * PAYMENT_SPLIT_SIZE;
-                if len != expected_len {
-                    return Err(ExecError::BadPayloadLength {
-                        expected: expected_len,
-                        got: len,
-                    });
-                }
-                let mut splits = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = base + PAYMENT_SPLITS_COUNT_PREFIX_LEN + i * PAYMENT_SPLIT_SIZE;
-                    let mut recipient = [0u8; 32];
-                    recipient.copy_from_slice(&payload[offset..offset + 32]);
-                    let basis_points =
-                        u16::from_be_bytes([payload[offset + 32], payload[offset + 33]]);
-                    splits.push(PaymentSplit {
-                        recipient_entity_id: recipient,
-                        basis_points,
-                    });
-                }
-                Some(splits)
             }
         };
         let mut payee_entity_id = [0u8; 32];
@@ -3172,6 +3536,7 @@ pub fn decode_signal_commitment_payload_v1(
                 request_hash,
                 max_block_height,
                 splits: splits_opt,
+                condition: condition_opt,
             }),
             None,
             None,
@@ -14154,6 +14519,7 @@ mod tests {
             request_hash: [0xCCu8; 32],
             max_block_height: 0x1112_1314_1516_1718,
             splits: None,
+            condition: None,
         }
     }
 
@@ -14359,6 +14725,7 @@ mod tests {
             request_hash: [0xCCu8; 32],
             max_block_height: 0x1112_1314_1516_1718,
             splits: Some(splits),
+            condition: None,
         }
     }
 
@@ -14497,6 +14864,256 @@ mod tests {
         // Split 2: [0x22; 32], 2000 bp.
         assert_eq!(&bytes[247..279], &[0x22u8; 32], "splits[2].recipient");
         assert_eq!(&bytes[279..281], &2_000u16.to_be_bytes(), "splits[2].bp");
+    }
+
+    fn payment_payload_from_extra(
+        extra: PaymentRequestExtraV1,
+        issuer: [u8; 32],
+        signal_hash: [u8; 32],
+    ) -> Vec<u8> {
+        let p = SignalCommitmentPayloadV1 {
+            signal_hash,
+            signal_type: novai_ai_entities::AiSignalType::PaymentRequest,
+            issuer_entity_id: issuer,
+            reputation: None,
+            purchase: None,
+            stake_deposit: None,
+            stake_withdraw: None,
+            stake_slash: None,
+            composition_check: None,
+            proof_submission: None,
+            subscription_create: None,
+            subscription_cancel: None,
+            payment_request: Some(extra),
+            service_attestation: None,
+            sla_accept: None,
+            channel_accept: None,
+            channel_close: None,
+            channel_finalize: None,
+            oracle_anchor: None,
+        };
+        encode_signal_commitment_payload_v1(&p)
+    }
+
+    fn make_payment_request_extra_with_condition(
+        condition: PaymentCondition,
+        splits: Option<Vec<PaymentSplit>>,
+    ) -> PaymentRequestExtraV1 {
+        PaymentRequestExtraV1 {
+            payee_entity_id: [0xAAu8; 32],
+            amount: 0x0102_0304_0506_0708,
+            service_descriptor_hash: [0xBBu8; 32],
+            request_hash: [0xCCu8; 32],
+            max_block_height: 0x1112_1314_1516_1718,
+            splits,
+            condition: Some(condition),
+        }
+    }
+
+    #[test]
+    fn payment_condition_marker_is_outside_splits_count_range() {
+        // The marker MUST NOT collide with a legal splits count so a legacy
+        // splits payload (count 2..=8 at offset 178) and an extended payload
+        // (0xC1 at offset 178) are never confused.
+        assert_eq!(PAYMENT_CONDITION_MARKER, 0xC1);
+        assert!(!(MIN_PAYMENT_SPLITS_WHEN_PRESENT..=MAX_PAYMENT_SPLITS)
+            .contains(&(PAYMENT_CONDITION_MARKER as usize)));
+        assert_eq!(PAYMENT_CONDITION_HEADER_LEN, 2);
+    }
+
+    #[test]
+    fn payment_request_condition_anchor_exists_roundtrip() {
+        let issuer = [0x11u8; 32];
+        let signal_hash = [0x22u8; 32];
+        let condition = PaymentCondition::AnchorExists {
+            anchor_signal_hash: [0x77u8; 32],
+        };
+        let extra = make_payment_request_extra_with_condition(condition.clone(), None);
+        let bytes = payment_payload_from_extra(extra, issuer, signal_hash);
+        assert_eq!(bytes.len(), 178 + 2 + 32);
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        let pr = decoded.payment_request.expect("payment tail present");
+        assert_eq!(pr.condition, Some(condition));
+        assert_eq!(pr.splits, None);
+    }
+
+    #[test]
+    fn golden_vector_payment_request_condition_anchor_exists_212_bytes() {
+        let issuer = [0x55u8; 32];
+        let signal_hash = [0x66u8; 32];
+        let condition = PaymentCondition::AnchorExists {
+            anchor_signal_hash: [0x99u8; 32],
+        };
+        let extra = make_payment_request_extra_with_condition(condition, None);
+        let bytes = payment_payload_from_extra(extra, issuer, signal_hash);
+        assert_eq!(bytes.len(), 212);
+        // Bytes 0..178 are the legacy payment tail (unchanged).
+        assert_eq!(bytes[33], 16, "signal_type byte = PaymentRequest");
+        assert_eq!(&bytes[66..98], &[0xAAu8; 32], "payee_entity_id");
+        // Week 36 condition trailer.
+        assert_eq!(bytes[178], PAYMENT_CONDITION_MARKER, "marker at offset 178");
+        assert_eq!(bytes[178], 0xC1);
+        assert_eq!(
+            bytes[179], PAYMENT_CONDITION_KIND_ANCHOR_EXISTS,
+            "kind byte = anchor_exists"
+        );
+        assert_eq!(bytes[179], 1);
+        assert_eq!(
+            &bytes[180..212],
+            &[0x99u8; 32],
+            "anchor_signal_hash at 180..212"
+        );
+    }
+
+    #[test]
+    fn payment_request_condition_data_hash_equals_roundtrip() {
+        let issuer = [0x11u8; 32];
+        let signal_hash = [0x22u8; 32];
+        let condition = PaymentCondition::AnchorDataHashEquals {
+            anchor_signal_hash: [0x77u8; 32],
+            expected_data_hash: [0x88u8; 32],
+        };
+        let extra = make_payment_request_extra_with_condition(condition.clone(), None);
+        let bytes = payment_payload_from_extra(extra, issuer, signal_hash);
+        assert_eq!(bytes.len(), 178 + 2 + 64);
+        assert_eq!(bytes[179], PAYMENT_CONDITION_KIND_ANCHOR_DATA_HASH_EQUALS);
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.payment_request.unwrap().condition, Some(condition));
+    }
+
+    #[test]
+    fn payment_request_condition_tag_equals_roundtrip() {
+        let issuer = [0x11u8; 32];
+        let signal_hash = [0x22u8; 32];
+        let tag = b"price/ETH-USD".to_vec();
+        let condition = PaymentCondition::AnchorTagEquals {
+            anchor_signal_hash: [0x77u8; 32],
+            expected_tag: tag.clone(),
+        };
+        let extra = make_payment_request_extra_with_condition(condition.clone(), None);
+        let bytes = payment_payload_from_extra(extra, issuer, signal_hash);
+        assert_eq!(bytes.len(), 178 + 2 + 32 + 1 + tag.len());
+        assert_eq!(bytes[179], PAYMENT_CONDITION_KIND_ANCHOR_TAG_EQUALS);
+        assert_eq!(usize::from(bytes[212]), tag.len(), "tag_len byte");
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.payment_request.unwrap().condition, Some(condition));
+    }
+
+    #[test]
+    fn payment_request_condition_not_expired_roundtrip() {
+        let issuer = [0x11u8; 32];
+        let signal_hash = [0x22u8; 32];
+        let condition = PaymentCondition::AnchorNotExpired {
+            anchor_signal_hash: [0x77u8; 32],
+        };
+        let extra = make_payment_request_extra_with_condition(condition.clone(), None);
+        let bytes = payment_payload_from_extra(extra, issuer, signal_hash);
+        assert_eq!(bytes.len(), 212);
+        assert_eq!(bytes[179], PAYMENT_CONDITION_KIND_ANCHOR_NOT_EXPIRED);
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.payment_request.unwrap().condition, Some(condition));
+    }
+
+    #[test]
+    fn payment_request_condition_with_splits_roundtrip() {
+        let issuer = [0x33u8; 32];
+        let signal_hash = [0x44u8; 32];
+        let condition = PaymentCondition::AnchorExists {
+            anchor_signal_hash: [0x77u8; 32],
+        };
+        let splits = three_split_recipients();
+        let extra =
+            make_payment_request_extra_with_condition(condition.clone(), Some(splits.clone()));
+        let bytes = payment_payload_from_extra(extra, issuer, signal_hash);
+        // 212 (condition) + 1 (count) + 3 * 34 (entries) = 315.
+        assert_eq!(bytes.len(), 315);
+        let decoded = decode_signal_commitment_payload_v1(&bytes).expect("decode succeeds");
+        let pr = decoded.payment_request.unwrap();
+        assert_eq!(pr.condition, Some(condition));
+        assert_eq!(pr.splits, Some(splits));
+    }
+
+    #[test]
+    fn golden_vector_payment_request_condition_and_2_splits_281_bytes() {
+        let issuer = [0x55u8; 32];
+        let signal_hash = [0x66u8; 32];
+        let condition = PaymentCondition::AnchorExists {
+            anchor_signal_hash: [0x99u8; 32],
+        };
+        let splits = vec![
+            PaymentSplit {
+                recipient_entity_id: [0xAAu8; 32],
+                basis_points: 6_000,
+            },
+            PaymentSplit {
+                recipient_entity_id: [0x11u8; 32],
+                basis_points: 4_000,
+            },
+        ];
+        let extra = make_payment_request_extra_with_condition(condition, Some(splits));
+        let bytes = payment_payload_from_extra(extra, issuer, signal_hash);
+        // 212 (condition) + 1 (count) + 2 * 34 = 281 bytes. This is the SAME
+        // total length as the 3-splits-no-condition golden vector; the byte
+        // at offset 178 (0xC1 vs 3) is what disambiguates the two shapes.
+        assert_eq!(bytes.len(), 281);
+        assert_eq!(
+            bytes[178], PAYMENT_CONDITION_MARKER,
+            "0xC1 marker, not a splits count"
+        );
+        assert_eq!(bytes[179], PAYMENT_CONDITION_KIND_ANCHOR_EXISTS);
+        assert_eq!(&bytes[180..212], &[0x99u8; 32], "anchor hash");
+        assert_eq!(bytes[212], 2, "splits count after condition body");
+        assert_eq!(&bytes[213..245], &[0xAAu8; 32], "splits[0].recipient");
+        assert_eq!(&bytes[245..247], &6_000u16.to_be_bytes(), "splits[0].bp");
+        assert_eq!(&bytes[247..279], &[0x11u8; 32], "splits[1].recipient");
+        assert_eq!(&bytes[279..281], &4_000u16.to_be_bytes(), "splits[1].bp");
+    }
+
+    #[test]
+    fn payment_request_condition_invalid_kind_rejected() {
+        let issuer = [0x11u8; 32];
+        let signal_hash = [0x22u8; 32];
+        let condition = PaymentCondition::AnchorExists {
+            anchor_signal_hash: [0x77u8; 32],
+        };
+        let extra = make_payment_request_extra_with_condition(condition, None);
+        let mut bytes = payment_payload_from_extra(extra, issuer, signal_hash);
+        // Corrupt the kind byte (offset 179) to unsupported values.
+        bytes[179] = 0;
+        assert!(matches!(
+            decode_signal_commitment_payload_v1(&bytes),
+            Err(ExecError::PaymentConditionInvalidKind { byte: 0 })
+        ));
+        bytes[179] = 5;
+        assert!(matches!(
+            decode_signal_commitment_payload_v1(&bytes),
+            Err(ExecError::PaymentConditionInvalidKind { byte: 5 })
+        ));
+    }
+
+    #[test]
+    fn payment_request_condition_invalid_tag_len_rejected() {
+        let issuer = [0x11u8; 32];
+        let signal_hash = [0x22u8; 32];
+        let condition = PaymentCondition::AnchorTagEquals {
+            anchor_signal_hash: [0x77u8; 32],
+            expected_tag: b"AB".to_vec(),
+        };
+        let extra = make_payment_request_extra_with_condition(condition, None);
+        let mut bytes = payment_payload_from_extra(extra, issuer, signal_hash);
+        // tag_len byte sits at offset 180 + 32 = 212. Zero is rejected
+        // before any length check.
+        bytes[212] = 0;
+        assert!(matches!(
+            decode_signal_commitment_payload_v1(&bytes),
+            Err(ExecError::PaymentConditionInvalidTag { len: 0 })
+        ));
+        // 33 == ORACLE_ANCHOR_DATA_TAG_MAX_LEN + 1, above the bound.
+        bytes[212] = 33;
+        assert!(matches!(
+            decode_signal_commitment_payload_v1(&bytes),
+            Err(ExecError::PaymentConditionInvalidTag { len: 33 })
+        ));
     }
 
     #[test]
