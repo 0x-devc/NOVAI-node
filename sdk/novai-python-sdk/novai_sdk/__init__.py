@@ -1,19 +1,35 @@
 """NOVAI Python SDK.
 
 Pure-Python client for the NOVAI blockchain. Wraps the JSON-RPC surface and
-builds canonical signed transactions locally, with no Rust toolchain required.
+builds canonical signed transactions locally, with no Rust toolchain
+required. Tier-1 use case is letting agent-framework code talk to a NOVAI
+node from Python.
 
-Quick start:
+Quick start::
 
-    from novai_sdk import NOVAIClient, Keypair
+    from novai_sdk import NOVAIClient, Keypair, Capabilities
 
     client = NOVAIClient("http://localhost:3030")
     kp = Keypair.generate()
-    txid, amount = client.faucet(kp.address)
+    client.faucet(kp.address)
+
+    # Register an oracle entity and post an anchor:
+    result = client.register_entity(
+        keypair=kp,
+        code_hash=bytes.fromhex("..."),
+        capabilities=Capabilities.oracle(),
+    )
+    anchor = client.post_oracle_anchor(
+        keypair=kp,
+        issuer_entity_id=result.entity_id,
+        data_hash=bytes.fromhex("..."),
+        external_timestamp=1735776000,
+        data_tag="price/ETH-USD",
+    )
 """
 
 from novai_sdk.capabilities import Capabilities
-from novai_sdk.client import AsyncNOVAIClient
+from novai_sdk.client import AsyncNOVAIClient, BalanceResult, FaucetResult
 from novai_sdk.codec import (
     TX_V1_OVERHEAD,
     TxV1,
@@ -76,7 +92,26 @@ from novai_sdk.errors import (
     ValidationError,
 )
 from novai_sdk.keys import Keypair
+from novai_sdk.signals.payments import PaymentCondition, PaymentSplit
 from novai_sdk.sync_client import NOVAIClient
+from novai_sdk.types import (
+    AiEntityInfo,
+    BlockHeader,
+    ChannelDisputeStatus,
+    MemoryObjectInfo,
+    OracleAnchorInfo,
+    PaymentChannelInfo,
+    PaymentConditionJson,
+    PaymentRecord,
+    PaymentSplitJson,
+    ServiceDescriptorInfo,
+    SignalInfo,
+    SlaAgreementInfo,
+    SubmissionResult,
+    TxReceipt,
+    UpgradeRecord,
+    VkRegistrationInfo,
+)
 
 __version__ = "0.1.0"
 
@@ -94,16 +129,22 @@ __all__ = [
     "ORACLE_ANCHOR_DATA_TAG_MAX_LEN",
     "PAYMENT_CONDITION_MARKER",
     "TX_V1_OVERHEAD",
+    "AiEntityInfo",
     "AiSignalType",
     "AsyncNOVAIClient",
     "AutonomyMode",
+    "BalanceResult",
+    "BlockHeader",
     "Capabilities",
+    "ChannelDisputeStatus",
     "ChannelStatus",
     "DecodeError",
     "EncodingError",
+    "FaucetResult",
     "FeeTooLowError",
     "InvalidParamsError",
     "Keypair",
+    "MemoryObjectInfo",
     "MemoryObjectType",
     "MempoolFullError",
     "MethodNotFoundError",
@@ -111,21 +152,35 @@ __all__ = [
     "NonceTooLowError",
     "NovaiError",
     "NovaiRpcError",
+    "OracleAnchorInfo",
     "PaymentAttestationStatus",
+    "PaymentChannelInfo",
+    "PaymentCondition",
+    "PaymentConditionJson",
     "PaymentConditionKind",
+    "PaymentRecord",
+    "PaymentSplit",
+    "PaymentSplitJson",
     "ProofType",
     "RateLimitedError",
     "ResponseTooLargeError",
     "SenderLimitExceededError",
     "ServerError",
     "ServiceCategory",
+    "ServiceDescriptorInfo",
     "ServiceDescriptorStatus",
+    "SignalInfo",
+    "SlaAgreementInfo",
     "SlaStatus",
     "StateQueryError",
+    "SubmissionResult",
     "TxPayloadType",
+    "TxReceipt",
     "TxV1",
     "TxVersion",
+    "UpgradeRecord",
     "ValidationError",
+    "VkRegistrationInfo",
     "__version__",
     "address_from_pubkey",
     "compute_entity_id",
