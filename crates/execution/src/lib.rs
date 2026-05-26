@@ -7238,6 +7238,12 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         ExecError::PaymentSplitsBadCount { count, min, max } => {
             ExecError::PaymentSplitsBadCount { count, min, max }
         }
+        ExecError::PaymentConditionInvalidKind { byte } => {
+            ExecError::PaymentConditionInvalidKind { byte }
+        }
+        ExecError::PaymentConditionInvalidTag { len } => {
+            ExecError::PaymentConditionInvalidTag { len }
+        }
         _ => ExecError::Overflow,
     })?;
 

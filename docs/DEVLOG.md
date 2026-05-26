@@ -18947,3 +18947,222 @@ from registered reputation-bearing oracle entities. The `AiEntity` V5
 encoding and every prior golden vector are unchanged, and the data_hash /
 source_hash commitments lay the groundwork for Week 36 Conditional
 Execution and a future challenge mechanism.
+
+---
+
+## Week 36 - Conditional Execution
+
+**Goal**: bind payment release to a verifiable on-chain condition,
+removing the agent from the trust path. An entity can now publish a
+`PaymentRequest` whose settlement is gated on a Week 35 oracle anchor that
+the runtime evaluates atomically before any balance moves.
+
+Week 35 introduced the `OracleAnchor` signal type as a producer of
+verifiable external commitments. Week 36 adds the consumer side: a small,
+narrow set of hardcoded condition kinds plus a wire-format extension to
+`PaymentRequest`. No new tx type, no new signal type, no predicate
+language, no mini-VM.
+
+### Wire format - marker-gated extension
+
+`PaymentRequestExtraV1` gains an optional
+`condition: Option<PaymentCondition>` field. When set, the encoder writes
+a marker byte `PAYMENT_CONDITION_MARKER = 0xC1` at offset
+`SIGNAL_COMMITMENT_PAYLOAD_V1_PAYMENT_REQUEST_LEN` (178), then a 1-byte
+condition-kind discriminant and a kind-specific body, optionally followed
+by the existing Week 33 splits sub-block.
+
+The decoder dispatches on the byte value at offset 178:
+
+- `2..=8` -> legacy Week 33 splits count, decoded exactly as before.
+- `0xC1` -> Week 36 extended format: condition body, then optional splits
+  sub-block.
+- anything else -> unchanged `PaymentSplitsBadCount` error (the marker
+  value 0xC1 is deliberately outside the legal splits-count range, and
+  distinct from the values 0 / 1 / 9 that existing reject tests assert
+  against).
+
+Result: every Week 28 178-byte payload and every Week 33 splits payload
+decodes byte-for-byte identically. Two new shapes appear (condition only,
+condition + splits) without disturbing the frozen ones. The existing
+`golden_vector_payment_request_payload_178_bytes` and
+`golden_vector_payment_request_with_3_splits_payload_281_bytes` tests
+pass unchanged.
+
+### Condition kinds (`PaymentCondition` enum)
+
+All four kinds reference a single oracle anchor by its 32-byte
+`signal_hash`. The wire body for each kind:
+
+1. `AnchorExists { anchor_signal_hash }` - 32-byte body, 212-byte payload.
+2. `AnchorDataHashEquals { anchor_signal_hash, expected_data_hash }` -
+   64-byte body, 244-byte payload.
+3. `AnchorTagEquals { anchor_signal_hash, expected_tag }` -
+   `anchor_hash[32] | tag_len[1] | tag[1..=32]`, 211..=242-byte payload.
+4. `AnchorNotExpired { anchor_signal_hash }` - 32-byte body, 212-byte
+   payload.
+
+Unknown kinds and out-of-range tag lengths are rejected at decode with
+`PaymentConditionInvalidKind { byte }` and
+`PaymentConditionInvalidTag { len }` respectively.
+
+### `validate_payment_condition` and handler wiring
+
+`validate_payment_condition(db, &condition, current_height)` reads the
+referenced anchor via `get_oracle_anchor`. A missing anchor surfaces as
+`PaymentConditionAnchorNotFound` for every kind. For the other three
+kinds the function compares the anchor's stored fields against the
+condition's operand:
+
+- `AnchorDataHashEquals` ->
+  `PaymentConditionDataHashMismatch { expected, actual }`.
+- `AnchorTagEquals` -> `PaymentConditionTagMismatch`.
+- `AnchorNotExpired` -> passes when
+  `expiry_height == 0 || expiry_height >= current_height`, else
+  `PaymentConditionAnchorExpired { expiry_height, current_height }`.
+
+An anchor is an immutable historical record, so the condition NEVER reads
+the issuing oracle's current `is_active` flag (Phase 0 pushback E2). A
+deactivated oracle's anchors still satisfy conditions; the adversarial
+test `adversarial_condition_anchor_from_deactivated_oracle_still_satisfies`
+locks this in.
+
+The `PaymentRequest` handler inserts the condition check after splits
+validation and the replay guard, before the fee / balance check. Failed
+conditions return `Err(...)` before the single `db.apply_batch(&ops)` at
+the end of `apply_signal_commitment_tx_inner`, so the whole transaction
+reverts and nothing is charged (see "Fee-on-rejection correction" below).
+
+### `PaymentConditionRecord` aux row
+
+On success the executor writes a `PaymentConditionRecord` at
+`ai/payment_conditions/by_hash/<signal_hash>`:
+`version(1) | kind(1) | anchor_signal_hash(32) | operand`, where the
+operand matches the on-wire condition body. The frozen 162-byte
+`PaymentRecord` stays untouched (Phase 0 pushback E3, mirroring how Week
+33 used a separate splits aux row). The row's presence is the storage
+discriminator between unconditional and conditional payments. A shared
+`encode_payment_condition_into` helper backs both the wire encoder and
+the record encoder; the record decodes through the same
+`decode_payment_condition` routine so the two encodings cannot drift.
+
+### Fee-on-rejection correction (Phase 0)
+
+The Week 36 brief asked for "consume the tx fee on condition failure
+(consistent with Week 28 semantics)". The code-level reality is
+different: `apply_signal_commitment_tx_inner` debits the tx fee, bumps
+the nonce, and increments `total_transactions` only on an in-memory
+`entity` struct, which is pushed to a single `Vec<WriteOp>` and persisted
+by a SINGLE `db.apply_batch(&ops)` at the end of the function. Any
+`return Err(...)` before that final call discards everything. So Week 28
+in fact reverts the whole transaction on every signal-level rejection
+(replay, insufficient balance, bad splits, ...) and charges nothing on
+chain. The DEVLOG prose claiming the tx fee survives a rejection is
+misleading: the only thing that persists is the node-level mempool nonce
+cursor (`crates/node/src/main.rs:177-196`), which is not on-chain state.
+
+Week 36 inherits this behaviour: a failed condition reverts the entire
+transaction with no fee charged. Trying to break that invariant would
+require either an early second `apply_batch` (a brand-new pattern that
+breaks atomicity) or returning `Ok` for a payment that did not move
+funds (polluting node logs). Neither is desirable. The adversarial test
+`condition_anchor_exists_missing_reverts_charges_nothing` asserts the
+payer balance, payee balance, and treasury are all untouched after a
+failed condition.
+
+### Phases
+
+- **Phase 1 - types and codec** (`493a141`). `PaymentCondition` enum +
+  kind constants, the 0xC1 marker, encode / decode wired through a shared
+  `decode_payment_condition` helper, 6 new `ExecError` variants
+  (`PaymentConditionInvalidKind`, `PaymentConditionInvalidTag`, plus the
+  four eval-time variants under `allow(dead_code)` until Phase 2). Inline
+  golden vectors at 212 bytes (condition only) and 281 bytes (condition +
+  2 splits, the same length as the 3-splits-no-condition golden, with the
+  marker byte as the disambiguator). 11 codec tests in addition.
+- **Phase 2 - validator** (`5191d13`). `validate_payment_condition`
+  read-only against committed state, plus a pub `anchor_signal_hash()`
+  accessor on `PaymentCondition`. 12 unit tests covering each kind
+  passing / failing, boundary expiry, and missing anchor.
+- **Phase 3 - execution + aux record** (`b0e6794`). Handler insertion
+  after the replay guard, `PaymentConditionRecord` codec + key prefix
+  `ai/payment_conditions/by_hash/`, shared `encode_payment_condition_into`
+  helper, 15 handler tests covering each kind + condition+splits +
+  no-partial-credit + backward compat + the replay slot stays free on a
+  failed condition.
+- **Phase 4 - RPC + CLI** (`daf3c8b`). `novai_getPaymentsByEntity` JSON
+  gains an optional `condition` object (`kind`, `anchor_signal_hash`,
+  `expected_data_hash`, `expected_tag`, `expected_tag_hex` per kind);
+  `null` for unconditional payments preserves the Week 28/33 wire shape.
+  New pub helpers `get_payment_condition` and
+  `get_payments_with_splits_and_condition_by_entity` (the Week 33 helper
+  is unchanged). `novai-cli signal publish payment-request` gains
+  `--condition-kind`, `--condition-anchor`, `--condition-data-hash`,
+  `--condition-tag`, courtesy-validated client-side. 3 RPC tests + 9 CLI
+  tests.
+- **Phase 5 - adversarial tests + DEVLOG**. 5 adversarial tests:
+  same-block anchor + conditional payment settles (deterministic
+  ordering), garbage kind byte rejected at dispatch, inactive payee
+  rejected before the condition check (proves ordering), anchor from a
+  deactivated oracle still satisfies the condition (proves the design
+  decision), 3-recipient splits with a failing condition leave every
+  recipient untouched (no partial credit).
+
+### Phase 0 design pushbacks (what changed before any code shipped)
+
+The Phase 0 review verified the load-bearing facts directly against the
+code and surfaced one big correction plus several smaller decisions.
+
+1. **Fee on condition failure -> clean revert** (the Week 28 semantics
+   correction above). The brief's "consume the fee" was based on the
+   misleading DEVLOG prose; the code reverts the whole tx.
+2. **Anchor reference is by `signal_hash` only** (Q3). Precise, O(1),
+   content-addressed, no "which anchor?" ambiguity. The
+   `entity_id + tag` "latest" mode would invite oracle front-running and
+   is deferred.
+3. **No NOT-variant** (Q4). Thin use case ("not yet" vs "never"), real
+   footgun. A future deadline / escrow primitive is the better home.
+4. **No extra fee** (Q6) and **no new capability** (E1) for issuing a
+   conditional payment. One extra KV read is in line with the existing
+   handler.
+5. **Channels are out of scope for v1** (Q5). Orthogonal feature at the
+   key-prefix level.
+6. **Extensible kind byte, narrow v1** (Q8). Four kinds implemented;
+   unknown kinds rejected at decode.
+7. **Aux record on success only** (E3). The frozen 162-byte
+   `PaymentRecord` is non-negotiable; the new row mirrors the Week 33
+   splits-record precedent.
+8. **Deactivated-oracle anchors still satisfy conditions** (E2). The
+   anchor is immutable historical data.
+9. **Wire approach (A): marker-gated extension to type 16**, not a new
+   signal type 23 (Q1). Reuses the entire payment lifecycle (attestation,
+   auto-slash, splits, RPC) untouched; the only cost is overloading the
+   meaning of offset 178, neutralised by choosing 0xC1 outside the legal
+   splits-count range.
+
+### Open items
+
+- **Anchor-condition pruning**: `PaymentConditionRecord` accumulates
+  forever, like every other Week 28/33/34/35 aux row. A governance-driven
+  prune keyed on the payment's height would align with the other pending
+  prune policies.
+- **Per-kind RPC filtering**: `novai_getPaymentsByEntity` returns every
+  payment in the window; a `condition_kind` filter would let consumers
+  narrow to "all conditional payments by kind X" without an off-chain
+  pass.
+- **Composable conditions (AND / OR)**: deliberately absent in v1. The
+  kind-byte / kind-body layout leaves room for future composite kinds, or
+  for non-anchor kinds (reputation threshold, SLA status) without another
+  wire migration.
+- **Oracle-liveness gating as a kind**: a future
+  `AnchorIssuerActive { anchor_hash }` kind could re-introduce the
+  `is_active` check for callers who explicitly want it, while keeping
+  the default semantics (immutable history) for the existing kinds.
+
+**Week 36 Status: COMPLETE.** Five phases shipped across five commits,
+all execution-crate tests pass, zero clippy warnings under
+`-D warnings`, `cargo deny check licenses` passes. Agents can now bind
+payment release to a verifiable on-chain condition without leaving the
+trust path. The `AiEntity` V5 encoding stays frozen, the `PaymentRecord`
+wire format stays frozen at 162 bytes, and every Week 28 / Week 33
+golden vector and reject test passes unchanged.
