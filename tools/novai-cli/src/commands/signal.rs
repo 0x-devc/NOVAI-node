@@ -157,6 +157,28 @@ pub struct ExtendedSignalArgs {
     /// entirely to issue a legacy single-recipient payment.
     #[arg(long = "split", value_name = "HEX32:BP")]
     pub split: Vec<String>,
+
+    /// Payment condition kind (payment-request, Week 36). One of
+    /// `anchor-exists`, `anchor-data-hash-equals`, `anchor-tag-equals`,
+    /// `anchor-not-expired`. Omit for an unconditional payment.
+    #[arg(long)]
+    pub condition_kind: Option<String>,
+
+    /// Hex-encoded 32-byte oracle-anchor `signal_hash` the condition
+    /// references (payment-request, Week 36). Required when
+    /// `--condition-kind` is set.
+    #[arg(long)]
+    pub condition_anchor: Option<String>,
+
+    /// Hex-encoded 32-byte expected `data_hash` for the
+    /// `anchor-data-hash-equals` condition kind (payment-request, Week 36).
+    #[arg(long)]
+    pub condition_data_hash: Option<String>,
+
+    /// Expected `data_tag` (1..=32 bytes, UTF-8) for the
+    /// `anchor-tag-equals` condition kind (payment-request, Week 36).
+    #[arg(long)]
+    pub condition_tag: Option<String>,
 }
 
 /// Parse signal type string.
@@ -301,6 +323,80 @@ fn parse_payment_splits_flag(
         }
     }
     Ok(Some(entries))
+}
+
+/// Condition marker byte. Mirrors `novai_execution::PAYMENT_CONDITION_MARKER`.
+const PAYMENT_CONDITION_MARKER: u8 = 0xC1;
+
+/// Max condition tag length. Mirrors
+/// `novai_execution::ORACLE_ANCHOR_DATA_TAG_MAX_LEN`.
+const PAYMENT_CONDITION_TAG_MAX_LEN: usize = 32;
+
+/// Parse the `--condition-*` flags into the encoded Week 36 condition
+/// trailer bytes (`marker | kind | anchor_hash[32] | operand`), or `None`
+/// when `--condition-kind` was not supplied.
+///
+/// Courtesy-validated client-side so authoring mistakes (bad kind, missing
+/// anchor, out-of-range tag) surface before the tx hits the network; the
+/// runtime re-validates via `decode_payment_condition` and
+/// `validate_payment_condition`.
+fn parse_payment_condition_flags(extra: &ExtendedSignalArgs) -> Result<Option<Vec<u8>>, String> {
+    let Some(kind_str) = extra.condition_kind.as_deref() else {
+        return Ok(None);
+    };
+    let anchor = parse_hex32(
+        require_str(
+            &extra.condition_anchor,
+            "--condition-anchor",
+            "payment-request condition",
+        )?,
+        "condition_anchor",
+    )?;
+    let mut out = Vec::new();
+    out.push(PAYMENT_CONDITION_MARKER);
+    match kind_str {
+        "anchor-exists" => {
+            out.push(1);
+            out.extend_from_slice(&anchor);
+        }
+        "anchor-data-hash-equals" => {
+            let expected = parse_hex32(
+                require_str(
+                    &extra.condition_data_hash,
+                    "--condition-data-hash",
+                    "anchor-data-hash-equals",
+                )?,
+                "condition_data_hash",
+            )?;
+            out.push(2);
+            out.extend_from_slice(&anchor);
+            out.extend_from_slice(&expected);
+        }
+        "anchor-tag-equals" => {
+            let tag = require_str(&extra.condition_tag, "--condition-tag", "anchor-tag-equals")?
+                .as_bytes();
+            if tag.is_empty() || tag.len() > PAYMENT_CONDITION_TAG_MAX_LEN {
+                return Err(format!(
+                    "--condition-tag must be 1..={PAYMENT_CONDITION_TAG_MAX_LEN} bytes; got {}",
+                    tag.len()
+                ));
+            }
+            out.push(3);
+            out.extend_from_slice(&anchor);
+            out.push(u8::try_from(tag.len()).expect("tag len <= 32 fits in u8"));
+            out.extend_from_slice(tag);
+        }
+        "anchor-not-expired" => {
+            out.push(4);
+            out.extend_from_slice(&anchor);
+        }
+        other => {
+            return Err(format!(
+                "--condition-kind must be one of anchor-exists, anchor-data-hash-equals, anchor-tag-equals, anchor-not-expired; got {other:?}"
+            ));
+        }
+    }
+    Ok(Some(out))
 }
 
 /// Append the v2 ProofSubmission tail (`vk_len_be:4 | vk_bytes |
@@ -571,11 +667,19 @@ fn build_signal_payload(
             payload.extend_from_slice(&request);
             payload.extend_from_slice(&max_block_height.to_be_bytes());
 
-            // Week 33: optional multi-party splits trailer. When the
-            // user passed one or more `--split` flags, append
-            // `count:1 | (recipient[32] | bp_be[2])*count` to the
-            // legacy 178-byte tail. Courtesy-validated client-side
-            // before submission; the runtime re-validates everything.
+            // Week 36: optional condition trailer (marker | kind | body),
+            // appended before any splits sub-block. Built directly as bytes;
+            // the runtime decodes it via decode_payment_condition.
+            if let Some(condition_bytes) = parse_payment_condition_flags(extra)? {
+                payload.extend_from_slice(&condition_bytes);
+            }
+
+            // Week 33: optional multi-party splits trailer. When the user
+            // passed one or more `--split` flags, append
+            // `count:1 | (recipient[32] | bp_be[2])*count`. When a condition
+            // precedes it this is the extended form; otherwise the legacy
+            // count byte sits at offset 178. Courtesy-validated client-side;
+            // the runtime re-validates everything.
             if let Some(splits) = parse_payment_splits_flag(&extra.split, &payee)? {
                 let count_u8 =
                     u8::try_from(splits.len()).expect("MAX_PAYMENT_SPLITS (8) fits in u8");
@@ -802,6 +906,10 @@ mod tests {
             sla_object_id: Some("00".repeat(32)),
             buyer_entity_id: Some("00".repeat(32)),
             split: Vec::new(),
+            condition_kind: None,
+            condition_anchor: None,
+            condition_data_hash: None,
+            condition_tag: None,
         }
     }
 
@@ -1255,5 +1363,192 @@ mod tests {
         let err = build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
             .unwrap_err();
         assert!(err.contains("first --split"), "err = {err}");
+    }
+
+    // Week 36 - conditional execution CLI flags.
+
+    #[test]
+    fn test_payment_request_with_anchor_exists_condition_212_bytes() {
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0x1112_1314_1516_1718),
+            condition_kind: Some("anchor-exists".to_string()),
+            condition_anchor: Some("99".repeat(32)),
+            ..full_extra()
+        };
+        let payload = build_signal_payload(
+            [0x66u8; 32],
+            AiSignalType::PaymentRequest,
+            [0x55u8; 32],
+            &extra,
+        )
+        .unwrap();
+        assert_eq!(payload.len(), 178 + 2 + 32, "212 bytes total");
+        assert_eq!(payload[178], 0xC1, "condition marker at offset 178");
+        assert_eq!(payload[179], 1, "kind = anchor_exists");
+        assert_eq!(&payload[180..212], &[0x99u8; 32], "anchor hash");
+    }
+
+    #[test]
+    fn test_payment_request_with_data_hash_equals_condition_244_bytes() {
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0),
+            condition_kind: Some("anchor-data-hash-equals".to_string()),
+            condition_anchor: Some("99".repeat(32)),
+            condition_data_hash: Some("dd".repeat(32)),
+            ..full_extra()
+        };
+        let payload =
+            build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+                .unwrap();
+        assert_eq!(payload.len(), 178 + 2 + 64, "244 bytes total");
+        assert_eq!(payload[179], 2, "kind = data_hash_equals");
+        assert_eq!(&payload[180..212], &[0x99u8; 32]);
+        assert_eq!(&payload[212..244], &[0xDDu8; 32]);
+    }
+
+    #[test]
+    fn test_payment_request_with_tag_equals_condition() {
+        let tag = "price/ETH-USD";
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0),
+            condition_kind: Some("anchor-tag-equals".to_string()),
+            condition_anchor: Some("99".repeat(32)),
+            condition_tag: Some(tag.to_string()),
+            ..full_extra()
+        };
+        let payload =
+            build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+                .unwrap();
+        assert_eq!(payload.len(), 178 + 2 + 32 + 1 + tag.len());
+        assert_eq!(payload[179], 3, "kind = tag_equals");
+        assert_eq!(usize::from(payload[212]), tag.len(), "tag_len byte");
+        assert_eq!(&payload[213..213 + tag.len()], tag.as_bytes());
+    }
+
+    #[test]
+    fn test_payment_request_with_not_expired_condition_212_bytes() {
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0),
+            condition_kind: Some("anchor-not-expired".to_string()),
+            condition_anchor: Some("99".repeat(32)),
+            ..full_extra()
+        };
+        let payload =
+            build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+                .unwrap();
+        assert_eq!(payload.len(), 212);
+        assert_eq!(payload[179], 4, "kind = not_expired");
+    }
+
+    #[test]
+    fn test_payment_request_condition_with_splits_281_bytes() {
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0),
+            condition_kind: Some("anchor-exists".to_string()),
+            condition_anchor: Some("99".repeat(32)),
+            split: vec![
+                format!("{}:6000", "aa".repeat(32)),
+                format!("{}:4000", "11".repeat(32)),
+            ],
+            ..full_extra()
+        };
+        let payload =
+            build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+                .unwrap();
+        // 178 + condition(2 + 32) + splits(1 + 2 * 34) = 281.
+        assert_eq!(payload.len(), 281);
+        assert_eq!(payload[178], 0xC1, "condition marker, not a splits count");
+        assert_eq!(payload[179], 1, "kind = anchor_exists");
+        assert_eq!(payload[212], 2, "splits count after condition body");
+    }
+
+    #[test]
+    fn test_payment_request_condition_unknown_kind_errors() {
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0),
+            condition_kind: Some("anchor-bogus".to_string()),
+            condition_anchor: Some("99".repeat(32)),
+            ..full_extra()
+        };
+        let err = build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+            .unwrap_err();
+        assert!(err.contains("--condition-kind"), "err = {err}");
+    }
+
+    #[test]
+    fn test_payment_request_condition_missing_anchor_errors() {
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0),
+            condition_kind: Some("anchor-exists".to_string()),
+            condition_anchor: None,
+            ..full_extra()
+        };
+        let err = build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+            .unwrap_err();
+        assert!(err.contains("--condition-anchor"), "err = {err}");
+    }
+
+    #[test]
+    fn test_payment_request_data_hash_equals_missing_operand_errors() {
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0),
+            condition_kind: Some("anchor-data-hash-equals".to_string()),
+            condition_anchor: Some("99".repeat(32)),
+            condition_data_hash: None,
+            ..full_extra()
+        };
+        let err = build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+            .unwrap_err();
+        assert!(err.contains("--condition-data-hash"), "err = {err}");
+    }
+
+    #[test]
+    fn test_payment_request_tag_equals_oversized_tag_errors() {
+        let extra = ExtendedSignalArgs {
+            payee_entity_id: Some("aa".repeat(32)),
+            payment_amount: Some(10_000),
+            service_descriptor_hash: Some("bb".repeat(32)),
+            request_hash: Some("cc".repeat(32)),
+            max_block_height: Some(0),
+            condition_kind: Some("anchor-tag-equals".to_string()),
+            condition_anchor: Some("99".repeat(32)),
+            condition_tag: Some("x".repeat(33)), // 33 > 32
+            ..full_extra()
+        };
+        let err = build_signal_payload([0u8; 32], AiSignalType::PaymentRequest, [0u8; 32], &extra)
+            .unwrap_err();
+        assert!(err.contains("--condition-tag"), "err = {err}");
     }
 }

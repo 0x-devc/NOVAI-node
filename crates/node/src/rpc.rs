@@ -36,15 +36,16 @@ use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_execution::{
     get_active_sla_between, get_channels_by_party_a, get_channels_by_party_b,
     get_memory_objects_by_entity, get_oracle_anchor, get_oracle_anchors_by_entity,
-    get_oracle_anchors_by_tag, get_payment_channel, get_payments_with_splits_by_entity,
-    get_service_descriptors_by_category, get_signals_by_height, get_signals_by_issuer,
-    get_signals_by_type, get_sla_agreement, get_slas_by_buyer, get_slas_by_seller,
-    get_upgrade_history, get_vk_registration_by_id, get_vk_registrations_by_entity,
-    read_account_or_default, read_ai_entity, read_upgrade_summary, OracleAnchorRecord,
-    PaymentRecord, PaymentRole, PaymentSplitsRecord, PaymentSplitsRecordEntry, UpgradeRecord,
-    ORACLE_ANCHOR_DATA_TAG_MAX_LEN, PAYMENT_ATTESTATION_STATUS_DELIVERED,
-    PAYMENT_ATTESTATION_STATUS_FAILED, PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16,
-    PROOF_TYPE_GROTH16_REGISTERED, PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
+    get_oracle_anchors_by_tag, get_payment_channel,
+    get_payments_with_splits_and_condition_by_entity, get_service_descriptors_by_category,
+    get_signals_by_height, get_signals_by_issuer, get_signals_by_type, get_sla_agreement,
+    get_slas_by_buyer, get_slas_by_seller, get_upgrade_history, get_vk_registration_by_id,
+    get_vk_registrations_by_entity, read_account_or_default, read_ai_entity, read_upgrade_summary,
+    OracleAnchorRecord, PaymentCondition, PaymentRecord, PaymentRole, PaymentSplitsRecord,
+    PaymentSplitsRecordEntry, UpgradeRecord, ORACLE_ANCHOR_DATA_TAG_MAX_LEN,
+    PAYMENT_ATTESTATION_STATUS_DELIVERED, PAYMENT_ATTESTATION_STATUS_FAILED,
+    PAYMENT_ATTESTATION_STATUS_NONE, PROOF_TYPE_GROTH16, PROOF_TYPE_GROTH16_REGISTERED,
+    PROOF_TYPE_PLONK, PROOF_TYPE_PLONK_REGISTERED, PROOF_TYPE_STUB,
 };
 use novai_p2p::{NetworkMessage, PeerManager};
 use novai_types::{Address, TxV1, TxVersion};
@@ -295,6 +296,70 @@ impl From<PaymentSplitsRecordEntry> for PaymentSplitJson {
     }
 }
 
+/// JSON-serializable payment condition (Week 36, conditional execution).
+/// `kind` is a stable snake_case label and `anchor_signal_hash` is hex. The
+/// kind-specific operands are present only for the kinds that carry them
+/// (`expected_data_hash` for `anchor_data_hash_equals`; `expected_tag` /
+/// `expected_tag_hex` for `anchor_tag_equals`) and `null` otherwise.
+#[derive(Debug, Serialize)]
+struct PaymentConditionJson {
+    /// Condition kind: `"anchor_exists"`, `"anchor_data_hash_equals"`,
+    /// `"anchor_tag_equals"`, or `"anchor_not_expired"`.
+    kind: &'static str,
+    /// Hex-encoded 32-byte `signal_hash` of the referenced oracle anchor.
+    anchor_signal_hash: String,
+    /// Required `data_hash` (hex) for `anchor_data_hash_equals`; `null`
+    /// for other kinds.
+    expected_data_hash: Option<String>,
+    /// Required `data_tag` (lossy UTF-8) for `anchor_tag_equals`; `null`
+    /// for other kinds.
+    expected_tag: Option<String>,
+    /// Required `data_tag` (exact bytes, hex) for `anchor_tag_equals`;
+    /// `null` for other kinds.
+    expected_tag_hex: Option<String>,
+}
+
+impl From<PaymentCondition> for PaymentConditionJson {
+    fn from(c: PaymentCondition) -> Self {
+        match c {
+            PaymentCondition::AnchorExists { anchor_signal_hash } => Self {
+                kind: "anchor_exists",
+                anchor_signal_hash: hex::encode(anchor_signal_hash),
+                expected_data_hash: None,
+                expected_tag: None,
+                expected_tag_hex: None,
+            },
+            PaymentCondition::AnchorDataHashEquals {
+                anchor_signal_hash,
+                expected_data_hash,
+            } => Self {
+                kind: "anchor_data_hash_equals",
+                anchor_signal_hash: hex::encode(anchor_signal_hash),
+                expected_data_hash: Some(hex::encode(expected_data_hash)),
+                expected_tag: None,
+                expected_tag_hex: None,
+            },
+            PaymentCondition::AnchorTagEquals {
+                anchor_signal_hash,
+                expected_tag,
+            } => Self {
+                kind: "anchor_tag_equals",
+                anchor_signal_hash: hex::encode(anchor_signal_hash),
+                expected_data_hash: None,
+                expected_tag: Some(String::from_utf8_lossy(&expected_tag).into_owned()),
+                expected_tag_hex: Some(hex::encode(&expected_tag)),
+            },
+            PaymentCondition::AnchorNotExpired { anchor_signal_hash } => Self {
+                kind: "anchor_not_expired",
+                anchor_signal_hash: hex::encode(anchor_signal_hash),
+                expected_data_hash: None,
+                expected_tag: None,
+                expected_tag_hex: None,
+            },
+        }
+    }
+}
+
 /// JSON-serializable PaymentRecord. Amount is rendered as a decimal
 /// string (consistent with the rest of the RPC surface where u64/u128
 /// values are returned as strings to avoid JSON precision loss);
@@ -331,6 +396,10 @@ struct PaymentJson {
     /// storage); otherwise a length-2-to-8 array whose
     /// `credited_amount` values sum to `amount`.
     splits: Option<Vec<PaymentSplitJson>>,
+    /// Week 36: the oracle-anchor condition that gated this payment.
+    /// `null` for unconditional payments (no aux record); otherwise the
+    /// condition reconstructed from the `PaymentConditionRecord`.
+    condition: Option<PaymentConditionJson>,
 }
 
 impl From<PaymentRecord> for PaymentJson {
@@ -355,6 +424,7 @@ impl From<PaymentRecord> for PaymentJson {
             attested_status,
             attested_height,
             splits: None,
+            condition: None,
         }
     }
 }
@@ -370,6 +440,20 @@ impl PaymentJson {
         if let Some(s) = splits {
             json.splits = Some(s.entries.into_iter().map(PaymentSplitJson::from).collect());
         }
+        json
+    }
+
+    /// Build a `PaymentJson` from a `PaymentRecord` plus the optional
+    /// Week 33 splits aux row and the optional Week 36 condition aux row.
+    /// `splits` / `condition` serialise as `null` when absent, preserving
+    /// the Week 28/33 wire shapes for existing consumers.
+    fn from_record_with_splits_and_condition(
+        record: PaymentRecord,
+        splits: Option<PaymentSplitsRecord>,
+        condition: Option<PaymentCondition>,
+    ) -> Self {
+        let mut json = Self::from_record_with_splits(record, splits);
+        json.condition = condition.map(PaymentConditionJson::from);
         json
     }
 }
@@ -2276,7 +2360,7 @@ fn handle_get_payments_by_entity(
     let entity_id = parse_hex32(&params.entity_id, "entity_id")?;
 
     let db = db.lock_or_recover();
-    let payments = get_payments_with_splits_by_entity(
+    let payments = get_payments_with_splits_and_condition_by_entity(
         &*db,
         &entity_id,
         role,
@@ -2291,7 +2375,7 @@ fn handle_get_payments_by_entity(
     Ok(GetPaymentsByEntityResult {
         payments: payments
             .into_iter()
-            .map(|(r, s)| PaymentJson::from_record_with_splits(r, s))
+            .map(|(r, s, c)| PaymentJson::from_record_with_splits_and_condition(r, s, c))
             .collect(),
     })
 }
@@ -3658,6 +3742,63 @@ mod tests {
         assert_eq!(json["splits"][0]["credited_amount"], u64::MAX.to_string());
         assert!(json["splits"][0]["credited_amount"].is_string());
         assert_eq!(json["splits"][1]["credited_amount"], "0");
+    }
+
+    // ========================================================================
+    // Week 36 Phase 4 - novai_getPaymentsByEntity condition surface
+    // ========================================================================
+
+    #[test]
+    fn test_payment_json_legacy_payment_renders_condition_null() {
+        // A payment with no condition aux record serialises with
+        // `"condition": null` so Week 28/33 consumers see no shape change.
+        let json = serde_json::to_value(PaymentJson::from(sample_payment_record())).unwrap();
+        assert!(
+            json["condition"].is_null(),
+            "no condition serialises as null"
+        );
+    }
+
+    #[test]
+    fn test_payment_json_with_condition_renders_object() {
+        let record = sample_payment_record();
+        let condition = PaymentCondition::AnchorTagEquals {
+            anchor_signal_hash: [0xC1u8; 32],
+            expected_tag: b"price/ETH-USD".to_vec(),
+        };
+        let json = serde_json::to_value(PaymentJson::from_record_with_splits_and_condition(
+            record,
+            None,
+            Some(condition),
+        ))
+        .unwrap();
+        assert!(json["splits"].is_null(), "no splits when condition only");
+        assert_eq!(json["condition"]["kind"], "anchor_tag_equals");
+        assert_eq!(json["condition"]["anchor_signal_hash"], "c1".repeat(32));
+        assert_eq!(json["condition"]["expected_tag"], "price/ETH-USD");
+        assert_eq!(
+            json["condition"]["expected_tag_hex"],
+            hex::encode(b"price/ETH-USD")
+        );
+        assert!(json["condition"]["expected_data_hash"].is_null());
+    }
+
+    #[test]
+    fn test_payment_json_condition_data_hash_equals_shape() {
+        let condition = PaymentCondition::AnchorDataHashEquals {
+            anchor_signal_hash: [0xC2u8; 32],
+            expected_data_hash: [0xD4u8; 32],
+        };
+        let json = serde_json::to_value(PaymentJson::from_record_with_splits_and_condition(
+            sample_payment_record(),
+            None,
+            Some(condition),
+        ))
+        .unwrap();
+        assert_eq!(json["condition"]["kind"], "anchor_data_hash_equals");
+        assert_eq!(json["condition"]["expected_data_hash"], "d4".repeat(32));
+        assert!(json["condition"]["expected_tag"].is_null());
+        assert!(json["condition"]["expected_tag_hex"].is_null());
     }
 
     // ========================================================================

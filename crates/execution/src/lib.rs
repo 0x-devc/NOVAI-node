@@ -1113,6 +1113,10 @@ pub enum ExecError<E> {
         /// Block height at which the payment was evaluated.
         current_height: u64,
     },
+    /// A stored `PaymentConditionRecord` aux row failed to decode.
+    /// Indicates state corruption; never returned for a freshly-built
+    /// payment.
+    PaymentConditionRecordDecodeFailed,
 }
 
 impl<E> From<StateDecodeError> for ExecError<E> {
@@ -5286,6 +5290,119 @@ pub fn get_payments_with_splits_by_entity<K: Kv>(
         };
 
         results.push((record, splits));
+    }
+
+    Ok(results)
+}
+
+/// Read the `PaymentConditionRecord` aux row for a payment's `signal_hash`,
+/// if present. `Some` only for payments that carried a Week 36 condition;
+/// `None` for unconditional payments.
+///
+/// # Errors
+/// Returns `ExecError::Db` on a KV failure or
+/// `ExecError::PaymentConditionRecordDecodeFailed` if the stored value is
+/// malformed.
+pub fn get_payment_condition<K: Kv>(
+    db: &K,
+    signal_hash: &[u8; 32],
+) -> Result<Option<PaymentCondition>, ExecError<K::Error>> {
+    match db
+        .get(&payment_condition_by_hash_key(signal_hash))
+        .map_err(ExecError::Db)?
+    {
+        Some(bytes) => Ok(Some(
+            decode_payment_condition_record_v1(&bytes)
+                .map_err(|_| ExecError::PaymentConditionRecordDecodeFailed)?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Week 36: like `get_payments_with_splits_by_entity` but also resolves the
+/// optional condition aux record for every returned payment.
+///
+/// Each tuple is `(PaymentRecord, Option<PaymentSplitsRecord>,
+/// Option<PaymentCondition>)`. The second value is `Some` for multi-party
+/// payments; the third is `Some` for payments that carried a Week 36
+/// condition. Same height-windowing and key-corruption semantics as
+/// `get_payments_by_entity`.
+///
+/// # Errors
+/// Returns `ExecError::Db` if the KV scan or follow-up reads fail,
+/// `ExecError::PaymentRecordDecodeFailed` if a referenced `by_hash` or
+/// splits value is malformed,
+/// `ExecError::PaymentConditionRecordDecodeFailed` if a condition aux value
+/// is malformed, or `ExecError::CodecDecode` if an index key is shorter
+/// than expected.
+#[allow(clippy::type_complexity)]
+pub fn get_payments_with_splits_and_condition_by_entity<K: Kv>(
+    db: &K,
+    entity_id: &[u8; 32],
+    role: PaymentRole,
+    start_height: u64,
+    end_height: u64,
+) -> Result<
+    Vec<(
+        PaymentRecord,
+        Option<PaymentSplitsRecord>,
+        Option<PaymentCondition>,
+    )>,
+    ExecError<K::Error>,
+> {
+    let role_prefix: &[u8] = match role {
+        PaymentRole::Payer => KEY_PREFIX_AI_PAYMENTS_BY_PAYER,
+        PaymentRole::Payee => KEY_PREFIX_AI_PAYMENTS_BY_PAYEE,
+    };
+    let mut prefix = Vec::with_capacity(role_prefix.len() + 32);
+    prefix.extend_from_slice(role_prefix);
+    prefix.extend_from_slice(entity_id);
+
+    let entries = db.scan_prefix(&prefix).map_err(ExecError::Db)?;
+    let mut results = Vec::with_capacity(entries.len());
+
+    for (key, _value) in entries {
+        if key.len() < prefix.len() + 8 + 32 {
+            return Err(ExecError::CodecDecode(format!(
+                "payment index key too short: {} bytes",
+                key.len()
+            )));
+        }
+        let tail = &key[prefix.len()..];
+        let mut height_bytes = [0u8; 8];
+        height_bytes.copy_from_slice(&tail[..8]);
+        let height = u64::from_be_bytes(height_bytes);
+        if height < start_height || height > end_height {
+            continue;
+        }
+        let mut signal_hash = [0u8; 32];
+        signal_hash.copy_from_slice(&tail[8..40]);
+
+        let record_bytes = db
+            .get(&payment_by_hash_key(&signal_hash))
+            .map_err(ExecError::Db)?
+            .ok_or_else(|| {
+                ExecError::CodecDecode(
+                    "payment index entry references missing by_hash record".into(),
+                )
+            })?;
+        let record = decode_payment_record_v1(&record_bytes)
+            .map_err(|_| ExecError::PaymentRecordDecodeFailed)?;
+
+        let splits = match db
+            .get(&payment_splits_by_hash_key(&signal_hash))
+            .map_err(ExecError::Db)?
+        {
+            Some(bytes) => Some(
+                decode_payment_splits_record_v1(&bytes)
+                    .map_err(|_| ExecError::PaymentRecordDecodeFailed)?,
+            ),
+            None => None,
+        };
+
+        let condition = get_payment_condition(db, &signal_hash)?;
+
+        results.push((record, splits, condition));
     }
 
     Ok(results)
