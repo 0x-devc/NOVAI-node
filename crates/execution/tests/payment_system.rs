@@ -21,11 +21,13 @@
 
 use novai_ai_entities::{AiEntity, AiSignalType, AutonomyMode, Capabilities};
 use novai_execution::{
-    apply_signal_commitment_tx, decode_payment_record_v1, decode_payment_splits_record_v1,
-    encode_signal_commitment_payload_v1, payment_by_hash_key, payment_by_payee_key,
-    payment_by_payer_key, payment_splits_by_hash_key, read_ai_entity, write_ai_entity_op,
-    ExecError, PaymentRequestExtraV1, PaymentSplit, PaymentSplitsRecord, PaymentSplitsRecordEntry,
-    SignalCommitmentPayloadV1, BPS_DENOMINATOR, KEY_MARKETPLACE_TREASURY,
+    apply_signal_commitment_tx, decode_payment_condition_record_v1, decode_payment_record_v1,
+    decode_payment_splits_record_v1, encode_oracle_anchor_record_v1,
+    encode_signal_commitment_payload_v1, oracle_anchor_by_hash_key, payment_by_hash_key,
+    payment_by_payee_key, payment_by_payer_key, payment_condition_by_hash_key,
+    payment_splits_by_hash_key, read_ai_entity, write_ai_entity_op, ExecError, OracleAnchorRecord,
+    PaymentCondition, PaymentRequestExtraV1, PaymentSplit, PaymentSplitsRecord,
+    PaymentSplitsRecordEntry, SignalCommitmentPayloadV1, BPS_DENOMINATOR, KEY_MARKETPLACE_TREASURY,
     KEY_PREFIX_AI_PAYMENTS_BY_PAYEE, KEY_PREFIX_AI_PAYMENTS_BY_PAYER, MAX_PAYMENT_SPLITS,
     MIN_PAYMENT_SPLITS_WHEN_PRESENT, PAYMENT_ATTESTATION_STATUS_NONE, PAYMENT_FEE_BPS,
     PAYMENT_RECORD_LEN, PAYMENT_SPLITS_RECORD_ENTRY_SIZE, PAYMENT_SPLITS_RECORD_MAX_LEN,
@@ -2600,4 +2602,585 @@ fn adversarial_garbage_trailing_bytes_after_splits_rejected() {
         .get(&payment_splits_by_hash_key(&signal_hash))
         .unwrap()
         .is_none());
+}
+
+// ============================================================================
+// Week 36 - Conditional execution (oracle-anchor-gated payments)
+// ============================================================================
+
+/// Write an `OracleAnchorRecord` directly into the store so a payment
+/// condition has something to read. Mirrors what the OracleAnchor handler
+/// persists; the issuer / timestamp / source fields are fixed because the
+/// condition kinds only inspect data_hash, data_tag, and expiry_height.
+fn write_anchor(
+    db: &mut MemKv,
+    signal_hash: &[u8; 32],
+    data_hash: [u8; 32],
+    data_tag: &[u8],
+    expiry_height: u64,
+) {
+    let record = OracleAnchorRecord {
+        issuer_entity_id: [0x09u8; 32],
+        data_hash,
+        external_timestamp: 1,
+        source_hash: [0u8; 32],
+        expiry_height,
+        anchor_height: 1,
+        data_tag: data_tag.to_vec(),
+    };
+    db.apply_batch(&[WriteOp::Put(
+        oracle_anchor_by_hash_key(signal_hash),
+        encode_oracle_anchor_record_v1(&record),
+    )])
+    .unwrap();
+}
+
+fn build_condition_payment_payload(
+    signal_hash: [u8; 32],
+    payer: [u8; 32],
+    payee: [u8; 32],
+    amount: u64,
+    condition: PaymentCondition,
+    splits: Option<Vec<PaymentSplit>>,
+) -> Vec<u8> {
+    encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash,
+        signal_type: AiSignalType::PaymentRequest,
+        issuer_entity_id: payer,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
+        payment_request: Some(PaymentRequestExtraV1 {
+            payee_entity_id: payee,
+            amount,
+            service_descriptor_hash: [0xBBu8; 32],
+            request_hash: [0xCCu8; 32],
+            max_block_height: EXPIRY_HEIGHT,
+            splits,
+            condition: Some(condition),
+        }),
+        service_attestation: None,
+        sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
+        oracle_anchor: None,
+    })
+}
+
+#[test]
+fn condition_anchor_exists_passes_and_records() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x71u8; 32], [0x81u8; 32]);
+    let payee = make_payee(&mut db, [0x72u8; 32], [0x82u8; 32]);
+    let anchor_hash = [0xA1u8; 32];
+    write_anchor(&mut db, &anchor_hash, [0xD1u8; 32], b"price/ETH-USD", 0);
+
+    let amount = 10_000u64;
+    let signal_hash = [0x01u8; 32];
+    let condition = PaymentCondition::AnchorExists {
+        anchor_signal_hash: anchor_hash,
+    };
+    let payload = build_condition_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        amount,
+        condition.clone(),
+        None,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles when anchor exists");
+
+    let fee = expected_fee(amount);
+    let payer_after = read_ai_entity(&db, &payer.id).unwrap().unwrap();
+    let payee_after = read_ai_entity(&db, &payee.id).unwrap().unwrap();
+    assert_eq!(
+        payer_after.economic_balance,
+        PAYER_BALANCE - u128::from(amount) - fee - u128::from(SIGNAL_FEE)
+    );
+    assert_eq!(
+        payee_after.economic_balance,
+        PAYEE_BALANCE + u128::from(amount)
+    );
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_some());
+    // Condition aux record present and round-trips to the original condition.
+    let cond_bytes = db
+        .get(&payment_condition_by_hash_key(&signal_hash))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        decode_payment_condition_record_v1(&cond_bytes).unwrap(),
+        condition
+    );
+}
+
+#[test]
+fn condition_anchor_exists_missing_reverts_charges_nothing() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x73u8; 32], [0x83u8; 32]);
+    let payee = make_payee(&mut db, [0x74u8; 32], [0x84u8; 32]);
+    // No anchor written: the condition cannot be satisfied.
+    let signal_hash = [0x02u8; 32];
+    let condition = PaymentCondition::AnchorExists {
+        anchor_signal_hash: [0xB2u8; 32],
+    };
+    let payload =
+        build_condition_payment_payload(signal_hash, payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(err, ExecError::PaymentConditionAnchorNotFound { .. }),
+        "got {err:?}"
+    );
+    // Clean revert: nothing charged (not even the tx fee), no records.
+    assert_eq!(
+        read_ai_entity(&db, &payer.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        PAYER_BALANCE
+    );
+    assert_eq!(
+        read_ai_entity(&db, &payee.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        PAYEE_BALANCE
+    );
+    assert_eq!(read_treasury(&db), 0);
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_condition_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn condition_data_hash_equals_passes() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x75u8; 32], [0x85u8; 32]);
+    let payee = make_payee(&mut db, [0x76u8; 32], [0x86u8; 32]);
+    let anchor_hash = [0xA3u8; 32];
+    write_anchor(&mut db, &anchor_hash, [0xDDu8; 32], b"t", 0);
+    let condition = PaymentCondition::AnchorDataHashEquals {
+        anchor_signal_hash: anchor_hash,
+        expected_data_hash: [0xDDu8; 32],
+    };
+    let payload =
+        build_condition_payment_payload([0x03u8; 32], payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles on data_hash match");
+    assert_eq!(
+        read_ai_entity(&db, &payee.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        PAYEE_BALANCE + 10_000
+    );
+}
+
+#[test]
+fn condition_data_hash_equals_mismatch_reverts() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x77u8; 32], [0x87u8; 32]);
+    let payee = make_payee(&mut db, [0x78u8; 32], [0x88u8; 32]);
+    let anchor_hash = [0xA4u8; 32];
+    write_anchor(&mut db, &anchor_hash, [0xDDu8; 32], b"t", 0);
+    let condition = PaymentCondition::AnchorDataHashEquals {
+        anchor_signal_hash: anchor_hash,
+        expected_data_hash: [0xEEu8; 32], // does not match stored 0xDD
+    };
+    let signal_hash = [0x04u8; 32];
+    let payload =
+        build_condition_payment_payload(signal_hash, payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentConditionDataHashMismatch { expected, actual }
+                if expected == [0xEEu8; 32] && actual == [0xDDu8; 32]
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        read_ai_entity(&db, &payer.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        PAYER_BALANCE
+    );
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn condition_data_hash_equals_missing_anchor_reverts() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x79u8; 32], [0x89u8; 32]);
+    let payee = make_payee(&mut db, [0x7Au8; 32], [0x8Au8; 32]);
+    let condition = PaymentCondition::AnchorDataHashEquals {
+        anchor_signal_hash: [0xA5u8; 32],
+        expected_data_hash: [0xEEu8; 32],
+    };
+    let payload =
+        build_condition_payment_payload([0x05u8; 32], payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(err, ExecError::PaymentConditionAnchorNotFound { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn condition_tag_equals_passes() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x7Bu8; 32], [0x8Bu8; 32]);
+    let payee = make_payee(&mut db, [0x7Cu8; 32], [0x8Cu8; 32]);
+    let anchor_hash = [0xA6u8; 32];
+    write_anchor(&mut db, &anchor_hash, [0x01u8; 32], b"price/ETH-USD", 0);
+    let condition = PaymentCondition::AnchorTagEquals {
+        anchor_signal_hash: anchor_hash,
+        expected_tag: b"price/ETH-USD".to_vec(),
+    };
+    let payload =
+        build_condition_payment_payload([0x06u8; 32], payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles on tag match");
+    assert_eq!(
+        read_ai_entity(&db, &payee.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        PAYEE_BALANCE + 10_000
+    );
+}
+
+#[test]
+fn condition_tag_equals_mismatch_reverts() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x7Du8; 32], [0x8Du8; 32]);
+    let payee = make_payee(&mut db, [0x7Eu8; 32], [0x8Eu8; 32]);
+    let anchor_hash = [0xA7u8; 32];
+    write_anchor(&mut db, &anchor_hash, [0x01u8; 32], b"price/ETH-USD", 0);
+    let condition = PaymentCondition::AnchorTagEquals {
+        anchor_signal_hash: anchor_hash,
+        expected_tag: b"price/BTC-USD".to_vec(),
+    };
+    let signal_hash = [0x07u8; 32];
+    let payload =
+        build_condition_payment_payload(signal_hash, payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(err, ExecError::PaymentConditionTagMismatch),
+        "got {err:?}"
+    );
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn condition_not_expired_future_passes() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x7Fu8; 32], [0x8Fu8; 32]);
+    let payee = make_payee(&mut db, [0x70u8; 32], [0x80u8; 32]);
+    let anchor_hash = [0xA8u8; 32];
+    // expiry well past the payment height (PAYMENT_HEIGHT = 500).
+    write_anchor(&mut db, &anchor_hash, [0x01u8; 32], b"t", 1_000);
+    let condition = PaymentCondition::AnchorNotExpired {
+        anchor_signal_hash: anchor_hash,
+    };
+    let payload =
+        build_condition_payment_payload([0x08u8; 32], payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("settles when not expired");
+}
+
+#[test]
+fn condition_not_expired_zero_expiry_passes() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x61u8; 32], [0x51u8; 32]);
+    let payee = make_payee(&mut db, [0x62u8; 32], [0x52u8; 32]);
+    let anchor_hash = [0xA9u8; 32];
+    // expiry_height 0 = no expiry: valid at any height.
+    write_anchor(&mut db, &anchor_hash, [0x01u8; 32], b"t", 0);
+    let condition = PaymentCondition::AnchorNotExpired {
+        anchor_signal_hash: anchor_hash,
+    };
+    let payload =
+        build_condition_payment_payload([0x09u8; 32], payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("zero expiry never expires");
+}
+
+#[test]
+fn condition_not_expired_boundary_passes() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x63u8; 32], [0x53u8; 32]);
+    let payee = make_payee(&mut db, [0x64u8; 32], [0x54u8; 32]);
+    let anchor_hash = [0xAAu8; 32];
+    // expiry_height == PAYMENT_HEIGHT: still valid (>=).
+    write_anchor(&mut db, &anchor_hash, [0x01u8; 32], b"t", PAYMENT_HEIGHT);
+    let condition = PaymentCondition::AnchorNotExpired {
+        anchor_signal_hash: anchor_hash,
+    };
+    let payload =
+        build_condition_payment_payload([0x0Au8; 32], payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("expiry == height is valid");
+}
+
+#[test]
+fn condition_not_expired_expired_reverts() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x65u8; 32], [0x55u8; 32]);
+    let payee = make_payee(&mut db, [0x66u8; 32], [0x56u8; 32]);
+    let anchor_hash = [0xABu8; 32];
+    // expiry_height below PAYMENT_HEIGHT: expired.
+    write_anchor(&mut db, &anchor_hash, [0x01u8; 32], b"t", 100);
+    let condition = PaymentCondition::AnchorNotExpired {
+        anchor_signal_hash: anchor_hash,
+    };
+    let signal_hash = [0x0Bu8; 32];
+    let payload =
+        build_condition_payment_payload(signal_hash, payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::PaymentConditionAnchorExpired {
+                expiry_height: 100,
+                current_height: PAYMENT_HEIGHT
+            }
+        ),
+        "got {err:?}"
+    );
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn condition_with_splits_passes_writes_both_aux_records() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x67u8; 32], [0x57u8; 32]);
+    let payee = make_payee(&mut db, [0x68u8; 32], [0x58u8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x69, 0x59, true);
+    let anchor_hash = [0xACu8; 32];
+    write_anchor(&mut db, &anchor_hash, [0x01u8; 32], b"t", 0);
+
+    let amount = 10_000u64;
+    let signal_hash = [0x0Cu8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 6_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_000,
+        },
+    ];
+    let condition = PaymentCondition::AnchorExists {
+        anchor_signal_hash: anchor_hash,
+    };
+    let payload = build_condition_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        amount,
+        condition,
+        Some(splits),
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("condition + splits settle");
+
+    // Both recipients credited per their basis points.
+    assert_eq!(
+        read_ai_entity(&db, &payee.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        PAYEE_BALANCE + 6_000
+    );
+    assert_eq!(
+        read_ai_entity(&db, &r2.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        4_000
+    );
+    // Both aux rows present: splits AND condition.
+    assert!(db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_some());
+    assert!(db
+        .get(&payment_condition_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn condition_with_splits_failed_condition_no_partial_credit() {
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x6Au8; 32], [0x5Au8; 32]);
+    let payee = make_payee(&mut db, [0x6Bu8; 32], [0x5Bu8; 32]);
+    let r2 = make_split_recipient(&mut db, 0x6C, 0x5C, true);
+    // Valid splits, but the referenced anchor does not exist: splits
+    // validation passes, the condition then fails, and the whole tx
+    // reverts. No recipient is partially credited.
+    let signal_hash = [0x0Du8; 32];
+    let splits = vec![
+        PaymentSplit {
+            recipient_entity_id: payee.id,
+            basis_points: 6_000,
+        },
+        PaymentSplit {
+            recipient_entity_id: r2.id,
+            basis_points: 4_000,
+        },
+    ];
+    let condition = PaymentCondition::AnchorExists {
+        anchor_signal_hash: [0xADu8; 32],
+    };
+    let payload = build_condition_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        condition,
+        Some(splits),
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(
+        matches!(err, ExecError::PaymentConditionAnchorNotFound { .. }),
+        "got {err:?}"
+    );
+    // No partial credit anywhere; payer untouched; no aux rows.
+    assert_eq!(
+        read_ai_entity(&db, &payer.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        PAYER_BALANCE
+    );
+    assert_eq!(
+        read_ai_entity(&db, &payee.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        PAYEE_BALANCE
+    );
+    assert_eq!(
+        read_ai_entity(&db, &r2.id)
+            .unwrap()
+            .unwrap()
+            .economic_balance,
+        0
+    );
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_splits_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get(&payment_condition_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn no_condition_backward_compat_settles_without_condition_record() {
+    // A PaymentRequest with no condition behaves exactly as Week 28/33:
+    // it settles and writes NO condition aux row.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x6Du8; 32], [0x5Du8; 32]);
+    let payee = make_payee(&mut db, [0x6Eu8; 32], [0x5Eu8; 32]);
+    let signal_hash = [0x0Eu8; 32];
+    let payload = build_payment_payload(
+        signal_hash,
+        payer.id,
+        payee.id,
+        10_000,
+        [0xBBu8; 32],
+        [0xCCu8; 32],
+        EXPIRY_HEIGHT,
+    );
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).expect("no-condition payment settles");
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_some());
+    assert!(
+        db.get(&payment_condition_by_hash_key(&signal_hash))
+            .unwrap()
+            .is_none(),
+        "no condition row for a plain payment"
+    );
+}
+
+#[test]
+fn failed_condition_leaves_replay_slot_free() {
+    // A failed condition reverts the whole tx, so the by_hash replay slot
+    // is NOT consumed and the on-chain nonce does not advance. Re-submitting
+    // the SAME signal_hash after the anchor is posted settles.
+    let mut db = MemKv::new();
+    let payer = make_payer(&mut db, [0x6Fu8; 32], [0x5Fu8; 32]);
+    let payee = make_payee(&mut db, [0x60u8; 32], [0x50u8; 32]);
+    let anchor_hash = [0xAEu8; 32];
+    let signal_hash = [0x0Fu8; 32];
+    let condition = PaymentCondition::AnchorExists {
+        anchor_signal_hash: anchor_hash,
+    };
+    let payload =
+        build_condition_payment_payload(signal_hash, payer.id, payee.id, 10_000, condition, None);
+    let tx = make_tx(payer.id, 0, SIGNAL_FEE, payload);
+
+    // First attempt: anchor absent -> revert, slot free.
+    let err = apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT).unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::PaymentConditionAnchorNotFound { .. }
+    ));
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_none());
+
+    // Post the anchor and retry the identical tx (nonce 0 still matches
+    // because the failed attempt did not advance the on-chain nonce).
+    write_anchor(&mut db, &anchor_hash, [0x01u8; 32], b"t", 0);
+    apply_signal_commitment_tx(&mut db, &tx, PAYMENT_HEIGHT)
+        .expect("retry settles once anchor exists");
+    assert!(db
+        .get(&payment_by_hash_key(&signal_hash))
+        .unwrap()
+        .is_some());
 }

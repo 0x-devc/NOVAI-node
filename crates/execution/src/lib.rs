@@ -1554,6 +1554,19 @@ pub const KEY_PREFIX_AI_PAYMENTS_BY_PAYEE: &[u8] = b"ai/payments/by_payee/";
 /// trailer; absent for legacy single-recipient payments.
 pub const KEY_PREFIX_AI_PAYMENT_SPLITS_BY_HASH: &[u8] = b"ai/payment_splits/by_hash/";
 
+/// KV-key prefix for the Week 36 conditional-execution aux record indexed
+/// by the payment's `signal_hash`.
+///
+/// Layout: `b"ai/payment_conditions/by_hash/" || signal_hash[32]`. Value
+/// is an encoded `PaymentConditionRecord`
+/// (`version | kind | anchor_signal_hash[32] | kind-specific operand`).
+/// Written only when the `PaymentRequest` carried a condition and the
+/// payment fully succeeded; absent otherwise (mirrors the splits aux row).
+pub const KEY_PREFIX_AI_PAYMENT_CONDITIONS_BY_HASH: &[u8] = b"ai/payment_conditions/by_hash/";
+
+/// `PaymentConditionRecord` wire-format version byte (Week 36).
+pub const PAYMENT_CONDITION_RECORD_V1: u8 = 1;
+
 /// `PaymentSplitsRecord` wire-format version byte (Week 33).
 pub const PAYMENT_SPLITS_RECORD_V1: u8 = 1;
 
@@ -2815,30 +2828,7 @@ pub fn encode_signal_commitment_payload_v1(p: &SignalCommitmentPayloadV1) -> Vec
             // of the legacy splits count byte or the end of the payload).
             if let Some(condition) = &extra.condition {
                 out.push(PAYMENT_CONDITION_MARKER);
-                out.push(condition.kind_byte());
-                match condition {
-                    PaymentCondition::AnchorExists { anchor_signal_hash }
-                    | PaymentCondition::AnchorNotExpired { anchor_signal_hash } => {
-                        out.extend_from_slice(anchor_signal_hash);
-                    }
-                    PaymentCondition::AnchorDataHashEquals {
-                        anchor_signal_hash,
-                        expected_data_hash,
-                    } => {
-                        out.extend_from_slice(anchor_signal_hash);
-                        out.extend_from_slice(expected_data_hash);
-                    }
-                    PaymentCondition::AnchorTagEquals {
-                        anchor_signal_hash,
-                        expected_tag,
-                    } => {
-                        out.extend_from_slice(anchor_signal_hash);
-                        let tag_len = u8::try_from(expected_tag.len())
-                            .expect("expected_tag len bounded by ORACLE_ANCHOR_DATA_TAG_MAX_LEN");
-                        out.push(tag_len);
-                        out.extend_from_slice(expected_tag);
-                    }
-                }
+                encode_payment_condition_into(&mut out, condition);
             }
             // Week 33 splits sub-block: count byte then 34-byte entries.
             // When a condition precedes it this is the extended form; with
@@ -4574,6 +4564,88 @@ pub fn payment_splits_by_hash_key(signal_hash: &[u8; 32]) -> Vec<u8> {
     out
 }
 
+/// Build the canonical KV key for the Week 36 conditional-execution aux
+/// record: `b"ai/payment_conditions/by_hash/" || signal_hash[32]`.
+#[must_use]
+pub fn payment_condition_by_hash_key(signal_hash: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_PREFIX_AI_PAYMENT_CONDITIONS_BY_HASH.len() + 32);
+    out.extend_from_slice(KEY_PREFIX_AI_PAYMENT_CONDITIONS_BY_HASH);
+    out.extend_from_slice(signal_hash);
+    out
+}
+
+/// Append a condition's kind byte and kind-specific body to `out`: the
+/// bytes that follow the marker on the wire, or the version byte in a
+/// `PaymentConditionRecord`. Shared by the signal-payload encoder and the
+/// aux-record encoder so both stay in lockstep with
+/// `decode_payment_condition`.
+fn encode_payment_condition_into(out: &mut Vec<u8>, condition: &PaymentCondition) {
+    out.push(condition.kind_byte());
+    match condition {
+        PaymentCondition::AnchorExists { anchor_signal_hash }
+        | PaymentCondition::AnchorNotExpired { anchor_signal_hash } => {
+            out.extend_from_slice(anchor_signal_hash);
+        }
+        PaymentCondition::AnchorDataHashEquals {
+            anchor_signal_hash,
+            expected_data_hash,
+        } => {
+            out.extend_from_slice(anchor_signal_hash);
+            out.extend_from_slice(expected_data_hash);
+        }
+        PaymentCondition::AnchorTagEquals {
+            anchor_signal_hash,
+            expected_tag,
+        } => {
+            out.extend_from_slice(anchor_signal_hash);
+            let tag_len = u8::try_from(expected_tag.len())
+                .expect("expected_tag len bounded by ORACLE_ANCHOR_DATA_TAG_MAX_LEN");
+            out.push(tag_len);
+            out.extend_from_slice(expected_tag);
+        }
+    }
+}
+
+/// Deterministically encode a `PaymentConditionRecord` aux row (Week 36).
+///
+/// Layout: `version(1) | kind(1) | anchor_signal_hash(32) | operand`, where
+/// the operand matches the on-wire condition body, so the stored row
+/// decodes through the same `decode_payment_condition` routine.
+#[must_use]
+pub fn encode_payment_condition_record_v1(condition: &PaymentCondition) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PAYMENT_CONDITION_HEADER_LEN + condition.body_len());
+    out.push(PAYMENT_CONDITION_RECORD_V1);
+    encode_payment_condition_into(&mut out, condition);
+    out
+}
+
+/// Decode a `PaymentConditionRecord` aux row (Week 36) back into a
+/// `PaymentCondition`.
+///
+/// # Errors
+/// Returns `ExecError::BadPayloadVersion` for an unknown version byte, or a
+/// `decode_payment_condition` error (`PaymentConditionInvalidKind`,
+/// `PaymentConditionInvalidTag`, `BadPayloadLength`) for a malformed body.
+pub fn decode_payment_condition_record_v1(bytes: &[u8]) -> Result<PaymentCondition, ExecError<()>> {
+    let version = bytes.first().copied().unwrap_or(0);
+    if version != PAYMENT_CONDITION_RECORD_V1 {
+        return Err(ExecError::BadPayloadVersion {
+            expected: PAYMENT_CONDITION_RECORD_V1,
+            got: version,
+        });
+    }
+    // The record reuses the on-wire condition layout with the version byte
+    // standing in for the marker byte, so decode from offset 0.
+    let (condition, after) = decode_payment_condition(bytes, 0)?;
+    if after != bytes.len() {
+        return Err(ExecError::BadPayloadLength {
+            expected: after,
+            got: bytes.len(),
+        });
+    }
+    Ok(condition)
+}
+
 // ============================================================================
 // PAYMENT SPLITS VALIDATION (Week 33 - multi-party payment splitting)
 // ============================================================================
@@ -4705,9 +4777,6 @@ fn validate_payment_splits<K: Kv>(
 /// `PaymentConditionAnchorExpired` when the condition does not hold, or
 /// `ExecError::Db` / `ExecError::OracleAnchorRecordDecodeFailed` on a KV
 /// read failure.
-// Fully unit-tested here in Phase 2; wired into the PaymentRequest handler
-// in Phase 3, hence allow(dead_code) until the call site exists.
-#[allow(dead_code)]
 fn validate_payment_condition<K: Kv>(
     db: &K,
     condition: &PaymentCondition,
@@ -7892,6 +7961,18 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             });
         }
 
+        // Week 36: evaluate the optional condition against committed state
+        // BEFORE any balance mutation. Runs after the replay guard (a
+        // duplicate is reported as PaymentAlreadySettled first) and before
+        // the fee / balance check so funds never move on an unmet
+        // condition. A failed condition returns Err, reverting the entire
+        // transaction with nothing charged: the true Week 28
+        // fee-on-rejection semantics, since the whole signal tx commits via
+        // the single apply_batch at the end of this function.
+        if let Some(condition) = &extra.condition {
+            validate_payment_condition(db, condition, current_height)?;
+        }
+
         let amount_u128 = u128::from(extra.amount);
         let fee = amount_u128
             .checked_mul(PAYMENT_FEE_BPS)
@@ -8060,6 +8141,17 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             payment_by_payee_key(&payee.id, current_height, &payload.signal_hash),
             Vec::new(),
         ));
+
+        // Week 36: persist the gating condition so the RPC layer (Phase 4)
+        // and off-chain audit can reconstruct what released this payment.
+        // The canonical PaymentRecord stays frozen; this aux row is present
+        // only when a condition was attached (mirrors the splits aux row).
+        if let Some(condition) = &extra.condition {
+            ops.push(WriteOp::Put(
+                payment_condition_by_hash_key(&payload.signal_hash),
+                encode_payment_condition_record_v1(condition),
+            ));
+        }
 
         ops.push(write_ai_entity_op(&payee));
     }
