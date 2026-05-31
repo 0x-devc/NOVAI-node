@@ -1,4 +1,4 @@
-//! Transaction builders for all 10 NOVAI transaction types.
+//! Transaction builders for all 11 NOVAI transaction types.
 //!
 //! Each builder constructs a fully signed `TxV1` ready for submission.
 //! The caller provides the signing key, nonce, fee, and type-specific fields.
@@ -332,4 +332,95 @@ pub fn register_ai_entity_with_key(
     payload.push(capabilities.to_byte());
     payload.extend_from_slice(&initial_balance.to_be_bytes());
     build_signed(sk, nonce, fee, payload)
+}
+
+// ============================================================================
+// Type 11: Entity Upgrade (Week 34)
+// ============================================================================
+
+/// Build an entity-upgrade transaction (creator-only, swaps an entity's `code_hash`).
+///
+/// Payload: `[0x0B][entity_id:32][new_code_hash:32][reason_hash:32]` (97 bytes)
+///
+/// `reason_hash` may be `None` to omit any off-chain reason commitment (encoded
+/// as 32 zero bytes on the wire, matching the Python SDK default).
+///
+/// The chain enforces creator-only, a per-entity cooldown of
+/// `MIN_UPGRADE_INTERVAL_BLOCKS = 1000`, and rejects `new_code_hash` equal to
+/// the entity's current code hash (not validated client-side; submission will
+/// fail).
+///
+/// # Errors
+///
+/// Returns error if signing fails.
+pub fn entity_upgrade(
+    sk: &SigningKey,
+    nonce: u64,
+    fee: u64,
+    entity_id: &[u8; 32],
+    new_code_hash: &[u8; 32],
+    reason_hash: Option<&[u8; 32]>,
+) -> Result<TxV1, Error> {
+    let mut payload = Vec::with_capacity(97);
+    payload.push(11);
+    payload.extend_from_slice(entity_id);
+    payload.extend_from_slice(new_code_hash);
+    match reason_hash {
+        Some(r) => payload.extend_from_slice(r),
+        None => payload.extend_from_slice(&[0u8; 32]),
+    }
+    build_signed(sk, nonce, fee, payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    /// Golden vector: layout must match the Python
+    /// `build_entity_upgrade_payload` byte-for-byte (Week 34, 97 bytes).
+    #[test]
+    fn entity_upgrade_payload_with_reason() {
+        let sk = test_signing_key();
+        let entity_id = [0xAAu8; 32];
+        let new_code_hash = [0xBBu8; 32];
+        let reason_hash = [0xCCu8; 32];
+
+        let tx = entity_upgrade(
+            &sk,
+            0,
+            5_000,
+            &entity_id,
+            &new_code_hash,
+            Some(&reason_hash),
+        )
+        .expect("entity_upgrade should build");
+
+        assert_eq!(tx.payload.len(), 97, "EntityUpgrade payload is 97 bytes");
+        assert_eq!(tx.payload[0], 0x0B, "tx type byte is 11");
+        assert_eq!(&tx.payload[1..33], &entity_id[..]);
+        assert_eq!(&tx.payload[33..65], &new_code_hash[..]);
+        assert_eq!(&tx.payload[65..97], &reason_hash[..]);
+    }
+
+    /// `None` reason must encode as 32 zero bytes (parity with the Python
+    /// default branch in `build_entity_upgrade_payload`).
+    #[test]
+    fn entity_upgrade_payload_default_reason_is_zero() {
+        let sk = test_signing_key();
+        let entity_id = [0x11u8; 32];
+        let new_code_hash = [0x22u8; 32];
+
+        let tx = entity_upgrade(&sk, 0, 5_000, &entity_id, &new_code_hash, None)
+            .expect("entity_upgrade should build");
+
+        assert_eq!(tx.payload.len(), 97);
+        assert_eq!(tx.payload[0], 0x0B);
+        assert_eq!(&tx.payload[1..33], &entity_id[..]);
+        assert_eq!(&tx.payload[33..65], &new_code_hash[..]);
+        assert_eq!(&tx.payload[65..97], &[0u8; 32][..]);
+    }
 }

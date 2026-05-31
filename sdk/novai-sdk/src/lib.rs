@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! This SDK provides key management, transaction construction for all 10 NOVAI
+//! This SDK provides key management, transaction construction for all 11 NOVAI
 //! transaction types, and an async RPC client for node communication.
 //!
 //! # Quick Start
