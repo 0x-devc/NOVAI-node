@@ -1372,6 +1372,9 @@ pub fn start_rpc_server_with_state(
         // H-04: Per-address faucet rate limiting
         let mut faucet_last_dispense: HashMap<[u8; 32], Instant> = HashMap::new();
         let mut faucet_last_global: Option<Instant> = None;
+        // PUBLIC FAUCET: per-IP 24h cooldown state. In-memory only, resets on
+        // node restart (acceptable for v0; see comments above PUBLIC_FAUCET_*).
+        let mut public_faucet_last_dispense: HashMap<IpAddr, Instant> = HashMap::new();
 
         for mut request in server.incoming_requests() {
             // C-06: Check concurrent request limit before processing.
@@ -1403,6 +1406,33 @@ pub fn start_rpc_server_with_state(
                 .remote_addr()
                 .map(std::net::SocketAddr::ip)
                 .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+
+            // PUBLIC FAUCET PRE-ROUTER: short-circuit GET /faucet/<address>
+            // before the JSON-RPC body parse. The endpoint has its own per-IP
+            // 24h cooldown, so it is not subject to the 1Hz RPC rate limit.
+            if request.method() == &tiny_http::Method::Get && request.url().starts_with("/faucet/")
+            {
+                let (status, body) = handle_public_faucet(
+                    request.url(),
+                    client_ip,
+                    &mempool,
+                    &nonce,
+                    &faucet_key,
+                    &mut public_faucet_last_dispense,
+                );
+                let response = Response::from_string(body)
+                    .with_status_code(StatusCode(status))
+                    .with_header(
+                        "Content-Type: application/json"
+                            .parse::<tiny_http::Header>()
+                            .unwrap(),
+                    );
+                if let Err(e) = request.respond(response) {
+                    tracing::warn!(%e, "Failed to send public faucet response");
+                }
+                continue;
+            }
+
             if rpc_rate_limited(&mut per_ip_limits, client_ip, &mut last_cleanup) {
                 if let Err(e) = request.respond(
                     Response::from_string("Too Many Requests").with_status_code(StatusCode(429)),
@@ -3138,50 +3168,13 @@ fn handle_faucet(
         }
     }
 
-    let faucet_pk = faucet_sk.verifying_key();
-    let faucet_addr = address_from_pubkey(&faucet_pk);
-
-    // Get current nonce for faucet account
-    let nonce = nonce_provider.expected_nonce(&faucet_addr);
-
-    // Build transfer payload: [version:1][to:32][amount:8 BE]
-    let mut payload = Vec::with_capacity(41);
-    payload.push(1); // Transfer payload version
-    payload.extend_from_slice(&to_address);
-    payload.extend_from_slice(&FAUCET_AMOUNT.to_be_bytes());
-
-    let mut tx = TxV1 {
-        version: TxVersion::V1,
-        from: faucet_addr,
-        pubkey: faucet_pk.to_bytes(),
-        nonce,
-        fee: 100, // MIN_FEE_TRANSFER
-        payload,
-        sig: [0u8; 64],
-    };
-
-    sign_tx_v1(&faucet_sk, &mut tx).map_err(|_| RpcError {
-        code: -32000,
-        message: "Faucet transaction signing failed".to_string(),
-    })?;
-
-    let txid = txid_v1(&tx).map_err(|e| {
-        tracing::debug!(?e, "Txid computation failed");
-        RpcError {
-            code: -32000,
-            message: "Failed to compute transaction ID".to_string(),
-        }
-    })?;
-
-    // Submit to mempool
-    let mut mempool_guard = mempool.lock_or_recover();
-    mempool_guard
-        .insert(tx, nonce_provider)
-        .map_err(|_| RpcError {
-            code: -32001,
-            message: "Faucet transaction rejected by mempool".to_string(),
-        })?;
-    drop(mempool_guard);
+    let txid = dispense_transfer(
+        &faucet_sk,
+        &to_address,
+        FAUCET_AMOUNT,
+        mempool,
+        nonce_provider,
+    )?;
 
     tracing::info!(
         to = %hex::encode(to_address),
@@ -3198,6 +3191,237 @@ fn handle_faucet(
         txid: hex::encode(txid),
         amount: FAUCET_AMOUNT.to_string(),
     })
+}
+
+/// Build, sign, and submit a Type 1 transfer from the faucet account to `to_address`.
+///
+/// Shared by the dev-mode `novai_faucet` JSON-RPC method and the public
+/// `GET /faucet/<address>` HTTP endpoint so both flows take the same
+/// build-sign-mempool path. The fee is fixed at MIN_FEE_TRANSFER (100).
+fn dispense_transfer(
+    faucet_sk: &ed25519_dalek::SigningKey,
+    to_address: &[u8; 32],
+    amount: u64,
+    mempool: &Arc<Mutex<TxMempool>>,
+    nonce_provider: &SharedNonceProvider,
+) -> Result<[u8; 32], RpcError> {
+    let faucet_pk = faucet_sk.verifying_key();
+    let faucet_addr = address_from_pubkey(&faucet_pk);
+
+    let nonce = nonce_provider.expected_nonce(&faucet_addr);
+
+    // Transfer payload: [version:1][to:32][amount:8 BE]
+    let mut payload = Vec::with_capacity(41);
+    payload.push(1);
+    payload.extend_from_slice(to_address);
+    payload.extend_from_slice(&amount.to_be_bytes());
+
+    let mut tx = TxV1 {
+        version: TxVersion::V1,
+        from: faucet_addr,
+        pubkey: faucet_pk.to_bytes(),
+        nonce,
+        fee: 100, // MIN_FEE_TRANSFER
+        payload,
+        sig: [0u8; 64],
+    };
+
+    sign_tx_v1(faucet_sk, &mut tx).map_err(|_| RpcError {
+        code: -32000,
+        message: "Faucet transaction signing failed".to_string(),
+    })?;
+
+    let txid = txid_v1(&tx).map_err(|e| {
+        tracing::debug!(?e, "Txid computation failed");
+        RpcError {
+            code: -32000,
+            message: "Failed to compute transaction ID".to_string(),
+        }
+    })?;
+
+    let mut mempool_guard = mempool.lock_or_recover();
+    mempool_guard
+        .insert(tx, nonce_provider)
+        .map_err(|_| RpcError {
+            code: -32001,
+            message: "Faucet transaction rejected by mempool".to_string(),
+        })?;
+    drop(mempool_guard);
+
+    Ok(txid)
+}
+
+// ============================================================================
+// PUBLIC HTTP FAUCET (GET /faucet/<address>)
+// ============================================================================
+//
+// Separate from the dev-mode JSON-RPC novai_faucet method. The public endpoint
+// is reachable over plain HTTP and rate-limited per client IP. The faucet key
+// loader is unchanged: pass --faucet-key <path> to enable it. Without a
+// faucet key the endpoint returns 503.
+//
+// Rate-limit state (per-IP HashMap) lives on the server-thread stack frame
+// and RESETS ON NODE RESTART. Acceptable for v0 of the public devnet faucet;
+// a persistent store can replace it later.
+//
+// TODO: When deployed behind a reverse proxy (nginx, Cloudflare), the
+// request.remote_addr() peer IP will be the proxy, not the real client.
+// Parsing X-Forwarded-For safely requires a configured trusted-proxy
+// allowlist; without one, any client can spoof the header and bypass the
+// rate limit. Do NOT enable forwarded-header parsing without that allowlist.
+
+/// Drip amount per public faucet request (100K NOVAI). Sized for a developer
+/// to register an entity (5K fee), post a handful of signals (1K each), make
+/// a few payments, and try an entity upgrade without running dry.
+const PUBLIC_FAUCET_AMOUNT: u64 = 100_000;
+
+/// Per-IP cooldown for the public faucet (24 hours).
+const PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS: u64 = 24 * 3600;
+
+/// Success body for GET /faucet/<address>.
+#[derive(Debug, Serialize)]
+struct PublicFaucetSuccess {
+    txid: String,
+    amount: String,
+    to: String,
+}
+
+/// Error body for GET /faucet/<address>. `retry_after_secs` is populated only
+/// on 429 responses.
+#[derive(Debug, Serialize)]
+struct PublicFaucetError {
+    error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_secs: Option<u64>,
+}
+
+/// Extract the 32-byte address from a `/faucet/<address>` URL path.
+///
+/// Accepts an optional trailing slash. Returns `(http_status, message)` on
+/// failure so the caller can emit a matching response.
+fn parse_public_faucet_path(url: &str) -> Result<[u8; 32], (u16, String)> {
+    const PREFIX: &str = "/faucet/";
+    let tail = url
+        .strip_prefix(PREFIX)
+        .ok_or((404, "Not Found".to_string()))?;
+    let addr_hex = tail.trim_end_matches('/');
+    if addr_hex.len() != 64 {
+        return Err((
+            400,
+            format!("address must be 64 hex chars, got {}", addr_hex.len()),
+        ));
+    }
+    let bytes = hex::decode(addr_hex).map_err(|e| (400, format!("invalid address hex: {e}")))?;
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Returns `Some(remaining_secs)` if `client_ip` is still within the per-IP
+/// cooldown window, `None` if a new dispense is allowed.
+fn public_faucet_cooldown_remaining(last_dispense: Option<&Instant>, now: Instant) -> Option<u64> {
+    let last = last_dispense?;
+    let elapsed = now.duration_since(*last);
+    let cooldown = Duration::from_secs(PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS);
+    if elapsed < cooldown {
+        Some(PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS - elapsed.as_secs())
+    } else {
+        None
+    }
+}
+
+fn public_faucet_error_body(error: impl Into<String>, retry_after_secs: Option<u64>) -> String {
+    serde_json::to_string(&PublicFaucetError {
+        error: error.into(),
+        retry_after_secs,
+    })
+    .unwrap_or_else(|_| r#"{"error":"serialization failure"}"#.to_string())
+}
+
+/// Handle a `GET /faucet/<address>` request.
+///
+/// Returns `(http_status, json_body)`. Address parsing runs first so malformed
+/// inputs cannot consume an IP's daily slot. Rate-limit accounting is recorded
+/// only after the mempool accepts the transaction.
+fn handle_public_faucet(
+    url: &str,
+    client_ip: IpAddr,
+    mempool: &Arc<Mutex<TxMempool>>,
+    nonce_provider: &SharedNonceProvider,
+    faucet_key: &Option<ed25519_dalek::SigningKey>,
+    per_ip_last_dispense: &mut HashMap<IpAddr, Instant>,
+) -> (u16, String) {
+    // 1. Parse + validate the address BEFORE any rate-limit accounting or signing.
+    let to_address = match parse_public_faucet_path(url) {
+        Ok(addr) => addr,
+        Err((status, msg)) => return (status, public_faucet_error_body(msg, None)),
+    };
+
+    // 2. Reject early if no faucet key has been loaded.
+    let Some(faucet_sk) = faucet_key.as_ref() else {
+        return (
+            503,
+            public_faucet_error_body(
+                "Faucet disabled. Operator must start the node with --faucet-key <path>.",
+                None,
+            ),
+        );
+    };
+
+    // 3. Per-IP 24h cooldown.
+    let now = Instant::now();
+    if let Some(remaining) =
+        public_faucet_cooldown_remaining(per_ip_last_dispense.get(&client_ip), now)
+    {
+        return (
+            429,
+            public_faucet_error_body(
+                format!(
+                    "Rate limit: one request per IP per 24h. Try again in {remaining} seconds."
+                ),
+                Some(remaining),
+            ),
+        );
+    }
+
+    // 4. Dispense via the shared transfer-build path.
+    let txid = match dispense_transfer(
+        faucet_sk,
+        &to_address,
+        PUBLIC_FAUCET_AMOUNT,
+        mempool,
+        nonce_provider,
+    ) {
+        Ok(t) => t,
+        Err(rpc_err) => {
+            // -32001 = mempool rejection (treat as transient: 503). All other
+            // codes from dispense_transfer are signing or txid failures (500).
+            let status = if rpc_err.code == -32001 { 503 } else { 500 };
+            return (status, public_faucet_error_body(rpc_err.message, None));
+        }
+    };
+
+    // 5. Record dispense ONLY after success, so failed attempts do not burn
+    //    an IP's daily slot.
+    per_ip_last_dispense.insert(client_ip, now);
+
+    tracing::info!(
+        ip = %client_ip,
+        to = %hex::encode(to_address),
+        amount = PUBLIC_FAUCET_AMOUNT,
+        txid = %hex::encode(txid),
+        "Public faucet dispensed tokens"
+    );
+
+    let body = PublicFaucetSuccess {
+        txid: hex::encode(txid),
+        amount: PUBLIC_FAUCET_AMOUNT.to_string(),
+        to: hex::encode(to_address),
+    };
+    (
+        200,
+        serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string()),
+    )
 }
 
 // ============================================================================
@@ -4091,5 +4315,97 @@ mod tests {
         assert!(oracle_ts_in_range(150, Some(100), Some(200)));
         assert!(!oracle_ts_in_range(99, Some(100), None));
         assert!(!oracle_ts_in_range(201, None, Some(200)));
+    }
+
+    // ========================================================================
+    // Public HTTP faucet (GET /faucet/<address>)
+    // ========================================================================
+
+    #[test]
+    fn parse_public_faucet_path_valid_lowercase() {
+        let url = format!("/faucet/{}", "ab".repeat(32));
+        let addr = parse_public_faucet_path(&url).expect("valid address parses");
+        assert_eq!(addr, [0xABu8; 32]);
+    }
+
+    #[test]
+    fn parse_public_faucet_path_valid_uppercase() {
+        let url = format!("/faucet/{}", "CD".repeat(32));
+        let addr = parse_public_faucet_path(&url).expect("uppercase hex parses");
+        assert_eq!(addr, [0xCDu8; 32]);
+    }
+
+    #[test]
+    fn parse_public_faucet_path_accepts_trailing_slash() {
+        let url = format!("/faucet/{}/", "11".repeat(32));
+        let addr = parse_public_faucet_path(&url).expect("trailing slash is tolerated");
+        assert_eq!(addr, [0x11u8; 32]);
+    }
+
+    #[test]
+    fn parse_public_faucet_path_rejects_short_address() {
+        let url = format!("/faucet/{}", "ab".repeat(16)); // 32 chars, want 64
+        let (status, msg) = parse_public_faucet_path(&url).unwrap_err();
+        assert_eq!(status, 400);
+        assert!(msg.contains("64 hex chars"), "msg was {msg}");
+    }
+
+    #[test]
+    fn parse_public_faucet_path_rejects_long_address() {
+        let url = format!("/faucet/{}", "ab".repeat(40));
+        let (status, _) = parse_public_faucet_path(&url).unwrap_err();
+        assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn parse_public_faucet_path_rejects_non_hex() {
+        let url = format!("/faucet/{}", "zz".repeat(32));
+        let (status, msg) = parse_public_faucet_path(&url).unwrap_err();
+        assert_eq!(status, 400);
+        assert!(msg.contains("invalid address hex"), "msg was {msg}");
+    }
+
+    #[test]
+    fn parse_public_faucet_path_rejects_wrong_prefix() {
+        let url = format!("/feucet/{}", "ab".repeat(32));
+        let (status, _) = parse_public_faucet_path(&url).unwrap_err();
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn public_faucet_cooldown_no_prior_dispense_is_none() {
+        let now = Instant::now();
+        assert!(public_faucet_cooldown_remaining(None, now).is_none());
+    }
+
+    #[test]
+    fn public_faucet_cooldown_just_dispensed_is_within_window() {
+        let last = Instant::now();
+        // Same instant: full window minus zero elapsed, so cooldown > 0.
+        let remaining = public_faucet_cooldown_remaining(Some(&last), last)
+            .expect("just-dispensed IP must be cooling down");
+        assert!(remaining > 0);
+        assert!(remaining <= PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS);
+    }
+
+    #[test]
+    fn public_faucet_cooldown_after_window_is_none() {
+        let last = Instant::now();
+        let after = last + Duration::from_secs(PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS + 1);
+        assert!(public_faucet_cooldown_remaining(Some(&last), after).is_none());
+    }
+
+    #[test]
+    fn public_faucet_error_body_omits_retry_after_when_none() {
+        let body = public_faucet_error_body("nope", None);
+        assert!(body.contains("\"error\":\"nope\""));
+        assert!(!body.contains("retry_after_secs"));
+    }
+
+    #[test]
+    fn public_faucet_error_body_includes_retry_after_when_some() {
+        let body = public_faucet_error_body("rate-limited", Some(42));
+        assert!(body.contains("\"error\":\"rate-limited\""));
+        assert!(body.contains("\"retry_after_secs\":42"));
     }
 }
