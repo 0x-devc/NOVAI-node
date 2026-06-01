@@ -110,7 +110,6 @@ enabled = true
 |----------|---------|-----------------|
 | AWS | EC2 c6i.xlarge | Global |
 | GCP | n2-standard-4 | Global |
-| [REDACTED] | AX41-NVMe | EU only |
 | Vultr | High Frequency | Global |
 
 **Deployment checklist per seed node:**

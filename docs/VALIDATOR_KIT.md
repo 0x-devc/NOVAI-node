@@ -115,7 +115,6 @@ Storage breakdown:
 | AWS | m6i.xlarge | ~$150 |
 | GCP | n2-standard-4 | ~$140 |
 | Azure | Standard_D4s_v3 | ~$145 |
-| [REDACTED] | AX41-NVMe | ~$50 |
 | OVH | Advance-1 | ~$60 |
 
 **Note**: Costs are estimates. Always verify current pricing.
