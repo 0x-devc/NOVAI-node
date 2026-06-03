@@ -126,8 +126,9 @@ loopback polling of a node listening on `:8081`.
   captures it. Tail: `journalctl -u novai-monitor -f -o cat`.
 - Undelivered alerts (Telegram offline, network partition) are buffered
   at `/var/lib/novai-monitor/alerts_undelivered.jsonl`. Inspect with
-  `tail -n 50 /var/lib/novai-monitor/alerts_undelivered.jsonl`. Drained
-  automatically on the next successful send.
+  `tail -n 50 /var/lib/novai-monitor/alerts_undelivered.jsonl`. v0 does
+  not auto-drain on recovery; the buffer is a forensic trail. Auto-drain
+  is a v0.1 follow-up.
 - State is in-memory. A restart re-seeds counter baselines and silently
   scrapes for `NOVAI_MONITOR_REARM_GRACE_SECS` before alerting again.
   An ongoing critical incident will re-fire after the grace window.
@@ -143,3 +144,10 @@ loopback polling of a node listening on `:8081`.
 - Runs as root in v0. Hardening to a dedicated `novai` Unix user is a
   follow-up; the security gain on a read-only monitor is small relative
   to dropping root on the node itself.
+- Undelivered-alert JSONL is write-only in v0; auto-drain on Telegram
+  recovery is a v0.1 follow-up. The operator can grep the file manually
+  if a delivery outage is suspected.
+- State is in-memory; a `state.json` snapshot under
+  `/var/lib/novai-monitor/` would survive restart without re-firing
+  alerts that were already acknowledged. Deferred until v0 produces
+  measurable post-restart noise.
