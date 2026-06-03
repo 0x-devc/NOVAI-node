@@ -1473,6 +1473,7 @@ fn main() {
                 faucet_key,
                 faucet_trusted_proxies,
                 faucet_rate_limit_path,
+                Some(Arc::clone(&node.peer_manager)),
             ) {
                 tracing::error!(%e, "Failed to start RPC server");
             }

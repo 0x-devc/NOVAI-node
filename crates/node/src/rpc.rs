@@ -1368,6 +1368,7 @@ pub fn start_rpc_server_with_state(
     faucet_key: Option<ed25519_dalek::SigningKey>,
     faucet_trusted_proxies: Vec<CidrBlock>,
     faucet_rate_limit_path: PathBuf,
+    peer_manager: Option<Arc<PeerManager>>,
 ) -> Result<(), String> {
     let addr: SocketAddr = bind_addr
         .parse()
@@ -1529,7 +1530,7 @@ pub fn start_rpc_server_with_state(
             // Route to method handler
             let http_response = match rpc_request.method.as_str() {
                 "novai_submitTransaction" => {
-                    match handle_submit_tx(&rpc_request, &mempool, &nonce, &None) {
+                    match handle_submit_tx(&rpc_request, &mempool, &nonce, &peer_manager) {
                         Ok(result) => {
                             let response = RpcResponse {
                                 jsonrpc: "2.0",
