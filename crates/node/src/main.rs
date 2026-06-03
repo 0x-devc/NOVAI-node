@@ -753,6 +753,9 @@ fn main() {
             let mut rpc_port: Option<u16> = None;
             let mut rpc_bind: Option<String> = None;
             let mut faucet_key_path: Option<String> = None;
+            // Repeatable --faucet-trusted-proxy <CIDR> flag. Empty by default,
+            // which keeps the safe behavior of ignoring X-Forwarded-For.
+            let mut faucet_trusted_proxies_raw: Vec<String> = Vec::new();
             let mut base_timeout_ms: u64 = novai_consensus::BASE_TIMEOUT_MS;
             let mut storage_backend: String = "rocksdb".to_string();
             let mut data_dir: Option<String> = None;
@@ -804,6 +807,14 @@ fn main() {
                             rest.get(i + 1)
                                 .cloned()
                                 .expect("missing --faucet-key value"),
+                        );
+                        i += 2;
+                    }
+                    "--faucet-trusted-proxy" => {
+                        faucet_trusted_proxies_raw.push(
+                            rest.get(i + 1)
+                                .cloned()
+                                .expect("missing --faucet-trusted-proxy value"),
                         );
                         i += 2;
                     }
@@ -1413,6 +1424,25 @@ fn main() {
                     None
                 };
 
+            // Parse --faucet-trusted-proxy CIDR blocks. Invalid CIDRs are a
+            // hard startup error: the operator opted in explicitly, so silent
+            // misconfiguration would be worse than a refuse-to-start.
+            let faucet_trusted_proxies: Vec<rpc::CidrBlock> = faucet_trusted_proxies_raw
+                .iter()
+                .map(|s| match rpc::CidrBlock::parse(s) {
+                    Ok(cidr) => {
+                        tracing::info!("Faucet trusted-proxy CIDR: {}", s);
+                        cidr
+                    }
+                    Err(e) => fatal(format!("invalid --faucet-trusted-proxy '{s}': {e}")),
+                })
+                .collect();
+            if faucet_trusted_proxies.is_empty() {
+                tracing::info!(
+                    "Faucet X-Forwarded-For parsing DISABLED (no --faucet-trusted-proxy configured)"
+                );
+            }
+
             if let Err(e) = rpc::start_rpc_server_with_state(
                 &rpc_addr,
                 Arc::clone(&mempool),
@@ -1421,6 +1451,7 @@ fn main() {
                 dev_keys,
                 Arc::clone(&blockchain_index),
                 faucet_key,
+                faucet_trusted_proxies,
             ) {
                 tracing::error!(%e, "Failed to start RPC server");
             }

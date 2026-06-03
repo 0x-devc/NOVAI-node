@@ -1342,9 +1342,16 @@ pub fn start_rpc_server(
 /// - `nonce_provider` - Provides expected nonces for transaction validation
 /// - `db` - Shared state database for queries
 /// - `dev_keys` - Whether dev mode is active (enables faucet endpoint)
+/// - `faucet_trusted_proxies` - CIDR allowlist for X-Forwarded-For parsing
+///   on the public faucet endpoint. Empty (the safe default) means the
+///   forwarded-for header is ignored and only the TCP peer IP is trusted.
 ///
 /// # Errors
 /// Returns error if the server cannot bind to the address.
+// Refactoring the long parameter list into a config struct is deferred to a
+// follow-up: this change set is scoped to adding the trusted-proxy allowlist
+// and keeps the public signature stable apart from the new final argument.
+#[allow(clippy::too_many_arguments)]
 pub fn start_rpc_server_with_state(
     bind_addr: &str,
     mempool: Arc<Mutex<TxMempool>>,
@@ -1353,6 +1360,7 @@ pub fn start_rpc_server_with_state(
     dev_keys: bool,
     blockchain_index: Arc<Mutex<BlockchainIndex>>,
     faucet_key: Option<ed25519_dalek::SigningKey>,
+    faucet_trusted_proxies: Vec<CidrBlock>,
 ) -> Result<(), String> {
     let addr: SocketAddr = bind_addr
         .parse()
@@ -1401,8 +1409,11 @@ pub fn start_rpc_server_with_state(
             }
             let _req_guard = RequestGuard(&active_requests);
 
-            // Per-IP rate limiting: sliding 1-second window
-            let client_ip = request
+            // Per-IP rate limiting: sliding 1-second window.
+            // peer_ip is the TCP-level peer (the proxy if one sits in front).
+            // The public faucet path resolves the real client below via
+            // resolve_client_ip when faucet_trusted_proxies is configured.
+            let peer_ip = request
                 .remote_addr()
                 .map(std::net::SocketAddr::ip)
                 .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
@@ -1412,9 +1423,14 @@ pub fn start_rpc_server_with_state(
             // 24h cooldown, so it is not subject to the 1Hz RPC rate limit.
             if request.method() == &tiny_http::Method::Get && request.url().starts_with("/faucet/")
             {
+                // Resolve the real client through the configured trusted-proxy
+                // allowlist. With no trusted proxies (the default) this returns
+                // peer_ip unchanged and any X-Forwarded-For value is ignored.
+                let faucet_client_ip =
+                    resolve_client_ip(peer_ip, request.headers(), &faucet_trusted_proxies);
                 let (status, body) = handle_public_faucet(
                     request.url(),
-                    client_ip,
+                    faucet_client_ip,
                     &mempool,
                     &nonce,
                     &faucet_key,
@@ -1433,7 +1449,7 @@ pub fn start_rpc_server_with_state(
                 continue;
             }
 
-            if rpc_rate_limited(&mut per_ip_limits, client_ip, &mut last_cleanup) {
+            if rpc_rate_limited(&mut per_ip_limits, peer_ip, &mut last_cleanup) {
                 if let Err(e) = request.respond(
                     Response::from_string("Too Many Requests").with_status_code(StatusCode(429)),
                 ) {
@@ -3264,11 +3280,139 @@ fn dispense_transfer(
 // and RESETS ON NODE RESTART. Acceptable for v0 of the public devnet faucet;
 // a persistent store can replace it later.
 //
-// TODO: When deployed behind a reverse proxy (nginx, Cloudflare), the
-// request.remote_addr() peer IP will be the proxy, not the real client.
-// Parsing X-Forwarded-For safely requires a configured trusted-proxy
-// allowlist; without one, any client can spoof the header and bypass the
-// rate limit. Do NOT enable forwarded-header parsing without that allowlist.
+// X-FORWARDED-FOR HANDLING:
+//
+// When deployed behind a reverse proxy (nginx, Cloudflare), request.remote_addr()
+// returns the proxy IP, not the real client. Parsing X-Forwarded-For without
+// restriction is unsafe (any client can spoof the header), so the operator must
+// explicitly enumerate trusted proxies via repeatable --faucet-trusted-proxy <CIDR>
+// flags. With no trusted proxies (the default) the forwarded-for header is ignored
+// and only the TCP peer IP is trusted. See resolve_client_ip for the rightward-walk
+// algorithm.
+
+/// A single CIDR block (IPv4 or IPv6) on the faucet trusted-proxy allowlist.
+///
+/// Used by resolve_client_ip to decide whether the TCP peer is allowed to set
+/// X-Forwarded-For on a faucet request, and to decide whether each intermediate
+/// hop in the XFF chain is also trusted.
+///
+/// CIDR matching is implemented inline (~30 LOC of bit math on u32 / u128) so
+/// that the node binary does not take a new direct dependency just for this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CidrBlock {
+    network: IpAddr,
+    prefix_len: u8,
+}
+
+impl CidrBlock {
+    /// Parse a CIDR block such as `10.0.0.0/8` or `2001:db8::/32`.
+    ///
+    /// Returns `Err(message)` if the form is malformed, the address does not
+    /// parse, the prefix length is missing or non-numeric, or the prefix
+    /// length exceeds the address family's maximum (32 for v4, 128 for v6).
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let (ip_str, prefix_str) = s
+            .split_once('/')
+            .ok_or_else(|| format!("CIDR missing '/<prefix>': {s}"))?;
+        let network: IpAddr = ip_str
+            .parse()
+            .map_err(|e| format!("invalid CIDR address '{ip_str}': {e}"))?;
+        let prefix_len: u8 = prefix_str
+            .parse()
+            .map_err(|e| format!("invalid CIDR prefix '{prefix_str}': {e}"))?;
+        let max = match network {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if prefix_len > max {
+            return Err(format!(
+                "CIDR prefix /{prefix_len} exceeds max /{max} for address family"
+            ));
+        }
+        Ok(CidrBlock {
+            network,
+            prefix_len,
+        })
+    }
+
+    /// Test whether an IP falls inside this CIDR block. v4 only matches v4
+    /// and v6 only matches v6 (no IPv4-mapped-IPv6 confusion).
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.network, ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                if self.prefix_len == 0 {
+                    return true;
+                }
+                let mask: u32 = !0u32 << (32 - self.prefix_len);
+                (u32::from(net) & mask) == (u32::from(ip) & mask)
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                if self.prefix_len == 0 {
+                    return true;
+                }
+                let mask: u128 = !0u128 << (128 - self.prefix_len);
+                (u128::from(net) & mask) == (u128::from(ip) & mask)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Resolve the real client IP given the TCP peer IP, the request headers,
+/// and the configured trusted-proxy allowlist.
+///
+/// SEMANTICS:
+/// - If `trusted_proxies` does not cover `peer_ip`, X-Forwarded-For is ignored
+///   entirely and `peer_ip` is returned. This is the safe default because any
+///   external client can forge the header otherwise.
+/// - If `peer_ip` is trusted, the X-Forwarded-For chain is walked
+///   rightmost-to-leftmost. Each entry that is itself in `trusted_proxies` is
+///   treated as another trusted hop; the first entry that is NOT trusted is
+///   the real client and is returned.
+/// - If every entry in the chain is trusted (no untrusted entry is ever
+///   reached), the leftmost entry is returned. This is the original sender
+///   from inside the trust boundary and is the standard X-Forwarded-For
+///   interpretation.
+/// - Malformed entries, empty values, and a missing header all fall back to
+///   `peer_ip`. The function never panics on hostile input.
+pub(crate) fn resolve_client_ip(
+    peer_ip: IpAddr,
+    headers: &[tiny_http::Header],
+    trusted_proxies: &[CidrBlock],
+) -> IpAddr {
+    if !ip_is_trusted(peer_ip, trusted_proxies) {
+        return peer_ip;
+    }
+    let Some(xff) = find_xff_header(headers) else {
+        return peer_ip;
+    };
+    let parsed: Vec<IpAddr> = xff
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<IpAddr>().ok())
+        .collect();
+    if parsed.is_empty() {
+        return peer_ip;
+    }
+    for ip in parsed.iter().rev() {
+        if !ip_is_trusted(*ip, trusted_proxies) {
+            return *ip;
+        }
+    }
+    parsed[0]
+}
+
+fn ip_is_trusted(ip: IpAddr, trusted_proxies: &[CidrBlock]) -> bool {
+    trusted_proxies.iter().any(|cidr| cidr.contains(ip))
+}
+
+fn find_xff_header(headers: &[tiny_http::Header]) -> Option<&str> {
+    headers
+        .iter()
+        .find(|h| h.field.equiv("X-Forwarded-For"))
+        .map(|h| h.value.as_str())
+}
 
 /// Drip amount per public faucet request (100K NOVAI). Sized for a developer
 /// to register an entity (5K fee), post a handful of signals (1K each), make
@@ -4407,5 +4551,211 @@ mod tests {
         let body = public_faucet_error_body("rate-limited", Some(42));
         assert!(body.contains("\"error\":\"rate-limited\""));
         assert!(body.contains("\"retry_after_secs\":42"));
+    }
+
+    // ========================================================================
+    // CIDR matcher (faucet trusted-proxy allowlist)
+    // ========================================================================
+
+    fn ipv4(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+    fn ipv6(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn cidr_parse_ipv4_24_contains_and_excludes() {
+        let cidr = CidrBlock::parse("10.0.0.0/24").expect("/24 parses");
+        assert!(cidr.contains(ipv4("10.0.0.0")));
+        assert!(cidr.contains(ipv4("10.0.0.5")));
+        assert!(cidr.contains(ipv4("10.0.0.255")));
+        assert!(!cidr.contains(ipv4("10.0.1.0")));
+        assert!(!cidr.contains(ipv4("11.0.0.0")));
+    }
+
+    #[test]
+    fn cidr_parse_ipv6_64_contains_and_excludes() {
+        let cidr = CidrBlock::parse("2001:db8::/64").expect("/64 parses");
+        assert!(cidr.contains(ipv6("2001:db8::1")));
+        assert!(cidr.contains(ipv6("2001:db8::ffff:ffff")));
+        assert!(!cidr.contains(ipv6("2001:db9::1")));
+    }
+
+    #[test]
+    fn cidr_parse_zero_prefix_contains_everything() {
+        let v4 = CidrBlock::parse("0.0.0.0/0").expect("/0 parses");
+        assert!(v4.contains(ipv4("1.2.3.4")));
+        assert!(v4.contains(ipv4("255.255.255.255")));
+        let v6 = CidrBlock::parse("::/0").expect("/0 v6 parses");
+        assert!(v6.contains(ipv6("::1")));
+        assert!(v6.contains(ipv6("2001:db8::1")));
+    }
+
+    #[test]
+    fn cidr_parse_invalid_prefix_too_large() {
+        assert!(CidrBlock::parse("10.0.0.0/33").is_err());
+        assert!(CidrBlock::parse("::/129").is_err());
+    }
+
+    #[test]
+    fn cidr_parse_malformed_inputs_rejected() {
+        assert!(CidrBlock::parse("garbage").is_err());
+        assert!(CidrBlock::parse("10.0.0.0").is_err());
+        assert!(CidrBlock::parse("10.0.0.0/").is_err());
+        assert!(CidrBlock::parse("/24").is_err());
+        assert!(CidrBlock::parse("10.0.0.0/abc").is_err());
+        assert!(CidrBlock::parse("999.0.0.0/8").is_err());
+    }
+
+    #[test]
+    fn cidr_v4_does_not_match_v6_and_vice_versa() {
+        let v4 = CidrBlock::parse("0.0.0.0/0").unwrap();
+        assert!(!v4.contains(ipv6("::1")));
+        let v6 = CidrBlock::parse("::/0").unwrap();
+        assert!(!v6.contains(ipv4("1.2.3.4")));
+    }
+
+    // ========================================================================
+    // resolve_client_ip (X-Forwarded-For walker)
+    // ========================================================================
+
+    fn xff_header(value: &str) -> tiny_http::Header {
+        format!("X-Forwarded-For: {value}")
+            .parse::<tiny_http::Header>()
+            .expect("XFF header parses")
+    }
+
+    fn cidrs(specs: &[&str]) -> Vec<CidrBlock> {
+        specs
+            .iter()
+            .map(|s| CidrBlock::parse(s).expect("test CIDR parses"))
+            .collect()
+    }
+
+    #[test]
+    fn resolve_no_xff_no_allowlist_returns_peer() {
+        let peer = ipv4("1.2.3.4");
+        let out = resolve_client_ip(peer, &[], &[]);
+        assert_eq!(out, peer);
+    }
+
+    #[test]
+    fn resolve_xff_present_but_no_allowlist_ignores_xff() {
+        // Safe default: even if a client sends XFF, without a configured
+        // trusted-proxy allowlist NOVAI must not honor it.
+        let peer = ipv4("1.2.3.4");
+        let headers = [xff_header("5.6.7.8")];
+        let out = resolve_client_ip(peer, &headers, &[]);
+        assert_eq!(out, peer);
+    }
+
+    #[test]
+    fn resolve_xff_peer_not_in_allowlist_ignores_xff() {
+        let peer = ipv4("1.2.3.4");
+        let headers = [xff_header("5.6.7.8")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, peer);
+    }
+
+    #[test]
+    fn resolve_xff_single_hop_in_allowlist_returns_xff_client() {
+        let peer = ipv4("10.0.0.1");
+        let headers = [xff_header("203.0.113.5")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, ipv4("203.0.113.5"));
+    }
+
+    #[test]
+    fn resolve_xff_multi_hop_walks_rightward_to_first_untrusted() {
+        // Chain order: client, hop1, hop2. Peer is the rightmost-implied hop.
+        // hop2 (10.0.0.2) is trusted, client (1.2.3.4) is not. NOVAI must
+        // return the first untrusted entry walking from the right.
+        let peer = ipv4("10.0.0.1");
+        let headers = [xff_header("1.2.3.4, 10.0.0.2")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, ipv4("1.2.3.4"));
+    }
+
+    #[test]
+    fn resolve_xff_all_entries_trusted_returns_leftmost() {
+        // If every XFF entry is itself in the trusted-proxy allowlist, no
+        // untrusted hop exists. NOVAI returns the leftmost entry, which is
+        // the original sender from inside the trust boundary.
+        let peer = ipv4("10.0.0.1");
+        let headers = [xff_header("10.0.0.3, 10.0.0.2")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, ipv4("10.0.0.3"));
+    }
+
+    #[test]
+    fn resolve_xff_malformed_entry_is_skipped() {
+        // Garbage entries are dropped during parse. The walk then proceeds
+        // over the remaining well-formed entries.
+        let peer = ipv4("10.0.0.1");
+        let headers = [xff_header("not-an-ip, 1.2.3.4")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, ipv4("1.2.3.4"));
+    }
+
+    #[test]
+    fn resolve_xff_with_whitespace_is_trimmed() {
+        let peer = ipv4("10.0.0.1");
+        let headers = [xff_header("  1.2.3.4  ,  10.0.0.2  ")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, ipv4("1.2.3.4"));
+    }
+
+    #[test]
+    fn resolve_xff_ipv6_in_chain_returns_ipv6_client() {
+        let peer = ipv4("10.0.0.1");
+        let headers = [xff_header("2001:db8::1")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, ipv6("2001:db8::1"));
+    }
+
+    #[test]
+    fn resolve_xff_empty_header_value_falls_back_to_peer() {
+        let peer = ipv4("10.0.0.1");
+        let headers = [xff_header("")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, peer);
+    }
+
+    #[test]
+    fn resolve_xff_whitespace_only_falls_back_to_peer() {
+        let peer = ipv4("10.0.0.1");
+        let headers = [xff_header("   ")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, peer);
+    }
+
+    #[test]
+    fn resolve_xff_header_name_is_case_insensitive() {
+        // tiny_http stores HeaderField with case-insensitive equiv(); confirm
+        // the find_xff_header helper actually matches a lowercase header.
+        let peer = ipv4("10.0.0.1");
+        let h = "x-forwarded-for: 1.2.3.4"
+            .parse::<tiny_http::Header>()
+            .expect("lowercase header parses");
+        let out = resolve_client_ip(peer, &[h], &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, ipv4("1.2.3.4"));
+    }
+
+    #[test]
+    fn resolve_xff_only_malformed_entries_falls_back_to_peer() {
+        let peer = ipv4("10.0.0.1");
+        let headers = [xff_header("not-an-ip, also-not")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8"]));
+        assert_eq!(out, peer);
+    }
+
+    #[test]
+    fn resolve_multiple_trusted_cidrs_v4_and_v6() {
+        // Confirm the allowlist supports multiple CIDR blocks of mixed families.
+        let peer = ipv6("2001:db8::1");
+        let headers = [xff_header("203.0.113.5")];
+        let out = resolve_client_ip(peer, &headers, &cidrs(&["10.0.0.0/8", "2001:db8::/32"]));
+        assert_eq!(out, ipv4("203.0.113.5"));
     }
 }
