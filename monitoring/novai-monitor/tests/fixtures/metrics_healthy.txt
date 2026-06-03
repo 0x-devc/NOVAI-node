@@ -1,0 +1,33 @@
+# HELP novai_committed_height Height of last committed block
+# TYPE novai_committed_height gauge
+novai_committed_height 184231
+# HELP novai_current_round Current consensus round
+# TYPE novai_current_round gauge
+novai_current_round 1
+# HELP novai_peer_count Number of connected peers
+# TYPE novai_peer_count gauge
+novai_peer_count 4
+# HELP novai_mempool_size Pending transactions in mempool
+# TYPE novai_mempool_size gauge
+novai_mempool_size 25
+# HELP novai_consensus_view_changes_total Total view changes since startup
+# TYPE novai_consensus_view_changes_total counter
+novai_consensus_view_changes_total 7
+# HELP novai_block_tx_count Transactions in last committed block
+# TYPE novai_block_tx_count gauge
+novai_block_tx_count 5
+# HELP novai_total_txs_committed Total transactions committed since startup
+# TYPE novai_total_txs_committed counter
+novai_total_txs_committed 50000
+# HELP novai_copilot_observations_total Copilot observation cycles
+# TYPE novai_copilot_observations_total counter
+novai_copilot_observations_total 1234
+# HELP novai_anomaly_signals_total Anomaly signals detected
+# TYPE novai_anomaly_signals_total counter
+novai_anomaly_signals_total 0
+# HELP novai_anomaly_signals_published Anomaly signals published on-chain
+# TYPE novai_anomaly_signals_published counter
+novai_anomaly_signals_published 0
+# HELP novai_anomaly_last_confidence Last anomaly confidence byte (0..=255)
+# TYPE novai_anomaly_last_confidence gauge
+novai_anomaly_last_confidence 0

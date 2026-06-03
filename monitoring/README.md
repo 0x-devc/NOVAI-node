@@ -2,6 +2,10 @@
 
 Prometheus alert rules and Grafana dashboard for NOVAI validator nodes.
 
+For standalone live alerting that does not require running Prometheus
+plus AlertManager, see `novai-monitor/`: a stdlib-only Python script
+that polls `/metrics` directly and DMs Telegram on chain health alerts.
+
 ## Quick Start
 
 ### 1. Prometheus Configuration

@@ -1,0 +1,28 @@
+[Unit]
+Description=NOVAI Metrics Monitor and Alerter
+Documentation=https://github.com/novai-protocol/novai-node/tree/main/monitoring/novai-monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# v0 runs as root to match the current novai-node service shape on the testnet
+# host. Harden to a dedicated novai user as a follow-up.
+User=root
+Group=root
+WorkingDirectory=/opt/novai-monitor
+EnvironmentFile=/etc/novai/monitor.env
+ExecStart=/usr/bin/python3 /opt/novai-monitor/novai_monitor.py
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+# Limited hardening that does not require a non-root user.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/novai-monitor
+
+[Install]
+WantedBy=multi-user.target
