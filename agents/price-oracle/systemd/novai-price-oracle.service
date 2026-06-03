@@ -1,0 +1,24 @@
+[Unit]
+Description=NOVAI price oracle (BTC/USD anchor publisher)
+Documentation=https://github.com/0x-devc/NOVAI-node/tree/main/agents/price-oracle
+After=network-online.target
+Wants=network-online.target
+# Soft dependency on the local NOVAI node. The oracle tolerates the node
+# being unreachable (logs, retries) so it does not need to be a hard order.
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/novai-price-oracle
+EnvironmentFile=/etc/novai/oracle.env
+ExecStart=/opt/novai-price-oracle/.venv/bin/python /opt/novai-price-oracle/oracle.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=novai-price-oracle
+
+[Install]
+WantedBy=multi-user.target
