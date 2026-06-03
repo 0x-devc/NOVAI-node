@@ -5,6 +5,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 pub mod consensus_node;
+pub mod faucet_rate_limit;
 pub mod metrics;
 pub mod rpc;
 

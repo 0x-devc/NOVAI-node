@@ -17,6 +17,7 @@
 //! - State query error → returns RPC error -32002
 
 use crate::consensus_node::Storage;
+use crate::faucet_rate_limit::FaucetRateLimit;
 use crate::MutexExt;
 use mempool::{NonceProvider, TxMempool};
 use novai_ai_entities::{
@@ -53,6 +54,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -1345,12 +1347,16 @@ pub fn start_rpc_server(
 /// - `faucet_trusted_proxies` - CIDR allowlist for X-Forwarded-For parsing
 ///   on the public faucet endpoint. Empty (the safe default) means the
 ///   forwarded-for header is ignored and only the TCP peer IP is trusted.
+/// - `faucet_rate_limit_path` - On-disk path for the persistent per-IP
+///   faucet cooldown store. The file is created on first dispense and
+///   reloaded on every node restart, so the 24h cooldown survives bounces.
 ///
 /// # Errors
 /// Returns error if the server cannot bind to the address.
 // Refactoring the long parameter list into a config struct is deferred to a
 // follow-up: this change set is scoped to adding the trusted-proxy allowlist
-// and keeps the public signature stable apart from the new final argument.
+// and the persistent rate-limit store, and keeps the public signature
+// stable apart from those new final arguments.
 #[allow(clippy::too_many_arguments)]
 pub fn start_rpc_server_with_state(
     bind_addr: &str,
@@ -1361,6 +1367,7 @@ pub fn start_rpc_server_with_state(
     blockchain_index: Arc<Mutex<BlockchainIndex>>,
     faucet_key: Option<ed25519_dalek::SigningKey>,
     faucet_trusted_proxies: Vec<CidrBlock>,
+    faucet_rate_limit_path: PathBuf,
 ) -> Result<(), String> {
     let addr: SocketAddr = bind_addr
         .parse()
@@ -1380,9 +1387,11 @@ pub fn start_rpc_server_with_state(
         // H-04: Per-address faucet rate limiting
         let mut faucet_last_dispense: HashMap<[u8; 32], Instant> = HashMap::new();
         let mut faucet_last_global: Option<Instant> = None;
-        // PUBLIC FAUCET: per-IP 24h cooldown state. In-memory only, resets on
-        // node restart (acceptable for v0; see comments above PUBLIC_FAUCET_*).
-        let mut public_faucet_last_dispense: HashMap<IpAddr, Instant> = HashMap::new();
+        // PUBLIC FAUCET: per-IP 24h cooldown state, persisted to disk so the
+        // cooldown survives node restarts. See faucet_rate_limit module docs
+        // for invariants (single-writer, atomic-write, best-effort persist).
+        let mut public_faucet_last_dispense =
+            FaucetRateLimit::open(faucet_rate_limit_path.clone(), now_unix_secs());
 
         for mut request in server.incoming_requests() {
             // C-06: Check concurrent request limit before processing.
@@ -3463,12 +3472,18 @@ fn parse_public_faucet_path(url: &str) -> Result<[u8; 32], (u16, String)> {
 
 /// Returns `Some(remaining_secs)` if `client_ip` is still within the per-IP
 /// cooldown window, `None` if a new dispense is allowed.
-fn public_faucet_cooldown_remaining(last_dispense: Option<&Instant>, now: Instant) -> Option<u64> {
+///
+/// Timestamps are UNIX seconds (u64) rather than `Instant` so the per-IP
+/// map can be persisted to disk across node restarts via the
+/// `faucet_rate_limit` module; `Instant` is monotonic and not serializable.
+fn public_faucet_cooldown_remaining(last_dispense: Option<u64>, now_secs: u64) -> Option<u64> {
     let last = last_dispense?;
-    let elapsed = now.duration_since(*last);
-    let cooldown = Duration::from_secs(PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS);
-    if elapsed < cooldown {
-        Some(PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS - elapsed.as_secs())
+    // saturating_sub: if a stored timestamp is somehow in the future (e.g.
+    // the wall clock jumped backwards between persist and reload), treat
+    // elapsed as zero so the IP is still inside the cooldown window.
+    let elapsed = now_secs.saturating_sub(last);
+    if elapsed < PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS {
+        Some(PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS - elapsed)
     } else {
         None
     }
@@ -3482,6 +3497,17 @@ fn public_faucet_error_body(error: impl Into<String>, retry_after_secs: Option<u
     .unwrap_or_else(|_| r#"{"error":"serialization failure"}"#.to_string())
 }
 
+/// Current wall-clock time in UNIX seconds. Used for faucet rate-limit
+/// timestamps which must survive node restarts (so `Instant` cannot apply).
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // If the system clock is somehow before the UNIX epoch the cooldown
+        // simply behaves as if the IP has never dispensed before.
+        .unwrap_or(0)
+}
+
 /// Handle a `GET /faucet/<address>` request.
 ///
 /// Returns `(http_status, json_body)`. Address parsing runs first so malformed
@@ -3493,7 +3519,7 @@ fn handle_public_faucet(
     mempool: &Arc<Mutex<TxMempool>>,
     nonce_provider: &SharedNonceProvider,
     faucet_key: &Option<ed25519_dalek::SigningKey>,
-    per_ip_last_dispense: &mut HashMap<IpAddr, Instant>,
+    per_ip_last_dispense: &mut FaucetRateLimit,
 ) -> (u16, String) {
     // 1. Parse + validate the address BEFORE any rate-limit accounting or signing.
     let to_address = match parse_public_faucet_path(url) {
@@ -3513,9 +3539,9 @@ fn handle_public_faucet(
     };
 
     // 3. Per-IP 24h cooldown.
-    let now = Instant::now();
+    let now_secs = now_unix_secs();
     if let Some(remaining) =
-        public_faucet_cooldown_remaining(per_ip_last_dispense.get(&client_ip), now)
+        public_faucet_cooldown_remaining(per_ip_last_dispense.last_dispense(client_ip), now_secs)
     {
         return (
             429,
@@ -3546,8 +3572,10 @@ fn handle_public_faucet(
     };
 
     // 5. Record dispense ONLY after success, so failed attempts do not burn
-    //    an IP's daily slot.
-    per_ip_last_dispense.insert(client_ip, now);
+    //    an IP's daily slot. The record also persists to disk so the cooldown
+    //    survives node restarts (FaucetRateLimit handles atomic writes and
+    //    logs persist failures without crashing).
+    per_ip_last_dispense.record(client_ip, now_secs);
 
     tracing::info!(
         ip = %client_ip,
@@ -4518,15 +4546,15 @@ mod tests {
 
     #[test]
     fn public_faucet_cooldown_no_prior_dispense_is_none() {
-        let now = Instant::now();
-        assert!(public_faucet_cooldown_remaining(None, now).is_none());
+        let now_secs: u64 = 1_700_000_000;
+        assert!(public_faucet_cooldown_remaining(None, now_secs).is_none());
     }
 
     #[test]
     fn public_faucet_cooldown_just_dispensed_is_within_window() {
-        let last = Instant::now();
-        // Same instant: full window minus zero elapsed, so cooldown > 0.
-        let remaining = public_faucet_cooldown_remaining(Some(&last), last)
+        let last: u64 = 1_700_000_000;
+        // Same second: zero elapsed, so the full cooldown window is remaining.
+        let remaining = public_faucet_cooldown_remaining(Some(last), last)
             .expect("just-dispensed IP must be cooling down");
         assert!(remaining > 0);
         assert!(remaining <= PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS);
@@ -4534,9 +4562,21 @@ mod tests {
 
     #[test]
     fn public_faucet_cooldown_after_window_is_none() {
-        let last = Instant::now();
-        let after = last + Duration::from_secs(PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS + 1);
-        assert!(public_faucet_cooldown_remaining(Some(&last), after).is_none());
+        let last: u64 = 1_700_000_000;
+        let after = last + PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS + 1;
+        assert!(public_faucet_cooldown_remaining(Some(last), after).is_none());
+    }
+
+    #[test]
+    fn public_faucet_cooldown_clock_skew_backwards_treated_as_zero_elapsed() {
+        // If a stored timestamp is somehow in the future relative to "now"
+        // (clock skew between persist and reload), saturating_sub yields
+        // zero elapsed and the full cooldown is still in effect.
+        let last: u64 = 1_700_000_500;
+        let now: u64 = 1_700_000_000;
+        let remaining = public_faucet_cooldown_remaining(Some(last), now)
+            .expect("future-stamped IP must still be cooling down");
+        assert_eq!(remaining, PUBLIC_FAUCET_PER_IP_COOLDOWN_SECS);
     }
 
     #[test]

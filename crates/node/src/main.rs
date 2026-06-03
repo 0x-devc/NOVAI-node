@@ -1443,6 +1443,26 @@ fn main() {
                 );
             }
 
+            // Derive the persistent faucet rate-limit path from the same
+            // data-dir convention used by the RocksDB store, so a multi-node
+            // devnet does not have nodes overwriting each other's state.
+            let faucet_rate_limit_path = {
+                let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                let base = data_dir
+                    .as_deref()
+                    .map(String::from)
+                    .unwrap_or_else(|| format!("{home}/.novai/data"));
+                let subdir = if dev_keys {
+                    format!(
+                        "validator-{}",
+                        validator_idx.expect("validator_idx set in dev-keys")
+                    )
+                } else {
+                    format!("validator-{}", &hex::encode(our_addr)[..16])
+                };
+                std::path::PathBuf::from(format!("{base}/{subdir}/faucet_rate_limit.json"))
+            };
+
             if let Err(e) = rpc::start_rpc_server_with_state(
                 &rpc_addr,
                 Arc::clone(&mempool),
@@ -1452,6 +1472,7 @@ fn main() {
                 Arc::clone(&blockchain_index),
                 faucet_key,
                 faucet_trusted_proxies,
+                faucet_rate_limit_path,
             ) {
                 tracing::error!(%e, "Failed to start RPC server");
             }
