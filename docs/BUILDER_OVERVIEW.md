@@ -1,12 +1,12 @@
 # NOVAI for Builders
 
-A mental model for developers writing software that interacts with NOVAI. Read [QUICKSTART.md](QUICKSTART.md) first if you have not yet booted a local devnet. For exact RPC shapes see [RPC_REFERENCE.md](RPC_REFERENCE.md). For working recipes covering the five advanced features see [AI_ENTITY_COOKBOOK.md](AI_ENTITY_COOKBOOK.md). For a crate-by-crate internal tour see [ARCHITECTURE.md](ARCHITECTURE.md).
+A mental model for developers writing software that interacts with NOVAI. Read [QUICKSTART.md](QUICKSTART.md) first if you have not yet booted a local devnet. For exact RPC shapes see [RPC_REFERENCE.md](RPC_REFERENCE.md). For working recipes covering all seven AI infrastructure features see [AI_ENTITY_COOKBOOK.md](AI_ENTITY_COOKBOOK.md). For a crate-by-crate internal tour see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
 ## What NOVAI is
 
-NOVAI is a Layer-1 blockchain where AI entities are protocol primitives, not smart contracts. There is no virtual machine and no WASM runtime. Every transaction is a native protocol operation that the node directly understands and executes. The protocol has 10 transaction types, 16 signal types, 11 memory object types (variant 10 reserved for `DelegationGrant`, variant 11 is `Subscription`), and one entity record format (V5 codec, 270 bytes).
+NOVAI is a Layer-1 blockchain where AI entities are protocol primitives, not smart contracts. There is no virtual machine and no WASM runtime. Every transaction is a native protocol operation that the node directly understands and executes. The protocol has 11 transaction types, 23 signal types, 16 memory object types, and one entity record format (V5 codec, 270 bytes).
 
 Consensus is HotStuff BFT with a 3-chain commit rule. Execution is deterministic: no floats, no `HashMap` iteration order dependencies, all arithmetic checked. State is committed via a 256-bit Sparse Merkle Tree. Persistence is RocksDB with atomic write batches. The codebase is clean-room (no code copied from Substrate, Tendermint, Cosmos SDK, Diem, Aptos, Sui, or anywhere else).
 
@@ -30,17 +30,17 @@ Consensus is HotStuff BFT with a 3-chain commit rule. Execution is deterministic
 +----------------------+
 |  1. Reputation       |  reputation_score in [0, 100], mutated by oracle signals
 +----------------------+
-|  0. Entity identity  |  AiEntity record (V5, 270 B), 6 capability bits, 3 autonomy modes
+|  0. Entity identity  |  AiEntity record (V5, 270 B), 7 capability bits, 3 autonomy modes
 +----------------------+
 ```
 
 ### Layer 0: Entity identity
 
-Every AI agent registers as an `AiEntity` on chain. The record carries a deterministic `entity_id` (`blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator)`), an optional Ed25519 signing key, an `economic_balance` for paying fees, a `nonce` for replay protection, and 6 capability bits gating what it can do.
+Every AI agent registers as an `AiEntity` on chain. The record carries a deterministic `entity_id` (`blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator)`), an optional Ed25519 signing key, an `economic_balance` for paying fees, a `nonce` for replay protection, and 7 capability bits gating what it can do.
 
 Three autonomy modes: `Advisory` (proposes but cannot act), `Gated` (acts through approval gates), `Autonomous` (reserved for future ZK-gated execution).
 
-Six capability bits: `read_public_chain`, `read_memory_objects`, `emit_proposals`, `request_execution`, `read_nnpx_derived`, `submit_reputation_updates`. The default for `register-with-key` is `0x07` (the first three).
+Seven capability bits: `read_public_chain`, `read_memory_objects`, `emit_proposals`, `request_execution`, `read_nnpx_derived`, `submit_reputation_updates`, `post_oracle_anchors` (Week 35). The default for `register-with-key` is `0x07` (the first three).
 
 ### Layer 1: Reputation
 
@@ -64,7 +64,7 @@ A reputation oracle issues a `CompositionCheck` signal naming a `failed_dep_idx`
 
 A `ProofSubmission` signal carries `proof_type`, `code_hash`, `computation_hash`, and (for real proofs) a verifying key and proof bytes inline. The chain runs the verifier; on success it creates a `VerificationRecord` memory object owned by the issuer (105 bytes fixed: `proof_type | code_hash | computation_hash | proof_hash | height_be`) and applies `+3` reputation to the issuer.
 
-Two verifier backends are active: `PROOF_TYPE_STUB = 0` (always accepts, for development) uses the v1 131-byte payload layout; `PROOF_TYPE_GROTH16 = 1` (real BN254 Groth16 via the arkworks ecosystem) uses the v2 variable-length layout that appends `vk_len_be:4 | vk_bytes | proof_len_be:4 | proof_bytes` after the existing 65-byte tail, with caps of 8 KiB for the VK and 1 KiB for the proof. `PROOF_TYPE_PLONK = 2` is reserved but not wired; submitting it returns `UnsupportedProofType`.
+Two inline verifier backends are active: `PROOF_TYPE_STUB = 0` (always accepts, for development) uses the v1 131-byte payload layout; `PROOF_TYPE_GROTH16 = 1` (real BN254 Groth16 via the arkworks ecosystem) uses the v2 variable-length layout that appends `vk_len_be:4 | vk_bytes | proof_len_be:4 | proof_bytes` after the existing 65-byte tail, with caps of 8 KiB for the VK and 1 KiB for the proof. Week 30 added a third active dispatch path, `PROOF_TYPE_GROTH16_REGISTERED = 3`, which carries a 32-byte VK registry handle in place of inline `vk_bytes` and looks up the registered key via a `VkRegistration` memory object. `PROOF_TYPE_PLONK = 2` and `PROOF_TYPE_PLONK_REGISTERED = 4` are reserved but not wired; submitting them returns `UnsupportedProofType`.
 
 Public inputs for Groth16 are the 64-byte concatenation `code_hash || computation_hash` split into four BN254 scalars (16-byte big-endian halves, lifted into `Fr`). The verifier is deterministic; arkworks runs with `default-features = false` so rayon is excluded from the dependency tree.
 
@@ -75,6 +75,20 @@ A subscriber locks `rate_per_block * duration_blocks` of `economic_balance` upfr
 ### Layer 7: Delegation
 
 A delegator entity grants a subset of its own capabilities to another entity for a bounded duration by writing a `DelegationGrant` memory object (variant 10, fixed 42 bytes: `version:1 | delegate_entity_id:32 | granted_capabilities:1 | expires_at_be:8`). At admission time, the runtime resolves an entity's effective capabilities by OR-merging its static bits with every active, non-expired grant naming it as the delegate, via a secondary index `ai/delegations_by_delegate/<delegate_id>/<grant_id>`. A fast path skips the scan when the entity already holds the requested capability statically. Revocation is `DELETE_MEMORY_OBJECT` on the grant and takes effect on the next tx; delegation is not transitive (B cannot re-delegate A's grant) and grants are immutable (UPDATE is rejected). `MAX_DELEGATION_GRANTS = 20` per delegator. Use case: a master entity registered with high stake delegates `emit_proposals` to many sub-entities running different strategies, and revokes a single sub-entity without touching the master.
+
+### Weeks 28-36: payment, channel, oracle anchor, and conditional execution
+
+These weeks added native protocol primitives on top of the eight layers above. Each ships either a new signal type, a new memory object type, an optional trailer on an existing signal, or a new top-level transaction type.
+
+- **Week 28 (x402 payments)**: `PaymentRequest` (signal 16) and `ServiceAttestation` (signal 17). Per-request native payment with optional delivery attestation and an inline reputation effect on attestation.
+- **Week 29 (Agent Discovery Registry)**: `ServiceDescriptor` (memory object 12) with immutable `category` field.
+- **Week 30 (VK registry)**: `VkRegistration` (memory object 13) plus `PROOF_TYPE_GROTH16_REGISTERED = 3` so `ProofSubmission` signals can reference a published VK by 32-byte handle instead of inlining it every time.
+- **Week 31 (SLAs with auto-slash)**: `SlaAgreement` (memory object 14) and `SlaAccept` (signal 18); threshold breach auto-slashes the seller's stake. Lazy `StakeWithdraw` collateral check prevents sellers from draining stake out from under an open SLA.
+- **Week 32 (Bidirectional payment channels)**: `PaymentChannel` (memory object 15) with `ChannelAccept` (signal 19), `ChannelClose` (signal 20), and `ChannelFinalize` (signal 21). Doubly-signed off-chain state updates, cooperative settle or unilateral close plus dispute window, permissionless finalize.
+- **Week 33 (Multi-party payment splits)**: optional 2..=8 recipient splits trailer on `PaymentRequest` (no new tx type); basis points sum to 10 000; a single fee on the total.
+- **Week 34 (Entity upgrade)**: top-level `EntityUpgrade` transaction (type 11) lets the original creator swap `code_hash` while preserving `entity_id` and every id-keyed state row.
+- **Week 35 (Oracle anchoring)**: `OracleAnchor` (signal 22) gated by the new capability bit 6 `post_oracle_anchors`; persisted as KV aux records (not memory objects) so per-entity anchor history is not bounded by the 100-per-entity memory object cap.
+- **Week 36 (Conditional execution)**: optional condition trailer on `PaymentRequest`; four hardcoded anchor-condition kinds (`anchor_exists`, `anchor_data_hash_equals`, `anchor_tag_equals`, `anchor_not_expired`); failed conditions clean-revert the whole transaction with nothing charged.
 
 ---
 
@@ -93,7 +107,7 @@ A delegator entity grants a subset of its own capabilities to another entity for
                 |
                 +-- publish SignalCatalog (sell signals)
                 |
-                +-- signal-commitment (publish any of 16 signal types)
+                +-- signal-commitment (publish any of 23 signal types)
                 |
                 +-- publish CompositionGraph (declare dependencies)
                 |
@@ -109,12 +123,12 @@ A delegator entity grants a subset of its own capabilities to another entity for
 
 ---
 
-## Transaction types (10 total)
+## Transaction types (11 total)
 
 | Code | Name | Min fee | When to use |
 |---|---|---|---|
 | 1 | Transfer | 100 | Move tokens between accounts |
-| 2 | SignalCommitment | 1,000 | Publish any of 16 signal types (the wrapper for layers 1-6) |
+| 2 | SignalCommitment | 1,000 | Publish any of 23 signal types (wraps layers 1-6 of the 8-layer diagram plus the Week 28-35 payment, channel, and oracle-anchor primitives) |
 | 3 | CreateMemoryObject | 500 | Create one of the registered memory object types (catalog, graph, record, subscription, etc.) |
 | 4 | UpdateMemoryObject | 500 | Replace contents of a memory object |
 | 5 | DeleteMemoryObject | 500 | Remove a memory object |
@@ -123,8 +137,9 @@ A delegator entity grants a subset of its own capabilities to another entity for
 | 8 | RegisterAiEntity | 5,000 | Register an entity without its own signing key |
 | 9 | CreditAiEntity | 100 | Top up an entity's `economic_balance` |
 | 10 | RegisterAiEntityWithKey | 5,000 | Register an entity that holds its own Ed25519 key |
+| 11 | EntityUpgrade | 5,000 | Swap an entity's `code_hash` while preserving `entity_id` and all id-keyed state (creator-only, Week 34) |
 
-`SignalCommitment` is the gateway transaction for the six infrastructure layers. The signal_type byte (1 of 16) plus an optional fixed-size tail tells the chain which subsystem to run.
+`SignalCommitment` is the gateway transaction for layers 1-6 of the 8-layer diagram plus the Week 28-35 additions on top. The `signal_type` byte (1 of 23) plus an optional fixed-size tail tells the chain which subsystem to run.
 
 ---
 
@@ -217,7 +232,7 @@ Flow:
 | Concern | Path |
 |---|---|
 | Entity, signal, memory types and codecs | `crates/ai_entities/` |
-| All 10 tx execution handlers + fee enforcement | `crates/execution/` |
+| All 11 tx execution handlers + fee enforcement | `crates/execution/` |
 | 256-bit Sparse Merkle Tree, state root | `crates/smt/` |
 | Storage abstraction + RocksDB + atomic batching | `crates/state/` |
 | Mempool (signature verification, nonce ordering) | `crates/mempool/` |
@@ -240,7 +255,7 @@ Flow:
 
 - [QUICKSTART.md](QUICKSTART.md): boot a 4-node devnet in 5 minutes.
 - [tutorials/FIRST_AI_ENTITY.md](tutorials/FIRST_AI_ENTITY.md): register an entity, publish a signal, create a memory object end-to-end.
-- [AI_ENTITY_COOKBOOK.md](AI_ENTITY_COOKBOOK.md): recipes for reputation, marketplace, staking, composition, ZK.
+- [AI_ENTITY_COOKBOOK.md](AI_ENTITY_COOKBOOK.md): recipes for reputation, marketplace, staking, composition, ZK proofs, subscriptions, and delegation.
 - [RPC_REFERENCE.md](RPC_REFERENCE.md): every JSON-RPC method, error code, and known gap.
 - [ARCHITECTURE.md](ARCHITECTURE.md): internal tour of the crates and how they fit together.
 - [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md): consensus-critical specifications (binding).

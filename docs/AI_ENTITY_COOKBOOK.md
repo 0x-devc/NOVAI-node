@@ -1,8 +1,8 @@
 # AI Entity Cookbook
 
-Five recipes for the AI infrastructure features in NOVAI v1: reputation, marketplace, staking, composition, and ZK proofs. Each recipe shows what works today, the exact byte layouts where the SDK does not yet have a helper, and how to verify the on-chain effect.
+Seven recipes for the AI infrastructure features in NOVAI v1: reputation, marketplace, staking, composition, ZK proofs, subscriptions, and delegation. Each recipe shows what works today, the exact byte layouts where the SDK does not yet have a helper, and how to verify the on-chain effect.
 
-The CLI now exposes first-class commands for all 14 signal types and all 10 memory object types. Recipes use a mix of CLI (`novai-cli signal publish`, `novai-cli memory create`, `novai-cli ai info`), the Rust SDK (`sdk/novai-sdk`), and direct transaction byte construction with `novai-crypto` + `novai-codec` (where neither covers the case). Remaining gaps are tagged `[NOT YET IMPLEMENTED]`.
+The CLI now exposes first-class commands for all 23 signal types and all 16 memory object types. Recipes use a mix of CLI (`novai-cli signal publish`, `novai-cli memory create`, `novai-cli ai info`), the Rust SDK (`sdk/novai-sdk`), and direct transaction byte construction with `novai-crypto` + `novai-codec` (where neither covers the case). Remaining gaps are tagged `[NOT YET IMPLEMENTED]`.
 
 > **Observable state.** `novai_getAiEntity` exposes the V4/V5 entity fields: `reputation_score`, `total_transactions`, `reputation_events_count`, `stake_balance`, and `stake_locked_until`. `novai-cli ai info` displays them in human-readable form. Each recipe below verifies via a combination of `novai_getAiEntity` for cumulative state, `novai_getTransaction` for tx inclusion, `novai_getSignalsByIssuer` and `novai_getSignalsByType` for signal events, and `novai_getMemoryObjects` for memory objects. See [RPC_REFERENCE.md#observed-gaps](RPC_REFERENCE.md#observed-gaps) for remaining gaps.
 
@@ -25,15 +25,16 @@ The `capabilities` field on an `AiEntity` is one byte. Set bits according to wha
 | 3 | 0x08 | request_execution | `request_execution` |
 | 4 | 0x10 | read_nnpx_derived | `read_nnpx` |
 | 5 | 0x20 | submit_reputation_updates | (none yet) |
+| 6 | 0x40 | post_oracle_anchors (Week 35) | (none yet) |
 
-`[NOT YET IMPLEMENTED]` The CLI capability parser does not accept `submit_reputation_updates`. To set bit 5, register the entity through the SDK with `Capabilities::from_byte(0x27)` (or whatever bitmask you need).
+`[NOT YET IMPLEMENTED]` The CLI capability parser does not accept `submit_reputation_updates` or `post_oracle_anchors`. To set bit 5, register the entity through the SDK with `Capabilities::from_byte(0x27)` (or whatever bitmask you need). To set bit 6 (for an oracle-anchor publisher), pass `0x47` instead. `Capabilities::oracle()` is a convenience builder that returns the canonical anchor-publisher mask.
 
 ## Minimum fees (base units)
 
 | Operation | Min fee | Constant |
 |---|---|---|
 | Transfer | 100 | `MIN_FEE_TRANSFER` |
-| Signal commitment (any of 14 types) | 1,000 | `MIN_FEE_SIGNAL_COMMITMENT` |
+| Signal commitment (any of 23 types) | 1,000 | `MIN_FEE_SIGNAL_COMMITMENT` |
 | Memory object create / update / delete | 500 | `MIN_FEE_MEMORY_OBJECT` |
 | Register AI entity | 5,000 | `MIN_FEE_REGISTER_AI_ENTITY` |
 | Credit AI entity | 100 | `MIN_FEE_CREDIT_AI_ENTITY` |
@@ -54,6 +55,15 @@ The `capabilities` field on an `AiEntity` is one byte. Set bits according to wha
 | StakeSlash | 11 | `submit_reputation_updates` |
 | CompositionCheck | 12 | `submit_reputation_updates` |
 | ProofSubmission | 13 | `emit_proposals` |
+| SubscriptionCreate | 14 | `emit_proposals` |
+| SubscriptionCancel | 15 | `emit_proposals` |
+| PaymentRequest | 16 | `emit_proposals` |
+| ServiceAttestation | 17 | `emit_proposals` |
+| SlaAccept | 18 | `emit_proposals` |
+| ChannelAccept | 19 | `emit_proposals` |
+| ChannelClose | 20 | `emit_proposals` |
+| ChannelFinalize | 21 | `emit_proposals` |
+| OracleAnchor | 22 | `post_oracle_anchors` (Week 35; bit 6) |
 
 ---
 
@@ -97,7 +107,7 @@ The CLI handles this directly: `novai-cli signal publish --signal-type reputatio
 [0x02][signal_hash:32][0x07][issuer_id:32][target_id:32][event_type:1][delta_be:2]
 ```
 
-`event_type` is 0-9 (`REP_EVENT_*` constants). Use `0` (`REP_EVENT_JOB_COMPLETED`) for routine positive updates. `delta_be` is an `i16` clamped on apply. The wrapping `TxV1` is signed by the oracle entity's key (loaded from `/tmp/oracle.key`), `from = address(oracle_vk)`, `pubkey = oracle_vk.to_bytes()`, fee `1_000`.
+`event_type` is 0-12 (`REP_EVENT_*` constants; valid range is 0..=`REP_EVENT_MAX` where `REP_EVENT_MAX = REP_EVENT_SLA_VIOLATION_TRIGGERED = 12`). Use `0` (`REP_EVENT_JOB_COMPLETED`) for routine positive updates. `delta_be` is an `i16` clamped on apply. The wrapping `TxV1` is signed by the oracle entity's key (loaded from `/tmp/oracle.key`), `from = address(oracle_vk)`, `pubkey = oracle_vk.to_bytes()`, fee `1_000`.
 
 ### Verify
 
@@ -120,7 +130,7 @@ Expect `reputation_score` to move by `points_delta` (clamped to `[0, 100]` on ap
 
 ### Common errors
 - `IssuerMissingCapability`: oracle entity does not have bit 5 set. Re-register.
-- `InvalidReputationEventType`: `event_type > 9`.
+- `InvalidReputationEventType`: `event_type > 12`.
 - `SelfReputationUpdate`: oracle and target are the same entity.
 - `TargetEntityNotFound`: target not registered.
 
@@ -329,12 +339,13 @@ A paused consumer cannot publish further signals or memory objects until reactiv
 
 ## Recipe 5: Prove Your Computation (ZK)
 
-Submit a `ProofSubmission` signal (type 13). The chain verifies the proof, creates a `VerificationRecord` memory object owned by the issuer, and applies `+3` reputation. Two `proof_type` values are accepted today:
+Submit a `ProofSubmission` signal (type 13). The chain verifies the proof, creates a `VerificationRecord` memory object owned by the issuer, and applies `+3` reputation. Three `proof_type` values are dispatched today:
 
 - `PROOF_TYPE_STUB = 0`: development-only path. The stub verifier returns true unconditionally. Use this for plumbing tests and to validate the on-chain side of your pipeline before you have real proofs.
-- `PROOF_TYPE_GROTH16 = 1`: real BN254 Groth16. Submit the verifying key and the proof inline in the signal payload; the chain runs `ark_groth16::Groth16::<Bn254>::verify_proof` and rejects on failure.
+- `PROOF_TYPE_GROTH16 = 1`: real BN254 Groth16, inline VK. Submit the verifying key and the proof inline in the signal payload; the chain runs `ark_groth16::Groth16::<Bn254>::verify_proof` and rejects on failure.
+- `PROOF_TYPE_GROTH16_REGISTERED = 3` (Week 30): same Groth16 verifier as path 1, but the signal payload carries a 32-byte VK registry handle in place of inline `vk_bytes`. The chain resolves the handle to a published `VkRegistration` memory object and runs the same pairing check. Use this when the same circuit is verified many times, so the VK pays the chain-write cost only once.
 
-`PROOF_TYPE_PLONK = 2` is reserved but not wired; submitting it returns `UnsupportedProofType { proof_type: 2 }`.
+`PROOF_TYPE_PLONK = 2` and `PROOF_TYPE_PLONK_REGISTERED = 4` are reserved but not wired; submitting either returns `UnsupportedProofType { proof_type }`.
 
 ### What you need
 - A registered entity with `emit_proposals` (in the default `0x07` capabilities mask).
@@ -454,7 +465,7 @@ If the submission appears and `reputation_score` bumped by `3`, the proof verifi
 The chain does NOT enforce a binding between the supplied `vk_bytes` and the entity's `code_hash`. Off-chain observers should recompute `vk_hash = blake3(vk_bytes)` and compare against the entity's published expected VK. A future feature will add either a `vk_commitment` field on `AiEntity` or a per-entity `VkRegistry` memory object; both options are additive to the current wire format.
 
 ### Common errors
-- `UnsupportedProofType { proof_type }`: `proof_type > PROOF_TYPE_MAX` (which is `1` today). Submitting `2` (PLONK) is the canonical example.
+- `UnsupportedProofType { proof_type }`: `proof_type` is not in the currently dispatched set. The active values are `0` (stub), `1` (Groth16 inline), and `3` (Groth16 via VK registry). Submitting `2` (PLONK) or `4` (PLONK via VK registry) is the canonical example of a reserved-but-unwired value.
 - `ProofVerificationFailed`: Groth16 path only. Causes: tampered proof bytes, wrong VK, mismatched public inputs (the chain's reconstructed `code_hash || computation_hash` differs from what the proof was bound to), malformed ark-serialize bytes.
 - `VerifyingKeyTooLarge { actual, max }`: v2 `vk_bytes` length above 8 KiB.
 - `ProofBytesTooLarge { actual, max }`: v2 `proof_bytes` length above 1 KiB.
@@ -643,7 +654,7 @@ The atomic batch tears down both the primary record and the by-delegate index en
 
 ## Where the SDK helpers will land
 
-The 4 missing helpers a developer would expect from `sdk/novai-sdk`:
+The 7 missing helpers a developer would expect from `sdk/novai-sdk`:
 
 ```rust
 // Build TxV1 for ReputationUpdate (signal 7) with the 35-byte tail.
