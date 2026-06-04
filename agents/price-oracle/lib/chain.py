@@ -127,7 +127,7 @@ class Chain:
         external_timestamp: int,
         data_tag: str,
         *,
-        fee: int = 1_000,
+        fee: int = 20_000,
     ) -> SubmissionResult:
         return self._client.post_oracle_anchor(
             keypair=kp,
