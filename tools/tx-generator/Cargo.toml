@@ -42,3 +42,11 @@ hex = "0.4"
 novai-types = { path = "../../crates/types" }
 novai-crypto = { path = "../../crates/crypto" }
 novai-codec = { path = "../../crates/codec" }
+
+[dev-dependencies]
+# HTTP mock server for integration tests that exercise worker recovery
+# without standing up a full devnet. MIT-licensed.
+mockito = "1.6"
+# Test-only tokio features (pause/advance/start_paused) so retry-loop
+# bound tests complete in test budget rather than real-time backoff.
+tokio = { version = "1.42", features = ["full", "test-util"] }

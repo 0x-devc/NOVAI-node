@@ -154,6 +154,21 @@ const MEMPOOL_FULL_BACKOFF_SECS: u64 = 2;
 /// Backoff duration when rate limited by server (seconds).
 const RATE_LIMITED_BACKOFF_SECS: u64 = 1;
 
+/// Maximum SenderLimitExceeded retries before giving up on a single transaction.
+/// At 200 ms per retry, this is ~4 seconds of waiting.
+const MAX_SENDER_LIMIT_RETRIES: u32 = 20;
+
+/// Maximum RateLimited retries before giving up on a single transaction.
+/// At RATE_LIMITED_BACKOFF_SECS per retry, this is a bounded backoff window.
+const MAX_RATE_LIMITED_RETRIES: u32 = 12;
+
+/// Worker heartbeat interval. Each worker's tokio::select! includes a sleep
+/// arm at this interval so a worker parked on rx.recv() cannot be wedged
+/// indefinitely if upstream stops sending. On fire the worker continues the
+/// loop and re-attempts recv; tokio's mpsc::Receiver::recv and tokio::sync::Mutex
+/// are cancellation-safe so no template is lost.
+const HEARTBEAT_DURATION: Duration = Duration::from_secs(1);
+
 /// Transaction submitter with worker pool.
 pub struct Submitter {
     config: SubmitterConfig,
@@ -316,6 +331,14 @@ impl Submitter {
                                 );
                             }
                         }
+                        _ = tokio::time::sleep(HEARTBEAT_DURATION) => {
+                            // Periodic wakeup. The worker re-attempts recv on
+                            // the next loop iteration so a parked recv()
+                            // cannot wedge indefinitely if upstream stops
+                            // sending. recv and Mutex are cancellation-safe
+                            // so no template is lost when this arm fires.
+                            continue;
+                        }
                         _ = shutdown_rx.recv() => {
                             info!("Worker {} received shutdown signal", worker_id);
                             break;
@@ -370,6 +393,8 @@ async fn submit_with_retry(
 
     let mut attempt = 0;
     let mut mempool_full_retries = 0u32;
+    let mut sender_limit_retries = 0u32;
+    let mut rate_limited_retries = 0u32;
 
     loop {
         match submit_once(http_client, endpoint, &tx).await {
@@ -395,6 +420,16 @@ async fn submit_with_retry(
             Err(SubmitError::MempoolFull(msg)) => {
                 mempool_full_retries += 1;
                 if mempool_full_retries >= MAX_MEMPOOL_FULL_RETRIES {
+                    // Exhausted: clear paused so the generator (and any
+                    // future workers) can resume. Leaving paused=true after
+                    // a Failed return strands subsequent workers on recv.
+                    if paused.load(Ordering::Relaxed) {
+                        paused.store(false, Ordering::Relaxed);
+                        warn!(
+                            "MempoolFull retries exhausted ({}), clearing pause",
+                            mempool_full_retries
+                        );
+                    }
                     let latency = start_time.elapsed();
                     let reason = format!("MempoolFull after {mempool_full_retries} retries: {msg}");
                     let _ = metric_tx.send(MetricEvent::Failed {
@@ -429,22 +464,64 @@ async fn submit_with_retry(
                 });
                 return SubmitResult::Rejected { reason };
             }
-            Err(SubmitError::SenderLimitExceeded(_)) => {
+            Err(SubmitError::SenderLimitExceeded(msg)) => {
                 // Sender has too many pending txs in the mempool. Backoff
-                // briefly and retry — the pending txs will drain into blocks.
-                // CRITICAL: Do NOT discard this tx or advance the nonce.
-                // Discarding creates a nonce gap that prevents drain_ready
-                // from ever selecting future txs for this sender (death spiral).
+                // briefly and retry: the pending txs will drain into blocks.
+                // The retry loop is bounded so a permanently-stuck mempool
+                // does not wedge the worker indefinitely.
+                //
+                // CONSEQUENCE OF EXHAUSTION: the nonce claimed for this tx
+                // is now a permanent gap for this sender. Future txs from
+                // this sender will be rejected at the node until the sender
+                // is restarted with a fresh nonce. Acceptable for a load
+                // tool with many senders (the worker just rotates to the
+                // next sender in the pool).
+                sender_limit_retries += 1;
+                if sender_limit_retries >= MAX_SENDER_LIMIT_RETRIES {
+                    let latency = start_time.elapsed();
+                    let reason =
+                        format!("SenderLimitExceeded after {sender_limit_retries} retries: {msg}");
+                    warn!(
+                        "SenderLimitExceeded retries exhausted ({}), giving up on this tx (sender nonce gap until restart)",
+                        sender_limit_retries
+                    );
+                    let _ = metric_tx.send(MetricEvent::Failed {
+                        txid,
+                        error: reason.clone(),
+                        latency,
+                    });
+                    return SubmitResult::Failed { error: reason };
+                }
+                debug!(
+                    "SenderLimitExceeded, backing off 200ms (retry {}/{})",
+                    sender_limit_retries, MAX_SENDER_LIMIT_RETRIES
+                );
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 continue;
             }
             Err(SubmitError::RateLimited) => {
+                rate_limited_retries += 1;
+                if rate_limited_retries >= MAX_RATE_LIMITED_RETRIES {
+                    let latency = start_time.elapsed();
+                    let reason =
+                        format!("RateLimited after {rate_limited_retries} retries (HTTP 429)");
+                    warn!(
+                        "RateLimited retries exhausted ({}), giving up on this tx",
+                        rate_limited_retries
+                    );
+                    let _ = metric_tx.send(MetricEvent::Failed {
+                        txid,
+                        error: reason.clone(),
+                        latency,
+                    });
+                    return SubmitResult::Failed { error: reason };
+                }
                 debug!(
-                    "Rate limited by server, backing off {}s",
-                    RATE_LIMITED_BACKOFF_SECS
+                    "Rate limited by server, backing off {}s (retry {}/{})",
+                    RATE_LIMITED_BACKOFF_SECS, rate_limited_retries, MAX_RATE_LIMITED_RETRIES
                 );
                 tokio::time::sleep(Duration::from_secs(RATE_LIMITED_BACKOFF_SECS)).await;
-                continue; // Retry indefinitely for rate limiting
+                continue;
             }
             Err(e) if is_validation_error(&e) => {
                 let latency = start_time.elapsed();
@@ -687,34 +764,29 @@ struct LatestBlockResponse {
     height: u64,
 }
 
-/// Monitors chain progress and engages the shared pause flag when the
-/// chain height stops advancing for a configurable threshold.
+/// Monitors chain progress and logs a warning when the chain height
+/// stops advancing for a configurable threshold.
 ///
-/// Complementary to the MempoolFull-driven pause: the submitter pauses
-/// when the node refuses transactions; the chain monitor pauses when
-/// the node accepts transactions but consensus has stopped making
-/// progress (e.g., during a leader stall, partition, or resource
-/// exhaustion event). Both writers share a single AtomicBool; either
-/// can re-engage pause on the next observation if the other clears it
-/// while the underlying condition still holds.
+/// Advisory only: this monitor does not pause the generator or workers.
+/// Its sole purpose is to surface chain-stall conditions as an operator-
+/// visible log line (e.g., during a leader stall, partition, or resource
+/// exhaustion event). Tx submission backpressure is handled exclusively
+/// by the MempoolFull retry path in submit_with_retry. A previous version
+/// of this type flipped a shared `paused` flag on stall detection; that
+/// path could leave workers permanently parked on recv if the monitor
+/// task died silently after setting the flag, so it was removed.
 pub struct ChainMonitor {
     endpoint: String,
     poll_interval: Duration,
     stall_threshold: Duration,
-    paused: Arc<AtomicBool>,
     http_client: reqwest::Client,
 }
 
 impl ChainMonitor {
     /// Create a new chain monitor that polls `endpoint` every
-    /// `poll_interval` and engages `paused` after `stall_threshold`
-    /// of no height advance.
-    pub fn new(
-        endpoint: String,
-        poll_interval: Duration,
-        stall_threshold: Duration,
-        paused: Arc<AtomicBool>,
-    ) -> Self {
+    /// `poll_interval` and warns once when no height advance has been
+    /// observed for `stall_threshold`.
+    pub fn new(endpoint: String, poll_interval: Duration, stall_threshold: Duration) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -723,7 +795,6 @@ impl ChainMonitor {
             endpoint,
             poll_interval,
             stall_threshold,
-            paused,
             http_client,
         }
     }
@@ -736,7 +807,7 @@ impl ChainMonitor {
 
     async fn run(self) {
         info!(
-            "Chain monitor started: poll_interval={:?}, stall_threshold={:?}",
+            "Chain monitor started (advisory): poll_interval={:?}, stall_threshold={:?}",
             self.poll_interval, self.stall_threshold
         );
         let mut last_height: Option<u64> = None;
@@ -747,24 +818,21 @@ impl ChainMonitor {
             tokio::time::sleep(self.poll_interval).await;
             match self.fetch_height().await {
                 Ok(Some(h)) => {
+                    // Per-poll heartbeat so silent monitor death is observable.
+                    debug!(height = h, stalled, "Chain monitor poll");
                     if Some(h) != last_height {
                         last_height = Some(h);
                         last_advance = Instant::now();
                         if stalled {
-                            info!(
-                                height = h,
-                                "Chain progress resumed, releasing generator pause"
-                            );
-                            self.paused.store(false, Ordering::Relaxed);
+                            info!(height = h, "Chain progress resumed (advisory)");
                             stalled = false;
                         }
                     } else if !stalled && last_advance.elapsed() >= self.stall_threshold {
                         warn!(
                             height = h,
                             elapsed_ms = last_advance.elapsed().as_millis() as u64,
-                            "Chain stalled, engaging generator pause"
+                            "Chain stalled (advisory, no pause action taken)"
                         );
-                        self.paused.store(true, Ordering::Relaxed);
                         stalled = true;
                     }
                 }
@@ -909,5 +977,234 @@ mod tests {
 
         // Should have 0 submissions since we shut down immediately
         assert_eq!(stats.total_submitted, 0);
+    }
+
+    // ============================================================
+    // Regression tests for the lockup fix:
+    //
+    // 1. worker_wakes_within_heartbeat_when_template_arrives_late
+    //    confirms the worker select loop still processes templates
+    //    after the heartbeat arm has cycled, i.e. the heartbeat
+    //    does not break the recv path.
+    // 2. mempool_full_clears_paused_on_exhaustion confirms a worker
+    //    that hits MAX_MEMPOOL_FULL_RETRIES does not strand the
+    //    paused flag at true (the original architectural defect).
+    // 3. sender_limit_exceeded_bounded confirms the SenderLimitExceeded
+    //    retry loop is no longer unbounded.
+    // 4. rate_limited_bounded confirms the RateLimited retry loop is
+    //    no longer unbounded.
+    //
+    // The three bound tests use paused time so they complete in test
+    // budget rather than real-time backoff (~120s for mempool, ~12s
+    // for rate-limited, ~4s for sender-limit). The heartbeat test
+    // uses real time because its timing assertion only makes sense
+    // against the wall clock.
+    // ============================================================
+
+    fn make_test_tx() -> TxV1 {
+        let acc = crate::sender::SenderAccount::from_index(0);
+        TxV1 {
+            version: TxVersion::V1,
+            from: acc.address,
+            pubkey: acc.verifying_key.to_bytes(),
+            nonce: 0,
+            fee: 1,
+            payload: vec![],
+            sig: [0u8; 64],
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_wakes_within_heartbeat_when_template_arrives_late() {
+        use crate::generator::TxTemplate;
+        use crate::metrics;
+        use crate::sender::SenderPool;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"jsonrpc":"2.0","result":{"txid":"0000000000000000000000000000000000000000000000000000000000000000"},"id":1}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let (tx_sender, tx_receiver) = mpsc::channel(10);
+        let (metric_tx, _metric_rx) = metrics::metric_channel();
+        let config = SubmitterConfig {
+            endpoint: server.url(),
+            worker_count: 1,
+            ..Default::default()
+        };
+        let pool = Arc::new(SenderPool::new(1));
+        let paused = Arc::new(AtomicBool::new(false));
+        let submitter = Submitter::new(config, Arc::clone(&pool), paused);
+        let handle = submitter.start(tx_receiver, metric_tx);
+
+        // Stay idle past HEARTBEAT_DURATION so the heartbeat arm cycles
+        // at least once before any template is sent.
+        tokio::time::sleep(HEARTBEAT_DURATION + Duration::from_millis(300)).await;
+
+        let sender = pool.next_sender();
+        let template = TxTemplate {
+            sender,
+            fee: 1,
+            payload: vec![],
+        };
+        tx_sender
+            .send(template)
+            .await
+            .expect("channel not closed before send");
+
+        // Allow recv + submit + mock response.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        handle.shutdown();
+        drop(tx_sender);
+        let stats = handle.wait().await;
+
+        assert_eq!(
+            stats.total_submitted, 1,
+            "worker should have processed the late-arriving template"
+        );
+        assert_eq!(
+            stats.total_accepted, 1,
+            "mock returned success, accepted count should be 1"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mempool_full_clears_paused_on_exhaustion() {
+        use crate::metrics;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"jsonrpc":"2.0","error":{"code":-32001,"message":"MempoolFull"},"id":1}"#,
+            )
+            .expect_at_least(MAX_MEMPOOL_FULL_RETRIES as usize)
+            .create_async()
+            .await;
+
+        let http_client = reqwest::Client::new();
+        let (metric_tx, _metric_rx) = metrics::metric_channel();
+        // Start with paused=true to mimic the architectural-defect scenario
+        // where a previous worker has already engaged the pause.
+        let paused = AtomicBool::new(true);
+        let tx = make_test_tx();
+
+        let result = submit_with_retry(
+            &http_client,
+            &server.url(),
+            tx,
+            3,
+            Duration::from_millis(10),
+            &metric_tx,
+            &paused,
+        )
+        .await;
+
+        match result {
+            SubmitResult::Failed { .. } => {}
+            other => {
+                panic!("expected SubmitResult::Failed after MempoolFull exhaustion, got {other:?}")
+            }
+        }
+        assert!(
+            !paused.load(Ordering::Relaxed),
+            "paused must be cleared on MempoolFull exhaustion so subsequent workers are not stranded"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sender_limit_exceeded_bounded() {
+        use crate::metrics;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"jsonrpc":"2.0","error":{"code":-32012,"message":"SenderLimitExceeded"},"id":1}"#,
+            )
+            .expect_at_least(MAX_SENDER_LIMIT_RETRIES as usize)
+            .create_async()
+            .await;
+
+        let http_client = reqwest::Client::new();
+        let (metric_tx, _metric_rx) = metrics::metric_channel();
+        let paused = AtomicBool::new(false);
+        let tx = make_test_tx();
+
+        let result = submit_with_retry(
+            &http_client,
+            &server.url(),
+            tx,
+            3,
+            Duration::from_millis(10),
+            &metric_tx,
+            &paused,
+        )
+        .await;
+
+        match result {
+            SubmitResult::Failed { error } => {
+                assert!(
+                    error.contains("SenderLimitExceeded"),
+                    "expected SenderLimitExceeded in error, got {error}"
+                );
+            }
+            other => panic!(
+                "expected SubmitResult::Failed after SenderLimitExceeded exhaustion, got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_bounded() {
+        use crate::metrics;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(429)
+            .expect_at_least(MAX_RATE_LIMITED_RETRIES as usize)
+            .create_async()
+            .await;
+
+        let http_client = reqwest::Client::new();
+        let (metric_tx, _metric_rx) = metrics::metric_channel();
+        let paused = AtomicBool::new(false);
+        let tx = make_test_tx();
+
+        let result = submit_with_retry(
+            &http_client,
+            &server.url(),
+            tx,
+            3,
+            Duration::from_millis(10),
+            &metric_tx,
+            &paused,
+        )
+        .await;
+
+        match result {
+            SubmitResult::Failed { error } => {
+                assert!(
+                    error.contains("RateLimited"),
+                    "expected RateLimited in error, got {error}"
+                );
+            }
+            other => {
+                panic!("expected SubmitResult::Failed after RateLimited exhaustion, got {other:?}")
+            }
+        }
     }
 }

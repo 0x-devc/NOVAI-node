@@ -6,11 +6,6 @@
 //! USAGE:
 //!   tx-generator --tps 100 --senders 10 --duration 60 --endpoint http://localhost:3030
 
-mod generator;
-mod metrics;
-mod sender;
-mod submitter;
-
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::sync::atomic::AtomicBool;
@@ -18,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+use tx_generator::{generator, metrics, sender, submitter};
 
 /// Transaction generator for load testing NOVAI nodes.
 #[derive(Parser, Debug)]
@@ -155,7 +151,6 @@ async fn main() -> Result<()> {
             args.endpoint.clone(),
             Duration::from_secs(args.stall_poll_interval_secs),
             Duration::from_secs(args.stall_threshold_secs),
-            Arc::clone(&paused),
         );
         Some(monitor.start())
     };
