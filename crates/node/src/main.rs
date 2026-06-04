@@ -143,6 +143,12 @@ impl NonceProvider for InMemoryNonceProvider {
 struct ExecutionCommitCallback {
     nonce_provider: Arc<InMemoryNonceProvider>,
     blockchain_index: Arc<Mutex<rpc::BlockchainIndex>>,
+    /// Queue of committed txids drained by the propose loop and removed from
+    /// the mempool. Cannot remove inline: on_commit fires from peer-connection
+    /// threads holding the db lock, while the propose loop holds the mempool
+    /// lock and acquires the db lock inside try_propose_block. Taking the
+    /// mempool lock here would close an AB-BA cycle.
+    pending_mempool_removals: Arc<Mutex<Vec<TxId>>>,
 }
 
 impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
@@ -190,6 +196,28 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                     let entry = map.entry(tx.from).or_insert(tx.nonce);
                     if tx.nonce >= *entry {
                         *entry = tx.nonce + 1;
+                    }
+                }
+            }
+        }
+
+        // Queue committed txs for deferred mempool removal. The propose loop
+        // drains this at the top of each tick (~100 ms typical). Even in the
+        // gap before drain runs, drain_ready's stale-evict path at
+        // crates/mempool/src/lib.rs:360-382 prevents reselection because the
+        // nonce-advance block above has already moved expected past every
+        // committed tx's nonce. The append is done under a tiny critical
+        // section that does not hold any other lock, so it cannot participate
+        // in the propose loop's mempool->state->db ordering.
+        {
+            let mut pending = self
+                .pending_mempool_removals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for block in blocks {
+                for tx in &block.txs {
+                    if let Ok(id) = txid_v1(tx) {
+                        pending.push(id);
                     }
                 }
             }
@@ -1110,15 +1138,24 @@ fn main() {
             // Shared blockchain index for block explorer RPC endpoints
             let blockchain_index = Arc::new(Mutex::new(rpc::BlockchainIndex::new()));
 
+            // Create mempool early so we can wire gossip before Arc-wrapping the node.
+            // Moved above the commit callback so the deferred-removal queue (below)
+            // can be shared by both the callback (append on commit) and the propose
+            // loop (drain under the mempool lock).
+            let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
+
+            // Deferred queue for committed txids. on_commit cannot remove from
+            // the mempool inline (AB-BA with the propose loop's mempool->db
+            // ordering), so it appends here and the propose loop drains.
+            let pending_mempool_removals: Arc<Mutex<Vec<TxId>>> = Arc::new(Mutex::new(Vec::new()));
+
             // Wire execution commit callback
             let commit_callback = Arc::new(ExecutionCommitCallback {
                 nonce_provider: Arc::clone(&nonce_provider),
                 blockchain_index: Arc::clone(&blockchain_index),
+                pending_mempool_removals: Arc::clone(&pending_mempool_removals),
             });
             node.set_commit_callback(commit_callback);
-
-            // Create mempool early so we can wire gossip before Arc-wrapping the node
-            let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
 
             // Wire gossip: allows peers to insert received txs into our mempool
             node.set_gossip_mempool(
@@ -1627,6 +1664,24 @@ fn main() {
                 if last_proposal_attempt.elapsed() >= Duration::from_millis(proposal_interval_ms) {
                     last_proposal_attempt = std::time::Instant::now();
 
+                    // Drain committed-tx removals queued by on_commit. Deferred
+                    // here to dodge the AB-BA cycle: on_commit fires while a
+                    // peer thread holds db, and the propose loop holds mempool
+                    // and acquires db inside try_propose_block; an inline lock
+                    // on the mempool inside on_commit would deadlock. At ~5 tps
+                    // across 4 nodes, the queue gains a handful of entries
+                    // between ticks and drains the same tick, so the peak length
+                    // is in the single digits under steady load.
+                    {
+                        let mut pending = pending_mempool_removals.lock_or_recover();
+                        if !pending.is_empty() {
+                            let mut mp = mempool.lock_or_recover();
+                            for txid in pending.drain(..) {
+                                mp.remove(&txid);
+                            }
+                        }
+                    }
+
                     // Recover txs from abandoned proposals (round changed before
                     // our block was committed). Nonce check filters out txs that
                     // were already committed via a different block.
@@ -1821,6 +1876,128 @@ fn main() {
 
         _ => {
             usage();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use novai_consensus_types::Block;
+    use novai_crypto::sign_tx_v1;
+    use novai_node::consensus_node::CommitCallback;
+    use novai_state::MemKv;
+
+    /// Exercises the full deferred-removal path that fixes the
+    /// duplicate-inclusion bug: on_commit appends committed txids to the
+    /// pending-removals queue, then the propose-loop drain pulls each one
+    /// out of the mempool.
+    ///
+    /// Three signed transfer txs are reinserted to a fresh mempool. A block
+    /// containing only T1 and T2 is fed to on_commit. The queue must hold
+    /// exactly [txid(T1), txid(T2)] afterward; the existing nonce-advance
+    /// step must move expected past T2; the drain step then strips T1 and
+    /// T2 from the mempool while leaving T3 untouched.
+    #[test]
+    fn on_commit_queues_committed_txs_and_drain_removes_them() {
+        let nonce_provider = Arc::new(InMemoryNonceProvider::new());
+        let blockchain_index = Arc::new(Mutex::new(rpc::BlockchainIndex::new()));
+        let pending_mempool_removals: Arc<Mutex<Vec<TxId>>> = Arc::new(Mutex::new(Vec::new()));
+        let callback = ExecutionCommitCallback {
+            nonce_provider: Arc::clone(&nonce_provider),
+            blockchain_index: Arc::clone(&blockchain_index),
+            pending_mempool_removals: Arc::clone(&pending_mempool_removals),
+        };
+
+        let (sk, pk) = generate_keypair();
+        let from = address_from_pubkey(&pk);
+        let pubkey = pk.to_bytes();
+
+        let mut t1 = build_tx(from, pubkey, 0, 1, String::new());
+        let mut t2 = build_tx(from, pubkey, 1, 1, String::new());
+        let mut t3 = build_tx(from, pubkey, 2, 1, String::new());
+        sign_tx_v1(&sk, &mut t1).expect("sign t1");
+        sign_tx_v1(&sk, &mut t2).expect("sign t2");
+        sign_tx_v1(&sk, &mut t3).expect("sign t3");
+
+        let id1 = txid_v1(&t1).expect("txid t1");
+        let id2 = txid_v1(&t2).expect("txid t2");
+        let id3 = txid_v1(&t3).expect("txid t3");
+
+        let mempool = Arc::new(Mutex::new(TxMempool::new(1, 1000)));
+        {
+            let mut mp = mempool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            mp.reinsert_unchecked(t1.clone()).expect("reinsert t1");
+            mp.reinsert_unchecked(t2.clone()).expect("reinsert t2");
+            mp.reinsert_unchecked(t3.clone()).expect("reinsert t3");
+            assert!(mp.contains(&id1));
+            assert!(mp.contains(&id2));
+            assert!(mp.contains(&id3));
+        }
+
+        let block = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs: vec![t1.clone(), t2.clone()],
+        };
+
+        // dispatch_tx may fail per-tx (no account state, no balance), but
+        // the queue-append and nonce-advance blocks run unconditionally, which
+        // is what we're verifying.
+        let mut storage = Storage::Memory(MemKv::new());
+        callback.on_commit(&mut storage, &[block]);
+
+        // First half of the deferred path: queue must hold the two committed
+        // txids in commit order, and the existing nonce-advance must still work.
+        {
+            let pending = pending_mempool_removals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                pending.len(),
+                2,
+                "queue should hold exactly the two committed txids"
+            );
+            assert_eq!(pending[0], id1, "queue order must match block tx order");
+            assert_eq!(pending[1], id2, "queue order must match block tx order");
+        }
+        assert_eq!(
+            nonce_provider.expected_nonce(&from),
+            2,
+            "expected_nonce should advance past the last committed nonce",
+        );
+
+        // Second half of the deferred path: simulate the propose-loop drain.
+        {
+            let mut pending = pending_mempool_removals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut mp = mempool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for txid in pending.drain(..) {
+                mp.remove(&txid);
+            }
+        }
+
+        // Final invariants.
+        {
+            let mp = mempool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(!mp.contains(&id1), "T1 should be removed from mempool");
+            assert!(!mp.contains(&id2), "T2 should be removed from mempool");
+            assert!(mp.contains(&id3), "T3 must remain (not in committed block)");
+        }
+        {
+            let pending = pending_mempool_removals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(pending.is_empty(), "queue should be drained");
         }
     }
 }
