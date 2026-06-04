@@ -245,6 +245,20 @@ impl TxMempool {
     pub fn remove(&mut self, id: &TxId) -> Option<TxV1> {
         let tx = self.by_id.remove(id)?;
         self.total_bytes -= novai_codec::tx_encoded_size(&tx);
+        // H-08: decrement per-sender count so the slot is reclaimed.
+        // The three other internal eviction paths (drain_ready stale-evict
+        // at lines 371-382, drain_ready selection at 411-424, purge_stale
+        // at 468-480) all do this; without it the propose-loop deferred
+        // drain at crates/node/src/main.rs:1675-1683 leaks the counter,
+        // and any node that does not also run drain_ready (i.e. every
+        // non-leader) eventually rejects the same sender forever with
+        // SenderLimitExceeded.
+        if let Some(c) = self.by_sender_count.get_mut(&tx.from) {
+            *c = c.saturating_sub(1);
+            if *c == 0 {
+                self.by_sender_count.remove(&tx.from);
+            }
+        }
         self.insertion_times.remove(id);
         Some(tx)
     }
@@ -1063,5 +1077,52 @@ mod tests {
         // Mempool reads the same map
         let (mp_scores, _) = mp.threat_scores();
         assert_eq!(*mp_scores.lock().unwrap().get(&addr).unwrap(), 75);
+    }
+
+    /// Regression test for the follower-mempool-eviction leak observed on
+    /// [redacted-host] 2026-06-04 (price-oracle entity 0a110df8).
+    ///
+    /// `TxMempool::remove` clears `by_id`, decrements `total_bytes`, and
+    /// drops `insertion_times`, but the original implementation did not
+    /// decrement `by_sender_count`. The propose-loop deferred-removal
+    /// drain (crates/node/src/main.rs:1675-1683) is the only production
+    /// caller of `remove`, and it runs on every node every tick. On the
+    /// proposer the leak was masked because `drain_ready` also runs and
+    /// decrements the counter via its stale-evict (lines 371-382) or
+    /// selection (lines 411-424) paths. On followers, which never call
+    /// `drain_ready`, the per-sender counter rose monotonically until it
+    /// hit `MAX_PENDING_PER_SENDER = 16` and that sender was rejected
+    /// with `SenderLimitExceeded` forever.
+    ///
+    /// This test runs more than `MAX_PENDING_PER_SENDER` insert/remove
+    /// cycles for a single sender. Pre-fix the insert at cycle 16 panics
+    /// with `SenderLimitExceeded`. Post-fix all cycles succeed and the
+    /// counter ends at zero.
+    #[test]
+    fn remove_decrements_per_sender_count_so_sender_can_keep_submitting() {
+        let (sk, vk) = test_keypair(42);
+        let from: Address = address_from_pubkey(&vk);
+
+        let mut np = TestNonceProvider::default();
+        np.set(from, 0);
+
+        let mut mp = TxMempool::new(1, 16);
+        let total_cycles: u64 = (MAX_PENDING_PER_SENDER as u64) * 2 + 5;
+
+        for cycle in 0..total_cycles {
+            np.set(from, cycle);
+            let tx = make_signed_tx(&sk, &vk, cycle, 1, b"oracle-anchor");
+            let id = mp
+                .insert(tx, &np)
+                .unwrap_or_else(|e| panic!("insert at cycle {cycle} failed: {e:?}"));
+            let removed = mp.remove(&id);
+            assert!(removed.is_some(), "remove at cycle {cycle} returned None");
+        }
+
+        assert_eq!(
+            mp.by_sender_count.get(&from).copied().unwrap_or(0),
+            0,
+            "per-sender counter must be zero after equal insert/remove cycles"
+        );
     }
 }

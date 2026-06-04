@@ -331,3 +331,119 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
 
     println!("✅ QC catch-up via justify_qc in proposal works correctly");
 }
+
+/// Follower-side mempool eviction regression test.
+///
+/// Reproduces the production lockup observed on [redacted-host] 2026-06-04 14:35 to
+/// 18:40 UTC where a price-oracle agent (entity 0a110df8) submitting a
+/// single-sender continuous workload to a non-leader RPC accumulated the
+/// per-sender pending count without ever evicting the committed txs. After
+/// 16 admits the receiving node returned `SenderLimitExceeded` for that
+/// sender for the rest of the run (81 submissions over 4 hours: 26 admitted,
+/// 55 rejected, on-chain nonce stuck at 1).
+///
+/// Root cause: `TxMempool::remove` in `crates/mempool/src/lib.rs:245-250`
+/// did not decrement `by_sender_count`. The propose-loop deferred-removal
+/// drain at `crates/node/src/main.rs:1675-1683` calls `remove` on every
+/// node every tick, but on followers (which never call `drain_ready`) the
+/// missing decrement caused the per-sender counter to rise monotonically
+/// to `MAX_PENDING_PER_SENDER = 16`.
+///
+/// Scope of this test: drives the exact deferred-removal pattern that runs
+/// on every node every tick (a `pending_removals` queue is appended on
+/// commit and drained into `mempool.remove`). It uses only the public
+/// `TxMempool` API, mirroring the production drain at `main.rs:1675-1683`.
+/// The end-to-end wiring through `ExecutionCommitCallback` (private to the
+/// novai-node binary) is covered by the existing unit test
+/// `on_commit_queues_committed_txs_and_drain_removes_them` at
+/// `crates/node/src/main.rs:1901-2002`; that test is now also strengthened
+/// indirectly by this fix because the same `mempool.remove` it exercises
+/// now decrements `by_sender_count`.
+///
+/// Pre-fix expectation: the insert at cycle 16 panics with
+/// `SenderLimitExceeded`. Post-fix expectation: all cycles succeed and the
+/// mempool is empty at the end.
+#[test]
+fn follower_evicts_committed_txs_under_single_sender_load() {
+    use ed25519_dalek::{SigningKey, VerifyingKey};
+    use mempool::{NonceProvider, TxMempool, MAX_PENDING_PER_SENDER};
+    use novai_crypto::sign_tx_v1;
+    use novai_types::{Address, TxId, TxV1, TxVersion};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    struct ProgressingNonces {
+        expected: Mutex<HashMap<Address, u64>>,
+    }
+    impl NonceProvider for ProgressingNonces {
+        fn expected_nonce(&self, addr: &Address) -> u64 {
+            self.expected
+                .lock()
+                .unwrap()
+                .get(addr)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    fn build_signed_tx(sk: &SigningKey, vk: &VerifyingKey, from: Address, nonce: u64) -> TxV1 {
+        let mut tx = TxV1 {
+            version: TxVersion::V1,
+            from,
+            pubkey: vk.to_bytes(),
+            nonce,
+            fee: 1,
+            payload: b"oracle-anchor".to_vec(),
+            sig: [0u8; 64],
+        };
+        sign_tx_v1(sk, &mut tx).expect("sign_tx_v1");
+        tx
+    }
+
+    let sk = SigningKey::from_bytes(&[0xAAu8; 32]);
+    let vk = sk.verifying_key();
+    let from = address_from_pubkey(&vk);
+
+    let np = ProgressingNonces {
+        expected: Mutex::new(HashMap::new()),
+    };
+    let mut mp = TxMempool::new(1, 1024);
+    let mut pending_removals: Vec<TxId> = Vec::new();
+
+    // Run more than MAX_PENDING_PER_SENDER cycles. Each cycle mirrors what
+    // happens on a follower node per block:
+    //   1. RPC admits a fresh tx with the next monotone nonce.
+    //   2. The tx is gossiped to the leader, included in a block, and the
+    //      block propagates back here.
+    //   3. ExecutionCommitCallback.on_commit appends the committed txid to
+    //      pending_mempool_removals (modeled here as a local Vec<TxId>).
+    //   4. The propose loop drain runs on every node every tick and calls
+    //      mempool.remove for each queued txid (modeled here verbatim).
+    // Pre-fix step 4 silently leaks by_sender_count; insert at cycle 16
+    // would fail.
+    let total_cycles: u64 = (MAX_PENDING_PER_SENDER as u64) * 2 + 5;
+    for cycle in 0..total_cycles {
+        np.expected.lock().unwrap().insert(from, cycle);
+        let tx = build_signed_tx(&sk, &vk, from, cycle);
+        let id = mp
+            .insert(tx, &np)
+            .unwrap_or_else(|e| panic!("insert at cycle {cycle} failed: {e:?}"));
+        pending_removals.push(id);
+
+        // The exact shape of the propose-loop drain at
+        // crates/node/src/main.rs:1675-1683.
+        for txid in pending_removals.drain(..) {
+            mp.remove(&txid);
+        }
+    }
+
+    assert_eq!(
+        mp.len(),
+        0,
+        "mempool should be empty after all deferred-removal drains"
+    );
+
+    println!(
+        "✅ Follower mempool evicted {total_cycles} single-sender committed txs without hitting SenderLimitExceeded"
+    );
+}
