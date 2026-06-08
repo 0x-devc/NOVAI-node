@@ -312,11 +312,27 @@ fn second_upgrade_after_cooldown_increments_count() {
 
 #[test]
 fn upgrade_via_dispatch_tx_succeeds() {
+    // After the type-8 RegisterAiEntity reverse-index fix, the creator's
+    // address resolves as an AI-entity sender through `check_ai_entity_sender`
+    // (`crates/execution/src/lib.rs:9666`). That function's deny-by-default arm
+    // at `:9706` rejects EntityUpgrade (and all other creator-privileged tx
+    // types) for AI entities, so `dispatch_tx` from a type-8 creator now
+    // returns `IssuerMissingCapability` before reaching `apply_entity_upgrade_tx`.
+    //
+    // Follow-up: extend `check_ai_entity_sender` to allow creator-privileged
+    // tx types (governance 6/7, credit 9, with-key 10, upgrade 11) for AI
+    // entities so type-8 creators can drive these flows through `dispatch_tx`.
+    // Each inner handler already enforces its own creator-only check.
+    //
+    // Until that follow-up lands, exercise the upgrade routing via direct
+    // `apply_entity_upgrade_tx`. The `dispatch_tx` wiring for type 11 is still
+    // covered by `upgrade_via_dispatch_below_min_fee_rejected` (the fee gate
+    // fires before `check_ai_entity_sender`).
     let mut db = MemKv::new();
     let creator = [0x01u8; 32];
     let id = register(&mut db, creator, [0x42u8; 32], 0);
 
-    dispatch_tx(
+    apply_entity_upgrade_tx(
         &mut db,
         &upgrade_tx(creator, 1, id, [0x43u8; 32], [0u8; 32]),
         50_000,

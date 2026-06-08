@@ -74,6 +74,15 @@ pub enum ExecError<E> {
         expected: Nonce,
         got: Nonce,
     },
+    /// β4-A: handler rejected a tx whose nonce is strictly below the
+    /// entity's persisted nonce. Distinct from `NonceMismatch`
+    /// (strict-equality reject) so callers can distinguish a replay from a
+    /// future-nonce gap. Handlers that admit gaps advance
+    /// `entity.nonce = tx.nonce + 1` on success.
+    NonceTooLow {
+        expected: Nonce,
+        got: Nonce,
+    },
     InsufficientFunds {
         balance: u128,
         needed: u128,
@@ -150,9 +159,15 @@ pub enum ExecError<E> {
     Tier0ActionForbidden,
     /// Attempted to register an AI entity that already exists.
     EntityAlreadyExists,
+    /// Type-8 `RegisterAiEntity` rejected because the creator address already
+    /// has an entity registered. The signal dispatch path resolves `tx.from`
+    /// through `ai/entities_by_addr/`, so a second type-8 registration from the
+    /// same creator would silently retarget every future signal to the new
+    /// entity and orphan the previous one.
+    CreatorAlreadyHasEntity,
     /// Attempted to register with Autonomous mode (reserved, not yet supported).
     AutonomousModeReserved,
-    /// AI emergency kill switch is active — all AI entity operations blocked.
+    /// AI emergency kill switch is active: all AI entity operations blocked.
     AiKillSwitchActive,
     /// Payload version byte not recognized by the dispatcher.
     UnknownPayloadVersion {
@@ -6621,8 +6636,8 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
         if !entity.is_active {
             return Err(ExecError::EntityNotActive);
         }
-        if tx.nonce != entity.nonce {
-            return Err(ExecError::NonceMismatch {
+        if tx.nonce < entity.nonce {
+            return Err(ExecError::NonceTooLow {
                 expected: entity.nonce,
                 got: tx.nonce,
             });
@@ -6638,10 +6653,7 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
             .economic_balance
             .checked_sub(needed)
             .ok_or(ExecError::Overflow)?;
-        entity.nonce = entity
-            .nonce
-            .checked_add(1)
-            .ok_or(ExecError::NonceOverflow)?;
+        entity.nonce = tx.nonce.checked_add(1).ok_or(ExecError::NonceOverflow)?;
 
         let ops = vec![
             write_ai_entity_op(&entity),
@@ -7262,9 +7274,10 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
     // D14.2: Validate emit_proposals capability (static or delegated)
     requires_capability(db, &entity, current_height, |c| c.emit_proposals)?;
 
-    // D14.2: Validate nonce
-    if tx.nonce != entity.nonce {
-        return Err(ExecError::NonceMismatch {
+    // β4-A: range admission. Mempool expected_nonce advances every
+    // committed tx, but entity.nonce only advances on successful runs.
+    if tx.nonce < entity.nonce {
+        return Err(ExecError::NonceTooLow {
             expected: entity.nonce,
             got: tx.nonce,
         });
@@ -7285,11 +7298,8 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         .checked_sub(fee_u128)
         .ok_or(ExecError::Overflow)?;
 
-    // D14.6: Increment AI entity nonce
-    entity.nonce = entity
-        .nonce
-        .checked_add(1)
-        .ok_or(ExecError::NonceOverflow)?;
+    // D14.6: Advance AI entity nonce (β4-A: pin to tx.nonce + 1).
+    entity.nonce = tx.nonce.checked_add(1).ok_or(ExecError::NonceOverflow)?;
 
     // D14.6: Update last_active_at
     entity.last_active_at = current_height;
@@ -9080,6 +9090,16 @@ pub fn apply_register_ai_entity_tx<K: KvBatch>(
         return Err(ExecError::EntityAlreadyExists);
     }
 
+    // Type-8 has no separate signing key, so the reverse index is keyed on
+    // the creator address. Reject if this creator already operates an entity,
+    // otherwise the new WriteOp::Put below would silently retarget every
+    // future signal from this creator to the new entity_id and orphan the
+    // previous one.
+    let addr_key = ai_entity_by_address_key(&tx.from);
+    if db.get(&addr_key).map_err(ExecError::Db)?.is_some() {
+        return Err(ExecError::CreatorAlreadyHasEntity);
+    }
+
     // Create entity
     let mut entity = AiEntity::new(
         payload.code_hash,
@@ -9107,7 +9127,7 @@ pub fn apply_register_ai_entity_tx<K: KvBatch>(
         .checked_add(fee_u128)
         .ok_or(ExecError::Overflow)?;
 
-    // Build atomic batch
+    // Build atomic batch (creator account + fee pool + entity + reverse index)
     let ops = vec![
         WriteOp::Put(
             account_key(&tx.from),
@@ -9118,6 +9138,9 @@ pub fn apply_register_ai_entity_tx<K: KvBatch>(
             encode_fee_pool_v1(&fee_pool).to_vec(),
         ),
         write_ai_entity_op(&entity),
+        // Reverse index: creator address -> entity_id, so signal dispatch
+        // can resolve tx.from to the entity without a separate signing key.
+        WriteOp::Put(addr_key, entity_id.to_vec()),
     ];
 
     db.apply_batch(&ops).map_err(ExecError::Db)?;
@@ -10523,8 +10546,8 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
     requires_capability(db, &entity, current_height, |c| c.read_memory_objects)?;
 
     // Validate nonce
-    if tx.nonce != entity.nonce {
-        return Err(ExecError::NonceMismatch {
+    if tx.nonce < entity.nonce {
+        return Err(ExecError::NonceTooLow {
             expected: entity.nonce,
             got: tx.nonce,
         });
@@ -10571,10 +10594,7 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
             .checked_sub(channel.deposit_a)
             .ok_or(ExecError::Overflow)?;
     }
-    entity.nonce = entity
-        .nonce
-        .checked_add(1)
-        .ok_or(ExecError::NonceOverflow)?;
+    entity.nonce = tx.nonce.checked_add(1).ok_or(ExecError::NonceOverflow)?;
     entity.last_active_at = current_height;
 
     // Build atomic batch — all storage keys use canonical entity.id
@@ -10731,8 +10751,8 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
     requires_capability(db, &entity, current_height, |c| c.read_memory_objects)?;
 
     // Validate nonce
-    if tx.nonce != entity.nonce {
-        return Err(ExecError::NonceMismatch {
+    if tx.nonce < entity.nonce {
+        return Err(ExecError::NonceTooLow {
             expected: entity.nonce,
             got: tx.nonce,
         });
@@ -10822,10 +10842,7 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
         .economic_balance
         .checked_sub(fee_u128)
         .ok_or(ExecError::Overflow)?;
-    entity.nonce = entity
-        .nonce
-        .checked_add(1)
-        .ok_or(ExecError::NonceOverflow)?;
+    entity.nonce = tx.nonce.checked_add(1).ok_or(ExecError::NonceOverflow)?;
     entity.last_active_at = current_height;
 
     // Build atomic batch
@@ -10900,8 +10917,8 @@ fn apply_delete_memory_object_tx_inner<K: KvBatch>(
     requires_capability(db, &entity, current_height, |c| c.read_memory_objects)?;
 
     // Validate nonce
-    if tx.nonce != entity.nonce {
-        return Err(ExecError::NonceMismatch {
+    if tx.nonce < entity.nonce {
+        return Err(ExecError::NonceTooLow {
             expected: entity.nonce,
             got: tx.nonce,
         });
@@ -10933,10 +10950,7 @@ fn apply_delete_memory_object_tx_inner<K: KvBatch>(
         .economic_balance
         .checked_sub(fee_u128)
         .ok_or(ExecError::Overflow)?;
-    entity.nonce = entity
-        .nonce
-        .checked_add(1)
-        .ok_or(ExecError::NonceOverflow)?;
+    entity.nonce = tx.nonce.checked_add(1).ok_or(ExecError::NonceOverflow)?;
     entity.last_active_at = current_height;
 
     // Build atomic batch — all storage keys use canonical entity.id
@@ -14182,22 +14196,34 @@ mod tests {
         assert_eq!(recip_acct.balance, 50_000u128);
     }
 
+    // Repurposed under β4-A: the old "future-nonce-rejected" invariant no
+    // longer holds (range admission admits tx.nonce >= entity.nonce). What
+    // β4-A DOES still guarantee at the transfer site is past-nonce
+    // rejection: a tx.nonce strictly below entity.nonce is a replay attempt
+    // and must return NonceTooLow.
     #[test]
-    fn ai_entity_transfer_nonce_mismatch_rejected() {
+    fn ai_entity_transfer_past_nonce_rejected() {
         let mut db = MemKv::new();
         let creator = [0x01u8; 32];
         fund_account(&mut db, &creator, 10_000_000);
 
-        let (_, entity_addr) = register_entity_with_key(&mut db, &creator, 0, [0xAB; 32], 500_000);
+        let (entity_id, entity_addr) =
+            register_entity_with_key(&mut db, &creator, 0, [0xAB; 32], 500_000);
 
-        // Entity nonce is 0, but we send nonce 5
-        let tx = mk_entity_transfer_tx(entity_addr, 5, 1_000, [0xFF; 32], 10_000);
+        // Manually advance the entity's persisted nonce to 5 to simulate
+        // five prior successful transfers without running them.
+        let mut entity = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+        entity.nonce = 5;
+        db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+
+        // tx.nonce = 0 is strictly below entity.nonce = 5 (a replay).
+        let tx = mk_entity_transfer_tx(entity_addr, 0, 1_000, [0xFF; 32], 10_000);
         let result = apply_tx_v1_transfer(&mut db, &tx);
         assert!(matches!(
             result,
-            Err(ExecError::NonceMismatch {
-                expected: 0,
-                got: 5
+            Err(ExecError::NonceTooLow {
+                expected: 5,
+                got: 0
             })
         ));
     }

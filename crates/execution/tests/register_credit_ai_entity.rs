@@ -670,3 +670,461 @@ fn dispatch_credit_entity() {
     // Verify fee pool
     assert_eq!(read_fee_pool(&db), fee as u128);
 }
+
+// ============================================================================
+// TEST 16: register_type_8_then_signal_succeeds
+//
+// Regression test for the production IssuerNotFound bug. A type-8 RegisterAiEntity
+// must write the reverse index `ai/entities_by_addr/{creator} -> entity_id` so
+// that signals signed by the creator key resolve to the entity at dispatch time.
+//
+// Two consecutive signals are submitted to prove the reverse-index row is not
+// consumed by the first lookup and the entity nonce advances correctly.
+//
+// Pre-fix this test fails with `IssuerNotFound` on the first signal.
+// ============================================================================
+
+#[test]
+fn register_type_8_then_signal_succeeds() {
+    use novai_state::Kv;
+
+    let mut db = MemKv::new();
+
+    let creator = [0x77u8; 32];
+    let code_hash = [0xAAu8; 32];
+    seed_account(&mut db, &creator, 100_000, 0);
+
+    // Register via type 8 (no separate signing key, creator is the operator).
+    let reg_payload = encode_register_ai_entity_payload_v1(&RegisterAiEntityPayloadV1 {
+        code_hash,
+        autonomy_mode: AutonomyMode::Gated,
+        capabilities: Capabilities::gated(),
+        initial_balance: 10_000,
+    })
+    .to_vec();
+    let reg_tx = create_test_tx(creator, 0, 10, reg_payload);
+    let entity_id = apply_register_ai_entity_tx(&mut db, &reg_tx, 100).unwrap();
+
+    // Reverse-index row must exist at ai_entity_by_address_key(creator)
+    // mapping to entity_id.
+    let reverse = db
+        .get(&ai_entity_by_address_key(&creator))
+        .unwrap()
+        .expect("type-8 register must populate the reverse-index row");
+    assert_eq!(
+        reverse, entity_id,
+        "reverse index must point at the registered entity_id"
+    );
+
+    // First signal: tx.from = creator (production case for type-8). Dispatch
+    // resolves the entity through the reverse index. Pre-fix this returns
+    // IssuerNotFound; post-fix it returns Ok.
+    let signal_payload_1 = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash: [0xC1u8; 32],
+        signal_type: AiSignalType::Prediction,
+        issuer_entity_id: entity_id,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
+        sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
+        oracle_anchor: None,
+    });
+    let signal_tx_1 = create_test_tx(creator, 0, 20, signal_payload_1);
+    let r1 = apply_signal_commitment_tx(&mut db, &signal_tx_1, 101);
+    assert!(
+        r1.is_ok(),
+        "first signal from type-8 registered creator must succeed: {r1:?}"
+    );
+
+    // Second signal from the same creator: proves the reverse-index row is
+    // persistent (not consumed) and the entity nonce advances 0 -> 1 -> 2.
+    let signal_payload_2 = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash: [0xC2u8; 32],
+        signal_type: AiSignalType::Prediction,
+        issuer_entity_id: entity_id,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
+        sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
+        oracle_anchor: None,
+    });
+    let signal_tx_2 = create_test_tx(creator, 1, 20, signal_payload_2);
+    let r2 = apply_signal_commitment_tx(&mut db, &signal_tx_2, 102);
+    assert!(
+        r2.is_ok(),
+        "second signal from same creator must also succeed: {r2:?}"
+    );
+
+    // Entity nonce advanced twice, balance debited 2 * 20.
+    let entity = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+    assert_eq!(entity.nonce, 2);
+    assert_eq!(entity.economic_balance, 10_000 - 40);
+    assert_eq!(entity.last_active_at, 102);
+}
+
+// ============================================================================
+// TEST 17: register_type_8_twice_same_creator_rejected
+//
+// A second type-8 registration from the same creator address must be rejected
+// with `CreatorAlreadyHasEntity`. Without this guard the new entity would
+// overwrite the reverse-index row at `ai/entities_by_addr/{creator}` and
+// silently orphan the first entity.
+//
+// Pre-fix this test fails because the guard does not exist and the second
+// registration succeeds.
+// ============================================================================
+
+#[test]
+fn register_type_8_twice_same_creator_rejected() {
+    let mut db = MemKv::new();
+
+    let creator = [0x88u8; 32];
+    seed_account(&mut db, &creator, 100_000, 0);
+
+    // First registration succeeds and writes ai/entities_by_addr/{creator}.
+    let payload_a = encode_register_ai_entity_payload_v1(&RegisterAiEntityPayloadV1 {
+        code_hash: [0xA1u8; 32],
+        autonomy_mode: AutonomyMode::Gated,
+        capabilities: Capabilities::gated(),
+        initial_balance: 1_000,
+    })
+    .to_vec();
+    let tx_a = create_test_tx(creator, 0, 10, payload_a);
+    apply_register_ai_entity_tx(&mut db, &tx_a, 100).unwrap();
+
+    // Second registration with a DIFFERENT code_hash but the SAME creator
+    // address must be rejected by the new guard.
+    let payload_b = encode_register_ai_entity_payload_v1(&RegisterAiEntityPayloadV1 {
+        code_hash: [0xB2u8; 32],
+        autonomy_mode: AutonomyMode::Gated,
+        capabilities: Capabilities::gated(),
+        initial_balance: 1_000,
+    })
+    .to_vec();
+    let tx_b = create_test_tx(creator, 1, 10, payload_b);
+    let result = apply_register_ai_entity_tx(&mut db, &tx_b, 101);
+    assert!(
+        matches!(result, Err(ExecError::CreatorAlreadyHasEntity)),
+        "second type-8 register from same creator must be rejected: {result:?}"
+    );
+}
+
+// ============================================================================
+// TEST 18: register_type_8_signal_recovers_from_failure_e2e (β4-A integration)
+//
+// Production recovery proof for site 2 (signal commitment handler). The
+// mempool's `expected_nonce[addr]` advances on every committed tx; the
+// entity's persisted `nonce` only advances when the handler runs to
+// completion. Under strict equality the first post-check failure froze the
+// entity forever. Under β4-A the next valid tx whose tx.nonce is at or
+// above entity.nonce is admitted, and entity.nonce is pinned to tx.nonce
+// plus one.
+//
+// Pre-fix this test fails at the second signal with NonceMismatch{0, 1}.
+// Post-fix it passes.
+// ============================================================================
+
+#[test]
+fn register_type_8_signal_recovers_from_failure_e2e() {
+    let mut db = MemKv::new();
+
+    let creator = [0xC1u8; 32];
+    let funder = [0xF2u8; 32];
+    let code_hash = [0xBBu8; 32];
+
+    seed_account(&mut db, &creator, 100_000, 0);
+    seed_account(&mut db, &funder, 100_000, 0);
+
+    // Register type-8 with `initial_balance = 5` so the first signal at
+    // `fee = 50` trips InsufficientFunds AFTER the nonce check at
+    // lib.rs:7272 has already passed.
+    let reg_payload = encode_register_ai_entity_payload_v1(&RegisterAiEntityPayloadV1 {
+        code_hash,
+        autonomy_mode: AutonomyMode::Gated,
+        capabilities: Capabilities::gated(),
+        initial_balance: 5,
+    })
+    .to_vec();
+    let reg_tx = create_test_tx(creator, 0, 10, reg_payload);
+    let entity_id = apply_register_ai_entity_tx(&mut db, &reg_tx, 100).unwrap();
+
+    // Signal #1: tx.nonce = 0, fee = 50 > entity.balance = 5. Handler passes
+    // the strict-equality nonce check (0 == 0), then fails the balance
+    // check BEFORE the entity.nonce advance at lib.rs:7295. entity.nonce
+    // stays 0.
+    let sig0_payload = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash: [0x01u8; 32],
+        signal_type: AiSignalType::Prediction,
+        issuer_entity_id: entity_id,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
+        sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
+        oracle_anchor: None,
+    });
+    let sig_tx_0 = create_test_tx(creator, 0, 50, sig0_payload);
+    let r0 = apply_signal_commitment_tx(&mut db, &sig_tx_0, 101);
+    assert!(
+        matches!(r0, Err(ExecError::InsufficientFunds { .. })),
+        "first signal must fail with InsufficientFunds, got {r0:?}"
+    );
+    let after_fail = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+    assert_eq!(
+        after_fail.nonce, 0,
+        "entity.nonce must stay frozen at 0 after a post-nonce-check failure"
+    );
+
+    // Refund the entity from a separate funder account. The credit handler
+    // advances the funder's account nonce but does NOT advance entity.nonce,
+    // so the gap between the mempool view (which would be 1 in production)
+    // and entity.nonce (still 0) persists for the next signal.
+    let credit_payload = encode_credit_ai_entity_payload_v1(&CreditAiEntityPayloadV1 {
+        entity_id,
+        amount: 1_000,
+    })
+    .to_vec();
+    let credit_tx = create_test_tx(funder, 0, 100, credit_payload);
+    apply_credit_ai_entity_tx(&mut db, &credit_tx, 102).unwrap();
+    let after_credit = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+    assert_eq!(
+        after_credit.nonce, 0,
+        "credit must not advance the recipient entity's nonce"
+    );
+    assert!(after_credit.economic_balance >= 1_000);
+
+    // Signal #2: tx.nonce = 1 (matches the production mempool view after
+    // the committed failure of signal #1). Pre-fix this hits `1 != 0` and
+    // returns NonceMismatch{expected: 0, got: 1}. Post-fix β4-A admits it
+    // because `1 >= 0`, then pins entity.nonce to `tx.nonce + 1 = 2`.
+    let sig1_payload = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash: [0x02u8; 32],
+        signal_type: AiSignalType::Prediction,
+        issuer_entity_id: entity_id,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
+        sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
+        oracle_anchor: None,
+    });
+    let sig_tx_1 = create_test_tx(creator, 1, 20, sig1_payload);
+    let r1 = apply_signal_commitment_tx(&mut db, &sig_tx_1, 103);
+    assert!(
+        r1.is_ok(),
+        "recovery signal at tx.nonce = 1 must succeed under β4-A, got {r1:?}"
+    );
+
+    let final_entity = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+    assert_eq!(
+        final_entity.nonce, 2,
+        "β4-A pins entity.nonce to tx.nonce + 1, not entity.nonce + 1"
+    );
+    assert_eq!(final_entity.last_active_at, 103);
+}
+
+// ============================================================================
+// TEST 19: signal_failure_does_not_wedge_entity (β4-A site 2 unit)
+//
+// Thin unit version of the same property as TEST 18: one failed signal
+// followed by one valid signal at the next nonce. Distinct from TEST 18 in
+// that it does not exercise the credit refund path; only the local
+// freeze-and-recover property of the signal handler.
+// ============================================================================
+
+#[test]
+fn signal_failure_does_not_wedge_entity() {
+    let mut db = MemKv::new();
+    let creator = [0xC2u8; 32];
+    let code_hash = [0xCCu8; 32];
+    seed_account(&mut db, &creator, 100_000, 0);
+
+    let reg_payload = encode_register_ai_entity_payload_v1(&RegisterAiEntityPayloadV1 {
+        code_hash,
+        autonomy_mode: AutonomyMode::Gated,
+        capabilities: Capabilities::gated(),
+        initial_balance: 100,
+    })
+    .to_vec();
+    let reg_tx = create_test_tx(creator, 0, 10, reg_payload);
+    let entity_id = apply_register_ai_entity_tx(&mut db, &reg_tx, 100).unwrap();
+
+    // Force fee > balance to trip InsufficientFunds after the nonce check.
+    let sig0_payload = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash: [0x10u8; 32],
+        signal_type: AiSignalType::Prediction,
+        issuer_entity_id: entity_id,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
+        sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
+        oracle_anchor: None,
+    });
+    let sig0_tx = create_test_tx(creator, 0, 1_000, sig0_payload);
+    let r0 = apply_signal_commitment_tx(&mut db, &sig0_tx, 101);
+    assert!(matches!(r0, Err(ExecError::InsufficientFunds { .. })));
+    assert_eq!(read_ai_entity(&db, &entity_id).unwrap().unwrap().nonce, 0);
+
+    // Recovery signal at tx.nonce = 1.
+    let sig1_payload = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash: [0x11u8; 32],
+        signal_type: AiSignalType::Prediction,
+        issuer_entity_id: entity_id,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
+        sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
+        oracle_anchor: None,
+    });
+    let sig1_tx = create_test_tx(creator, 1, 50, sig1_payload);
+    apply_signal_commitment_tx(&mut db, &sig1_tx, 102)
+        .expect("β4-A must admit tx.nonce > entity.nonce");
+
+    let entity = read_ai_entity(&db, &entity_id).unwrap().unwrap();
+    assert_eq!(entity.nonce, 2);
+}
+
+// ============================================================================
+// TEST 20: pre_fix_entity_without_reverse_index_still_fails_under_beta4a
+//
+// Production-recovery pin. The [redacted-host] price oracle entity
+// 0a110df84a9ab852987be12b46e1e5e343ec489f2440b67e4e1a67ead54a36db was
+// registered against a binary that did NOT write the
+// `ai/entities_by_addr/{creator}` reverse-index row. Under β4-A the signal
+// dispatcher's reverse-index lookup at `crates/execution/src/lib.rs:7198`
+// still returns IssuerNotFound BEFORE any nonce comparison can happen, so
+// β4-A alone cannot rehome that entity. Production recovery requires
+// operator-level re-registration via `bootstrap.py` with a fresh keyfile.
+//
+// This is a pin test (not a bisection test): the assertion holds in both
+// pre-fix and post-fix builds. It locks the documented requirement so any
+// future change that makes the reverse-index lookup gap-tolerant has to
+// pass through a conscious test update.
+// ============================================================================
+
+#[test]
+fn pre_fix_entity_without_reverse_index_still_fails_under_beta4a() {
+    use novai_state::Kv;
+
+    let mut db = MemKv::new();
+    let creator = [0xD0u8; 32];
+    let code_hash = [0xDDu8; 32];
+
+    // Construct an entity and write ONLY its primary-key row. Deliberately
+    // skip the reverse-index Put at ai_entity_by_address_key(creator) to
+    // simulate a pre-layer-1 type-8 registration that orphaned the address
+    // resolution path.
+    let mut entity = AiEntity::new(
+        code_hash,
+        creator,
+        AutonomyMode::Gated,
+        Capabilities::gated(),
+        100,
+    );
+    entity.economic_balance = 1_000;
+    let entity_id = entity.id;
+    db.apply_batch(&[write_ai_entity_op(&entity)]).unwrap();
+
+    // Confirm the reverse-index row is genuinely absent.
+    assert!(
+        db.get(&ai_entity_by_address_key(&creator))
+            .unwrap()
+            .is_none(),
+        "test precondition: reverse-index row must be absent"
+    );
+
+    // Submit any signal from this creator. The dispatcher's lookup at
+    // lib.rs:7198 fails BEFORE the nonce check at lib.rs:7272 ever runs.
+    let payload = encode_signal_commitment_payload_v1(&SignalCommitmentPayloadV1 {
+        signal_hash: [0xAAu8; 32],
+        signal_type: AiSignalType::Prediction,
+        issuer_entity_id: entity_id,
+        reputation: None,
+        purchase: None,
+        stake_deposit: None,
+        stake_withdraw: None,
+        stake_slash: None,
+        composition_check: None,
+        proof_submission: None,
+        subscription_create: None,
+        subscription_cancel: None,
+        payment_request: None,
+        service_attestation: None,
+        sla_accept: None,
+        channel_accept: None,
+        channel_close: None,
+        channel_finalize: None,
+        oracle_anchor: None,
+    });
+    let tx = create_test_tx(creator, 0, 20, payload);
+    let result = apply_signal_commitment_tx(&mut db, &tx, 101);
+    assert!(
+        matches!(result, Err(ExecError::IssuerNotFound)),
+        "entity without reverse-index row must return IssuerNotFound \
+         regardless of β4-A; recovery requires operator re-registration. got {result:?}"
+    );
+}

@@ -215,3 +215,97 @@ fn determinism_same_initial_state_same_txs_same_final_state() {
         db2.get(KEY_FEE_POOL).unwrap()
     );
 }
+
+// ============================================================================
+// transfer_failure_does_not_wedge_entity (β4-A site 1 unit)
+//
+// Site 1 is the AI-entity branch of `apply_tx_v1_transfer` at lib.rs:6625.
+// `lookup_ai_entity_by_address(tx.from)` resolves the type-8 creator
+// address through the reverse-index row written at register time, so the
+// `if let Some(mut entity) = ai_sender` block runs. The nonce check at
+// lib.rs:6630 and the balance check at lib.rs:6636 both run BEFORE the
+// nonce advance at lib.rs:6647, so a balance-driven failure freezes
+// entity.nonce. β4-A admits the next valid transfer at tx.nonce above
+// entity.nonce.
+// ============================================================================
+
+#[test]
+fn transfer_failure_does_not_wedge_entity() {
+    use novai_ai_entities::{AutonomyMode, Capabilities};
+    use novai_execution::{
+        apply_register_ai_entity_tx, encode_register_ai_entity_payload_v1, read_ai_entity,
+        RegisterAiEntityPayloadV1,
+    };
+    use novai_state::{account_key, KvBatch, WriteOp};
+    use novai_types::TxVersion;
+
+    let mut db = MemKv::new();
+    let creator = addr(0xE0);
+    let recipient = addr(0xE1);
+    let code_hash = [0xEEu8; 32];
+
+    // Fund creator. Pre-seed recipient to satisfy the M-06 minimum balance
+    // check at lib.rs:6606, otherwise small transfers would fail there
+    // instead of the balance gate we want to exercise.
+    db.apply_batch(&[
+        WriteOp::Put(
+            account_key(&creator),
+            encode_account_v1(&AccountStateV1 {
+                balance: 100_000,
+                nonce: 0,
+            })
+            .to_vec(),
+        ),
+        WriteOp::Put(
+            account_key(&recipient),
+            encode_account_v1(&AccountStateV1 {
+                balance: 10_000,
+                nonce: 0,
+            })
+            .to_vec(),
+        ),
+    ])
+    .unwrap();
+
+    // Register a type-8 AI entity with a small economic balance. The
+    // register handler writes the reverse-index row at
+    // ai_entity_by_address_key(creator), so subsequent transfers from
+    // tx.from = creator enter the AI-entity branch.
+    let reg_payload = encode_register_ai_entity_payload_v1(&RegisterAiEntityPayloadV1 {
+        code_hash,
+        autonomy_mode: AutonomyMode::Gated,
+        capabilities: Capabilities::gated(),
+        initial_balance: 50,
+    })
+    .to_vec();
+    let reg_tx = TxV1 {
+        version: TxVersion::V1,
+        from: creator,
+        pubkey: creator,
+        nonce: 0,
+        fee: 10,
+        payload: reg_payload,
+        sig: [0u8; 64],
+    };
+    let entity_id = apply_register_ai_entity_tx(&mut db, &reg_tx, 100).unwrap();
+
+    // Transfer #1: amount + fee = 1100 > entity.balance = 50.
+    // InsufficientFunds fires at lib.rs:6636 AFTER the nonce check at
+    // lib.rs:6630 has passed. entity.nonce stays 0.
+    let t_bad = tx(creator, 0, 100, recipient, 1_000);
+    let r0 = apply_tx_v1_transfer(&mut db, &t_bad);
+    assert!(
+        matches!(r0, Err(ExecError::InsufficientFunds { .. })),
+        "first transfer must fail with InsufficientFunds, got {r0:?}"
+    );
+    assert_eq!(read_ai_entity(&db, &entity_id).unwrap().unwrap().nonce, 0);
+
+    // Transfer #2: small enough to fit. Pre-fix the strict-equality check
+    // at lib.rs:6630 returns NonceMismatch{expected: 0, got: 1}. Post-fix
+    // β4-A admits (1 >= 0), then pins entity.nonce to tx.nonce + 1 = 2.
+    let t_good = tx(creator, 1, 5, recipient, 10);
+    apply_tx_v1_transfer(&mut db, &t_good)
+        .expect("β4-A must admit AI-entity transfer at tx.nonce above entity.nonce");
+
+    assert_eq!(read_ai_entity(&db, &entity_id).unwrap().unwrap().nonce, 2);
+}

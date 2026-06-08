@@ -255,8 +255,14 @@ fn wrong_nonce_is_rejected() {
 
     let result = apply_signal_commitment_tx(&mut db, &tx, 100);
     assert!(
-        matches!(result, Err(ExecError::NonceMismatch { .. })),
-        "Wrong nonce should be rejected"
+        matches!(
+            result,
+            Err(ExecError::NonceTooLow {
+                expected: 5,
+                got: 0
+            })
+        ),
+        "past-nonce signal must be rejected with NonceTooLow under β4-A, got {result:?}"
     );
 }
 
