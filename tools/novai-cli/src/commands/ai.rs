@@ -27,6 +27,7 @@ fn parse_capabilities(s: &str) -> Result<Capabilities, String> {
             "emit_proposals" => caps.emit_proposals = true,
             "request_execution" => caps.request_execution = true,
             "read_nnpx" => caps.read_nnpx_derived = true,
+            "post_oracle_anchors" => caps.post_oracle_anchors = true,
             other => return Err(format!("Unknown capability '{other}'")),
         }
     }

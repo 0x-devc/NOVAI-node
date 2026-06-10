@@ -133,7 +133,7 @@ enum AiCommand {
         /// Autonomy mode: advisory or gated.
         #[arg(long, default_value = "advisory")]
         autonomy: String,
-        /// Comma-separated capabilities: read_chain, read_memory, emit_proposals, request_execution, read_nnpx.
+        /// Comma-separated capabilities: read_chain, read_memory, emit_proposals, request_execution, read_nnpx, post_oracle_anchors.
         #[arg(long, default_value = "read_chain,read_memory,emit_proposals")]
         capabilities: String,
         /// Initial balance to fund the entity.
