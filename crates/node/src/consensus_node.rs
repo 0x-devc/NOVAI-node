@@ -897,15 +897,26 @@ impl ConsensusNode {
             );
         }
 
-        // Store blocks to DB AND cache in memory for commit rule
+        // Bug 1 latent bug A (docs/gate3-bug1-diagnosis.md Risk 2): the
+        // sync-chunk block storage AND the KEY_COMMITTED_HEIGHT cursor
+        // advance below were previously two separate non-atomic writes (a
+        // per-block db.put loop here plus a standalone db.put on the
+        // cursor). A crash in that window left the validator with the
+        // executor's state advanced beyond the recorded cursor; recovery
+        // would compute a different committed_height than peers and the
+        // chain would fork at the next state_root comparison. Both writes
+        // are now accumulated into a single Vec<WriteOp> and applied
+        // atomically at the end of this method (see the apply_batch call
+        // below the conditional cursor block).
+        let mut sync_ops: Vec<WriteOp> = Vec::with_capacity(blocks.len() + 1);
         for block in &blocks {
             let key = novai_state::block_key(block.height);
             let value = novai_consensus_types::codec::encode_block_v1(block)
                 .map_err(|e| format!("Failed to encode block: {e:?}"))?;
-            db.put(&key, &value)
-                .map_err(|e| format!("Failed to store block: {e:?}"))?;
+            sync_ops.push(WriteOp::Put(key, value));
 
-            // Cache in memory so commit rule can find them via block_by_hash
+            // Cache in memory so commit rule can find them via block_by_hash.
+            // In-memory only; not part of the atomic sync batch.
             state
                 .cache_block(block.clone())
                 .map_err(|e| format!("Cache block failed: {e:?}"))?;
@@ -956,6 +967,11 @@ impl ConsensusNode {
         // full commit chain to highest_qc isn't available yet.
         // These blocks are chain-verified and stored to DB — they were
         // already committed by network consensus.
+        //
+        // The cursor Put is folded into the same sync_ops batch as the
+        // block storage above so that "blocks stored" and "cursor
+        // advanced" are atomic; previously they were two separate writes
+        // (see latent bug A comment near the sync_ops accumulator).
         if state.committed_height < last_received_height {
             // Execute synced blocks not already committed via the QC path above
             let already = state.committed_height;
@@ -968,16 +984,21 @@ impl ConsensusNode {
                 self.execute_committed_blocks(&mut db, &remaining);
             }
             state.committed_height = last_received_height;
-            db.put(
-                novai_state::KEY_COMMITTED_HEIGHT,
-                &last_received_height.to_be_bytes(),
-            )
-            .map_err(|e| format!("Failed to persist committed_height: {e:?}"))?;
+            sync_ops.push(WriteOp::Put(
+                novai_state::KEY_COMMITTED_HEIGHT.to_vec(),
+                last_received_height.to_be_bytes().to_vec(),
+            ));
             tracing::info!(
                 committed_height = last_received_height,
                 "Sync: advanced committed_height (chunk complete)"
             );
         }
+
+        // Atomic write: block storage and (when present) the
+        // KEY_COMMITTED_HEIGHT cursor advance commit together or not at
+        // all. See the latent bug A comment near the sync_ops accumulator.
+        db.apply_batch(&sync_ops)
+            .map_err(|e| format!("Failed to persist sync chunk atomically: {e:?}"))?;
 
         let final_committed = state.committed_height;
 
