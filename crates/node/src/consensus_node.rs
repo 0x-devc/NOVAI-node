@@ -106,6 +106,22 @@ impl Storage {
             Storage::Rocks(kv) => kv.compact_range_default(start, end),
         }
     }
+
+    /// Synchronously flush the default-CF memtable.
+    ///
+    /// No-op on the in-memory backend. On RocksDB, delegates to
+    /// `RocksKv::flush_default`. See that method for the durability
+    /// rationale (Bug 1 latent concern B).
+    ///
+    /// # Errors
+    /// Returns a stringified RocksDB error if the flush fails. Callers
+    /// typically log and continue rather than abort the commit loop.
+    pub fn flush_default(&self) -> Result<(), String> {
+        match self {
+            Storage::Memory(_) => Ok(()),
+            Storage::Rocks(kv) => kv.flush_default().map_err(|e| e.to_string()),
+        }
+    }
 }
 
 /// Callback invoked after blocks are committed and consensus state is updated.

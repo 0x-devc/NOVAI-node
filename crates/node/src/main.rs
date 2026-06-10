@@ -300,6 +300,23 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                 let block_end = block_key(prune_below);
                 let qc_start = qc_key(0);
                 let qc_end = qc_key(prune_below);
+                // Bug 1 latent concern B (docs/gate3-bug1-diagnosis.md Risk 2):
+                // synchronously flush the default-CF memtable to L0 BEFORE the
+                // compaction runs. RocksDB's WAL fsync is bandwidth-triggered
+                // (set_bytes_per_sync / set_wal_bytes_per_sync at
+                // crates/state/src/rocksdb_kv.rs), so without this flush a
+                // crash between the executor's apply_batch and the next
+                // bandwidth-triggered fsync could lose ops still resident in
+                // the memtable, and the subsequent compaction would not see
+                // them either. A flush failure here is logged but not fatal;
+                // the compaction can still proceed over whatever is durable.
+                if let Err(e) = db.flush_default() {
+                    tracing::warn!(
+                        height = last_block.height,
+                        error = %e,
+                        "Pre-compaction flush failed; proceeding with compaction anyway"
+                    );
+                }
                 db.compact_range_default(Some(&block_start), Some(&block_end));
                 db.compact_range_default(Some(&qc_start), Some(&qc_end));
                 tracing::info!(

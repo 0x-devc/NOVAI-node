@@ -158,6 +158,28 @@ impl RocksKv {
             .expect("default column family must exist");
         self.db.compact_range_cf(cf, start, end);
     }
+
+    /// Synchronously flush the default column family's memtable to L0.
+    ///
+    /// Bug 1 latent concern B (see `docs/gate3-bug1-diagnosis.md` Risk 2):
+    /// the forced compaction at `crates/node/src/main.rs:303-304` previously
+    /// ran without a preceding flush. RocksDB's WAL is bandwidth-fsynced
+    /// (`set_bytes_per_sync(1MB)` / `set_wal_bytes_per_sync(1MB)` in
+    /// `RocksKv::open`), so recently-written default-CF ops could live in
+    /// the memtable and an unfsynced WAL segment when compaction starts. A
+    /// crash in that window would lose those ops. Calling this method
+    /// before `compact_range_default` guarantees the memtable is persisted
+    /// to L0 SST files before compaction runs.
+    ///
+    /// # Errors
+    /// Returns the underlying RocksDB error if the flush fails.
+    pub fn flush_default(&self) -> Result<(), rocksdb::Error> {
+        let cf = self
+            .db
+            .cf_handle(CF_DEFAULT)
+            .expect("default column family must exist");
+        self.db.flush_cf(cf)
+    }
 }
 
 #[cfg(feature = "rocksdb")]
