@@ -6559,6 +6559,43 @@ pub fn append_smt_ops_for_state_ops<K: Kv>(
     Ok(new_root)
 }
 
+/// Apply `state_ops` to the DB inside a single atomic batch that also
+/// authenticates them in the state SMT.
+///
+/// This is the shared close-the-SMT-inclusion-gap helper used by every
+/// handler that mutates state-relevant keys (accounts, AI entities,
+/// reverse-index, fee pool, signal records, oracle anchors, memory
+/// objects, governance state, entity upgrade records). Previously only
+/// `apply_tx_v1_transfer_inner` authenticated its writes in the SMT, so
+/// any drift in non-Transfer-written keys would surface as a
+/// `state_root` divergence on the next Transfer FROM the affected
+/// entity. Bringing
+/// every handler under one update path makes `KEY_SMT_ROOT` a faithful
+/// commitment to every handler-produced write.
+///
+/// Note on handlers that nest other handlers (e.g.,
+/// `apply_governance_execute_tx` calls `apply_module_activation` or
+/// `apply_module_rollback` before writing its own proposal-state op):
+/// this helper is called once per `apply_batch` site, so a nested
+/// invocation produces two successive SMT walks within one tx. Both
+/// walks are correct (each reads the current `KEY_SMT_ROOT` and applies
+/// only its own ops, then commits) and deterministic across validators.
+/// The double walk is a performance cost only and is acceptable for the
+/// low-frequency governance Execute path.
+///
+/// # Errors
+/// Returns DB error from the SMT read of the current root, the SMT
+/// update walk, or the final `apply_batch`.
+fn apply_state_ops_with_smt<K: KvBatch>(
+    db: &mut K,
+    state_ops: Vec<WriteOp>,
+) -> Result<(), ExecError<K::Error>> {
+    let mut all_ops = state_ops;
+    let snapshot = all_ops.clone();
+    let _new_root = append_smt_ops_for_state_ops(db, &snapshot, &mut all_ops)?;
+    db.apply_batch(&all_ops).map_err(ExecError::Db)
+}
+
 /// Apply a single `TxV1` as a `TransferPayloadV1` against the account state machine.
 ///
 /// Rules (Week 3):
@@ -6667,10 +6704,7 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
             ),
         ];
 
-        let mut all_ops = ops;
-        let state_ops_snapshot = all_ops.clone();
-        let _new_root = append_smt_ops_for_state_ops(db, &state_ops_snapshot, &mut all_ops)?;
-        db.apply_batch(&all_ops).map_err(ExecError::Db)?;
+        apply_state_ops_with_smt(db, ops)?;
     } else {
         // Normal account sender path (original logic)
         let mut from_acct = read_account_or_default(db, &tx.from)?;
@@ -6711,10 +6745,7 @@ fn apply_tx_v1_transfer_inner<K: KvBatch>(
             ),
         ];
 
-        let mut all_ops = ops;
-        let state_ops_snapshot = all_ops.clone();
-        let _new_root = append_smt_ops_for_state_ops(db, &state_ops_snapshot, &mut all_ops)?;
-        db.apply_batch(&all_ops).map_err(ExecError::Db)?;
+        apply_state_ops_with_smt(db, ops)?;
     }
 
     Ok(())
@@ -6825,7 +6856,7 @@ pub fn apply_module_activation<K: KvBatch>(
     if !entity.is_active {
         entity.is_active = true;
         let op = write_ai_entity_op(&entity);
-        db.apply_batch(&[op]).map_err(ExecError::Db)?;
+        apply_state_ops_with_smt(db, vec![op])?;
     }
 
     Ok(())
@@ -6849,7 +6880,7 @@ pub fn apply_module_rollback<K: KvBatch>(
     if entity.is_active {
         entity.is_active = false;
         let op = write_ai_entity_op(&entity);
-        db.apply_batch(&[op]).map_err(ExecError::Db)?;
+        apply_state_ops_with_smt(db, vec![op])?;
     }
 
     Ok(())
@@ -7039,7 +7070,7 @@ pub fn apply_governance_submit_tx<K: KvBatch>(
 
     // Store proposal
     let op = write_proposal_op(&proposal);
-    db.apply_batch(&[op]).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, vec![op])?;
 
     Ok(proposal_id)
 }
@@ -7123,7 +7154,7 @@ pub fn apply_governance_execute_tx<K: KvBatch>(
                 // 0x00 = deactivate (restore normal operation)
                 let active = proposal.proposal_data[0] == 1;
                 let op = write_ai_kill_switch_op(active);
-                db.apply_batch(&[op]).map_err(ExecError::Db)?;
+                apply_state_ops_with_smt(db, vec![op])?;
             } else if proposal.proposal_data.len() == 32 {
                 // Per-entity emergency freeze
                 let mut entity_id = [0u8; 32];
@@ -7167,7 +7198,7 @@ pub fn apply_governance_execute_tx<K: KvBatch>(
 
     // Store updated proposal
     let op = write_proposal_op(&proposal);
-    db.apply_batch(&[op]).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, vec![op])?;
 
     Ok(())
 }
@@ -9005,7 +9036,7 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
     ops.push(write_ai_entity_op(&entity));
 
     // Apply all changes atomically
-    db.apply_batch(&ops).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, ops)?;
 
     Ok(())
 }
@@ -9143,7 +9174,7 @@ pub fn apply_register_ai_entity_tx<K: KvBatch>(
         WriteOp::Put(addr_key, entity_id.to_vec()),
     ];
 
-    db.apply_batch(&ops).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, ops)?;
 
     Ok(entity_id)
 }
@@ -9257,7 +9288,7 @@ pub fn apply_credit_ai_entity_tx<K: KvBatch>(
         write_ai_entity_op(&entity),
     ];
 
-    db.apply_batch(&ops).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, ops)?;
 
     Ok(())
 }
@@ -9404,7 +9435,7 @@ pub fn apply_register_ai_entity_with_key_tx<K: KvBatch>(
         WriteOp::Put(addr_key, entity_id.to_vec()),
     ];
 
-    db.apply_batch(&ops).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, ops)?;
 
     Ok(entity_id)
 }
@@ -9524,7 +9555,7 @@ pub fn apply_entity_upgrade_tx<K: KvBatch>(
             encode_upgrade_record_v1(&record).to_vec(),
         ),
     ];
-    db.apply_batch(&ops).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, ops)?;
 
     Ok(payload.entity_id)
 }
@@ -10682,7 +10713,7 @@ fn apply_create_memory_object_tx_inner<K: KvBatch>(
     ops.push(write_ai_entity_op(&entity));
 
     // Apply atomically
-    db.apply_batch(&ops).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, ops)?;
 
     Ok(object_id)
 }
@@ -10854,7 +10885,7 @@ fn apply_update_memory_object_tx_inner<K: KvBatch>(
     ops.push(write_ai_entity_op(&entity));
 
     // Apply atomically
-    db.apply_batch(&ops).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, ops)?;
 
     Ok(())
 }
@@ -11119,7 +11150,7 @@ fn apply_delete_memory_object_tx_inner<K: KvBatch>(
     ops.push(write_ai_entity_op(&entity));
 
     // Apply atomically
-    db.apply_batch(&ops).map_err(ExecError::Db)?;
+    apply_state_ops_with_smt(db, ops)?;
 
     Ok(())
 }

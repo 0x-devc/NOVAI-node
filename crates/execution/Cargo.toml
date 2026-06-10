@@ -25,6 +25,11 @@ ark-groth16 = { version = "=0.5.0", default-features = false, features = ["std"]
 ark-relations = { version = "=0.5.0", default-features = false, features = ["std"] }
 ark-serialize = { version = "=0.5.0", default-features = false, features = ["derive", "std"] }
 ark-std = { version = "=0.5.0", default-features = false, features = ["std"] }
+# Bug 1 Gate 2 variant 4: RocksKv-backed four-validator determinism harness.
+# Enables `rocksdb` feature on novai-state ONLY for the test build, leaving
+# the regular execution-crate dependency unchanged.
+novai-state = { path = "../state", version = "0.1.0", features = ["rocksdb"] }
+tempfile = "3"
 
 [lints]
 workspace = true

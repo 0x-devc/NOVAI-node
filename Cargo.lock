@@ -1844,6 +1844,7 @@ dependencies = [
  "novai-smt",
  "novai-state",
  "novai-types",
+ "tempfile",
 ]
 
 [[package]]
