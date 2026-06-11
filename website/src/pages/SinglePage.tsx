@@ -665,14 +665,14 @@ export default function SinglePage() {
                   {"The NOVAInetwork Testnet is".split(" ").map((word, i) => (
                     <motion.span key={i} initial={{ opacity: 0, y: 12, filter: "blur(4px)" }} whileInView={{ opacity: 1, y: 0, filter: "blur(0px)" }} viewport={{ once: true }} transition={{ duration: 0.4, delay: 0.2 + i * 0.08, ease: "easeOut" }} className="inline-block mr-[0.3em]">{word}</motion.span>
                   ))}{" "}
-                  <motion.span initial={{ opacity: 0, y: 12, filter: "blur(4px)" }} whileInView={{ opacity: 1, y: 0, filter: "blur(0px)" }} viewport={{ once: true }} transition={{ duration: 0.4, delay: 0.6, ease: "easeOut" }} className="inline-block gradient-text">Coming Soon</motion.span>
+                  <motion.span initial={{ opacity: 0, y: 12, filter: "blur(4px)" }} whileInView={{ opacity: 1, y: 0, filter: "blur(0px)" }} viewport={{ once: true }} transition={{ duration: 0.4, delay: 0.6, ease: "easeOut" }} className="inline-block gradient-text">Live in Private Beta</motion.span>
                 </h2>
-                <p className="text-lg text-muted-foreground mb-8 leading-relaxed max-w-lg">We're preparing something special. The public testnet will let you experience AI-native blockchain infrastructure firsthand.</p>
+                <p className="text-lg text-muted-foreground mb-8 leading-relaxed max-w-lg">The NOVAInetwork private testnet is live and validating blocks today. The public testnet opens next. Sign up to get access when it does.</p>
                 <div className="glass-card rounded-2xl px-6 py-5 flex items-center gap-4 mb-8 max-w-sm">
                   <span className="relative flex h-3 w-3"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-75" /><span className="relative inline-flex h-3 w-3 rounded-full bg-accent" /></span>
-                  <div><p className="text-sm font-semibold text-foreground">Testnet Status</p><p className="text-xs text-accent">In Development</p></div>
+                  <div><p className="text-sm font-semibold text-foreground">Testnet Status</p><p className="text-xs text-accent">Private testnet live</p></div>
                 </div>
-                <p className="text-sm text-muted-foreground mb-6">Join our community to be the first to know when it goes live.</p>
+                <p className="text-sm text-muted-foreground mb-6">Join the community to get access when the public testnet opens.</p>
                 <a href="#socials" className="btn-primary no-underline">Join Community <ArrowRight size={16} /></a>
               </motion.div>
               <motion.div initial={{ opacity: 0, y: 30 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.8, delay: 0.3 }}>
