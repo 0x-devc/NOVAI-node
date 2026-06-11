@@ -1,31 +1,52 @@
 #!/usr/bin/env python3
 """PURPOSE: One-shot idempotent setup for the NOVAI price-oracle.
 
+Two-key Type-10 funding model: a funder ed25519 account that signs all
+account-level operations (Type-10 registration, runtime CreditAiEntity
+top-ups) and an entity ed25519 key that signs all entity-level signals
+(OracleAnchor, memory CRUD). The funder address is bound nowhere in the
+chain-side reverse index, so it can submit CreditAiEntity at any time
+without tripping the check_ai_entity_sender deny arm at
+crates/execution/src/lib.rs:9741. See
+docs/gate-oracle-funding-model-diagnosis.md for the design and
+docs/AGENT_FUNDING_PLAYBOOK.md for the reusable lifecycle that future
+agents copy.
+
 Steps (every step skips itself if already done):
 
-  1. Load or generate an ed25519 keypair; write /etc/novai/oracle-keys.json
-     at 0600 with seed + derived public info.
-  2. Fund the address via the public faucet if balance is below the
-     register threshold. Faucet is per-IP-24h-cooldown; bootstrap exits
-     non-zero if the cooldown blocks a needed top-up.
-  3. RegisterEntity with Capabilities.oracle() (bits 0,1,2,6 = 0x47) if
-     no entity with this (code_hash, creator_addr) is on-chain yet, then
-     verify capability bit 6 (post_oracle_anchors) is set in the on-chain
-     view. Capabilities are frozen post-register, so a mismatch is fatal
-     and requires manual cleanup.
-  4. Rewrite oracle-keys.json with entity_id, capabilities, registered_at.
+  1. Load or generate the two ed25519 keypairs; write
+     /etc/novai/oracle-keys.json at 0600 with both seeds plus derived
+     public info. Refuse to load a v1 (single-key) keyfile; the
+     operator must archive it and re-bootstrap. The v1 key is bound to
+     the dead Type-8 entity whose creator address is reverse-index-
+     locked, so silent migration would inherit a poisoned funder.
+  2. Fund the FUNDER address via the public faucet if balance is below
+     the register threshold. Faucet is per-IP-24h-cooldown; bootstrap
+     exits non-zero if the cooldown blocks a needed top-up.
+  3. RegisterEntityWithKey (Type-10) with Capabilities.oracle() (bits
+     0,1,2,6 = 0x47) if no entity with (ORACLE_CODE_HASH, funder_addr)
+     is on-chain yet, then verify capability bit 6
+     (post_oracle_anchors) is set in the on-chain view. The entity
+     pubkey is bound at the chain-side address derived from the entity
+     pubkey, not from the funder. Capabilities are frozen post-register,
+     so a mismatch is fatal and requires manual cleanup.
+  4. Rewrite oracle-keys.json with entity_id, capabilities,
+     registered_at.
 
 INVARIANTS:
-- Re-running on the same host with the same key file is a no-op once the
-  oracle is registered.
-- The key file is the only persistent secret; everything else is derived.
+- Re-running on the same host with the same key file is a no-op once
+  the oracle is registered.
+- The key file is the only persistent secret; everything else is
+  derived.
+- The funder address must be free of any prior creator binding under
+  ORACLE_CODE_HASH. A reused funder collides at EntityAlreadyExists.
 
 FAILURE MODES:
 - Missing config (PRICE_ORACLE_RPC_ENDPOINT) -> exit 2.
 - Faucet cooldown AND insufficient balance for register -> exit 3.
-- Entity exists without bit 6 -> exit 4 (operator intervention required).
-- RPC unreachable / timeout -> exit 5 (transient; systemd-free script, so
-  the operator re-runs).
+- Entity exists without bit 6 -> exit 4 (operator intervention).
+- RPC unreachable / timeout -> exit 5.
+- v1 keyfile on disk in v2 mode -> KeyFileVersionError at load time.
 """
 
 from __future__ import annotations
@@ -47,15 +68,33 @@ LOG = logging.getLogger("price_oracle.bootstrap")
 
 DEFAULT_KEY_PATH = "/etc/novai/oracle-keys.json"
 DEFAULT_ENDPOINT = "http://localhost:3030"
-KEYFILE_VERSION = 1
+KEYFILE_VERSION = 2
 KEYFILE_MODE = 0o600
 
-MIN_BALANCE_FOR_REGISTER = 50_000
+# Sized so a fresh funder, after one faucet drop, can cover both the
+# registration fee and the seed balance for the new entity, with slack
+# left over for the first runtime CreditAiEntity top-up cycle.
+INITIAL_ENTITY_BALANCE = 50_000
+REGISTER_FEE = 5_000
+MIN_BALANCE_FOR_REGISTER = INITIAL_ENTITY_BALANCE + REGISTER_FEE + 5_000  # 60_000
 MIN_BALANCE_TO_OPERATE = 5_000
 FAUCET_POLL_TIMEOUT_SECS = 30.0
 FAUCET_POLL_INTERVAL_SECS = 2.0
 REGISTER_POLL_TIMEOUT_SECS = 30.0
 REGISTER_POLL_INTERVAL_SECS = 2.0
+
+
+class KeyFileVersionError(ValueError):
+    """Raised when a keyfile on disk has a version this bootstrap does
+    not support.
+
+    The v1 (single-key Type-8) to v2 (two-key Type-10) transition is
+    intentionally non-migratable. The v1 key is bound to the dead
+    Type-8 entity whose creator address is reverse-index-locked, so
+    auto-migrating would silently inherit a poisoned funder. The
+    operator must archive the v1 file and let bootstrap generate a
+    fresh v2 file.
+    """
 
 
 @dataclass(frozen=True)
@@ -76,9 +115,12 @@ class BootstrapConfig:
 
 @dataclass
 class KeyFile:
-    seed_hex: str
-    pubkey_hex: str
-    address_hex: str
+    funder_seed_hex: str
+    funder_pubkey_hex: str
+    funder_address_hex: str
+    entity_seed_hex: str
+    entity_pubkey_hex: str
+    entity_address_hex: str
     entity_id_hex: str | None = None
     capabilities_byte: int | None = None
     registered_at_unix: int | None = None
@@ -86,9 +128,12 @@ class KeyFile:
     def to_dict(self) -> dict[str, object]:
         d: dict[str, object] = {
             "version": KEYFILE_VERSION,
-            "seed_hex": self.seed_hex,
-            "pubkey_hex": self.pubkey_hex,
-            "address_hex": self.address_hex,
+            "funder_seed_hex": self.funder_seed_hex,
+            "funder_pubkey_hex": self.funder_pubkey_hex,
+            "funder_address_hex": self.funder_address_hex,
+            "entity_seed_hex": self.entity_seed_hex,
+            "entity_pubkey_hex": self.entity_pubkey_hex,
+            "entity_address_hex": self.entity_address_hex,
         }
         if self.entity_id_hex is not None:
             d["entity_id_hex"] = self.entity_id_hex
@@ -99,45 +144,88 @@ class KeyFile:
         return d
 
 
-def load_or_generate_key(path: Path) -> tuple[Keypair, KeyFile, bool]:
-    """Return (keypair, keyfile, generated). ``generated`` is True if we wrote a new key."""
+def load_or_generate_key(path: Path) -> tuple[Keypair, Keypair, KeyFile, bool]:
+    """Return (funder_kp, entity_kp, keyfile, generated).
+
+    ``generated`` is True if both keypairs were freshly generated and
+    persisted (first-run path), False if they were loaded from an
+    existing v2 keyfile.
+    """
     if path.exists():
-        kp, kf = _load_key(path)
-        LOG.info("keypair_load event=reused path=%s address=%s", path, kf.address_hex)
-        return kp, kf, False
-    kp = Keypair.generate()
+        funder_kp, entity_kp, kf = _load_key(path)
+        LOG.info(
+            "keypair_load event=reused path=%s funder=%s entity=%s",
+            path,
+            kf.funder_address_hex,
+            kf.entity_address_hex,
+        )
+        return funder_kp, entity_kp, kf, False
+    funder_kp = Keypair.generate()
+    entity_kp = Keypair.generate()
     kf = KeyFile(
-        seed_hex=kp.seed.hex(),
-        pubkey_hex=kp.pubkey.hex(),
-        address_hex=kp.address.hex(),
+        funder_seed_hex=funder_kp.seed.hex(),
+        funder_pubkey_hex=funder_kp.pubkey.hex(),
+        funder_address_hex=funder_kp.address.hex(),
+        entity_seed_hex=entity_kp.seed.hex(),
+        entity_pubkey_hex=entity_kp.pubkey.hex(),
+        entity_address_hex=entity_kp.address.hex(),
     )
     _write_key_atomic(path, kf)
     LOG.info(
-        "keypair_create event=generated path=%s address=%s", path, kf.address_hex
+        "keypair_create event=generated path=%s funder=%s entity=%s",
+        path,
+        kf.funder_address_hex,
+        kf.entity_address_hex,
     )
-    return kp, kf, True
+    return funder_kp, entity_kp, kf, True
 
 
-def _load_key(path: Path) -> tuple[Keypair, KeyFile]:
+def _load_key(path: Path) -> tuple[Keypair, Keypair, KeyFile]:
     raw = path.read_text(encoding="utf-8")
     data = json.loads(raw)
-    seed_hex = str(data["seed_hex"])
-    if len(seed_hex) != 64:
-        raise ValueError(f"seed_hex must be 64 hex chars, got {len(seed_hex)}")
-    kp = Keypair.from_seed(bytes.fromhex(seed_hex))
+    version = data.get("version")
+    if version != KEYFILE_VERSION:
+        raise KeyFileVersionError(
+            f"keyfile {path} has version={version!r}, this bootstrap "
+            f"requires version={KEYFILE_VERSION}; archive the existing "
+            f"file and re-run to generate a fresh two-key keyfile"
+        )
+    try:
+        funder_seed_hex = str(data["funder_seed_hex"])
+        entity_seed_hex = str(data["entity_seed_hex"])
+    except KeyError as exc:
+        raise ValueError(
+            f"keyfile {path} is missing required field {exc!s} for v2"
+        ) from exc
+    for label, seed_hex in (("funder", funder_seed_hex), ("entity", entity_seed_hex)):
+        if len(seed_hex) != 64:
+            raise ValueError(
+                f"{label}_seed_hex must be 64 hex chars, got {len(seed_hex)}"
+            )
+    funder_kp = Keypair.from_seed(bytes.fromhex(funder_seed_hex))
+    entity_kp = Keypair.from_seed(bytes.fromhex(entity_seed_hex))
     kf = KeyFile(
-        seed_hex=seed_hex,
-        pubkey_hex=str(data.get("pubkey_hex", kp.pubkey.hex())),
-        address_hex=str(data.get("address_hex", kp.address.hex())),
+        funder_seed_hex=funder_seed_hex,
+        funder_pubkey_hex=str(data.get("funder_pubkey_hex", funder_kp.pubkey.hex())),
+        funder_address_hex=str(data.get("funder_address_hex", funder_kp.address.hex())),
+        entity_seed_hex=entity_seed_hex,
+        entity_pubkey_hex=str(data.get("entity_pubkey_hex", entity_kp.pubkey.hex())),
+        entity_address_hex=str(data.get("entity_address_hex", entity_kp.address.hex())),
         entity_id_hex=data.get("entity_id_hex"),
         capabilities_byte=data.get("capabilities_byte"),
         registered_at_unix=data.get("registered_at_unix"),
     )
-    if kf.address_hex != kp.address.hex():
+    if kf.funder_address_hex != funder_kp.address.hex():
         raise ValueError(
-            "address_hex in keyfile does not match seed-derived address; refusing to load"
+            "funder_address_hex in keyfile does not match seed-derived "
+            "address; refusing to load"
         )
-    return kp, kf
+    if kf.entity_address_hex != entity_kp.address.hex():
+        raise ValueError(
+            "entity_address_hex in keyfile does not match seed-derived "
+            "address; refusing to load"
+        )
+    return funder_kp, entity_kp, kf
 
 
 def _write_key_atomic(path: Path, kf: KeyFile) -> None:
@@ -157,7 +245,12 @@ def ensure_funded(
     sleep_fn=time.sleep,
     now_fn=time.monotonic,
 ) -> int:
-    """Return final balance. Skip the faucet call if already funded."""
+    """Return final balance for ``address``. Skip the faucet call if
+    already funded.
+
+    Under v2 ``address`` is the funder address; the entity has no
+    account ledger of its own.
+    """
     balance = chain.get_balance(address)
     if balance >= MIN_BALANCE_FOR_REGISTER:
         LOG.info(
@@ -198,13 +291,24 @@ def ensure_funded(
 
 def ensure_registered(
     chain: Chain,
-    kp: Keypair,
+    funder_kp: Keypair,
+    entity_kp: Keypair,
     *,
+    initial_balance: int = INITIAL_ENTITY_BALANCE,
+    register_fee: int = REGISTER_FEE,
     sleep_fn=time.sleep,
     now_fn=time.monotonic,
 ) -> tuple[bytes, int]:
-    """Return (entity_id, capabilities_byte). Skip if already registered with bit 6."""
-    entity_id = chain.entity_id_for(kp.address)
+    """Return (entity_id, capabilities_byte).
+
+    Skip if an entity at compute_id(ORACLE_CODE_HASH, funder_kp.address)
+    already exists with the post_oracle_anchors capability (idempotent
+    re-run). Exit 4 if it exists without that capability (poisoned or
+    aborted prior run). Otherwise submit Type-10 RegisterAiEntityWithKey
+    signed by the funder, with the entity pubkey bound at the chain-side
+    reverse-index address derived from entity_kp.pubkey.
+    """
+    entity_id = chain.entity_id_for(funder_kp.address)
     status = chain.get_entity_status(entity_id)
     if status.exists and status.has_post_oracle_anchors:
         LOG.info(
@@ -221,11 +325,18 @@ def ensure_registered(
         )
         sys.exit(4)
 
-    result = chain.register_oracle(kp)
+    result = chain.register_oracle_with_key(
+        funder_kp,
+        entity_kp.pubkey,
+        fee=register_fee,
+        initial_balance=initial_balance,
+    )
     LOG.info(
-        "register event=submitted txid=%s entity_id=%s",
+        "register event=submitted txid=%s entity_id=%s funder=%s entity_pubkey=%s",
         result.txid,
         result.entity_id,
+        funder_kp.address.hex(),
+        entity_kp.pubkey.hex(),
     )
 
     deadline = now_fn() + REGISTER_POLL_TIMEOUT_SECS
@@ -268,13 +379,15 @@ def update_keyfile(
     )
 
 
-def print_summary(kf: KeyFile, balance: int) -> None:
+def print_summary(kf: KeyFile, funder_balance: int) -> None:
     bit_6_set = bool((kf.capabilities_byte or 0) & POST_ORACLE_ANCHORS_BIT)
     print()
     print("price-oracle bootstrap complete")
-    print(f"  address:          {kf.address_hex}")
-    print(f"  pubkey:           {kf.pubkey_hex}")
-    print(f"  balance:          {balance}")
+    print(f"  funder_address:   {kf.funder_address_hex}")
+    print(f"  funder_pubkey:    {kf.funder_pubkey_hex}")
+    print(f"  funder_balance:   {funder_balance}")
+    print(f"  entity_address:   {kf.entity_address_hex}")
+    print(f"  entity_pubkey:    {kf.entity_pubkey_hex}")
     print(f"  entity_id:        {kf.entity_id_hex}")
     print(f"  capabilities:     0x{(kf.capabilities_byte or 0):02x}")
     print(f"  post_oracle_anchors (bit 6): {bit_6_set}")
@@ -292,9 +405,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     chain = Chain(cfg.endpoint)
-    kp, kf, _ = load_or_generate_key(cfg.key_path)
-    balance = ensure_funded(chain, kp.address)
-    entity_id, caps = ensure_registered(chain, kp)
+    funder_kp, entity_kp, kf, _ = load_or_generate_key(cfg.key_path)
+    funder_balance = ensure_funded(chain, funder_kp.address)
+    entity_id, caps = ensure_registered(chain, funder_kp, entity_kp)
     update_keyfile(
         cfg.key_path,
         kf,
@@ -302,8 +415,8 @@ def main(argv: list[str] | None = None) -> int:
         capabilities_byte=caps,
         registered_at_unix=int(time.time()),
     )
-    balance = chain.get_balance(kp.address)
-    print_summary(kf, balance)
+    funder_balance = chain.get_balance(funder_kp.address)
+    print_summary(kf, funder_balance)
     LOG.info("bootstrap_done event=ok")
     return 0
 
