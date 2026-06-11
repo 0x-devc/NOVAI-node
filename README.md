@@ -1,10 +1,10 @@
-# NOVAI — L1 Blockchain with First-Class AI Entities
+# NOVAI - L1 Blockchain with First-Class AI Entities
 
 NOVAI is a Layer-1 blockchain where AI entities are protocol primitives, not smart contracts.
 
-Most blockchain projects that claim "AI integration" bolt AI onto an existing smart contract VM — the AI runs off-chain and pokes the chain through oracle calls or contract wrappers. NOVAI takes a different approach: AI entities exist at the same level as accounts and validators. They have on-chain identity, persistent memory, economic balance, capability flags, and governance-controlled autonomy modes, all enforced at the protocol layer.
+Most blockchain projects that claim "AI integration" bolt AI onto an existing smart contract VM - the AI runs off-chain and pokes the chain through oracle calls or contract wrappers. NOVAI takes a different approach: AI entities exist at the same level as accounts and validators. They have on-chain identity, persistent memory, economic balance, capability flags, and governance-controlled autonomy modes, all enforced at the protocol layer.
 
-There is no smart contract VM. There is no WASM runtime. Every transaction type is a native protocol operation. This is a deliberate design choice — it means you cannot deploy arbitrary code, but it also means the chain understands the semantics of every operation it executes.
+There is no smart contract VM. There is no WASM runtime. Every transaction type is a native protocol operation. This is a deliberate design choice - it means you cannot deploy arbitrary code, but it also means the chain understands the semantics of every operation it executes.
 
 The entire codebase is clean-room: no code copied or adapted from Substrate, Tendermint, Cosmos SDK, Diem, Aptos, Sui, or any other blockchain implementation. Concepts are drawn from published papers (HotStuff BFT, Sparse Merkle Trees), but every line is written from first principles.
 
@@ -109,7 +109,7 @@ All transactions are deterministic. There are no floats, no `HashMap` iteration 
 
 ### Encoding
 
-All protocol types use canonical binary encoding — one valid byte sequence per logical value. Encodings are versioned (type prefix byte) and locked by golden vector tests. Domain-separated hashing prevents cross-protocol attacks.
+All protocol types use canonical binary encoding - one valid byte sequence per logical value. Encodings are versioned (type prefix byte) and locked by golden vector tests. Domain-separated hashing prevents cross-protocol attacks.
 
 ## Transaction Types
 
@@ -219,7 +219,7 @@ Size: 51 bytes
 Min fee: 5000
 ```
 
-Autonomy modes: Advisory (0) — can only emit proposals; Gated (1) — proposals go through approval gates. The entity ID is deterministically derived: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator_address)`.
+Autonomy modes: Advisory (0) - can only emit proposals; Gated (1) - proposals go through approval gates. The entity ID is deterministically derived: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator_address)`.
 
 Capabilities (8-bit bitfield, bits 0-6 defined, bit 7 reserved): `read_public_chain` (bit 0), `read_memory_objects` (bit 1), `emit_proposals` (bit 2), `request_execution` (bit 3), `read_nnpx_derived` (bit 4), `submit_reputation_updates` (bit 5, oracle entities only), `post_oracle_anchors` (bit 6).
 
@@ -411,20 +411,39 @@ pkill -f 'novai-node run'
 
 ### RPC Endpoints
 
-All RPC calls use JSON-RPC 2.0 over HTTP POST. The node exposes 29 methods; the 9 most common are listed below. The full reference (every method with request/response shapes) lives in `docs/RPC_REFERENCE.md`.
+All RPC calls use JSON-RPC 2.0 over HTTP POST. The node exposes 29 methods; all are listed below. For full request/response shapes, error codes, and curl examples, see `docs/RPC_REFERENCE.md`.
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
 | `novai_submitTransaction` | `{ "tx": "<hex>" }` | Submit a signed transaction |
-| `novai_getNonce` | `{ "address": "<hex>" }` | Query expected nonce |
-| `novai_getBalance` | `{ "address": "<hex>" }` | Query balance and nonce |
-| `novai_getAiEntity` | `{ "entity_id": "<hex>" }` | Query AI entity state |
-| `novai_getMemoryObjects` | `{ "entity_id": "<hex>" }` | List memory objects |
-| `novai_getSignalsByHeight` | `{ "height": <u64> }` | Query signals at height |
-| `novai_getSignalsByIssuer` | `{ "issuer": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Query signals by issuer |
-| `novai_getSignalsByType` | `{ "signal_type": <u8>, "start_height": <u64>, "end_height": <u64> }` | Query signals by type |
+| `novai_getTransaction` | `{ "txid": "<hex>" }` | Transaction receipt by txid |
+| `novai_getLatestBlock` | `{}` | Latest committed block header |
+| `novai_getBlockByHeight` | `{ "height": <u64> }` | Block header at a given height |
+| `novai_getBlockByHash` | `{ "hash": "<hex>" }` | Block header by its hash |
+| `novai_getBalance` | `{ "address": "<hex>" }` | Account balance and nonce |
+| `novai_getNonce` | `{ "address": "<hex>" }` | Account expected nonce |
+| `novai_getAiEntity` | `{ "entity_id": "<hex>" }` | AI entity record by id |
+| `novai_getMemoryObjects` | `{ "entity_id": "<hex>" }` | All memory objects owned by an entity |
+| `novai_getSignalsByHeight` | `{ "height": <u64> }` | Signals committed at a height |
+| `novai_getSignalsByIssuer` | `{ "issuer": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Signals from an entity over a range |
+| `novai_getSignalsByType` | `{ "signal_type": <u8>, "start_height": <u64>, "end_height": <u64> }` | Signals by type over a range |
+| `novai_getPaymentsByEntity` | `{ "entity_id": "<hex>", "role": "payer"\|"payee", "start_height": <u64>, "end_height": <u64> }` | Payments where the entity is payer or payee |
+| `novai_getServiceDescriptorsByCategory` | `{ "category": <u8> }` | Service descriptors filtered by category |
+| `novai_getVkRegistration` | `{ "id": "<hex>" }` | A registered Groth16 verifying key by handle |
+| `novai_listVkRegistrations` | `{ "entity_id": "<hex>" }` | All VK registrations owned by an entity |
+| `novai_getSlaAgreement` | `{ "owner": "<hex>", "object_id": "<hex>" }` | SLA memory object by (owner, object_id) |
+| `novai_getActiveSla` | `{ "buyer": "<hex>", "seller": "<hex>" }` | Active SLA between a buyer and seller |
+| `novai_listSlasByBuyer` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | SLAs where the entity is the buyer |
+| `novai_listSlasBySeller` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | SLAs where the entity is the seller |
+| `novai_getPaymentChannel` | `{ "owner": "<hex>", "object_id": "<hex>" }` | Payment channel by (owner, object_id) |
+| `novai_listChannelsByPartyA` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Channels where the entity is party A |
+| `novai_listChannelsByPartyB` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Channels where the entity is party B |
+| `novai_getChannelDisputeStatus` | `{ "owner": "<hex>", "object_id": "<hex>" }` | Dispute window status with derived `finalize_ready` |
+| `novai_getUpgradeHistory` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Entity upgrade history over a range |
+| `novai_getOracleAnchor` | `{ "signal_hash": "<hex>" }` | Oracle anchor by its signal hash |
+| `novai_getOracleAnchorsByEntity` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Oracle anchors posted by an entity |
+| `novai_getOracleAnchorsByTag` | `{ "data_tag": "<string>", "start_height": <u64>, "end_height": <u64> }` | Oracle anchors matching a `data_tag` |
 | `novai_faucet` | `{ "address": "<hex>" }` | Request testnet tokens (dev mode only) |
-<!-- TODO: enumerate remaining 20 methods (payments, services, VK, SLA, channels, oracle anchors, blocks, transactions, etc.). Canonical list in crates/node/src/rpc.rs. -->
 
 
 ## Becoming a Validator on the Public Testnet
