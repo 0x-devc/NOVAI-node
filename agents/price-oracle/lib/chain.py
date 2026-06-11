@@ -286,18 +286,6 @@ class Chain:
             fee=fee,
         )
 
-    def register_oracle(
-        self, kp: Keypair, *, fee: int = 5_000, initial_balance: int = 0
-    ) -> SubmissionResult:
-        return self._client.register_entity(
-            keypair=kp,
-            code_hash=ORACLE_CODE_HASH,
-            capabilities=Capabilities.oracle(),
-            autonomy_mode=AutonomyMode.GATED,
-            initial_balance=initial_balance,
-            fee=fee,
-        )
-
     def post_anchor(
         self,
         kp: Keypair,
