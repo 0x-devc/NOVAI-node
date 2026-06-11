@@ -245,11 +245,18 @@ done
 
 header "4. STATE ROOT VERDICT PER HEIGHT"
 
+# Agreement is decided by MAJORITY across responding validators, not by
+# first-responder comparison. With a 3-1 split where the first responder
+# is the dissenter, the dissenting port is the lone one, not the three
+# agreeing ones. Even splits (e.g. 2-2) are reported as SPLIT (no
+# majority) and fail explicitly. Ported from scripts/verify-local-devnet.sh.
+
 for h in "${TEST_HEIGHTS[@]}"; do
-  # Collect non-error roots for this height.
-  reference=""
   any_unreach=0
-  diverge_ports=()
+
+  # Per-height parallel arrays of responding (port, state_root) pairs.
+  resp_ports=()
+  resp_roots=()
   for i in "${!VALIDATOR_PORTS[@]}"; do
     port="${VALIDATOR_PORTS[$i]}"
     sr="${STATE_ROOT_AT["${h},${port}"]}"
@@ -259,29 +266,102 @@ for h in "${TEST_HEIGHTS[@]}"; do
         continue
         ;;
     esac
-    if [[ -z "$reference" ]]; then
-      reference="$sr"
-    elif [[ "$sr" != "$reference" ]]; then
-      diverge_ports+=("$port")
+    resp_ports[${#resp_ports[@]}]="$port"
+    resp_roots[${#resp_roots[@]}]="$sr"
+  done
+
+  # Group responders by state_root. Parallel arrays:
+  #   group_roots[g]  the gth unique state_root
+  #   group_counts[g] how many responders hold that root
+  #   group_ports[g]  space-separated port list for that root
+  group_roots=()
+  group_counts=()
+  group_ports=()
+  for k in "${!resp_roots[@]}"; do
+    r="${resp_roots[$k]}"
+    p="${resp_ports[$k]}"
+    found=-1
+    for g in "${!group_roots[@]}"; do
+      if [[ "${group_roots[$g]}" == "$r" ]]; then
+        found=$g
+        break
+      fi
+    done
+    if (( found >= 0 )); then
+      group_counts[$found]=$((group_counts[$found] + 1))
+      group_ports[$found]="${group_ports[$found]} $p"
+    else
+      n=${#group_roots[@]}
+      group_roots[$n]="$r"
+      group_counts[$n]=1
+      group_ports[$n]="$p"
     fi
   done
 
-  if (( ${#diverge_ports[@]} > 0 )); then
-    printf '  height=%-8s DIVERGE (dissenting ports: %s) reference=%s...\n' \
-      "$h" "${diverge_ports[*]}" "${reference:0:16}"
-    for port in "${diverge_ports[@]}"; do
-      printf '    DISSENT port=%s  state_root=%s\n' "$port" "${STATE_ROOT_AT["${h},${port}"]}"
-    done
-    fail "height ${h}: DIVERGE on ports ${diverge_ports[*]}"
-  elif (( any_unreach == 1 )); then
-    printf '  height=%-8s PARTIAL (one or more validators unreachable; responders AGREE on %s...)\n' \
-      "$h" "${reference:0:16}"
-    fail "height ${h}: partial verdict - unreachable validator(s)"
-  elif [[ -z "$reference" ]]; then
+  n_groups=${#group_roots[@]}
+
+  if (( n_groups == 0 )); then
     printf '  height=%-8s NO DATA (every validator unreachable or absent)\n' "$h"
     fail "height ${h}: no data from any validator"
+    continue
+  fi
+
+  if (( n_groups == 1 )); then
+    if (( any_unreach == 1 )); then
+      printf '  height=%-8s PARTIAL (some validators unreachable; responders AGREE on %s...)\n' \
+        "$h" "${group_roots[0]:0:16}"
+      fail "height ${h}: partial verdict, unreachable validator(s)"
+    else
+      printf '  height=%-8s AGREE state_root=%s\n' "$h" "${group_roots[0]}"
+    fi
+    continue
+  fi
+
+  # n_groups >= 2: divergence. Find the largest group and check for a tie.
+  max_count=0
+  max_idx=-1
+  for g in "${!group_counts[@]}"; do
+    c=${group_counts[$g]}
+    if (( c > max_count )); then
+      max_count=$c
+      max_idx=$g
+    fi
+  done
+  tied=0
+  for g in "${!group_counts[@]}"; do
+    if (( g != max_idx )) && (( group_counts[$g] == max_count )); then
+      tied=1
+    fi
+  done
+
+  if (( tied == 1 )); then
+    # No clear majority. Report SPLIT and dump every group.
+    printf '  height=%-8s SPLIT (no majority): %d distinct state_roots across %d responders\n' \
+      "$h" "$n_groups" "${#resp_roots[@]}"
+    for g in "${!group_roots[@]}"; do
+      printf '    GROUP %d  count=%s  ports=[%s]  state_root=%s\n' \
+        "$g" "${group_counts[$g]}" "${group_ports[$g]}" "${group_roots[$g]}"
+    done
+    fail "height ${h}: SPLIT (no majority) across ${#resp_roots[@]} responders"
   else
-    printf '  height=%-8s AGREE state_root=%s\n' "$h" "$reference"
+    # Clear majority. Print majority + dissenters.
+    maj_root="${group_roots[$max_idx]}"
+    maj_ports="${group_ports[$max_idx]}"
+    printf '  height=%-8s DIVERGE majority_root=%s... (count=%d, ports=[%s])\n' \
+      "$h" "${maj_root:0:16}" "$max_count" "$maj_ports"
+    diss_ports_all=""
+    for g in "${!group_roots[@]}"; do
+      if (( g == max_idx )); then continue; fi
+      dp="${group_ports[$g]}"
+      printf '    DISSENT  count=%s  ports=[%s]  state_root=%s\n' \
+        "${group_counts[$g]}" "$dp" "${group_roots[$g]}"
+      if [[ -z "$diss_ports_all" ]]; then
+        diss_ports_all="$dp"
+      else
+        diss_ports_all="$diss_ports_all $dp"
+      fi
+    done
+    fail "height ${h}: DIVERGE dissenting_ports=[${diss_ports_all}] majority_root=${maj_root:0:16}..."
   fi
 done
 
