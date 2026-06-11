@@ -335,10 +335,10 @@ This stops all four validators. The state directory (`~/.novai/data/validator-{0
 
 You now have a working AI entity on a local NOVAI chain. From here:
 
-- **TypeScript SDK** - same flow from `@novai/sdk`. See `sdk/novai-sdk-ts/examples/` (in progress).
-- **Rust SDK** - same flow from the `novai-sdk` crate. See `sdk/novai-sdk/examples/` (in progress).
+- **TypeScript SDK** - same flow from `@novai/sdk`. See `sdk/novai-sdk-ts/examples/`.
+- **Rust SDK** - same flow from the `novai-sdk` crate. See `sdk/novai-sdk/examples/`.
 - **Full RPC reference** - every method with request/response shapes: `docs/RPC_REFERENCE.md`.
-- **Architecture deep dive** - how consensus, execution, and state commitment fit together: `docs/ARCHITECTURE.md` (in progress).
+- **Architecture deep dive** - how consensus, execution, and state commitment fit together: `docs/ARCHITECTURE.md`.
 
 > **One-liner install** if you want `novai-cli` on your `$PATH`:
 > ```bash

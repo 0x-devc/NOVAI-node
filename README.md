@@ -411,20 +411,39 @@ pkill -f 'novai-node run'
 
 ### RPC Endpoints
 
-All RPC calls use JSON-RPC 2.0 over HTTP POST. The node exposes 29 methods; the 9 most common are listed below. The full reference (every method with request/response shapes) lives in `docs/RPC_REFERENCE.md`.
+All RPC calls use JSON-RPC 2.0 over HTTP POST. The node exposes 29 methods; all are listed below. For full request/response shapes, error codes, and curl examples, see `docs/RPC_REFERENCE.md`.
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
 | `novai_submitTransaction` | `{ "tx": "<hex>" }` | Submit a signed transaction |
-| `novai_getNonce` | `{ "address": "<hex>" }` | Query expected nonce |
-| `novai_getBalance` | `{ "address": "<hex>" }` | Query balance and nonce |
-| `novai_getAiEntity` | `{ "entity_id": "<hex>" }` | Query AI entity state |
-| `novai_getMemoryObjects` | `{ "entity_id": "<hex>" }` | List memory objects |
-| `novai_getSignalsByHeight` | `{ "height": <u64> }` | Query signals at height |
-| `novai_getSignalsByIssuer` | `{ "issuer": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Query signals by issuer |
-| `novai_getSignalsByType` | `{ "signal_type": <u8>, "start_height": <u64>, "end_height": <u64> }` | Query signals by type |
+| `novai_getTransaction` | `{ "txid": "<hex>" }` | Transaction receipt by txid |
+| `novai_getLatestBlock` | `{}` | Latest committed block header |
+| `novai_getBlockByHeight` | `{ "height": <u64> }` | Block header at a given height |
+| `novai_getBlockByHash` | `{ "hash": "<hex>" }` | Block header by its hash |
+| `novai_getBalance` | `{ "address": "<hex>" }` | Account balance and nonce |
+| `novai_getNonce` | `{ "address": "<hex>" }` | Account expected nonce |
+| `novai_getAiEntity` | `{ "entity_id": "<hex>" }` | AI entity record by id |
+| `novai_getMemoryObjects` | `{ "entity_id": "<hex>" }` | All memory objects owned by an entity |
+| `novai_getSignalsByHeight` | `{ "height": <u64> }` | Signals committed at a height |
+| `novai_getSignalsByIssuer` | `{ "issuer": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Signals from an entity over a range |
+| `novai_getSignalsByType` | `{ "signal_type": <u8>, "start_height": <u64>, "end_height": <u64> }` | Signals by type over a range |
+| `novai_getPaymentsByEntity` | `{ "entity_id": "<hex>", "role": "payer"\|"payee", "start_height": <u64>, "end_height": <u64> }` | Payments where the entity is payer or payee |
+| `novai_getServiceDescriptorsByCategory` | `{ "category": <u8> }` | Service descriptors filtered by category |
+| `novai_getVkRegistration` | `{ "id": "<hex>" }` | A registered Groth16 verifying key by handle |
+| `novai_listVkRegistrations` | `{ "entity_id": "<hex>" }` | All VK registrations owned by an entity |
+| `novai_getSlaAgreement` | `{ "owner": "<hex>", "object_id": "<hex>" }` | SLA memory object by (owner, object_id) |
+| `novai_getActiveSla` | `{ "buyer": "<hex>", "seller": "<hex>" }` | Active SLA between a buyer and seller |
+| `novai_listSlasByBuyer` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | SLAs where the entity is the buyer |
+| `novai_listSlasBySeller` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | SLAs where the entity is the seller |
+| `novai_getPaymentChannel` | `{ "owner": "<hex>", "object_id": "<hex>" }` | Payment channel by (owner, object_id) |
+| `novai_listChannelsByPartyA` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Channels where the entity is party A |
+| `novai_listChannelsByPartyB` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Channels where the entity is party B |
+| `novai_getChannelDisputeStatus` | `{ "owner": "<hex>", "object_id": "<hex>" }` | Dispute window status with derived `finalize_ready` |
+| `novai_getUpgradeHistory` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Entity upgrade history over a range |
+| `novai_getOracleAnchor` | `{ "signal_hash": "<hex>" }` | Oracle anchor by its signal hash |
+| `novai_getOracleAnchorsByEntity` | `{ "entity_id": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Oracle anchors posted by an entity |
+| `novai_getOracleAnchorsByTag` | `{ "data_tag": "<string>", "start_height": <u64>, "end_height": <u64> }` | Oracle anchors matching a `data_tag` |
 | `novai_faucet` | `{ "address": "<hex>" }` | Request testnet tokens (dev mode only) |
-<!-- TODO: enumerate remaining 20 methods (payments, services, VK, SLA, channels, oracle anchors, blocks, transactions, etc.). Canonical list in crates/node/src/rpc.rs. -->
 
 
 ## Becoming a Validator on the Public Testnet

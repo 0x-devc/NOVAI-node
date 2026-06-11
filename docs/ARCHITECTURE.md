@@ -281,7 +281,7 @@ The subscription protocol promotes ad-hoc, off-chain "I'll pay you per call" rel
 
 **Purpose.** The deterministic state-transition engine. Decodes payloads, runs every per-tx validation, applies state changes via atomic batches, and updates the SMT. The `dispatch_tx` function is the single entry point - every transaction in every block goes through it.
 
-**Key items.** `dispatch_tx`, `apply_tx_v1_transfer{,_inner}`, `apply_signal_commitment_tx{,_inner}`, the four `apply_*_memory_object_tx` variants, `apply_register_ai_entity_{tx,with_key_tx}`, `apply_credit_ai_entity_tx`, `apply_governance_{submit,execute}_tx`, `check_ai_entity_sender`, `lookup_ai_entity_by_address`, plus all 10 payload `encode_*_v1`/`decode_*_v1` pairs and their `*_PAYLOAD_V1` byte constants.
+**Key items.** `dispatch_tx`, `apply_tx_v1_transfer{,_inner}`, `apply_signal_commitment_tx{,_inner}`, the four `apply_*_memory_object_tx` variants, `apply_register_ai_entity_{tx,with_key_tx}`, `apply_credit_ai_entity_tx`, `apply_governance_{submit,execute}_tx`, `check_ai_entity_sender`, `lookup_ai_entity_by_address`, plus all 11 payload `encode_*_v1`/`decode_*_v1` pairs and their `*_PAYLOAD_V1` byte constants.
 
 **Workspace deps.** `types`, `state`, `smt`, `ai_entities`, `codec`, `governance`.
 
