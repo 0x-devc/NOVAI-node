@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """PURPOSE: Long-running NOVAI price-oracle main loop.
 
+Two-key Type-10 funding model: the funder keypair signs account-level
+operations (CreditAiEntity top-ups, faucet target). The entity keypair
+signs entity-level signals (OracleAnchor commitments). See
+docs/AGENT_FUNDING_PLAYBOOK.md for the reusable lifecycle and
+docs/gate-oracle-funding-model-diagnosis.md for why the funder must be
+on a non-entity-bound path.
+
 Every PRICE_ORACLE_LOOP_INTERVAL_SECS seconds:
   1. Fetch BTC/USD spot from CoinGecko (urllib).
   2. Build a deterministic data_hash from (price, timestamp).
-  3. Submit an OracleAnchor signal through the Python SDK.
-  4. Update Prometheus metrics on localhost:9201.
-  5. Sleep, interruptibly.
+  3. (Tier 1) If entity.economic_balance is low, CreditAiEntity from
+     the funder.
+  4. (Tier 2) If funder.balance is low, faucet the funder.
+  5. Submit an OracleAnchor signal signed by the entity key.
+  6. Update Prometheus metrics on localhost:9201.
+  7. Sleep, interruptibly.
 
 INVARIANTS:
 - The loop never crashes on a recoverable error; only on signature /
@@ -15,13 +25,18 @@ INVARIANTS:
   sleep loop.
 - Metrics increments correspond 1:1 to the events they describe; no
   silent failures.
+- The keyfile's entity_id_hex is the authority for self.entity_id; the
+  derivation from funder address is a sanity check that must match.
+  Disagreement is a hard fail at startup (exit 6), not a warning.
 
 FAILURE MODES:
 - Missing keyfile / endpoint -> fatal at startup (exit non-zero, systemd
   restarts after RestartSec).
-- Entity not registered with bit 6 -> WARN every tick, do NOT auto-fix
-  (bootstrap.py owns registration).
-- All other failures increment a metric and continue.
+- v1 keyfile or seed-derived address mismatch -> exit 2.
+- Entity not registered with bit 6 -> exit 3.
+- Metrics port bind failed -> exit 4.
+- Keyfile entity_id missing or disagrees with derived -> exit 6.
+- All other tick-level failures increment a metric and continue.
 """
 
 from __future__ import annotations
@@ -155,15 +170,43 @@ def _env_float(key: str, env: dict[str, str]) -> float:
         return float(DEFAULTS[key])
 
 
-def load_keypair_from_file(path: Path) -> tuple[Keypair, dict[str, Any]]:
+KEYFILE_VERSION_V2 = 2
+
+
+def load_keypair_from_file(
+    path: Path,
+) -> tuple[Keypair, Keypair, dict[str, Any]]:
+    """Return (funder_kp, entity_kp, keyfile_dict).
+
+    Refuses any keyfile whose ``version`` is not 2. The v1 file is
+    bound to the dead Type-8 entity; auto-migration would silently
+    inherit a poisoned funder. Operator must archive and re-bootstrap.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
-    seed_hex = str(data["seed_hex"])
-    if len(seed_hex) != 64:
-        raise ValueError(f"seed_hex must be 64 hex chars, got {len(seed_hex)}")
-    kp = Keypair.from_seed(bytes.fromhex(seed_hex))
-    if str(data.get("address_hex", kp.address.hex())) != kp.address.hex():
-        raise ValueError("address_hex in keyfile does not match seed; refusing to load")
-    return kp, data
+    version = data.get("version")
+    if version != KEYFILE_VERSION_V2:
+        raise ValueError(
+            f"keyfile {path} has version={version!r}, oracle requires "
+            f"version={KEYFILE_VERSION_V2}; archive and re-run bootstrap"
+        )
+    funder_seed_hex = str(data["funder_seed_hex"])
+    entity_seed_hex = str(data["entity_seed_hex"])
+    for label, seed_hex in (("funder", funder_seed_hex), ("entity", entity_seed_hex)):
+        if len(seed_hex) != 64:
+            raise ValueError(
+                f"{label}_seed_hex must be 64 hex chars, got {len(seed_hex)}"
+            )
+    funder_kp = Keypair.from_seed(bytes.fromhex(funder_seed_hex))
+    entity_kp = Keypair.from_seed(bytes.fromhex(entity_seed_hex))
+    if str(data.get("funder_address_hex", funder_kp.address.hex())) != funder_kp.address.hex():
+        raise ValueError(
+            "funder_address_hex in keyfile does not match seed; refusing to load"
+        )
+    if str(data.get("entity_address_hex", entity_kp.address.hex())) != entity_kp.address.hex():
+        raise ValueError(
+            "entity_address_hex in keyfile does not match seed; refusing to load"
+        )
+    return funder_kp, entity_kp, data
 
 
 class Oracle:
@@ -173,7 +216,8 @@ class Oracle:
         self,
         cfg: OracleConfig,
         chain: Chain,
-        kp: Keypair,
+        funder_kp: Keypair,
+        entity_kp: Keypair,
         entity_id: bytes,
         registry: MetricsRegistry,
         *,
@@ -184,7 +228,14 @@ class Oracle:
     ) -> None:
         self.cfg = cfg
         self.chain = chain
-        self.kp = kp
+        # funder_kp: signs account-level ops (CreditAiEntity, faucet
+        # target). Never signs entity-bound signals; that would route
+        # through check_ai_entity_sender's deny arm at lib.rs:9741.
+        # entity_kp: signs SignalCommitment carrying OracleAnchor.
+        # Holds capability bit 6 (post_oracle_anchors); the funder does
+        # not.
+        self.funder_kp = funder_kp
+        self.entity_kp = entity_kp
         self.entity_id = entity_id
         self.registry = registry
         self.fetch_fn = fetch_fn
@@ -305,7 +356,7 @@ class Oracle:
             return
 
         try:
-            account_nonce = self.chain.get_account_nonce(self.kp.address)
+            account_nonce = self.chain.get_account_nonce(self.funder_kp.address)
         except Exception as exc:  # noqa: BLE001 mapped by map_credit_error
             reason = map_credit_error(exc)
             self._next_credit_attempt_at = (
@@ -322,7 +373,7 @@ class Oracle:
 
         try:
             result = self.chain.credit_entity(
-                self.kp,
+                self.funder_kp,
                 self.entity_id,
                 self.cfg.credit_amount,
                 nonce=account_nonce,
@@ -366,7 +417,7 @@ class Oracle:
         crates/node/src/rpc.rs:3125.
         """
         try:
-            balance = self.chain.get_balance(self.kp.address)
+            balance = self.chain.get_balance(self.funder_kp.address)
         except Exception as exc:  # noqa: BLE001 best-effort
             LOG.warning("account_balance_read event=failed error=%s", exc)
             return
@@ -392,7 +443,7 @@ class Oracle:
             return
 
         try:
-            result = self.chain.faucet(self.kp.address)
+            result = self.chain.faucet(self.funder_kp.address)
         except Exception as exc:  # noqa: BLE001 mapped by map_faucet_error
             reason = map_faucet_error(exc)
             self._next_faucet_attempt_at = (
@@ -463,7 +514,7 @@ class Oracle:
             return
         try:
             result = self.chain.post_anchor(
-                self.kp,
+                self.entity_kp,
                 self.entity_id,
                 data_hash,
                 ts,
@@ -513,13 +564,50 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        kp, keyfile_data = load_keypair_from_file(cfg.key_path)
+        funder_kp, entity_kp, keyfile_data = load_keypair_from_file(cfg.key_path)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         LOG.error("oracle_init event=keyfile_error error=%s path=%s", exc, cfg.key_path)
         return 2
 
+    # The keyfile's entity_id_hex is the authority. bootstrap.py
+    # persists it at registration time, after the chain confirms the
+    # entity exists with the right capabilities. The derivation below
+    # is a sanity check that must match: disagreement means the keyfile
+    # and funder have drifted (different registrations, swapped files,
+    # or a manually-edited keyfile). Silently funding the wrong entity
+    # is the bug class this check exists to prevent.
+    expected_entity_id_hex = keyfile_data.get("entity_id_hex")
+    if not expected_entity_id_hex:
+        LOG.error(
+            "oracle_init event=keyfile_missing_entity_id path=%s "
+            "advice=re-run-bootstrap-to-register",
+            cfg.key_path,
+        )
+        return 6
+    try:
+        expected_entity_id = bytes.fromhex(str(expected_entity_id_hex))
+    except ValueError as exc:
+        LOG.error(
+            "oracle_init event=keyfile_entity_id_malformed value=%s error=%s",
+            expected_entity_id_hex,
+            exc,
+        )
+        return 6
+
     chain = Chain(cfg.endpoint)
-    entity_id = chain.entity_id_for(kp.address)
+    derived_entity_id = chain.entity_id_for(funder_kp.address)
+    if expected_entity_id != derived_entity_id:
+        LOG.error(
+            "oracle_init event=entity_id_drift_fatal keyfile=%s derived=%s "
+            "funder=%s advice=archive-keyfile-and-re-bootstrap",
+            expected_entity_id_hex,
+            derived_entity_id.hex(),
+            funder_kp.address.hex(),
+        )
+        return 6
+
+    entity_id = expected_entity_id
+
     status = chain.get_entity_status(entity_id)
     if not status.exists or not status.has_post_oracle_anchors:
         LOG.error(
@@ -529,14 +617,6 @@ def main(argv: list[str] | None = None) -> int:
             status.capabilities,
         )
         return 3
-
-    expected_entity_id_hex = keyfile_data.get("entity_id_hex")
-    if expected_entity_id_hex and expected_entity_id_hex != entity_id.hex():
-        LOG.warning(
-            "oracle_init event=entity_id_drift keyfile=%s derived=%s",
-            expected_entity_id_hex,
-            entity_id.hex(),
-        )
 
     registry = build_oracle_registry(time.monotonic())
     try:
@@ -550,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 4
 
-    oracle = Oracle(cfg, chain, kp, entity_id, registry)
+    oracle = Oracle(cfg, chain, funder_kp, entity_kp, entity_id, registry)
     return oracle.run_forever()
 
 

@@ -1,9 +1,19 @@
-"""Oracle main-loop tick semantics: success path and each failure path."""
+"""Oracle main-loop tick semantics: success path and each failure path.
+
+Under the two-key Type-10 funding model the Oracle holds both a funder
+keypair (signs CreditAiEntity and consumes the faucet) and an entity
+keypair (signs OracleAnchor). The signer-split tests verify that each
+chain call uses the right key; the drift test in main() verifies the
+oracle hard-fails when the keyfile's stored entity_id disagrees with
+the on-chain derivation.
+"""
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from novai_sdk import (
@@ -55,6 +65,7 @@ class _MonotonicClock:
 class FakeChain:
     def __init__(self) -> None:
         self.posts: list[tuple[bytes, bytes, int, str]] = []
+        self.post_signer_addrs: list[bytes] = []
         self.post_exc: Optional[BaseException] = None
         self.height_value: Optional[int] = 12_345
         self.endpoint = "http://fake"
@@ -70,10 +81,12 @@ class FakeChain:
         self.account_nonce_value: int = 0
         self.account_nonce_exc: Optional[BaseException] = None
         self.account_nonce_calls: int = 0
+        self.account_nonce_addrs: list[bytes] = []
         self.mempool_nonce_value: int = 708
         self.mempool_nonce_calls: int = 0
         self.credit_exc: Optional[BaseException] = None
         self.credit_calls: list[tuple[bytes, int, int]] = []
+        self.credit_signer_addrs: list[bytes] = []
 
     def entity_id_for(self, address: bytes) -> bytes:
         return b"E" * 32
@@ -95,14 +108,15 @@ class FakeChain:
 
     def get_account_nonce(self, address: bytes) -> int:
         self.account_nonce_calls += 1
+        self.account_nonce_addrs.append(address)
         if self.account_nonce_exc is not None:
             raise self.account_nonce_exc
         return self.account_nonce_value
 
     def get_nonce(self, address: bytes) -> int:
         """Mempool-drift footgun. Production must NOT call this for any
-        account-signed tx. Present so the v2 nonce-source test can assert
-        the agent did not reach for it."""
+        account-signed tx. Present so the v2 nonce-source test can
+        assert the agent did not reach for it."""
         self.mempool_nonce_calls += 1
         return self.mempool_nonce_value
 
@@ -116,6 +130,7 @@ class FakeChain:
         fee: int = 100,
     ) -> _SubmissionResult:
         self.credit_calls.append((entity_id, amount, nonce))
+        self.credit_signer_addrs.append(kp.address)
         if self.credit_exc is not None:
             raise self.credit_exc
         return _SubmissionResult(txid="creditxid")
@@ -137,6 +152,7 @@ class FakeChain:
         if self.post_exc is not None:
             raise self.post_exc
         self.posts.append((entity_id, data_hash, external_timestamp, data_tag))
+        self.post_signer_addrs.append(kp.address)
         return _SubmissionResult()
 
     def latest_block_height(self) -> Optional[int]:
@@ -158,7 +174,7 @@ def _make_oracle(
 ) -> oracle_mod.Oracle:
     cfg = oracle_mod.OracleConfig(
         endpoint="http://fake",
-        key_path=__file__,  # not loaded inside Oracle
+        key_path=__file__,
         coingecko_url="http://stub",
         metrics_host="127.0.0.1",
         metrics_port=0,
@@ -172,15 +188,17 @@ def _make_oracle(
         credit_retry_after_secs=credit_retry_after_secs,
         faucet_retry_after_secs=faucet_retry_after_secs,
     )
-    kp = Keypair.generate()
+    funder_kp = Keypair.generate()
+    entity_kp = Keypair.generate()
     ch = chain if chain is not None else FakeChain()
     reg = registry if registry is not None else build_oracle_registry(time.monotonic())
     mono = monotonic_fn if monotonic_fn is not None else (lambda: 0.0)
     return oracle_mod.Oracle(
         cfg=cfg,
         chain=ch,
-        kp=kp,
-        entity_id=ch.entity_id_for(kp.address),
+        funder_kp=funder_kp,
+        entity_kp=entity_kp,
+        entity_id=ch.entity_id_for(funder_kp.address),
         registry=reg,
         fetch_fn=fetch_fn,
         sleep_fn=lambda _s: None,
@@ -297,7 +315,6 @@ def test_sliced_sleep_yields_on_stop():
     calls: list[float] = []
     o.sleep_fn = lambda s: calls.append(s) or setattr(o, "_stopping", True)
     o._sliced_sleep(60.0)
-    # Stops after the first 1-second slice.
     assert calls == [1.0]
 
 
@@ -320,7 +337,7 @@ def test_loop_records_loop_completed_timestamp_after_each_tick():
 
 def test_refaucet_triggers_when_balance_below_threshold():
     chain = FakeChain()
-    chain.balance_value = 100  # well below the 200_000 account threshold
+    chain.balance_value = 100
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
@@ -332,7 +349,7 @@ def test_refaucet_triggers_when_balance_below_threshold():
 
 def test_refaucet_skipped_when_balance_above_threshold():
     chain = FakeChain()
-    chain.balance_value = 1_000_000  # well above the 200_000 account threshold
+    chain.balance_value = 1_000_000
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
@@ -355,7 +372,6 @@ def test_cooldown_blocked_oracle_does_not_spin_faucet():
     for _ in range(60):
         o._tick()
         clock.advance(60.0)
-    # Across 60 ticks the oracle made exactly one faucet RPC call.
     assert len(chain.faucet_calls) == 1
     text = reg.render()
     assert 'novai_oracle_faucet_attempts_total{result="rate_limited"} 1' in text
@@ -372,7 +388,6 @@ def test_cooldown_boundary_allows_one_more_faucet_attempt():
     )
     o._tick()
     assert len(chain.faucet_calls) == 1
-    # Advance past the 3600s backoff window.
     clock.advance(3601.0)
     o._tick()
     assert len(chain.faucet_calls) == 2
@@ -389,11 +404,10 @@ def test_faucet_disabled_does_not_sys_exit_and_sets_backoff():
     o = _make_oracle(
         fetch_fn=_ok_fetch, chain=chain, registry=reg, monotonic_fn=clock
     )
-    o._tick()  # must not raise SystemExit
+    o._tick()
     assert len(chain.faucet_calls) == 1
     text = reg.render()
     assert 'novai_oracle_faucet_attempts_total{result="disabled"} 1' in text
-    # Backoff was stamped: a second tick at the same monotonic time skips the faucet.
     o._tick()
     assert len(chain.faucet_calls) == 1
 
@@ -426,23 +440,21 @@ def test_get_balance_failure_skips_topup_but_does_not_block_submit():
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
-    # No faucet call because the balance read failed first.
     assert chain.faucet_calls == []
-    # Submit still ran (FakeChain.post_anchor has no post_exc).
     text = reg.render()
     assert "novai_oracle_submission_success_total 1" in text
 
 
 def test_v2_tier1_credits_when_entity_balance_below_threshold():
     chain = FakeChain()
-    chain.entity_balance_value = 100  # well below default 5_000
+    chain.entity_balance_value = 100
     chain.account_nonce_value = 1
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
     assert len(chain.credit_calls) == 1
     _entity_id, amount, nonce = chain.credit_calls[0]
-    assert amount == 100_000  # default credit_amount
+    assert amount == 100_000
     assert nonce == 1
     text = reg.render()
     assert 'novai_oracle_credit_attempts_total{result="success"} 1' in text
@@ -451,17 +463,15 @@ def test_v2_tier1_credits_when_entity_balance_below_threshold():
 
 def test_v2_tier1_uses_account_nonce_not_mempool_nonce():
     chain = FakeChain()
-    chain.entity_balance_value = 0  # tier 1 fires
-    chain.account_nonce_value = 1  # on-chain account.nonce
-    chain.mempool_nonce_value = 708  # drifted mempool expected
+    chain.entity_balance_value = 0
+    chain.account_nonce_value = 1
+    chain.mempool_nonce_value = 708
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
     assert len(chain.credit_calls) == 1
     _entity_id, _amount, nonce = chain.credit_calls[0]
-    # The credit MUST use account.nonce (1), not the mempool's drifted value (708).
     assert nonce == 1, f"expected account nonce 1, got {nonce}"
-    # And the agent must not have asked for the mempool nonce at all.
     assert chain.mempool_nonce_calls == 0
 
 
@@ -480,7 +490,6 @@ def test_v2_tier1_does_not_spin_on_repeated_failure():
     for _ in range(5):
         o._tick()
         clock.advance(60.0)
-    # Default credit_retry_after_secs is 300; after 5 ticks (240s simulated) backoff still holds.
     assert len(chain.credit_calls) == 1
     text = reg.render()
     assert 'novai_oracle_credit_attempts_total{result="nonce_mismatch"} 1' in text
@@ -488,7 +497,7 @@ def test_v2_tier1_does_not_spin_on_repeated_failure():
 
 def test_v2_tier1_skipped_when_entity_balance_healthy():
     chain = FakeChain()
-    chain.entity_balance_value = 1_000_000  # well above default 5_000
+    chain.entity_balance_value = 1_000_000
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
@@ -499,8 +508,8 @@ def test_v2_tier1_skipped_when_entity_balance_healthy():
 
 def test_v2_tier2_faucets_account_when_below_account_min_balance():
     chain = FakeChain()
-    chain.balance_value = 100  # below default 200_000
-    chain.entity_balance_value = 1_000_000  # above 5_000, tier 1 skipped
+    chain.balance_value = 100
+    chain.entity_balance_value = 1_000_000
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
@@ -513,7 +522,7 @@ def test_v2_tier2_faucets_account_when_below_account_min_balance():
 def test_v2_tier2_does_not_spin():
     chain = FakeChain()
     chain.balance_value = 0
-    chain.entity_balance_value = 1_000_000  # tier 1 skipped
+    chain.entity_balance_value = 1_000_000
     chain.faucet_exc = RateLimitedError(-32000, "Faucet rate limit")
     reg = build_oracle_registry(time.monotonic())
     clock = _MonotonicClock(start=1000.0)
@@ -523,24 +532,21 @@ def test_v2_tier2_does_not_spin():
     for _ in range(60):
         o._tick()
         clock.advance(60.0)
-    # 3600s default backoff; 60 ticks * 60s = 3540s, still in window.
     assert len(chain.faucet_calls) == 1
 
 
 def test_v2_submit_runs_after_both_tiers_fail():
     chain = FakeChain()
-    chain.entity_balance_value = 0  # tier 1 fires
+    chain.entity_balance_value = 0
     chain.account_nonce_value = 1
     chain.credit_exc = NovaiServerError(-32000, "NonceMismatch")
-    chain.balance_value = 0  # tier 2 fires
+    chain.balance_value = 0
     chain.faucet_exc = RateLimitedError(-32000, "Faucet rate limit")
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
-    # Both tiers attempted.
     assert len(chain.credit_calls) == 1
     assert len(chain.faucet_calls) == 1
-    # And _submit still ran (no post_exc, so it succeeds).
     assert len(chain.posts) == 1
     text = reg.render()
     assert "novai_oracle_submission_success_total 1" in text
@@ -553,3 +559,172 @@ def test_v2_map_credit_error_maps_nonce_mismatch_and_insufficient_funds():
     )
     assert map_credit_error(nm) == "nonce_mismatch"
     assert map_credit_error(insuff) == "insufficient_funds"
+
+
+# -- Two-key signer split (new under v2) -------------------------------------
+
+
+def test_v2_credit_signs_with_funder_kp():
+    """CreditAiEntity must be signed by the funder, not the entity. The
+    funder is on a non-entity-bound path through check_ai_entity_sender;
+    the entity is not, so signing credit with the entity key would
+    bounce at lib.rs:9741.
+    """
+    chain = FakeChain()
+    chain.entity_balance_value = 0
+    chain.account_nonce_value = 1
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    assert chain.credit_signer_addrs == [o.funder_kp.address]
+    assert chain.account_nonce_addrs == [o.funder_kp.address]
+    # The entity key never touches the credit path.
+    assert o.entity_kp.address not in chain.credit_signer_addrs
+    assert o.entity_kp.address not in chain.account_nonce_addrs
+
+
+def test_v2_anchor_signs_with_entity_kp():
+    """OracleAnchor must be signed by the entity key, not the funder.
+    The entity holds capability bit 6 (post_oracle_anchors); the funder
+    has no capabilities and would be denied at validate_oracle_anchor.
+    """
+    chain = FakeChain()
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    assert chain.post_signer_addrs == [o.entity_kp.address]
+    assert o.funder_kp.address not in chain.post_signer_addrs
+
+
+def test_v2_faucet_targets_funder_address():
+    """The faucet RPC pays the funder; the entity has no account ledger."""
+    chain = FakeChain()
+    chain.balance_value = 0
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    assert chain.faucet_calls == [o.funder_kp.address]
+
+
+# -- Keyfile entity_id drift check in main() (new under v2) ------------------
+
+
+def _write_v2_keyfile(
+    path: Path,
+    *,
+    funder: Keypair,
+    entity: Keypair,
+    entity_id_hex: str,
+    capabilities_byte: int = 0x47,
+    registered_at_unix: int = 1_717_428_000,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "funder_seed_hex": funder.seed.hex(),
+                "funder_pubkey_hex": funder.pubkey.hex(),
+                "funder_address_hex": funder.address.hex(),
+                "entity_seed_hex": entity.seed.hex(),
+                "entity_pubkey_hex": entity.pubkey.hex(),
+                "entity_address_hex": entity.address.hex(),
+                "entity_id_hex": entity_id_hex,
+                "capabilities_byte": capabilities_byte,
+                "registered_at_unix": registered_at_unix,
+            }
+        )
+    )
+
+
+def test_main_exits_on_keyfile_entity_id_drift(tmp_path, monkeypatch):
+    """Hard fail on startup if the keyfile's entity_id_hex disagrees
+    with chain.entity_id_for(funder_kp.address). Silently funding the
+    wrong entity is the failure mode this check exists to prevent.
+    """
+    keyfile_path = tmp_path / "oracle-keys.json"
+    funder = Keypair.generate()
+    entity = Keypair.generate()
+    _write_v2_keyfile(
+        keyfile_path,
+        funder=funder,
+        entity=entity,
+        entity_id_hex="ff" * 32,
+    )
+
+    class DriftChain:
+        endpoint = "http://fake"
+
+        def entity_id_for(self, address: bytes) -> bytes:
+            return b"\x00" * 32
+
+        def get_entity_status(self, entity_id: bytes) -> EntityStatus:
+            return EntityStatus(True, True, 0x47, entity_id, entity_id.hex())
+
+    monkeypatch.setattr(oracle_mod, "Chain", lambda endpoint: DriftChain())
+    monkeypatch.setenv("PRICE_ORACLE_KEY_PATH", str(keyfile_path))
+    monkeypatch.setenv("PRICE_ORACLE_RPC_ENDPOINT", "http://fake")
+
+    rc = oracle_mod.main([])
+    assert rc == 6, f"expected exit 6 on entity_id drift, got {rc}"
+
+
+def test_main_exits_when_keyfile_entity_id_missing(tmp_path, monkeypatch):
+    """A v2 keyfile that has not yet been updated by bootstrap (no
+    entity_id_hex) is an aborted-or-legacy state; oracle.py refuses to
+    start.
+    """
+    keyfile_path = tmp_path / "oracle-keys.json"
+    funder = Keypair.generate()
+    entity = Keypair.generate()
+    keyfile_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "funder_seed_hex": funder.seed.hex(),
+                "funder_pubkey_hex": funder.pubkey.hex(),
+                "funder_address_hex": funder.address.hex(),
+                "entity_seed_hex": entity.seed.hex(),
+                "entity_pubkey_hex": entity.pubkey.hex(),
+                "entity_address_hex": entity.address.hex(),
+            }
+        )
+    )
+
+    class AnyChain:
+        endpoint = "http://fake"
+
+        def entity_id_for(self, address: bytes) -> bytes:
+            return b"\x00" * 32
+
+        def get_entity_status(self, entity_id: bytes) -> EntityStatus:
+            return EntityStatus(True, True, 0x47, entity_id, entity_id.hex())
+
+    monkeypatch.setattr(oracle_mod, "Chain", lambda endpoint: AnyChain())
+    monkeypatch.setenv("PRICE_ORACLE_KEY_PATH", str(keyfile_path))
+    monkeypatch.setenv("PRICE_ORACLE_RPC_ENDPOINT", "http://fake")
+
+    rc = oracle_mod.main([])
+    assert rc == 6
+
+
+def test_main_refuses_v1_keyfile(tmp_path, monkeypatch):
+    """v1 keyfile on disk in v2 mode is a load-time refuse, returning
+    exit code 2 (keyfile_error) per the documented failure table."""
+    keyfile_path = tmp_path / "oracle-keys.json"
+    kp = Keypair.generate()
+    keyfile_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "seed_hex": kp.seed.hex(),
+                "pubkey_hex": kp.pubkey.hex(),
+                "address_hex": kp.address.hex(),
+            }
+        )
+    )
+
+    monkeypatch.setenv("PRICE_ORACLE_KEY_PATH", str(keyfile_path))
+    monkeypatch.setenv("PRICE_ORACLE_RPC_ENDPOINT", "http://fake")
+
+    rc = oracle_mod.main([])
+    assert rc == 2
