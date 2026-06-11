@@ -6,6 +6,11 @@ INVARIANTS:
   local crypto helper, no I/O).
 - ORACLE_CODE_HASH is locked at v1; bumping it is a deliberate semantic
   change that produces a NEW entity_id and forces a new RegisterEntity.
+- Under the two-key Type-10 model the agent identity tuple is
+  (ORACLE_CODE_HASH, funder_address). The entity signing pubkey is bound
+  separately in the chain-side reverse index but does NOT participate in
+  entity_id derivation. A fresh funder address is therefore required per
+  agent identity; reusing a funder collides at EntityAlreadyExists.
 
 FAILURE MODES:
 - See map_submit_error for the SDK-exception -> reason mapping. Unknown
@@ -147,6 +152,17 @@ class Chain:
         return self._client.endpoint
 
     def entity_id_for(self, address: bytes) -> bytes:
+        """Compute the deterministic entity_id this agent registers under
+        given the supplied address as the funder.
+
+        The chain derives entity_id = compute_id(code_hash, tx.from) where
+        tx.from is the signer of the registration tx. Under the two-key
+        Type-10 model that signer is the funder, so a different funder
+        address yields a different entity_id even when code_hash is held
+        constant. See crates/execution/src/lib.rs:9378-9379 (Type-10) and
+        sdk/novai-python-sdk/novai_sdk/client.py:725 (SDK side, identical
+        formula).
+        """
         return compute_entity_id(ORACLE_CODE_HASH, address)
 
     def get_balance(self, address: bytes) -> int:
@@ -193,6 +209,22 @@ class Chain:
             entity_id_hex=entity_id_hex,
         )
 
+    def funder_is_unbound(self, address: bytes) -> bool:
+        """Return True if no AI entity is registered with this address as
+        its creator under ORACLE_CODE_HASH.
+
+        The two-key Type-10 model requires the funder address to be free
+        of any prior creator binding. check_ai_entity_sender at
+        crates/execution/src/lib.rs:9706-9708 looks up the sender in the
+        reverse index; a bound funder hits the default deny arm at
+        lib.rs:9741 and CreditAiEntity (Type-9) is rejected with
+        IssuerMissingCapability. A False return here means the bootstrap
+        must refuse to proceed and the operator must rotate the funder
+        address.
+        """
+        status = self.get_entity_status(self.entity_id_for(address))
+        return not status.exists
+
     def faucet(self, address: bytes):
         return self._client.faucet(address)
 
@@ -220,6 +252,38 @@ class Chain:
             amount=amount,
             fee=fee,
             nonce=nonce,
+        )
+
+    def register_oracle_with_key(
+        self,
+        funder_kp: Keypair,
+        entity_pubkey: bytes,
+        *,
+        fee: int = 5_000,
+        initial_balance: int = 0,
+    ) -> SubmissionResult:
+        """Submit a Type-10 RegisterAiEntityWithKey signed by the funder.
+
+        The funder ed25519 keypair pays the registration fee and seeds the
+        entity's economic_balance via payload.initial_balance. The
+        entity_pubkey is the separate signing key the entity itself will
+        use for signal commitments and memory CRUD; it is bound at
+        registration into the chain-side reverse index keyed on
+        derive_address_from_pubkey_bytes(entity_pubkey), NOT on the funder
+        address. See crates/execution/src/lib.rs:9386-9393 and the
+        diagnosis at docs/gate-oracle-funding-model-diagnosis.md.
+
+        The funder must not already be entity-bound; callers must call
+        funder_is_unbound first and refuse to proceed on False.
+        """
+        return self._client.register_entity_with_key(
+            keypair=funder_kp,
+            code_hash=ORACLE_CODE_HASH,
+            entity_pubkey=entity_pubkey,
+            capabilities=Capabilities.oracle(),
+            autonomy_mode=AutonomyMode.GATED,
+            initial_balance=initial_balance,
+            fee=fee,
         )
 
     def register_oracle(
