@@ -13,7 +13,7 @@ The entire codebase is clean-room: no code copied or adapted from Substrate, Ten
 The private testnet has been running since early 2026. Current state:
 
 - **BFT consensus** producing blocks continuously (16M+ blocks committed)
-- **10 transaction types** fully executing with deterministic state transitions
+- **11 transaction types** fully executing with deterministic state transitions
 - **AI entity registration** with on-chain identity, balance, and capabilities
 - **AI memory objects** (persistent on-chain storage for AI entities)
 - **AI signal commitments** (on-chain indexing of off-chain AI outputs)
@@ -71,7 +71,7 @@ What is **not** live: smart contracts, dynamic code execution, the NNPX privacy 
 | `crates/node` | Validator binary: consensus loop, RPC server, metrics, peer management |
 | `crates/consensus` | HotStuff BFT engine: proposal/vote/QC cycle, timeout view-change |
 | `crates/consensus_types` | Wire protocol: `SignedProposal`, `Vote`, `QC`, `Timeout`, canonical codecs |
-| `crates/execution` | Deterministic state transitions: all 10 tx types, fee schedule, SMT updates |
+| `crates/execution` | Deterministic state transitions: all 11 tx types, fee schedule, SMT updates |
 | `crates/smt` | 256-bit Sparse Merkle Tree with domain-separated hashing |
 | `crates/state` | Storage abstraction: `Kv`/`KvBatch` traits, RocksDB + in-memory backends |
 | `crates/mempool` | Transaction pool: signature verification, nonce ordering, size limits |
@@ -79,7 +79,7 @@ What is **not** live: smart contracts, dynamic code execution, the NNPX privacy 
 | `crates/codec` | Canonical binary encoding: versioned, golden-vector tested |
 | `crates/crypto` | Ed25519 signatures, Blake3 hashing, domain-separated address derivation |
 | `crates/types` | Protocol primitives: `TxV1`, `Block`, `Address`, constants |
-| `crates/ai_entities` | AI types: entities, signals (7 types), memory objects, approval gates |
+| `crates/ai_entities` | AI types: entities, signals (23 types), memory objects (16 types), approval gates |
 | `crates/governance` | Proposal lifecycle: 5 types, timelocks, AI autonomy upgrade gates |
 | `crates/genesis` | Deterministic genesis state generation |
 | `crates/copilot` | Validator advisory: statistics-based anomaly detection (non-binding) |
@@ -113,7 +113,7 @@ All protocol types use canonical binary encoding — one valid byte sequence per
 
 ## Transaction Types
 
-NOVAI has 10 native transaction types. Each is identified by the first byte of the transaction payload.
+NOVAI has 11 native transaction types. Each is identified by the first byte of the transaction payload.
 
 ### Wire Format
 
@@ -153,7 +153,7 @@ Size: 66 bytes
 Min fee: 1000
 ```
 
-Signal types (0-6): Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast.
+Signal types (0-22, 23 total): Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast, and 16 additional types covering reputation, marketplace, staking, composition, proof submission, subscriptions, payments, SLAs, channels, and oracle anchors. See `crates/ai_entities/src/signals.rs` for the canonical enum.
 
 ### Type 3: Create Memory Object
 
@@ -165,7 +165,7 @@ Size: 6+ bytes
 Min fee: 500
 ```
 
-Memory object types (0-4): ChainSummary, LabelIndex, EmbeddingCommitment, AnomalyLog, StatisticsSnapshot. Max 64 KB per object, max 100 objects per entity.
+Memory object types (0-15, 16 total): ChainSummary, LabelIndex, EmbeddingCommitment, AnomalyLog, StatisticsSnapshot, and 11 additional types covering reputation events, ratings, signal catalogs, composition graphs, verification records, delegation grants, subscriptions, service descriptors, VK registrations, SLA agreements, and payment channels. See `crates/ai_entities/src/memory.rs` for the canonical enum. Max 64 KB per object, max 100 objects per entity.
 
 ### Type 4: Update Memory Object
 
@@ -221,7 +221,7 @@ Min fee: 5000
 
 Autonomy modes: Advisory (0) — can only emit proposals; Gated (1) — proposals go through approval gates. The entity ID is deterministically derived: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator_address)`.
 
-Capabilities (bitfield): `read_public_chain` (bit 0), `read_memory_objects` (bit 1), `emit_proposals` (bit 2), `request_execution` (bit 3), `read_nnpx_derived` (bit 4).
+Capabilities (8-bit bitfield, bits 0-6 defined, bit 7 reserved): `read_public_chain` (bit 0), `read_memory_objects` (bit 1), `emit_proposals` (bit 2), `request_execution` (bit 3), `read_nnpx_derived` (bit 4), `submit_reputation_updates` (bit 5, oracle entities only), `post_oracle_anchors` (bit 6).
 
 ### Type 9: Credit AI Entity
 
@@ -242,6 +242,10 @@ Payload: [0x0A][code_hash:32][pubkey:32][autonomy_mode:1][capabilities:1][initia
 Size: 83 bytes
 Min fee: 5000
 ```
+
+### Type 11: Entity Upgrade
+
+In-place upgrade of an AI entity's code hash, capabilities, or autonomy mode. Payload version byte: `0x0B` (`ENTITY_UPGRADE_PAYLOAD_V1` in `crates/execution/src/lib.rs`). See source for the canonical encoding and fee.
 
 ## Getting Started (5 Minutes)
 
@@ -407,7 +411,7 @@ pkill -f 'novai-node run'
 
 ### RPC Endpoints
 
-All RPC calls use JSON-RPC 2.0 over HTTP POST.
+All RPC calls use JSON-RPC 2.0 over HTTP POST. The node exposes 29 methods; the 9 most common are listed below. The full reference (every method with request/response shapes) lives in `docs/RPC_REFERENCE.md`.
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
@@ -420,6 +424,8 @@ All RPC calls use JSON-RPC 2.0 over HTTP POST.
 | `novai_getSignalsByIssuer` | `{ "issuer": "<hex>", "start_height": <u64>, "end_height": <u64> }` | Query signals by issuer |
 | `novai_getSignalsByType` | `{ "signal_type": <u8>, "start_height": <u64>, "end_height": <u64> }` | Query signals by type |
 | `novai_faucet` | `{ "address": "<hex>" }` | Request testnet tokens (dev mode only) |
+<!-- TODO: enumerate remaining 20 methods (payments, services, VK, SLA, channels, oracle anchors, blocks, transactions, etc.). Canonical list in crates/node/src/rpc.rs. -->
+
 
 ## Becoming a Validator on the Public Testnet
 

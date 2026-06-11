@@ -304,7 +304,7 @@ Defined in `crates/execution/src/lib.rs`.
 
 Transfer payload format: `[version:1][to:32][amount_be:8]` = 41 bytes.
 
-Payload version byte routing (from execution dispatch):
+Payload version byte routing (from execution dispatch). NOVAI defines 11 transaction types; all are listed below.
 
 | Version Byte | Constant | Payload Type | Source |
 |-------------|----------|-------------|--------|
@@ -315,6 +315,10 @@ Payload version byte routing (from execution dispatch):
 | `5` | `DELETE_MEMORY_OBJECT_PAYLOAD_V1` | Delete Memory Object | `crates/execution/src/lib.rs:265` |
 | `6` | `SUBMIT_PROPOSAL_PAYLOAD_V1` | Submit Governance Proposal | `crates/execution/src/lib.rs:272` |
 | `7` | `EXECUTE_PROPOSAL_PAYLOAD_V1` | Execute Governance Proposal | `crates/execution/src/lib.rs:275` |
+| `8` | `REGISTER_AI_ENTITY_PAYLOAD_V1` | Register AI Entity | `crates/execution/src/lib.rs:5454` |
+| `9` | `CREDIT_AI_ENTITY_PAYLOAD_V1` | Credit AI Entity | `crates/execution/src/lib.rs:5457` |
+| `10` | `REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1` | Register AI Entity with Key | `crates/execution/src/lib.rs:5592` |
+| `11` | `ENTITY_UPGRADE_PAYLOAD_V1` | Entity Upgrade | `crates/execution/src/lib.rs:5702` |
 
 ---
 
@@ -338,6 +342,8 @@ Source: `crates/ai_entities/src/lib.rs:48,238-243`.
 
 ### Capability flags (`crates/ai_entities/src/lib.rs:114-148`)
 
+Seven bits are defined (bits 0 through 6); bit 7 is reserved.
+
 | Bit | Capability | Description |
 |-----|-----------|-------------|
 | 0 | `read_public_chain` | Read blocks, txs, accounts |
@@ -345,7 +351,9 @@ Source: `crates/ai_entities/src/lib.rs:48,238-243`.
 | 2 | `emit_proposals` | Emit proposal objects |
 | 3 | `request_execution` | Request Tier 1/2 action execution |
 | 4 | `read_nnpx_derived` | Read NNPX derived views |
-| 5-7 | `_reserved` | Reserved for future use |
+| 5 | `submit_reputation_updates` | Emit `ReputationUpdate` signals (oracle entities only) |
+| 6 | `post_oracle_anchors` | Emit `OracleAnchor` signals (oracle data anchoring) |
+| 7 | `_reserved` | Reserved for future use |
 
 ### Well-known identifiers (`crates/ai_entities/src/lib.rs:65-80`)
 
@@ -358,7 +366,9 @@ Source: `crates/ai_entities/src/lib.rs:48,238-243`.
 
 ## 13. AI Signal System
 
-### Signal types (`crates/ai_entities/src/signals.rs:13-21`)
+### Signal types (`crates/ai_entities/src/signals.rs`)
+
+NOVAI defines 23 signal types (discriminants `0` through `22`); all are listed below.
 
 | Type | Value |
 |------|-------|
@@ -369,6 +379,22 @@ Source: `crates/ai_entities/src/lib.rs:48,238-243`.
 | `AuditReport` | `4` |
 | `SpamRisk` | `5` |
 | `CongestionForecast` | `6` |
+| `ReputationUpdate` | `7` |
+| `SignalPurchase` | `8` |
+| `StakeDeposit` | `9` |
+| `StakeWithdraw` | `10` |
+| `StakeSlash` | `11` |
+| `CompositionCheck` | `12` |
+| `ProofSubmission` | `13` |
+| `SubscriptionCreate` | `14` |
+| `SubscriptionCancel` | `15` |
+| `PaymentRequest` | `16` |
+| `ServiceAttestation` | `17` |
+| `SlaAccept` | `18` |
+| `ChannelAccept` | `19` |
+| `ChannelClose` | `20` |
+| `ChannelFinalize` | `21` |
+| `OracleAnchor` | `22` |
 
 ### Signal commitment hash
 
@@ -434,7 +460,7 @@ Defined in `crates/ai_entities/src/memory.rs`.
 
 Object ID: `blake3("NOVAI_MEMORY_OBJECT_ID_V1" || ...)` (`crates/ai_entities/src/memory.rs:20`).
 
-Memory object types (`crates/ai_entities/src/memory.rs:45-57`):
+Memory object types (`crates/ai_entities/src/memory.rs`). NOVAI defines 16 memory object types (discriminants `0` through `15`); all are listed below.
 
 | Type | Value |
 |------|-------|
@@ -443,6 +469,17 @@ Memory object types (`crates/ai_entities/src/memory.rs:45-57`):
 | `EmbeddingCommitment` | `2` |
 | `AnomalyLog` | `3` |
 | `StatisticsSnapshot` | `4` |
+| `ReputationEvent` | `5` |
+| `Rating` | `6` |
+| `SignalCatalog` | `7` |
+| `CompositionGraph` | `8` |
+| `VerificationRecord` | `9` |
+| `DelegationGrant` | `10` |
+| `Subscription` | `11` |
+| `ServiceDescriptor` | `12` |
+| `VkRegistration` | `13` |
+| `SlaAgreement` | `14` |
+| `PaymentChannel` | `15` |
 
 ---
 

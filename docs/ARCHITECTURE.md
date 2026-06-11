@@ -87,13 +87,13 @@ The arrows show "Layer N may depend on Layer N−1 or below". Within a layer, cr
 
 **Purpose.** First-class on-chain types for AI entities, signals, memory objects, approval gates, action tiers, and NNPX privacy commitments. Pure type definitions plus the deterministic id derivations and capability bitfields.
 
-**Key items.** `AiEntity`, `AiEntityId`, `CodeHash`, `AutonomyMode` (Advisory / Gated / Autonomous-reserved), `Capabilities` (bitfield), `MemoryObject`, `MemoryObjectType` (9 variants: ChainSummary, LabelIndex, EmbeddingCommitment, AnomalyLog, StatisticsSnapshot, ReputationEvent, Rating, SignalCatalog, CompositionGraph), `AiSignalType` (13 variants: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast, ReputationUpdate, SignalPurchase, StakeDeposit, StakeWithdraw, StakeSlash, CompositionCheck), `SignalCommitment`, `SignalCatalogData`, `CompositionGraphData`, `ApprovalGate`, `GateType` (Multisig / Threshold / TimelockOnly), `DerivedView`. The `AiEntity::compute_id(code_hash, creator)` function is the canonical entity-id derivation: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator)`.
+**Key items.** `AiEntity`, `AiEntityId`, `CodeHash`, `AutonomyMode` (Advisory / Gated / Autonomous-reserved), `Capabilities` (bitfield), `MemoryObject`, `MemoryObjectType` (16 variants: ChainSummary, LabelIndex, EmbeddingCommitment, AnomalyLog, StatisticsSnapshot, ReputationEvent, Rating, SignalCatalog, CompositionGraph, VerificationRecord, DelegationGrant, Subscription, ServiceDescriptor, VkRegistration, SlaAgreement, PaymentChannel), `AiSignalType` (23 variants: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast, ReputationUpdate, SignalPurchase, StakeDeposit, StakeWithdraw, StakeSlash, CompositionCheck, ProofSubmission, SubscriptionCreate, SubscriptionCancel, PaymentRequest, ServiceAttestation, SlaAccept, ChannelAccept, ChannelClose, ChannelFinalize, OracleAnchor), `SignalCommitment`, `SignalCatalogData`, `CompositionGraphData`, `ApprovalGate`, `GateType` (Multisig / Threshold / TimelockOnly), `DerivedView`. The `AiEntity::compute_id(code_hash, creator)` function is the canonical entity-id derivation: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator)`.
 
 **Reputation fields on `AiEntity`.** `reputation_score: u16` (clamped to `[0, 100]`, defaults to `DEFAULT_REPUTATION_SCORE = 50` for new entities), `total_transactions: u32` (incremented only on `REP_EVENT_JOB_COMPLETED`), `reputation_events_count: u32` (incremented on every applied reputation event).
 
 **Stake fields on `AiEntity`.** `stake_balance: u128` (collateral the entity has staked, in the same unit as `economic_balance`; defaults to 0 for new entities), `stake_locked_until: u64` (block height under which `StakeWithdraw` is rejected; 0 means unlocked). The reputation and stake fields together form the canonical `AiEntity` V5 encoding (270 bytes). Older records (V1/V2/V3/V4) decode with the missing tail fields defaulted: V1/V2/V3 promote to reputation defaults, V1/V2/V3/V4 promote to `stake_balance = 0` and `stake_locked_until = 0`. Entities are rewritten in V5 on the next mutating transaction.
 
-**Capability bits** (`u8` bitfield, LSB→MSB): bit 0 `read_public_chain`, bit 1 `read_memory_objects`, bit 2 `emit_proposals`, bit 3 `request_execution`, bit 4 `read_nnpx_derived`, bit 5 `submit_reputation_updates` (oracle entities only), bits 6–7 reserved.
+**Capability bits** (`u8` bitfield, LSB→MSB): bit 0 `read_public_chain`, bit 1 `read_memory_objects`, bit 2 `emit_proposals`, bit 3 `request_execution`, bit 4 `read_nnpx_derived`, bit 5 `submit_reputation_updates` (oracle entities only), bit 6 `post_oracle_anchors` (issues `OracleAnchor` signals), bit 7 reserved.
 
 **Workspace deps.** `types`.
 
@@ -109,7 +109,7 @@ The `ReputationUpdate` signal payload extends the base 66-byte `SignalCommitment
 
 #### Signal marketplace
 
-The marketplace lets entities price the signals they emit and lets other entities pay for access. Like reputation, it does not introduce a new transaction type — it rides on `SignalCommitment` (tx type 2) with `signal_type == SignalPurchase` and stores per-seller pricing as a `MemoryObjectType::SignalCatalog` memory object. NOVAI stays at 10 transaction types.
+The marketplace lets entities price the signals they emit and lets other entities pay for access. Like reputation, it does not introduce a new transaction type — it rides on `SignalCommitment` (tx type 2) with `signal_type == SignalPurchase` and stores per-seller pricing as a `MemoryObjectType::SignalCatalog` memory object. NOVAI stays at 11 transaction types.
 
 **Catalog format.** A `SignalCatalogData` is a count-prefixed list of up to `MAX_CATALOG_OFFERINGS = 10` entries. Each `SignalCatalogEntry` is exactly 10 bytes: `signal_type:1 | price_per_signal_be:8 | is_active:1`. The full catalog is therefore at most 101 bytes, well under the 64 KB memory-object limit. The codec accepts duplicate `signal_type` entries; `find_offering` returns the first match. Sellers wanting a canonical view should ensure each `signal_type` appears at most once per catalog. When multiple `SignalCatalog` memory objects exist for the same seller, the apply path uses the lexicographically last `object_id` from the `ai/memory_by_type` index ("latest wins").
 
@@ -123,7 +123,7 @@ The marketplace lets entities price the signals they emit and lets other entitie
 
 #### Entity staking and bonding
 
-Staking lets an entity post collateral against its on-chain behavior. Staked funds are locked for a cooldown period and can be slashed by an oracle when bad behavior is detected. Higher stake means more skin in the game, which feeds into reputation- and marketplace-driven trust signals. Like reputation and the marketplace, staking adds no new transaction type — it rides on `SignalCommitment` (tx type 2) with three new `signal_type` values. NOVAI stays at 10 transaction types.
+Staking lets an entity post collateral against its on-chain behavior. Staked funds are locked for a cooldown period and can be slashed by an oracle when bad behavior is detected. Higher stake means more skin in the game, which feeds into reputation- and marketplace-driven trust signals. Like reputation and the marketplace, staking adds no new transaction type — it rides on `SignalCommitment` (tx type 2) with three new `signal_type` values. NOVAI stays at 11 transaction types.
 
 **State.** Staking fields live directly on `AiEntity` (V5 codec): `stake_balance: u128` and `stake_locked_until: u64`. A non-zero stake is just a u128 value with a u64 lock height; entities with zero stake operate normally and are not gated out of any other flow.
 
@@ -145,7 +145,7 @@ Staking lets an entity post collateral against its on-chain behavior. Staked fun
 
 #### Cross-entity composition protocol
 
-The composition protocol promotes ad-hoc, off-chain pipelines between AI entities into a first-class on-chain dependency graph. An entity declares which other entities it consumes signals from, and an oracle can attest that one of those dependencies has failed and auto-pause the consumer. Like reputation, marketplace, and staking, composition adds no new transaction type — graph publication uses the existing `CREATE_MEMORY_OBJECT` / `UPDATE_MEMORY_OBJECT` flows, and dependency-failure attestation rides on `SignalCommitment` (tx type 2) with a new `signal_type`. NOVAI stays at 10 transaction types.
+The composition protocol promotes ad-hoc, off-chain pipelines between AI entities into a first-class on-chain dependency graph. An entity declares which other entities it consumes signals from, and an oracle can attest that one of those dependencies has failed and auto-pause the consumer. Like reputation, marketplace, and staking, composition adds no new transaction type — graph publication uses the existing `CREATE_MEMORY_OBJECT` / `UPDATE_MEMORY_OBJECT` flows, and dependency-failure attestation rides on `SignalCommitment` (tx type 2) with a new `signal_type`. NOVAI stays at 11 transaction types.
 
 **Graph format.** A `CompositionGraphData` is a count-prefixed list of up to `MAX_COMPOSITION_DEPENDENCIES = 10` entries. Each `CompositionDependency` is exactly 44 bytes: `source_entity_id:32 | required_signal_type:1 | min_reputation_be:2 | min_stake_be:8 | is_required:1`. The full graph is therefore at most 441 bytes, well under the 64 KB memory-object limit. Unlike `SignalCatalogData`, the codec rejects duplicates: no two entries may share the same `(source_entity_id, required_signal_type)` pair, because the dependency index is what attestations key on and ambiguity at an index would be unresolvable. Self-dependencies (`source_entity_id == owner.id`) are rejected on both the create and update memory-object handlers — entities cannot list themselves as a source. When multiple `CompositionGraph` memory objects exist for the same owner, the apply path uses the lexicographically last `object_id` from the `ai/memory_by_type` index ("latest wins"), matching `SignalCatalog`. Entities are expected to maintain a single graph and revise it via `UPDATE_MEMORY_OBJECT`.
 
@@ -165,7 +165,7 @@ The composition protocol promotes ad-hoc, off-chain pipelines between AI entitie
 
 #### Capability delegation
 
-Capability delegation lets an AI entity grant a subset of its own capabilities to another entity for a bounded duration, without copying or transferring the underlying authority. A trading firm can register a master entity with full capabilities and high stake, then issue narrow grants to sub-entities that handle specific strategies; if a sub-entity misbehaves, the master deletes the single grant and the sub-entity instantly loses the delegated bit without disturbing the master. Delegation adds no new transaction type: grants are `MemoryObjectType::DelegationGrant` records owned by the delegator and created via `CREATE_MEMORY_OBJECT` (tx type 3). Revocation is `DELETE_MEMORY_OBJECT` (tx type 5). NOVAI stays at 10 transaction types.
+Capability delegation lets an AI entity grant a subset of its own capabilities to another entity for a bounded duration, without copying or transferring the underlying authority. A trading firm can register a master entity with full capabilities and high stake, then issue narrow grants to sub-entities that handle specific strategies; if a sub-entity misbehaves, the master deletes the single grant and the sub-entity instantly loses the delegated bit without disturbing the master. Delegation adds no new transaction type: grants are `MemoryObjectType::DelegationGrant` records owned by the delegator and created via `CREATE_MEMORY_OBJECT` (tx type 3). Revocation is `DELETE_MEMORY_OBJECT` (tx type 5). NOVAI stays at 11 transaction types.
 
 **Record format.** `DelegationGrantData` is a fixed 42-byte payload: `version:1 | delegate_entity_id:32 | granted_capabilities:1 | expires_at_be:8`. The owner of the surrounding memory object envelope is the delegator (Entity A); the embedded `delegate_entity_id` identifies the recipient (Entity B). `granted_capabilities` is the same 8-bit layout produced by `Capabilities::to_byte`. `expires_at == 0` is the explicit no-expiry sentinel; the grant remains active until the delegator deletes the memory object. `MemoryObjectType::DelegationGrant` is variant 10.
 
@@ -187,7 +187,7 @@ Capability delegation lets an AI entity grant a subset of its own capabilities t
 
 #### Recurring payment subscriptions
 
-The subscription protocol promotes ad-hoc, off-chain "I'll pay you per call" relationships between AI entities into a first-class on-chain agreement with locked funds and lazy settlement. A subscriber locks `rate_per_block * duration_blocks` of `economic_balance` upfront in exchange for receiving a producer's signals over a bounded window; the producer is paid lazily when the subscriber cancels (or when the window expires and the subscriber cancels). Subscriptions add no new transaction type: both create and cancel ride on `SignalCommitment` (tx type 2) with two new `signal_type` discriminants. The subscription record itself is a `MemoryObjectType::Subscription` memory object owned by the subscriber. NOVAI stays at 10 transaction types.
+The subscription protocol promotes ad-hoc, off-chain "I'll pay you per call" relationships between AI entities into a first-class on-chain agreement with locked funds and lazy settlement. A subscriber locks `rate_per_block * duration_blocks` of `economic_balance` upfront in exchange for receiving a producer's signals over a bounded window; the producer is paid lazily when the subscriber cancels (or when the window expires and the subscriber cancels). Subscriptions add no new transaction type: both create and cancel ride on `SignalCommitment` (tx type 2) with two new `signal_type` discriminants. The subscription record itself is a `MemoryObjectType::Subscription` memory object owned by the subscriber. NOVAI stays at 11 transaction types.
 
 **Record format.** `SubscriptionData` is a fixed 114-byte payload: `subscriber_entity_id:32 | producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 | start_height_be:8 | end_height_be:8 | last_settled_height_be:8 | total_locked_be:16 | is_active:1`. The owner of the surrounding memory object envelope is the subscriber; the embedded `producer_entity_id` identifies the counterparty. `total_locked` is captured at create time as `rate_per_block * duration_blocks` and never re-derived; settlement reads `last_settled_height` and the rate. `is_active` is `false` after cancellation or full expiry; cancelled records remain in state for audit until the subscriber explicitly issues `DELETE_MEMORY_OBJECT`. `MemoryObjectType::Subscription` is variant 11; variant 10 is reserved for the parallel Feature 8 `DelegationGrant`.
 
@@ -363,7 +363,7 @@ The subscription protocol promotes ad-hoc, off-chain "I'll pay you per call" rel
 
 **Workspace deps.** every other crate listed above.
 
-**Where to read.** `crates/node/src/main.rs` to see the boot sequence; `crates/node/src/consensus_node.rs` to see how `consensus`, `mempool`, and `execution` are stitched together; `crates/node/src/rpc.rs` for the 13 endpoints documented in [`docs/RPC_REFERENCE.md`](RPC_REFERENCE.md).
+**Where to read.** `crates/node/src/main.rs` to see the boot sequence; `crates/node/src/consensus_node.rs` to see how `consensus`, `mempool`, and `execution` are stitched together; `crates/node/src/rpc.rs` for the 29 endpoints documented in [`docs/RPC_REFERENCE.md`](RPC_REFERENCE.md).
 
 ---
 
@@ -527,8 +527,8 @@ These live outside `crates/` and are not part of the chain's deterministic surfa
 | `tools/novai-cli/` | The CLI — keygen, faucet, balance, transfer, register/credit AI entities, signal publish, memory CRUD, and queries. 17 commands. Detailed in [`docs/tutorials/FIRST_AI_ENTITY.md`](tutorials/FIRST_AI_ENTITY.md). |
 | `tools/genesis-generator/` | Builds a `genesis.json` file from a higher-level config (validator pubkeys, pre-funded accounts, AI entity manifests). |
 | `tools/tx-generator/` | Load-test driver that mints accounts and submits transfers in a loop. Used to tune mempool and consensus throughput. |
-| `sdk/novai-sdk/` | Rust SDK: `Client`, key helpers, all 10 tx builders. Async via tokio. Quick-start in [`examples/quick-start/`](../sdk/novai-sdk/examples/quick-start/). |
-| `sdk/novai-sdk-ts/` | TypeScript SDK: `NovaiClient`, key helpers, all 10 tx builders. Pure-JS deps (`tweetnacl` + `blake3`). Quick-start in [`examples/quick-start/`](../sdk/novai-sdk-ts/examples/quick-start/). |
+| `sdk/novai-sdk/` | Rust SDK: `Client`, key helpers, all 11 tx builders. Async via tokio. Quick-start in [`examples/quick-start/`](../sdk/novai-sdk/examples/quick-start/). |
+| `sdk/novai-sdk-ts/` | TypeScript SDK: `NovaiClient`, key helpers, all 11 tx builders. Pure-JS deps (`tweetnacl` + `blake3`). Quick-start in [`examples/quick-start/`](../sdk/novai-sdk-ts/examples/quick-start/). |
 
 ---
 

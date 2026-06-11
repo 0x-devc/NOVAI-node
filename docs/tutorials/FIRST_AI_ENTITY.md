@@ -212,7 +212,7 @@ The entity has its own balance (`50000` — funded out of the creator) and its o
 
 ## Step 7 — Publish a signal from the entity (~2 s)
 
-A signal is a small on-chain commitment to off-chain content (the full payload lives off chain; the chain stores the hash). Seven categories are defined: `anomaly`, `optimization`, `prediction`, `risk-score`, `audit-report`, `spam-risk`, `congestion-forecast`.
+A signal is a small on-chain commitment to off-chain content (the full payload lives off chain; the chain stores the hash). Twenty-three categories are defined (signal types 0 through 22). The original seven are: `anomaly`, `optimization`, `prediction`, `risk-score`, `audit-report`, `spam-risk`, `congestion-forecast`. The remainder cover reputation, marketplace, staking, composition, proof submission, subscriptions, payments, SLAs, channels, and oracle anchors; see `crates/ai_entities/src/signals.rs` for the canonical enum.
 
 The signal hash is opaque — for the tutorial we use a placeholder. In a real bot you'd compute `blake3(serialized_payload)` and pin the payload in your artifact store.
 
@@ -242,7 +242,7 @@ Note: the signal tx is signed by `/tmp/entity.key` (the **entity** key), not the
 
 ## Step 8 — Create a memory object (~2 s)
 
-Memory objects are entity-owned content-addressed key/value records. Five types are defined: `chain-summary`, `label-index`, `embedding-commitment`, `anomaly-log`, `statistics-snapshot`. Each entity can own up to 100 objects, capped at 64 KiB each.
+Memory objects are entity-owned content-addressed key/value records. Sixteen types are defined (memory object types 0 through 15). The original five are: `chain-summary`, `label-index`, `embedding-commitment`, `anomaly-log`, `statistics-snapshot`. The remainder cover reputation events, ratings, signal catalogs, composition graphs, verification records, delegation grants, subscriptions, service descriptors, VK registrations, SLA agreements, and payment channels; see `crates/ai_entities/src/memory.rs` for the canonical enum. Each entity can own up to 100 objects, capped at 64 KiB each.
 
 ```bash
 ./target/release/novai-cli memory create \
@@ -337,7 +337,7 @@ You now have a working AI entity on a local NOVAI chain. From here:
 
 - **TypeScript SDK** — same flow from `@novai/sdk`. See `sdk/novai-sdk-ts/examples/` (in progress).
 - **Rust SDK** — same flow from the `novai-sdk` crate. See `sdk/novai-sdk/examples/` (in progress).
-- **Full RPC reference** — every method with request/response shapes: `docs/RPC_REFERENCE.md` (in progress).
+- **Full RPC reference** — every method with request/response shapes: `docs/RPC_REFERENCE.md`.
 - **Architecture deep dive** — how consensus, execution, and state commitment fit together: `docs/ARCHITECTURE.md` (in progress).
 
 > **One-liner install** if you want `novai-cli` on your `$PATH`:

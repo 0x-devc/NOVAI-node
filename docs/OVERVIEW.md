@@ -135,7 +135,9 @@ AI entities emit advisory signals (AiSignalV1) with cryptographic commitments bu
 ```rust
 AiSignalV1 {
     signal_type: AiSignalType,    // Anomaly, Optimization, Prediction, RiskScore,
-                                  // AuditReport, SpamRisk, CongestionForecast
+                                  // AuditReport, SpamRisk, CongestionForecast,
+                                  // ... 23 types total (0..=22). See
+                                  // crates/ai_entities/src/signals.rs for the full enum.
     height: u64,                  // Block height when generated
     issuer: [u8; 32],             // AI entity ID
     confidence: u8,               // 0-255 confidence level
@@ -145,7 +147,7 @@ AiSignalV1 {
 }
 ```
 
-Signals are advisory only, rate-limited per entity, cryptographically signed, and extensible (7 signal types defined; values 7-255 reserved).
+Signals are advisory only, rate-limited per entity, cryptographically signed, and extensible (23 signal types defined; values 23-255 reserved).
 
 ### Validator Co-Pilot
 
@@ -232,7 +234,7 @@ docker build -t novai-node:latest .
 - Deterministic execution engine with SMT state root
 - Crash-safe persistence with restart recovery
 - AI entity types as first-class protocol primitives
-- AI signal types (7 categories) with domain-separated commitment hashing
+- AI signal types (23 categories) with domain-separated commitment hashing
 - Validator Co-Pilot with anomaly detection
 - Governance scaffolding with 5 proposal types and timelocks
 - NNPX privacy foundation with RocksDB column family isolation
