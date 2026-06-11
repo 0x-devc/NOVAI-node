@@ -15,7 +15,7 @@ from novai_sdk import (
 )
 
 import oracle as oracle_mod
-from lib.chain import EntityStatus, map_submit_error
+from lib.chain import EntityStatus, map_credit_error, map_submit_error
 from lib.coingecko import (
     NetworkError,
     ParseError,
@@ -63,6 +63,17 @@ class FakeChain:
         self.faucet_exc: Optional[BaseException] = None
         self.faucet_calls: list[bytes] = []
         self.get_balance_calls: int = 0
+        # v2: entity ledger + credit + nonce stubs.
+        self.entity_balance_value: int = 10_000_000
+        self.entity_balance_exc: Optional[BaseException] = None
+        self.entity_balance_calls: int = 0
+        self.account_nonce_value: int = 0
+        self.account_nonce_exc: Optional[BaseException] = None
+        self.account_nonce_calls: int = 0
+        self.mempool_nonce_value: int = 708
+        self.mempool_nonce_calls: int = 0
+        self.credit_exc: Optional[BaseException] = None
+        self.credit_calls: list[tuple[bytes, int, int]] = []
 
     def entity_id_for(self, address: bytes) -> bytes:
         return b"E" * 32
@@ -75,6 +86,39 @@ class FakeChain:
         if self.balance_exc is not None:
             raise self.balance_exc
         return self.balance_value
+
+    def get_entity_economic_balance(self, entity_id: bytes) -> int:
+        self.entity_balance_calls += 1
+        if self.entity_balance_exc is not None:
+            raise self.entity_balance_exc
+        return self.entity_balance_value
+
+    def get_account_nonce(self, address: bytes) -> int:
+        self.account_nonce_calls += 1
+        if self.account_nonce_exc is not None:
+            raise self.account_nonce_exc
+        return self.account_nonce_value
+
+    def get_nonce(self, address: bytes) -> int:
+        """Mempool-drift footgun. Production must NOT call this for any
+        account-signed tx. Present so the v2 nonce-source test can assert
+        the agent did not reach for it."""
+        self.mempool_nonce_calls += 1
+        return self.mempool_nonce_value
+
+    def credit_entity(
+        self,
+        kp: Keypair,
+        entity_id: bytes,
+        amount: int,
+        *,
+        nonce: int,
+        fee: int = 100,
+    ) -> _SubmissionResult:
+        self.credit_calls.append((entity_id, amount, nonce))
+        if self.credit_exc is not None:
+            raise self.credit_exc
+        return _SubmissionResult(txid="creditxid")
 
     def faucet(self, address: bytes) -> _FaucetResult:
         self.faucet_calls.append(address)
@@ -106,7 +150,10 @@ def _make_oracle(
     registry: MetricsRegistry | None = None,
     time_fn=lambda: 1_717_428_000,
     monotonic_fn=None,
-    min_balance: int = 60_000,
+    entity_min_balance: int = 5_000,
+    account_min_balance: int = 200_000,
+    credit_amount: int = 100_000,
+    credit_retry_after_secs: float = 300.0,
     faucet_retry_after_secs: float = 3600.0,
 ) -> oracle_mod.Oracle:
     cfg = oracle_mod.OracleConfig(
@@ -119,7 +166,10 @@ def _make_oracle(
         http_timeout_secs=5.0,
         data_tag="price/BTC-USD",
         log_level="INFO",
-        min_balance=min_balance,
+        entity_min_balance=entity_min_balance,
+        account_min_balance=account_min_balance,
+        credit_amount=credit_amount,
+        credit_retry_after_secs=credit_retry_after_secs,
         faucet_retry_after_secs=faucet_retry_after_secs,
     )
     kp = Keypair.generate()
@@ -270,25 +320,25 @@ def test_loop_records_loop_completed_timestamp_after_each_tick():
 
 def test_refaucet_triggers_when_balance_below_threshold():
     chain = FakeChain()
-    chain.balance_value = 100  # well below the 60_000 threshold
+    chain.balance_value = 100  # well below the 200_000 account threshold
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
     assert len(chain.faucet_calls) == 1
     text = reg.render()
     assert 'novai_oracle_faucet_attempts_total{result="success"} 1' in text
-    assert "novai_oracle_balance 100" in text
+    assert "novai_oracle_account_balance 100" in text
 
 
 def test_refaucet_skipped_when_balance_above_threshold():
     chain = FakeChain()
-    chain.balance_value = 1_000_000  # well above the 60_000 threshold
+    chain.balance_value = 1_000_000  # well above the 200_000 account threshold
     reg = build_oracle_registry(time.monotonic())
     o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
     o._tick()
     assert chain.faucet_calls == []
     text = reg.render()
-    assert "novai_oracle_balance 1000000" in text
+    assert "novai_oracle_account_balance 1000000" in text
 
 
 def test_cooldown_blocked_oracle_does_not_spin_faucet():
@@ -381,3 +431,125 @@ def test_get_balance_failure_skips_topup_but_does_not_block_submit():
     # Submit still ran (FakeChain.post_anchor has no post_exc).
     text = reg.render()
     assert "novai_oracle_submission_success_total 1" in text
+
+
+def test_v2_tier1_credits_when_entity_balance_below_threshold():
+    chain = FakeChain()
+    chain.entity_balance_value = 100  # well below default 5_000
+    chain.account_nonce_value = 1
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    assert len(chain.credit_calls) == 1
+    _entity_id, amount, nonce = chain.credit_calls[0]
+    assert amount == 100_000  # default credit_amount
+    assert nonce == 1
+    text = reg.render()
+    assert 'novai_oracle_credit_attempts_total{result="success"} 1' in text
+    assert "novai_oracle_entity_balance 100" in text
+
+
+def test_v2_tier1_uses_account_nonce_not_mempool_nonce():
+    chain = FakeChain()
+    chain.entity_balance_value = 0  # tier 1 fires
+    chain.account_nonce_value = 1  # on-chain account.nonce
+    chain.mempool_nonce_value = 708  # drifted mempool expected
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    assert len(chain.credit_calls) == 1
+    _entity_id, _amount, nonce = chain.credit_calls[0]
+    # The credit MUST use account.nonce (1), not the mempool's drifted value (708).
+    assert nonce == 1, f"expected account nonce 1, got {nonce}"
+    # And the agent must not have asked for the mempool nonce at all.
+    assert chain.mempool_nonce_calls == 0
+
+
+def test_v2_tier1_does_not_spin_on_repeated_failure():
+    chain = FakeChain()
+    chain.entity_balance_value = 0
+    chain.account_nonce_value = 1
+    chain.credit_exc = NovaiServerError(
+        -32000, "NonceMismatch { expected: 1, got: 708 }"
+    )
+    reg = build_oracle_registry(time.monotonic())
+    clock = _MonotonicClock(start=1000.0)
+    o = _make_oracle(
+        fetch_fn=_ok_fetch, chain=chain, registry=reg, monotonic_fn=clock
+    )
+    for _ in range(5):
+        o._tick()
+        clock.advance(60.0)
+    # Default credit_retry_after_secs is 300; after 5 ticks (240s simulated) backoff still holds.
+    assert len(chain.credit_calls) == 1
+    text = reg.render()
+    assert 'novai_oracle_credit_attempts_total{result="nonce_mismatch"} 1' in text
+
+
+def test_v2_tier1_skipped_when_entity_balance_healthy():
+    chain = FakeChain()
+    chain.entity_balance_value = 1_000_000  # well above default 5_000
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    assert chain.credit_calls == []
+    text = reg.render()
+    assert "novai_oracle_entity_balance 1000000" in text
+
+
+def test_v2_tier2_faucets_account_when_below_account_min_balance():
+    chain = FakeChain()
+    chain.balance_value = 100  # below default 200_000
+    chain.entity_balance_value = 1_000_000  # above 5_000, tier 1 skipped
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    assert len(chain.faucet_calls) == 1
+    text = reg.render()
+    assert 'novai_oracle_faucet_attempts_total{result="success"} 1' in text
+    assert "novai_oracle_account_balance 100" in text
+
+
+def test_v2_tier2_does_not_spin():
+    chain = FakeChain()
+    chain.balance_value = 0
+    chain.entity_balance_value = 1_000_000  # tier 1 skipped
+    chain.faucet_exc = RateLimitedError(-32000, "Faucet rate limit")
+    reg = build_oracle_registry(time.monotonic())
+    clock = _MonotonicClock(start=1000.0)
+    o = _make_oracle(
+        fetch_fn=_ok_fetch, chain=chain, registry=reg, monotonic_fn=clock
+    )
+    for _ in range(60):
+        o._tick()
+        clock.advance(60.0)
+    # 3600s default backoff; 60 ticks * 60s = 3540s, still in window.
+    assert len(chain.faucet_calls) == 1
+
+
+def test_v2_submit_runs_after_both_tiers_fail():
+    chain = FakeChain()
+    chain.entity_balance_value = 0  # tier 1 fires
+    chain.account_nonce_value = 1
+    chain.credit_exc = NovaiServerError(-32000, "NonceMismatch")
+    chain.balance_value = 0  # tier 2 fires
+    chain.faucet_exc = RateLimitedError(-32000, "Faucet rate limit")
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    # Both tiers attempted.
+    assert len(chain.credit_calls) == 1
+    assert len(chain.faucet_calls) == 1
+    # And _submit still ran (no post_exc, so it succeeds).
+    assert len(chain.posts) == 1
+    text = reg.render()
+    assert "novai_oracle_submission_success_total 1" in text
+
+
+def test_v2_map_credit_error_maps_nonce_mismatch_and_insufficient_funds():
+    nm = NovaiServerError(-32000, "NonceMismatch { expected: 1, got: 708 }")
+    insuff = NovaiServerError(
+        -32000, "InsufficientFunds { balance: 0, needed: 100100 }"
+    )
+    assert map_credit_error(nm) == "nonce_mismatch"
+    assert map_credit_error(insuff) == "insufficient_funds"

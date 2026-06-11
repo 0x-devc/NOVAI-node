@@ -208,12 +208,31 @@ def build_oracle_registry(start_time_monotonic: float) -> MetricsRegistry:
             "rpc_unreachable",
         ),
     )
+    reg.declare_counter(
+        "novai_oracle_credit_attempts_total",
+        "Number of CreditAiEntity attempts made from the runtime loop, by outcome.",
+        label_name="result",
+        label_values=(
+            "success",
+            "nonce_mismatch",
+            "insufficient_funds",
+            "rpc_error",
+            "rpc_unreachable",
+            "error",
+        ),
+    )
     reg.declare_gauge(
         "novai_oracle_last_price_usd", "Most recent observed BTC/USD price."
     )
     reg.declare_gauge(
-        "novai_oracle_balance",
-        "Last observed economic_balance for the oracle entity (units).",
+        "novai_oracle_entity_balance",
+        "Last observed entity.economic_balance for the oracle entity (units). "
+        "This is the ledger debited by signal-commitment fees.",
+    )
+    reg.declare_gauge(
+        "novai_oracle_account_balance",
+        "Last observed account.balance for the oracle's address (units). "
+        "This is the ledger debited by CreditAiEntity and credited by the faucet.",
     )
     reg.declare_gauge(
         "novai_oracle_last_submission_height",

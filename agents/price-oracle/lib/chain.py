@@ -103,6 +103,30 @@ def map_faucet_error(exc: BaseException) -> str:
     return "rpc_unreachable"
 
 
+def map_credit_error(exc: BaseException) -> str:
+    """Map a CreditAiEntity submission exception to a Prometheus reason label.
+
+    The handler at crates/execution/src/lib.rs:9206 can reject with:
+    - NonceMismatch (account-signed exact-equality check at :9226)
+    - InsufficientFunds (sender account does not cover amount + fee)
+    The mempool can also reject at admission with NonceTooLow when the
+    mempool-cache expected_nonce(addr) has drifted ahead of the on-chain
+    account.nonce; see docs/gate-oracle-balance-diagnosis-v2.md for the
+    asymmetry between account-signed (equality) and entity-signed (range)
+    nonce checks.
+    """
+    if isinstance(exc, NonceTooLowError):
+        return "nonce_mismatch"
+    if isinstance(exc, NovaiRpcError):
+        msg = exc.message or ""
+        if "NonceMismatch" in msg:
+            return "nonce_mismatch"
+        if "InsufficientFunds" in msg:
+            return "insufficient_funds"
+        return "rpc_error"
+    return "rpc_unreachable"
+
+
 @dataclass(frozen=True)
 class EntityStatus:
     exists: bool
@@ -129,6 +153,32 @@ class Chain:
         result = self._client.get_balance(address)
         return int(result.balance)
 
+    def get_account_nonce(self, address: bytes) -> int:
+        """Return the on-chain account.nonce via novai_getBalance.
+
+        This is the correct nonce source for account-signed txs (Transfer,
+        RegisterEntity, CreditAiEntity, RegisterEntityWithKey, EntityUpgrade),
+        whose handlers do an exact-equality nonce check at the chain layer.
+        Callers must NOT use novai_getNonce here, because that RPC returns
+        the mempool's expected_nonce, which advances on every committed tx
+        (success or fail) and drifts away from account.nonce when entity-
+        signed txs are interleaved. See docs/gate-oracle-balance-diagnosis-v2.md.
+        """
+        result = self._client.get_balance(address)
+        return int(result.nonce)
+
+    def get_entity_economic_balance(self, entity_id: bytes) -> int:
+        """Return entity.economic_balance via novai_getAiEntity.
+
+        This is the ledger debited by signal-commitment fees at
+        crates/execution/src/lib.rs:7319/7327. It is distinct from the
+        account ledger that novai_getBalance reads.
+        """
+        info = self._client.get_ai_entity(entity_id)
+        if info is None:
+            raise ValueError(f"entity not registered: {entity_id.hex()}")
+        return int(info.economic_balance)
+
     def get_entity_status(self, entity_id: bytes) -> EntityStatus:
         info = self._client.get_ai_entity(entity_id)
         entity_id_hex = entity_id.hex()
@@ -145,6 +195,32 @@ class Chain:
 
     def faucet(self, address: bytes):
         return self._client.faucet(address)
+
+    def credit_entity(
+        self,
+        kp: Keypair,
+        entity_id: bytes,
+        amount: int,
+        *,
+        nonce: int,
+        fee: int = 100,
+    ) -> SubmissionResult:
+        """Submit a CreditAiEntity (tx type 9) from the kp's account to entity.
+
+        The nonce is REQUIRED (no default) because the SDK's default nonce
+        path calls novai_getNonce, which returns the mempool's expected
+        value. For account-signed txs the chain checks exact equality
+        against account.nonce; the mempool value will silently be wrong
+        once the address has any committed entity-signed txs. Callers must
+        pass the value from get_account_nonce(address).
+        """
+        return self._client.credit_entity(
+            keypair=kp,
+            entity_id=entity_id,
+            amount=amount,
+            fee=fee,
+            nonce=nonce,
+        )
 
     def register_oracle(
         self, kp: Keypair, *, fee: int = 5_000, initial_balance: int = 0

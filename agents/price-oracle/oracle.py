@@ -38,7 +38,7 @@ from typing import Any, Callable
 
 from novai_sdk import Keypair
 
-from lib.chain import Chain, map_faucet_error, map_submit_error
+from lib.chain import Chain, map_credit_error, map_faucet_error, map_submit_error
 from lib.coingecko import (
     BackoffState,
     CoinGeckoError,
@@ -67,7 +67,11 @@ DEFAULTS = {
     "PRICE_ORACLE_HTTP_TIMEOUT_SECS": "10",
     "PRICE_ORACLE_DATA_TAG": DATA_TAG,
     "PRICE_ORACLE_LOG_LEVEL": "INFO",
-    "PRICE_ORACLE_MIN_BALANCE": "60000",
+    "PRICE_ORACLE_ENTITY_MIN_BALANCE": "5000",
+    "PRICE_ORACLE_ACCOUNT_MIN_BALANCE": "200000",
+    "PRICE_ORACLE_MIN_BALANCE": "200000",  # legacy alias of PRICE_ORACLE_ACCOUNT_MIN_BALANCE
+    "PRICE_ORACLE_CREDIT_AMOUNT": "100000",
+    "PRICE_ORACLE_CREDIT_RETRY_AFTER_SECS": "300",
     "PRICE_ORACLE_FAUCET_RETRY_AFTER_SECS": "3600",
 }
 
@@ -83,7 +87,10 @@ class OracleConfig:
     http_timeout_secs: float
     data_tag: str
     log_level: str
-    min_balance: int = 60_000
+    entity_min_balance: int = 5_000
+    account_min_balance: int = 200_000
+    credit_amount: int = 100_000
+    credit_retry_after_secs: float = 300.0
     faucet_retry_after_secs: float = 3600.0
 
     @classmethod
@@ -92,6 +99,21 @@ class OracleConfig:
 
         def get(key: str) -> str:
             return env.get(key, DEFAULTS[key])
+
+        # Backward-compat alias: prefer PRICE_ORACLE_ACCOUNT_MIN_BALANCE (v2),
+        # fall back to the v1 name PRICE_ORACLE_MIN_BALANCE with a one-line
+        # deprecation warning so existing systemd env files keep working.
+        if "PRICE_ORACLE_ACCOUNT_MIN_BALANCE" in env:
+            account_min_balance = _env_int("PRICE_ORACLE_ACCOUNT_MIN_BALANCE", env)
+        elif "PRICE_ORACLE_MIN_BALANCE" in env:
+            account_min_balance = _env_int("PRICE_ORACLE_MIN_BALANCE", env)
+            LOG.warning(
+                "config event=deprecated_alias key=PRICE_ORACLE_MIN_BALANCE "
+                "use=PRICE_ORACLE_ACCOUNT_MIN_BALANCE value=%d",
+                account_min_balance,
+            )
+        else:
+            account_min_balance = int(DEFAULTS["PRICE_ORACLE_ACCOUNT_MIN_BALANCE"])
 
         return cls(
             endpoint=get("PRICE_ORACLE_RPC_ENDPOINT"),
@@ -103,7 +125,12 @@ class OracleConfig:
             http_timeout_secs=_env_float("PRICE_ORACLE_HTTP_TIMEOUT_SECS", env),
             data_tag=get("PRICE_ORACLE_DATA_TAG"),
             log_level=get("PRICE_ORACLE_LOG_LEVEL"),
-            min_balance=_env_int("PRICE_ORACLE_MIN_BALANCE", env),
+            entity_min_balance=_env_int("PRICE_ORACLE_ENTITY_MIN_BALANCE", env),
+            account_min_balance=account_min_balance,
+            credit_amount=_env_int("PRICE_ORACLE_CREDIT_AMOUNT", env),
+            credit_retry_after_secs=_env_float(
+                "PRICE_ORACLE_CREDIT_RETRY_AFTER_SECS", env
+            ),
             faucet_retry_after_secs=_env_float(
                 "PRICE_ORACLE_FAUCET_RETRY_AFTER_SECS", env
             ),
@@ -166,6 +193,7 @@ class Oracle:
         self.monotonic_fn = monotonic_fn
         self.backoff = BackoffState()
         self._stopping = False
+        self._next_credit_attempt_at: float | None = None
         self._next_faucet_attempt_at: float | None = None
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
@@ -218,24 +246,134 @@ class Oracle:
         self._submit(obs)
 
     def _maybe_top_up(self) -> None:
-        """Best-effort balance check + re-faucet.
+        """Two-tier best-effort balance management.
+
+        Tier 1 (_maybe_credit_entity) reads entity.economic_balance and
+        submits a CreditAiEntity tx from the account when the entity is
+        low. Tier 2 (_maybe_faucet_account) reads account.balance and
+        calls novai_faucet when the account is low. Both tiers are
+        best-effort and never raise. _submit runs after both regardless.
+        See docs/gate-oracle-balance-diagnosis-v2.md for why the two
+        ledgers are separate and why this order matters.
+        """
+        self._maybe_credit_entity()
+        self._maybe_faucet_account()
+
+    def _maybe_credit_entity(self) -> None:
+        """Tier 1: read entity.economic_balance and CreditAiEntity if low.
+
+        Never raises. Never calls sys.exit. Every credit-attempt exit
+        path (success, nonce mismatch, insufficient funds, RPC error,
+        nonce-read failure) stamps self._next_credit_attempt_at to
+        monotonic_now + cfg.credit_retry_after_secs so a stuck oracle
+        cannot spin the credit RPC.
+
+        Critical nonce-source detail: account.nonce comes from
+        novai_getBalance (chain.get_account_nonce), NOT from
+        novai_getNonce (mempool's expected_nonce). The chain's
+        apply_credit_ai_entity_tx at crates/execution/src/lib.rs:9226
+        uses exact equality against the on-chain account.nonce. The
+        mempool cache advances on every committed tx (success or fail)
+        per crates/node/src/main.rs:183-201, so its expected_nonce
+        drifts away from account.nonce whenever entity-signed signals
+        are interleaved (the oracle's case).
+        """
+        try:
+            entity_balance = self.chain.get_entity_economic_balance(self.entity_id)
+        except Exception as exc:  # noqa: BLE001 best-effort
+            LOG.warning("entity_balance_read event=failed error=%s", exc)
+            return
+
+        self.registry.set_gauge("novai_oracle_entity_balance", float(entity_balance))
+
+        if entity_balance >= self.cfg.entity_min_balance:
+            return
+
+        now_mono = self.monotonic_fn()
+        if (
+            self._next_credit_attempt_at is not None
+            and now_mono < self._next_credit_attempt_at
+        ):
+            retry_in = self._next_credit_attempt_at - now_mono
+            LOG.info(
+                "credit event=skipped reason=backoff retry_in_secs=%.0f "
+                "entity_balance=%d threshold=%d",
+                retry_in,
+                entity_balance,
+                self.cfg.entity_min_balance,
+            )
+            return
+
+        try:
+            account_nonce = self.chain.get_account_nonce(self.kp.address)
+        except Exception as exc:  # noqa: BLE001 mapped by map_credit_error
+            reason = map_credit_error(exc)
+            self._next_credit_attempt_at = (
+                now_mono + self.cfg.credit_retry_after_secs
+            )
+            self.registry.inc_counter("novai_oracle_credit_attempts_total", reason)
+            LOG.warning(
+                "credit event=failed phase=nonce_read reason=%s exc=%s error=%s",
+                reason,
+                type(exc).__name__,
+                exc,
+            )
+            return
+
+        try:
+            result = self.chain.credit_entity(
+                self.kp,
+                self.entity_id,
+                self.cfg.credit_amount,
+                nonce=account_nonce,
+            )
+        except Exception as exc:  # noqa: BLE001 mapped by map_credit_error
+            reason = map_credit_error(exc)
+            self._next_credit_attempt_at = (
+                now_mono + self.cfg.credit_retry_after_secs
+            )
+            self.registry.inc_counter("novai_oracle_credit_attempts_total", reason)
+            LOG.warning(
+                "credit event=failed phase=submit reason=%s exc=%s error=%s "
+                "entity_balance=%d account_nonce=%d",
+                reason,
+                type(exc).__name__,
+                exc,
+                entity_balance,
+                account_nonce,
+            )
+            return
+
+        self._next_credit_attempt_at = now_mono + self.cfg.credit_retry_after_secs
+        self.registry.inc_counter("novai_oracle_credit_attempts_total", "success")
+        LOG.info(
+            "credit event=requested txid=%s amount=%d entity_balance_before=%d "
+            "account_nonce=%d threshold=%d",
+            result.txid,
+            self.cfg.credit_amount,
+            entity_balance,
+            account_nonce,
+            self.cfg.entity_min_balance,
+        )
+
+    def _maybe_faucet_account(self) -> None:
+        """Tier 2: read account.balance and faucet when low.
 
         Never raises. Never calls sys.exit. Every faucet-attempt exit
-        path (success, rate-limited, disabled, RPC error) stamps
-        self._next_faucet_attempt_at to monotonic_now +
-        cfg.faucet_retry_after_secs so a drained-and-cooldown-blocked
-        oracle cannot spin the RPC. The 3600s default matches
-        FAUCET_PER_ADDRESS_COOLDOWN_SECS at crates/node/src/rpc.rs:3125.
+        path stamps self._next_faucet_attempt_at to
+        monotonic_now + cfg.faucet_retry_after_secs. The 3600s default
+        matches FAUCET_PER_ADDRESS_COOLDOWN_SECS at
+        crates/node/src/rpc.rs:3125.
         """
         try:
             balance = self.chain.get_balance(self.kp.address)
         except Exception as exc:  # noqa: BLE001 best-effort
-            LOG.warning("balance_read event=failed error=%s", exc)
+            LOG.warning("account_balance_read event=failed error=%s", exc)
             return
 
-        self.registry.set_gauge("novai_oracle_balance", float(balance))
+        self.registry.set_gauge("novai_oracle_account_balance", float(balance))
 
-        if balance >= self.cfg.min_balance:
+        if balance >= self.cfg.account_min_balance:
             return
 
         now_mono = self.monotonic_fn()
@@ -249,7 +387,7 @@ class Oracle:
                 "balance=%d threshold=%d",
                 retry_in,
                 balance,
-                self.cfg.min_balance,
+                self.cfg.account_min_balance,
             )
             return
 
@@ -277,7 +415,7 @@ class Oracle:
             result.txid,
             result.amount,
             balance,
-            self.cfg.min_balance,
+            self.cfg.account_min_balance,
         )
 
     def _fetch_price(self) -> PriceObservation | None:
