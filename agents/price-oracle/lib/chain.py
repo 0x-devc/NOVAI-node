@@ -55,11 +55,50 @@ _SUBMIT_ERROR_MAP: tuple[tuple[type[BaseException], str], ...] = (
 
 
 def map_submit_error(exc: BaseException) -> str:
-    """Map an SDK exception to a Prometheus reason label."""
+    """Map an SDK exception to a Prometheus reason label.
+
+    The "insufficient_funds" branch fires when the chain returns an
+    InsufficientFunds execution rejection via the submit RPC. Today the
+    fee/balance check at crates/execution/src/lib.rs:7319 runs in
+    on_commit (post-consensus) so the submitter does not see it; the
+    mapping is in place so that any future mempool-admission balance
+    check, or a tx-receipt poll, surfaces drain honestly in the
+    novai_oracle_submission_failure_total{reason="insufficient_funds"}
+    counter instead of the rpc_unreachable catch-all.
+    """
     for exc_type, reason in _SUBMIT_ERROR_MAP:
         if isinstance(exc, exc_type):
             return reason
     if isinstance(exc, NovaiRpcError):
+        if "InsufficientFunds" in (exc.message or ""):
+            return "insufficient_funds"
+        return "rpc_error"
+    return "rpc_unreachable"
+
+
+def map_faucet_error(exc: BaseException) -> str:
+    """Map a faucet-call exception to a Prometheus reason label.
+
+    The dev-faucet RPC at crates/node/src/rpc.rs:3129 raises:
+    - RateLimitedError: per-address cooldown still active (the SDK
+      promotes -32000 with "rate" in the message to this class).
+    - ServerError -32000 with "Faucet disabled" message: the node was
+      not started with --dev-keys or --faucet-key.
+    - ServerError -32000 with "global cooldown": the 10s global window
+      is still active.
+    - MempoolFullError: dispense tx could not enter the mempool.
+    - NovaiError or transport error: RPC unreachable.
+    """
+    if isinstance(exc, RateLimitedError):
+        return "rate_limited"
+    if isinstance(exc, MempoolFullError):
+        return "mempool_full"
+    if isinstance(exc, NovaiRpcError):
+        msg = (exc.message or "").lower()
+        if "faucet disabled" in msg:
+            return "disabled"
+        if "global cooldown" in msg:
+            return "rate_limited"
         return "rpc_error"
     return "rpc_unreachable"
 
@@ -127,7 +166,7 @@ class Chain:
         external_timestamp: int,
         data_tag: str,
         *,
-        fee: int = 20_000,
+        fee: int = 1_000,
     ) -> SubmissionResult:
         return self._client.post_oracle_anchor(
             keypair=kp,

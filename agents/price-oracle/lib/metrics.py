@@ -192,10 +192,28 @@ def build_oracle_registry(start_time_monotonic: float) -> MetricsRegistry:
             "validation_failed",
             "entity_not_registered",
             "encoding_error",
+            "insufficient_funds",
+        ),
+    )
+    reg.declare_counter(
+        "novai_oracle_faucet_attempts_total",
+        "Number of re-faucet attempts made from the runtime loop, by outcome.",
+        label_name="result",
+        label_values=(
+            "success",
+            "rate_limited",
+            "disabled",
+            "mempool_full",
+            "rpc_error",
+            "rpc_unreachable",
         ),
     )
     reg.declare_gauge(
         "novai_oracle_last_price_usd", "Most recent observed BTC/USD price."
+    )
+    reg.declare_gauge(
+        "novai_oracle_balance",
+        "Last observed economic_balance for the oracle entity (units).",
     )
     reg.declare_gauge(
         "novai_oracle_last_submission_height",

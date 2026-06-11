@@ -6,10 +6,16 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from novai_sdk import FeeTooLowError, Keypair, NonceTooLowError
+from novai_sdk import (
+    FeeTooLowError,
+    Keypair,
+    NonceTooLowError,
+    RateLimitedError,
+    ServerError as NovaiServerError,
+)
 
 import oracle as oracle_mod
-from lib.chain import EntityStatus
+from lib.chain import EntityStatus, map_submit_error
 from lib.coingecko import (
     NetworkError,
     ParseError,
@@ -27,18 +33,54 @@ class _SubmissionResult:
     entity_id: Optional[str] = None
 
 
+@dataclass
+class _FaucetResult:
+    txid: str = "deadbeef"
+    amount: str = "10000000"
+
+
+class _MonotonicClock:
+    """Injectable monotonic time source for backoff tests."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, secs: float) -> None:
+        self.t += secs
+
+
 class FakeChain:
     def __init__(self) -> None:
         self.posts: list[tuple[bytes, bytes, int, str]] = []
         self.post_exc: Optional[BaseException] = None
         self.height_value: Optional[int] = 12_345
         self.endpoint = "http://fake"
+        self.balance_value: int = 10_000_000
+        self.balance_exc: Optional[BaseException] = None
+        self.faucet_exc: Optional[BaseException] = None
+        self.faucet_calls: list[bytes] = []
+        self.get_balance_calls: int = 0
 
     def entity_id_for(self, address: bytes) -> bytes:
         return b"E" * 32
 
     def get_entity_status(self, entity_id: bytes) -> EntityStatus:
         return EntityStatus(True, True, 0x47, entity_id, entity_id.hex())
+
+    def get_balance(self, address: bytes) -> int:
+        self.get_balance_calls += 1
+        if self.balance_exc is not None:
+            raise self.balance_exc
+        return self.balance_value
+
+    def faucet(self, address: bytes) -> _FaucetResult:
+        self.faucet_calls.append(address)
+        if self.faucet_exc is not None:
+            raise self.faucet_exc
+        return _FaucetResult()
 
     def post_anchor(
         self,
@@ -63,6 +105,9 @@ def _make_oracle(
     chain: FakeChain | None = None,
     registry: MetricsRegistry | None = None,
     time_fn=lambda: 1_717_428_000,
+    monotonic_fn=None,
+    min_balance: int = 60_000,
+    faucet_retry_after_secs: float = 3600.0,
 ) -> oracle_mod.Oracle:
     cfg = oracle_mod.OracleConfig(
         endpoint="http://fake",
@@ -74,10 +119,13 @@ def _make_oracle(
         http_timeout_secs=5.0,
         data_tag="price/BTC-USD",
         log_level="INFO",
+        min_balance=min_balance,
+        faucet_retry_after_secs=faucet_retry_after_secs,
     )
     kp = Keypair.generate()
     ch = chain if chain is not None else FakeChain()
     reg = registry if registry is not None else build_oracle_registry(time.monotonic())
+    mono = monotonic_fn if monotonic_fn is not None else (lambda: 0.0)
     return oracle_mod.Oracle(
         cfg=cfg,
         chain=ch,
@@ -87,6 +135,7 @@ def _make_oracle(
         fetch_fn=fetch_fn,
         sleep_fn=lambda _s: None,
         time_fn=time_fn,
+        monotonic_fn=mono,
     )
 
 
@@ -217,3 +266,118 @@ def test_loop_records_loop_completed_timestamp_after_each_tick():
     o.registry.set_gauge("novai_oracle_last_loop_completed_timestamp", 1_717_428_000)
     text = reg.render()
     assert "novai_oracle_last_loop_completed_timestamp 1717428000" in text
+
+
+def test_refaucet_triggers_when_balance_below_threshold():
+    chain = FakeChain()
+    chain.balance_value = 100  # well below the 60_000 threshold
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    assert len(chain.faucet_calls) == 1
+    text = reg.render()
+    assert 'novai_oracle_faucet_attempts_total{result="success"} 1' in text
+    assert "novai_oracle_balance 100" in text
+
+
+def test_refaucet_skipped_when_balance_above_threshold():
+    chain = FakeChain()
+    chain.balance_value = 1_000_000  # well above the 60_000 threshold
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    assert chain.faucet_calls == []
+    text = reg.render()
+    assert "novai_oracle_balance 1000000" in text
+
+
+def test_cooldown_blocked_oracle_does_not_spin_faucet():
+    chain = FakeChain()
+    chain.balance_value = 0
+    chain.faucet_exc = RateLimitedError(
+        -32000, "Faucet rate limit: try again in 3600 seconds"
+    )
+    reg = build_oracle_registry(time.monotonic())
+    clock = _MonotonicClock(start=1000.0)
+    o = _make_oracle(
+        fetch_fn=_ok_fetch, chain=chain, registry=reg, monotonic_fn=clock
+    )
+    for _ in range(60):
+        o._tick()
+        clock.advance(60.0)
+    # Across 60 ticks the oracle made exactly one faucet RPC call.
+    assert len(chain.faucet_calls) == 1
+    text = reg.render()
+    assert 'novai_oracle_faucet_attempts_total{result="rate_limited"} 1' in text
+
+
+def test_cooldown_boundary_allows_one_more_faucet_attempt():
+    chain = FakeChain()
+    chain.balance_value = 0
+    chain.faucet_exc = RateLimitedError(-32000, "Faucet rate limit")
+    reg = build_oracle_registry(time.monotonic())
+    clock = _MonotonicClock(start=1000.0)
+    o = _make_oracle(
+        fetch_fn=_ok_fetch, chain=chain, registry=reg, monotonic_fn=clock
+    )
+    o._tick()
+    assert len(chain.faucet_calls) == 1
+    # Advance past the 3600s backoff window.
+    clock.advance(3601.0)
+    o._tick()
+    assert len(chain.faucet_calls) == 2
+
+
+def test_faucet_disabled_does_not_sys_exit_and_sets_backoff():
+    chain = FakeChain()
+    chain.balance_value = 0
+    chain.faucet_exc = NovaiServerError(
+        -32000, "Faucet disabled. Use --faucet-key <path> or --dev-keys to enable."
+    )
+    reg = build_oracle_registry(time.monotonic())
+    clock = _MonotonicClock(start=1000.0)
+    o = _make_oracle(
+        fetch_fn=_ok_fetch, chain=chain, registry=reg, monotonic_fn=clock
+    )
+    o._tick()  # must not raise SystemExit
+    assert len(chain.faucet_calls) == 1
+    text = reg.render()
+    assert 'novai_oracle_faucet_attempts_total{result="disabled"} 1' in text
+    # Backoff was stamped: a second tick at the same monotonic time skips the faucet.
+    o._tick()
+    assert len(chain.faucet_calls) == 1
+
+
+def test_submit_still_runs_when_below_threshold_and_cooldown_blocked():
+    chain = FakeChain()
+    chain.balance_value = 0
+    chain.faucet_exc = RateLimitedError(-32000, "Faucet rate limit")
+    chain.post_exc = NovaiServerError(
+        -32000, "InsufficientFunds { balance: 0, needed: 1000 }"
+    )
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    text = reg.render()
+    assert (
+        'novai_oracle_submission_failure_total{reason="insufficient_funds"} 1' in text
+    )
+    assert len(chain.faucet_calls) == 1
+
+
+def test_map_submit_error_maps_insufficient_funds():
+    exc = NovaiServerError(-32000, "InsufficientFunds { balance: 0, needed: 1000 }")
+    assert map_submit_error(exc) == "insufficient_funds"
+
+
+def test_get_balance_failure_skips_topup_but_does_not_block_submit():
+    chain = FakeChain()
+    chain.balance_exc = OSError("network down")
+    reg = build_oracle_registry(time.monotonic())
+    o = _make_oracle(fetch_fn=_ok_fetch, chain=chain, registry=reg)
+    o._tick()
+    # No faucet call because the balance read failed first.
+    assert chain.faucet_calls == []
+    # Submit still ran (FakeChain.post_anchor has no post_exc).
+    text = reg.render()
+    assert "novai_oracle_submission_success_total 1" in text

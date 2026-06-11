@@ -38,7 +38,7 @@ from typing import Any, Callable
 
 from novai_sdk import Keypair
 
-from lib.chain import Chain, map_submit_error
+from lib.chain import Chain, map_faucet_error, map_submit_error
 from lib.coingecko import (
     BackoffState,
     CoinGeckoError,
@@ -67,6 +67,8 @@ DEFAULTS = {
     "PRICE_ORACLE_HTTP_TIMEOUT_SECS": "10",
     "PRICE_ORACLE_DATA_TAG": DATA_TAG,
     "PRICE_ORACLE_LOG_LEVEL": "INFO",
+    "PRICE_ORACLE_MIN_BALANCE": "60000",
+    "PRICE_ORACLE_FAUCET_RETRY_AFTER_SECS": "3600",
 }
 
 
@@ -81,6 +83,8 @@ class OracleConfig:
     http_timeout_secs: float
     data_tag: str
     log_level: str
+    min_balance: int = 60_000
+    faucet_retry_after_secs: float = 3600.0
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "OracleConfig":
@@ -99,6 +103,10 @@ class OracleConfig:
             http_timeout_secs=_env_float("PRICE_ORACLE_HTTP_TIMEOUT_SECS", env),
             data_tag=get("PRICE_ORACLE_DATA_TAG"),
             log_level=get("PRICE_ORACLE_LOG_LEVEL"),
+            min_balance=_env_int("PRICE_ORACLE_MIN_BALANCE", env),
+            faucet_retry_after_secs=_env_float(
+                "PRICE_ORACLE_FAUCET_RETRY_AFTER_SECS", env
+            ),
         )
 
 
@@ -145,6 +153,7 @@ class Oracle:
         fetch_fn: Callable[[str, float], PriceObservation] = fetch_btc_usd,
         sleep_fn: Callable[[float], None] = time.sleep,
         time_fn: Callable[[], float] = time.time,
+        monotonic_fn: Callable[[], float] = time.monotonic,
     ) -> None:
         self.cfg = cfg
         self.chain = chain
@@ -154,8 +163,10 @@ class Oracle:
         self.fetch_fn = fetch_fn
         self.sleep_fn = sleep_fn
         self.time_fn = time_fn
+        self.monotonic_fn = monotonic_fn
         self.backoff = BackoffState()
         self._stopping = False
+        self._next_faucet_attempt_at: float | None = None
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
 
@@ -203,7 +214,71 @@ class Oracle:
         if obs is None:
             return
         self.registry.set_gauge("novai_oracle_last_price_usd", obs.price)
+        self._maybe_top_up()
         self._submit(obs)
+
+    def _maybe_top_up(self) -> None:
+        """Best-effort balance check + re-faucet.
+
+        Never raises. Never calls sys.exit. Every faucet-attempt exit
+        path (success, rate-limited, disabled, RPC error) stamps
+        self._next_faucet_attempt_at to monotonic_now +
+        cfg.faucet_retry_after_secs so a drained-and-cooldown-blocked
+        oracle cannot spin the RPC. The 3600s default matches
+        FAUCET_PER_ADDRESS_COOLDOWN_SECS at crates/node/src/rpc.rs:3125.
+        """
+        try:
+            balance = self.chain.get_balance(self.kp.address)
+        except Exception as exc:  # noqa: BLE001 best-effort
+            LOG.warning("balance_read event=failed error=%s", exc)
+            return
+
+        self.registry.set_gauge("novai_oracle_balance", float(balance))
+
+        if balance >= self.cfg.min_balance:
+            return
+
+        now_mono = self.monotonic_fn()
+        if (
+            self._next_faucet_attempt_at is not None
+            and now_mono < self._next_faucet_attempt_at
+        ):
+            retry_in = self._next_faucet_attempt_at - now_mono
+            LOG.info(
+                "faucet event=skipped reason=backoff retry_in_secs=%.0f "
+                "balance=%d threshold=%d",
+                retry_in,
+                balance,
+                self.cfg.min_balance,
+            )
+            return
+
+        try:
+            result = self.chain.faucet(self.kp.address)
+        except Exception as exc:  # noqa: BLE001 mapped by map_faucet_error
+            reason = map_faucet_error(exc)
+            self._next_faucet_attempt_at = (
+                now_mono + self.cfg.faucet_retry_after_secs
+            )
+            self.registry.inc_counter("novai_oracle_faucet_attempts_total", reason)
+            LOG.warning(
+                "faucet event=failed reason=%s exc=%s error=%s balance=%d",
+                reason,
+                type(exc).__name__,
+                exc,
+                balance,
+            )
+            return
+
+        self._next_faucet_attempt_at = now_mono + self.cfg.faucet_retry_after_secs
+        self.registry.inc_counter("novai_oracle_faucet_attempts_total", "success")
+        LOG.info(
+            "faucet event=requested txid=%s amount=%s balance_before=%d threshold=%d",
+            result.txid,
+            result.amount,
+            balance,
+            self.cfg.min_balance,
+        )
 
     def _fetch_price(self) -> PriceObservation | None:
         try:
