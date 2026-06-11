@@ -1,10 +1,10 @@
-# NOVAI — L1 Blockchain with First-Class AI Entities
+# NOVAI - L1 Blockchain with First-Class AI Entities
 
 NOVAI is a Layer-1 blockchain where AI entities are protocol primitives, not smart contracts.
 
-Most blockchain projects that claim "AI integration" bolt AI onto an existing smart contract VM — the AI runs off-chain and pokes the chain through oracle calls or contract wrappers. NOVAI takes a different approach: AI entities exist at the same level as accounts and validators. They have on-chain identity, persistent memory, economic balance, capability flags, and governance-controlled autonomy modes, all enforced at the protocol layer.
+Most blockchain projects that claim "AI integration" bolt AI onto an existing smart contract VM - the AI runs off-chain and pokes the chain through oracle calls or contract wrappers. NOVAI takes a different approach: AI entities exist at the same level as accounts and validators. They have on-chain identity, persistent memory, economic balance, capability flags, and governance-controlled autonomy modes, all enforced at the protocol layer.
 
-There is no smart contract VM. There is no WASM runtime. Every transaction type is a native protocol operation. This is a deliberate design choice — it means you cannot deploy arbitrary code, but it also means the chain understands the semantics of every operation it executes.
+There is no smart contract VM. There is no WASM runtime. Every transaction type is a native protocol operation. This is a deliberate design choice - it means you cannot deploy arbitrary code, but it also means the chain understands the semantics of every operation it executes.
 
 The entire codebase is clean-room: no code copied or adapted from Substrate, Tendermint, Cosmos SDK, Diem, Aptos, Sui, or any other blockchain implementation. Concepts are drawn from published papers (HotStuff BFT, Sparse Merkle Trees), but every line is written from first principles.
 
@@ -109,7 +109,7 @@ All transactions are deterministic. There are no floats, no `HashMap` iteration 
 
 ### Encoding
 
-All protocol types use canonical binary encoding — one valid byte sequence per logical value. Encodings are versioned (type prefix byte) and locked by golden vector tests. Domain-separated hashing prevents cross-protocol attacks.
+All protocol types use canonical binary encoding - one valid byte sequence per logical value. Encodings are versioned (type prefix byte) and locked by golden vector tests. Domain-separated hashing prevents cross-protocol attacks.
 
 ## Transaction Types
 
@@ -219,7 +219,7 @@ Size: 51 bytes
 Min fee: 5000
 ```
 
-Autonomy modes: Advisory (0) — can only emit proposals; Gated (1) — proposals go through approval gates. The entity ID is deterministically derived: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator_address)`.
+Autonomy modes: Advisory (0) - can only emit proposals; Gated (1) - proposals go through approval gates. The entity ID is deterministically derived: `blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator_address)`.
 
 Capabilities (8-bit bitfield, bits 0-6 defined, bit 7 reserved): `read_public_chain` (bit 0), `read_memory_objects` (bit 1), `emit_proposals` (bit 2), `request_execution` (bit 3), `read_nnpx_derived` (bit 4), `submit_reputation_updates` (bit 5, oracle entities only), `post_oracle_anchors` (bit 6).
 
