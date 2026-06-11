@@ -22,7 +22,7 @@ use novai_types::{Address, TxId, TxV1, TxVersion};
 use std::collections::HashMap;
 use std::env;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -139,6 +139,16 @@ impl NonceProvider for InMemoryNonceProvider {
     }
 }
 
+/// Shared atomic accumulators for the Prometheus commit metrics. on_commit
+/// writes here on every commit; the /metrics collect closure reads on each
+/// scrape. Backs novai_block_tx_count (gauge of last block's tx count) and
+/// novai_total_txs_committed (monotonic counter).
+#[derive(Default)]
+struct CommitMetrics {
+    block_tx_count: AtomicU64,
+    total_txs_committed: AtomicU64,
+}
+
 /// Post-commit callback: executes transactions, advances nonces, and updates the blockchain index.
 struct ExecutionCommitCallback {
     nonce_provider: Arc<InMemoryNonceProvider>,
@@ -149,6 +159,10 @@ struct ExecutionCommitCallback {
     /// lock and acquires the db lock inside try_propose_block. Taking the
     /// mempool lock here would close an AB-BA cycle.
     pending_mempool_removals: Arc<Mutex<Vec<TxId>>>,
+    /// Shared with the /metrics collect closure so on_commit can publish
+    /// novai_block_tx_count and novai_total_txs_committed without going
+    /// through the consensus state lock.
+    commit_metrics: Arc<CommitMetrics>,
 }
 
 impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
@@ -222,6 +236,20 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                 }
             }
         }
+
+        // Publish commit metrics for /metrics scrapes. block_tx_count is a
+        // gauge of the last committed block's tx count; total_txs_committed is
+        // a monotonic counter across all commits. Relaxed ordering: the
+        // /metrics reader does not synchronize with consensus state, so a
+        // briefly-stale scrape is acceptable.
+        if let Some(last) = blocks.last() {
+            self.commit_metrics
+                .block_tx_count
+                .store(last.txs.len() as u64, Ordering::Relaxed);
+        }
+        self.commit_metrics
+            .total_txs_committed
+            .fetch_add(total_txs as u64, Ordering::Relaxed);
 
         // H-07: Periodically purge expired governance proposals (every 1000 blocks)
         if let Some(last_block) = blocks.last() {
@@ -1166,11 +1194,17 @@ fn main() {
             // ordering), so it appends here and the propose loop drains.
             let pending_mempool_removals: Arc<Mutex<Vec<TxId>>> = Arc::new(Mutex::new(Vec::new()));
 
+            // Shared atomic accumulators for the Prometheus commit metrics.
+            // on_commit publishes the per-commit values; the /metrics collect
+            // closure reads on each scrape.
+            let commit_metrics = Arc::new(CommitMetrics::default());
+
             // Wire execution commit callback
             let commit_callback = Arc::new(ExecutionCommitCallback {
                 nonce_provider: Arc::clone(&nonce_provider),
                 blockchain_index: Arc::clone(&blockchain_index),
                 pending_mempool_removals: Arc::clone(&pending_mempool_removals),
+                commit_metrics: Arc::clone(&commit_metrics),
             });
             node.set_commit_callback(commit_callback);
 
@@ -1417,6 +1451,7 @@ fn main() {
                 let peer_manager = Arc::clone(&node.peer_manager);
                 let mempool = Arc::clone(&mempool);
                 let observer_metrics = Arc::clone(&observer_metrics);
+                let commit_metrics = Arc::clone(&commit_metrics);
                 move || {
                     // Acquire state lock once for all state fields
                     let (committed_height, current_round, view_changes_total) = {
@@ -1429,8 +1464,10 @@ fn main() {
                         peer_count: peer_manager.peer_count() as u64,
                         mempool_size: mempool.lock_or_recover().len() as u64,
                         view_changes_total,
-                        block_tx_count: 0, // TODO: Wire to actual block commit events
-                        total_txs_committed: 0, // TODO: Accumulate from block commits
+                        block_tx_count: commit_metrics.block_tx_count.load(Ordering::Relaxed),
+                        total_txs_committed: commit_metrics
+                            .total_txs_committed
+                            .load(Ordering::Relaxed),
                         // Copilot metrics from observer
                         copilot_observations_total: observer_metrics
                             .observations
@@ -1924,6 +1961,7 @@ mod tests {
             nonce_provider: Arc::clone(&nonce_provider),
             blockchain_index: Arc::clone(&blockchain_index),
             pending_mempool_removals: Arc::clone(&pending_mempool_removals),
+            commit_metrics: Arc::new(CommitMetrics::default()),
         };
 
         let (sk, pk) = generate_keypair();
@@ -2016,5 +2054,82 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(pending.is_empty(), "queue should be drained");
         }
+    }
+
+    /// Bisection-proof for the novai_block_tx_count and
+    /// novai_total_txs_committed metric wiring. Before the on_commit writes
+    /// land, CommitMetrics stays at zero and the assertions below trip; with
+    /// the writes wired, block_tx_count tracks the LAST committed block's tx
+    /// count and total_txs_committed accumulates monotonically across commits.
+    #[test]
+    fn on_commit_updates_commit_metrics_block_tx_count_and_total() {
+        let nonce_provider = Arc::new(InMemoryNonceProvider::new());
+        let blockchain_index = Arc::new(Mutex::new(rpc::BlockchainIndex::new()));
+        let pending_mempool_removals: Arc<Mutex<Vec<TxId>>> = Arc::new(Mutex::new(Vec::new()));
+        let commit_metrics = Arc::new(CommitMetrics::default());
+        let callback = ExecutionCommitCallback {
+            nonce_provider: Arc::clone(&nonce_provider),
+            blockchain_index: Arc::clone(&blockchain_index),
+            pending_mempool_removals: Arc::clone(&pending_mempool_removals),
+            commit_metrics: Arc::clone(&commit_metrics),
+        };
+
+        let (sk, pk) = generate_keypair();
+        let from = address_from_pubkey(&pk);
+        let pubkey = pk.to_bytes();
+
+        let mut t1 = build_tx(from, pubkey, 0, 1, String::new());
+        let mut t2 = build_tx(from, pubkey, 1, 1, String::new());
+        sign_tx_v1(&sk, &mut t1).expect("sign t1");
+        sign_tx_v1(&sk, &mut t2).expect("sign t2");
+
+        let block_a = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs: vec![t1, t2],
+        };
+
+        let mut storage = Storage::Memory(MemKv::new());
+        callback.on_commit(&mut storage, &[block_a]);
+
+        assert_eq!(
+            commit_metrics.block_tx_count.load(Ordering::Relaxed),
+            2,
+            "block_tx_count should reflect the committed block's tx count",
+        );
+        assert_eq!(
+            commit_metrics.total_txs_committed.load(Ordering::Relaxed),
+            2,
+            "total_txs_committed should accumulate per commit",
+        );
+
+        let mut t3 = build_tx(from, pubkey, 2, 1, String::new());
+        let mut t4 = build_tx(from, pubkey, 3, 1, String::new());
+        let mut t5 = build_tx(from, pubkey, 4, 1, String::new());
+        sign_tx_v1(&sk, &mut t3).expect("sign t3");
+        sign_tx_v1(&sk, &mut t4).expect("sign t4");
+        sign_tx_v1(&sk, &mut t5).expect("sign t5");
+
+        let block_b = Block {
+            height: 2,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs: vec![t3, t4, t5],
+        };
+        callback.on_commit(&mut storage, &[block_b]);
+
+        assert_eq!(
+            commit_metrics.block_tx_count.load(Ordering::Relaxed),
+            3,
+            "block_tx_count should reflect the LAST committed block's tx count, not cumulative",
+        );
+        assert_eq!(
+            commit_metrics.total_txs_committed.load(Ordering::Relaxed),
+            5,
+            "total_txs_committed should accumulate across multiple commits",
+        );
     }
 }
