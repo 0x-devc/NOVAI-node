@@ -1627,6 +1627,72 @@ impl ConsensusState {
             ops.push(WriteOp::Put(key, value));
         }
 
+        // 1b. Dense per-height certifying QCs. The triggering QC write
+        // below (step 2) covers only qc.height; intermediate heights in a
+        // multi-block batch, plus the genesis edge (a QC at height 1 or 2
+        // never triggers a commit under the 3-chain rule), get their rows
+        // here, sourced from qc_cache and verified against the committed
+        // block's hash. Every failure mode degrades to an absent row plus
+        // a log line, never a fabricated row and never a failed commit:
+        // commit/accept decisions must be byte-for-byte unchanged by this
+        // step. Dense rows ride the same PRUNE_RETAIN_BLOCKS prune as
+        // blocks (step 6 deletes qc_key for every pruned height).
+        for block in blocks {
+            let Some(cqc) = self.qc_cache.get(&block.height) else {
+                // Distinguish a benign miss (row already on disk from an
+                // earlier trigger write, e.g. before a restart) from a
+                // genuine gap (no certifying QC available anywhere, the
+                // sync catch-up case until Stage 2 carries QCs on the wire).
+                match db.get(&qc_key(block.height)) {
+                    Ok(Some(_)) => tracing::debug!(
+                        height = block.height,
+                        "Dense QC persist: qc_cache miss but QC row already on disk"
+                    ),
+                    Ok(None) => tracing::warn!(
+                        height = block.height,
+                        "Dense QC persist: no certifying QC available for committed block, row left absent"
+                    ),
+                    Err(e) => tracing::warn!(
+                        height = block.height,
+                        error = ?e,
+                        "Dense QC persist: QC row existence check failed"
+                    ),
+                }
+                continue;
+            };
+
+            let block_hash = match novai_consensus_types::codec::hash_block_v1(block) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(
+                        height = block.height,
+                        error = ?e,
+                        "Dense QC persist: block hash failed, row left absent"
+                    );
+                    continue;
+                }
+            };
+
+            if cqc.block_hash != block_hash {
+                tracing::warn!(
+                    height = block.height,
+                    qc_hash = ?&cqc.block_hash[..4],
+                    block_hash = ?&block_hash[..4],
+                    "Dense QC persist: cached QC does not certify committed block, row left absent"
+                );
+                continue;
+            }
+
+            match encode_qc_v1(cqc) {
+                Ok(value) => ops.push(WriteOp::Put(qc_key(block.height), value)),
+                Err(e) => tracing::warn!(
+                    height = block.height,
+                    error = ?e,
+                    "Dense QC persist: certifying QC failed to encode, row left absent"
+                ),
+            }
+        }
+
         // 2. QC that triggered commit
         let qc_k = qc_key(qc.height);
         let qc_v = encode_qc_v1(qc)
