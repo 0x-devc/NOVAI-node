@@ -660,10 +660,111 @@ impl ConsensusState {
         // Add vote (capped)
         let max_per_hash = validator_pubkeys.len() + 5;
         let votes_for_hash = self.pending_votes.entry(vote.block_hash).or_default();
+        // Fix B (gate-equivocation-535004): refuse a second vote from the
+        // same voter for the same block. voted_in_round catches duplicates
+        // within a round, but it is cleared on round advance, so without
+        // this scan the same voter's vote can land in pending_votes twice
+        // across a round boundary. try_form_qc now dedups too, but keeping
+        // the duplicate out of pending_votes is the cheaper first line and
+        // bounds memory. This scan is intentionally NOT a voted_at_height
+        // check, so the Stage 2 Fix C removal of voted_at_height does not
+        // undo it. Idempotent: a duplicate is a silent no-op, the same
+        // contract as the cap below.
+        if votes_for_hash.iter().any(|v| v.voter == vote.voter) {
+            return Ok(());
+        }
         if votes_for_hash.len() >= max_per_hash {
             return Ok(());
         }
         votes_for_hash.push(vote);
+
+        Ok(())
+    }
+
+    /// Verify that a QC received from an untrusted source is well-formed.
+    ///
+    /// This is the single definition of QC well-formedness for QCs that
+    /// arrive from a peer: a timeout-embedded `highest_qc` (add_timeout)
+    /// and a synced block's certifying QC (the Stage 2 Fix A2 sync check).
+    /// It enforces, in order: no duplicate voters and no over-cap vote
+    /// count (via `encode_qc_v1`, the canonical encoder), at least `quorum`
+    /// DISTINCT voters, every voter present in the validator set, every
+    /// vote bound to this QC's height and block hash, and every vote
+    /// signature valid under the domain-separated vote encoding.
+    ///
+    /// Formation (`try_form_qc`) and the commit-path install
+    /// (`cache_qc_and_check_commit`) deliberately do NOT call this: they
+    /// validate duplicate voters via `encode_qc_v1` directly, because
+    /// sub-quorum and empty-vote QCs (the genesis `justify_qc`) legitimately
+    /// reach those sites and their votes are either already verified on the
+    /// way in or out of scope to verify here.
+    ///
+    /// # Errors
+    /// Returns `InvalidVote` if the QC has duplicate voters, fewer than
+    /// `quorum` distinct voters, a voter outside the set, a vote bound to a
+    /// different height or block, or an invalid signature.
+    pub fn verify_qc_well_formed(
+        qc: &QC,
+        validator_pubkeys: &[(Address, VerifyingKey)],
+        quorum: usize,
+    ) -> Result<(), ConsensusError> {
+        // 1. Canonical well-formedness: encode_qc_v1 rejects duplicate
+        //    voters and an over-cap vote count. A QC that survives this has
+        //    a set of DISTINCT voters, so votes.len() below is the distinct
+        //    count, not a raw entry count (the Layer 2 bug was counting
+        //    raw entries).
+        encode_qc_v1(qc)
+            .map_err(|e| ConsensusError::InvalidVote(format!("malformed QC: {e:?}")))?;
+
+        // 2. Quorum of distinct voters.
+        if qc.votes.len() < quorum {
+            return Err(ConsensusError::InvalidVote(format!(
+                "QC has {} distinct voters, below quorum {}",
+                qc.votes.len(),
+                quorum
+            )));
+        }
+
+        // 3. Each voter in the set, each vote bound to this QC, each
+        //    signature valid.
+        for vote in &qc.votes {
+            let pubkey = validator_pubkeys
+                .iter()
+                .find(|(addr, _)| *addr == vote.voter)
+                .map(|(_, pk)| pk)
+                .ok_or_else(|| {
+                    ConsensusError::InvalidVote(format!(
+                        "QC vote from unknown validator {:?}",
+                        &vote.voter[..4]
+                    ))
+                })?;
+
+            if vote.height != qc.height || vote.block_hash != qc.block_hash {
+                return Err(ConsensusError::InvalidVote(
+                    "QC vote not bound to QC height/block".to_string(),
+                ));
+            }
+
+            let unsigned_vote = Vote {
+                height: vote.height,
+                round: vote.round,
+                block_hash: vote.block_hash,
+                voter: vote.voter,
+                signature: [0u8; 64],
+                ai_signal_commitment: vote.ai_signal_commitment,
+            };
+            let unsigned_bytes =
+                novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
+            let domain_tag = b"NOVAI_VOTE_V1";
+            let mut to_verify = Vec::new();
+            to_verify.extend_from_slice(domain_tag);
+            to_verify.extend_from_slice(&unsigned_bytes);
+            if !novai_crypto::verify_bytes(pubkey, &to_verify, &vote.signature) {
+                return Err(ConsensusError::InvalidVote(
+                    "QC contains invalid vote signature".to_string(),
+                ));
+            }
+        }
 
         Ok(())
     }
@@ -687,12 +788,27 @@ impl ConsensusState {
         let f = (n - 1) / 3;
         let quorum = 2 * f + 1;
 
-        if votes.len() < quorum {
+        // Fix B (gate-equivocation-535004): dedup votes by voter BEFORE the
+        // quorum count and slice. pending_votes can hold the same voter more
+        // than once when a vote arrives twice across a round boundary
+        // (voted_in_round is cleared on round advance), and the previous
+        // votes.len() count let a 2-distinct-signer QC form at quorum 3.
+        // Keeping the first occurrence per voter is deterministic in Vec
+        // order, so all honest nodes select the same vote set.
+        let mut seen = HashSet::new();
+        let mut distinct_votes: Vec<Vote> = Vec::new();
+        for vote in votes {
+            if seen.insert(vote.voter) {
+                distinct_votes.push(vote.clone());
+            }
+        }
+
+        if distinct_votes.len() < quorum {
             return Ok(None);
         }
 
-        // Form QC with exactly quorum votes
-        let qc_votes: Vec<Vote> = votes.iter().take(quorum).cloned().collect();
+        // Form QC with exactly quorum DISTINCT votes.
+        let qc_votes: Vec<Vote> = distinct_votes.into_iter().take(quorum).collect();
 
         // QC height is the view height we're forming consensus for
         let qc_height = match &self.highest_qc {
@@ -706,6 +822,14 @@ impl ConsensusState {
             block_hash: *block_hash,
             votes: qc_votes,
         };
+
+        // Encode-validate the formed QC: encode_qc_v1 rejects duplicate
+        // voters. After the dedup above this always passes, but it is the
+        // canonical formation gate the spec calls for and guards against any
+        // future change that reintroduces a duplicate into the formed QC.
+        encode_qc_v1(&qc).map_err(|e| {
+            ConsensusError::QcFormationFailed(format!("formed QC malformed: {e:?}"))
+        })?;
 
         Ok(Some(qc))
     }
@@ -863,8 +987,16 @@ impl ConsensusState {
             ));
         }
 
-        // H-01: Update highest_qc if timeout includes a better QC,
-        // but ONLY after re-verifying all vote signatures in the QC.
+        // H-01 / Fix B (gate-equivocation-535004): update highest_qc if the
+        // timeout carries a dominating QC, but ONLY after full
+        // well-formedness verification. The previous inline check counted
+        // qc.votes.len() rather than DISTINCT voters, so a duplicate-voter
+        // QC could be adopted as a quorum certificate (Finding 2): three
+        // copies of one voter's vote passed votes.len() == quorum and each
+        // identical signature verified. Routing through verify_qc_well_formed
+        // closes that, because encode_qc_v1 inside it rejects duplicate
+        // voters before the quorum count, and it still checks voter
+        // membership and every signature as before.
         if let Some(ref qc) = timeout.highest_qc {
             let dominated = match &self.highest_qc {
                 None => true,
@@ -874,53 +1006,10 @@ impl ConsensusState {
                 }
             };
             if dominated {
-                // Verify quorum: need 2f+1 votes
                 let n = validator_pubkeys.len();
                 let f = (n - 1) / 3;
                 let quorum = 2 * f + 1;
-                if qc.votes.len() < quorum {
-                    return Err(ConsensusError::InvalidVote(format!(
-                        "Timeout QC has insufficient votes: {} < quorum {}",
-                        qc.votes.len(),
-                        quorum,
-                    )));
-                }
-
-                // Re-verify each vote signature in the QC
-                for vote in &qc.votes {
-                    let vote_pk = validator_pubkeys
-                        .iter()
-                        .find(|(addr, _)| *addr == vote.voter)
-                        .map(|(_, pk)| pk)
-                        .ok_or_else(|| {
-                            ConsensusError::InvalidVote(format!(
-                                "Timeout QC contains vote from unknown validator {:?}",
-                                &vote.voter[..4]
-                            ))
-                        })?;
-
-                    let unsigned_vote = Vote {
-                        height: vote.height,
-                        round: vote.round,
-                        block_hash: vote.block_hash,
-                        voter: vote.voter,
-                        signature: [0u8; 64],
-                        ai_signal_commitment: vote.ai_signal_commitment,
-                    };
-                    let unsigned_bytes =
-                        novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
-                    let domain_tag = b"NOVAI_VOTE_V1";
-                    let mut to_verify = Vec::new();
-                    to_verify.extend_from_slice(domain_tag);
-                    to_verify.extend_from_slice(&unsigned_bytes);
-
-                    if !novai_crypto::verify_bytes(vote_pk, &to_verify, &vote.signature) {
-                        return Err(ConsensusError::InvalidVote(
-                            "Timeout QC contains invalid vote signature".to_string(),
-                        ));
-                    }
-                }
-
+                Self::verify_qc_well_formed(qc, validator_pubkeys, quorum)?;
                 self.highest_qc = Some(qc.clone());
             }
         }
@@ -1139,6 +1228,22 @@ impl ConsensusState {
             }
         };
         if dominated {
+            // Fix B (gate-equivocation-535004): encode-validate before
+            // installing as highest_qc. encode_qc_v1 rejects duplicate
+            // voters, so a duplicate-voter QC cannot become highest_qc via
+            // the commit path. I deliberately use encode_qc_v1 here rather
+            // than the full verify_qc_well_formed helper: a sub-quorum
+            // genesis justify_qc (height 0, no votes) legitimately reaches
+            // this install, and full signature verification of a justify_qc
+            // is the proposal path's concern, out of scope for this fix.
+            // Validating before the state clears below means a malformed QC
+            // is rejected with no side effects.
+            encode_qc_v1(&qc).map_err(|e| {
+                ConsensusError::QcFormationFailed(format!(
+                    "refusing to install malformed QC as highest_qc: {e:?}"
+                ))
+            })?;
+
             // Reset round to 0 when view height advances (new dominating QC)
             // This is critical for leader synchronization
             let old_view_height = self
@@ -3185,5 +3290,306 @@ mod tests {
         // Corrupt row: a decode error surfaces as Err.
         db.put(&qc_key(9), b"garbage").unwrap();
         assert!(ConsensusState::load_qc_at_height(&db, 9).is_err());
+    }
+
+    // ===== Stage 2 Fix B (gate-equivocation-535004): duplicate-proof QCs =====
+
+    /// Build a domain-separated, validly signed vote.
+    fn fixb_signed_vote(
+        signer: &SigningKey,
+        voter: Address,
+        height: u64,
+        round: u64,
+        block_hash: [u8; 32],
+    ) -> Vote {
+        let unsigned = Vote {
+            height,
+            round,
+            block_hash,
+            voter,
+            signature: [0u8; 64],
+            ai_signal_commitment: None,
+        };
+        let unsigned_bytes = novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned);
+        let mut to_sign = Vec::new();
+        to_sign.extend_from_slice(b"NOVAI_VOTE_V1");
+        to_sign.extend_from_slice(&unsigned_bytes);
+        let signature = novai_crypto::sign_bytes(signer, &to_sign);
+        Vote {
+            signature,
+            ..unsigned
+        }
+    }
+
+    #[test]
+    fn verify_qc_well_formed_accepts_valid_quorum_qc() {
+        let validators = make_test_validators(4);
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let bh = [0x11; 32];
+        let votes: Vec<Vote> = (0..3)
+            .map(|i| fixb_signed_vote(&validators[i].1, validators[i].0, 5, 0, bh))
+            .collect();
+        let qc = QC {
+            height: 5,
+            round: 0,
+            block_hash: bh,
+            votes,
+        };
+        assert!(ConsensusState::verify_qc_well_formed(&qc, &pubkeys, 3).is_ok());
+    }
+
+    #[test]
+    fn verify_qc_well_formed_rejects_duplicate_voter() {
+        // The exact 535004 Layer 2 shape: three vote ENTRIES but only two
+        // DISTINCT voters, masquerading as quorum 3.
+        let validators = make_test_validators(4);
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let bh = [0x11; 32];
+        let v_a = fixb_signed_vote(&validators[0].1, validators[0].0, 5, 0, bh);
+        let v_b = fixb_signed_vote(&validators[1].1, validators[1].0, 5, 0, bh);
+        let qc = QC {
+            height: 5,
+            round: 0,
+            block_hash: bh,
+            votes: vec![v_a.clone(), v_a, v_b],
+        };
+        assert!(ConsensusState::verify_qc_well_formed(&qc, &pubkeys, 3).is_err());
+    }
+
+    #[test]
+    fn verify_qc_well_formed_rejects_sub_quorum() {
+        let validators = make_test_validators(4);
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let bh = [0x11; 32];
+        let votes: Vec<Vote> = (0..2)
+            .map(|i| fixb_signed_vote(&validators[i].1, validators[i].0, 5, 0, bh))
+            .collect();
+        let qc = QC {
+            height: 5,
+            round: 0,
+            block_hash: bh,
+            votes,
+        };
+        assert!(ConsensusState::verify_qc_well_formed(&qc, &pubkeys, 3).is_err());
+    }
+
+    #[test]
+    fn verify_qc_well_formed_rejects_unknown_voter() {
+        let validators = make_test_validators(4);
+        // Only the first three validators are known to the verifier.
+        let pubkeys: Vec<(Address, VerifyingKey)> = validators
+            .iter()
+            .take(3)
+            .map(|(a, _, vk)| (*a, *vk))
+            .collect();
+        let bh = [0x11; 32];
+        let mut votes: Vec<Vote> = (0..2)
+            .map(|i| fixb_signed_vote(&validators[i].1, validators[i].0, 5, 0, bh))
+            .collect();
+        // A third distinct voter, validly signed, but outside the known set.
+        votes.push(fixb_signed_vote(
+            &validators[3].1,
+            validators[3].0,
+            5,
+            0,
+            bh,
+        ));
+        let qc = QC {
+            height: 5,
+            round: 0,
+            block_hash: bh,
+            votes,
+        };
+        assert!(ConsensusState::verify_qc_well_formed(&qc, &pubkeys, 3).is_err());
+    }
+
+    #[test]
+    fn verify_qc_well_formed_rejects_invalid_signature() {
+        let validators = make_test_validators(4);
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let bh = [0x11; 32];
+        let mut votes: Vec<Vote> = (0..3)
+            .map(|i| fixb_signed_vote(&validators[i].1, validators[i].0, 5, 0, bh))
+            .collect();
+        votes[2].signature = [0u8; 64]; // corrupt one signature
+        let qc = QC {
+            height: 5,
+            round: 0,
+            block_hash: bh,
+            votes,
+        };
+        assert!(ConsensusState::verify_qc_well_formed(&qc, &pubkeys, 3).is_err());
+    }
+
+    #[test]
+    fn verify_qc_well_formed_rejects_vote_for_different_block() {
+        // A vote validly signed for a DIFFERENT block must not count toward
+        // this QC even though its signature checks out for its own block.
+        let validators = make_test_validators(4);
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let bh = [0x11; 32];
+        let other = [0x22; 32];
+        let mut votes: Vec<Vote> = (0..2)
+            .map(|i| fixb_signed_vote(&validators[i].1, validators[i].0, 5, 0, bh))
+            .collect();
+        votes.push(fixb_signed_vote(
+            &validators[2].1,
+            validators[2].0,
+            5,
+            0,
+            other,
+        ));
+        let qc = QC {
+            height: 5,
+            round: 0,
+            block_hash: bh,
+            votes,
+        };
+        assert!(ConsensusState::verify_qc_well_formed(&qc, &pubkeys, 3).is_err());
+    }
+
+    #[test]
+    fn try_form_qc_dedups_duplicate_voter_no_quorum() {
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+        let bh = [0x11; 32];
+        // Three entries, two distinct voters: the pre-fix votes.len() == 3
+        // would have formed a 2-distinct-signer QC at quorum 3.
+        let v_a = fixb_signed_vote(&validators[0].1, validators[0].0, 1, 0, bh);
+        let v_b = fixb_signed_vote(&validators[1].1, validators[1].0, 1, 0, bh);
+        state.pending_votes.insert(bh, vec![v_a.clone(), v_a, v_b]);
+        assert!(state.try_form_qc(&bh, &validator_set).unwrap().is_none());
+    }
+
+    #[test]
+    fn try_form_qc_forms_clean_qc_ignoring_duplicate() {
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+        let bh = [0x11; 32];
+        let v_a = fixb_signed_vote(&validators[0].1, validators[0].0, 1, 0, bh);
+        let v_b = fixb_signed_vote(&validators[1].1, validators[1].0, 1, 0, bh);
+        let v_c = fixb_signed_vote(&validators[2].1, validators[2].0, 1, 0, bh);
+        // Four entries, three distinct voters plus a duplicate of A.
+        state
+            .pending_votes
+            .insert(bh, vec![v_a.clone(), v_b, v_c, v_a]);
+        let qc = state
+            .try_form_qc(&bh, &validator_set)
+            .unwrap()
+            .expect("a quorum of 3 distinct voters must form a QC");
+        assert_eq!(qc.votes.len(), 3);
+        let mut voters: Vec<_> = qc.votes.iter().map(|v| v.voter).collect();
+        voters.sort();
+        voters.dedup();
+        assert_eq!(voters.len(), 3, "formed QC must have 3 distinct voters");
+        assert!(novai_consensus_types::codec::encode_qc_v1(&qc).is_ok());
+    }
+
+    #[test]
+    fn add_vote_verified_dedups_duplicate_across_round() {
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+        let bh = [0x11; 32];
+        let vote = fixb_signed_vote(&validators[1].1, validators[1].0, 1, 0, bh);
+        state.add_vote_verified(vote.clone(), &pubkeys).unwrap();
+        assert_eq!(
+            state.pending_votes.get(&bh).map(std::vec::Vec::len),
+            Some(1)
+        );
+        // Simulate a round advance: the within-round guard is cleared.
+        state.voted_in_round.clear();
+        // The same voter's vote arrives again across the round boundary.
+        state.add_vote_verified(vote, &pubkeys).unwrap();
+        assert_eq!(
+            state.pending_votes.get(&bh).map(std::vec::Vec::len),
+            Some(1),
+            "cross-round duplicate must not land twice in pending_votes"
+        );
+    }
+
+    #[test]
+    fn commit_path_install_rejects_duplicate_voter_qc() {
+        use novai_state::MemKv;
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+        let db = MemKv::new();
+        let bh = [0x11; 32];
+        // A duplicate-voter QC that dominates (height 3 > 0) and so reaches
+        // the commit-path install, where encode_qc_v1 rejects it.
+        let v_a = fixb_signed_vote(&validators[0].1, validators[0].0, 3, 0, bh);
+        let qc = QC {
+            height: 3,
+            round: 0,
+            block_hash: bh,
+            votes: vec![v_a.clone(), v_a],
+        };
+        let result = state.cache_qc_and_check_commit(qc, &db);
+        assert!(
+            result.is_err(),
+            "a duplicate-voter QC must not install via the commit path"
+        );
+        assert!(
+            state.highest_qc.is_none(),
+            "highest_qc must be unchanged after rejection"
+        );
+    }
+
+    #[test]
+    fn add_timeout_rejects_malformed_qc_via_helper() {
+        // Confirms verify_qc_well_formed is wired into the add_timeout
+        // install site: a sub-quorum embedded QC is rejected and not adopted.
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+        let bh = [0x11; 32];
+        let sub_quorum_qc = QC {
+            height: 3,
+            round: 0,
+            block_hash: bh,
+            votes: vec![
+                fixb_signed_vote(&validators[0].1, validators[0].0, 3, 0, bh),
+                fixb_signed_vote(&validators[1].1, validators[1].0, 3, 0, bh),
+            ],
+        };
+        let unsigned = Timeout {
+            height: 1,
+            round: 0,
+            voter: validators[1].0,
+            highest_qc: Some(sub_quorum_qc),
+            signature: [0u8; 64],
+        };
+        let unsigned_bytes =
+            novai_consensus_types::codec::encode_timeout_v1_unsigned(&unsigned).unwrap();
+        let mut to_sign = Vec::new();
+        to_sign.extend_from_slice(b"NOVAI_TIMEOUT_V1");
+        to_sign.extend_from_slice(&unsigned_bytes);
+        let signature = novai_crypto::sign_bytes(&validators[1].1, &to_sign);
+        let timeout = Timeout {
+            signature,
+            ..unsigned
+        };
+
+        let result = state.add_timeout(timeout, &pubkeys);
+        assert!(
+            result.is_err(),
+            "add_timeout must reject a sub-quorum embedded QC via the helper"
+        );
+        assert!(
+            state.highest_qc.is_none(),
+            "a sub-quorum QC must not be adopted as highest_qc"
+        );
     }
 }
