@@ -2,10 +2,11 @@
 
 use ed25519_dalek::SigningKey;
 use novai_consensus::ConsensusState;
-use novai_consensus_types::{Block, BlockRequest, BlockResponse, QC};
+use novai_consensus_types::{Block, BlockRequest, BlockResponse, Vote, QC};
 use novai_crypto::address_from_pubkey;
 use novai_node::consensus_node::ConsensusNode;
 use novai_state::Kv;
+use novai_types::Address;
 use rand_core::OsRng;
 use std::collections::HashMap;
 
@@ -88,6 +89,7 @@ fn test_sync_from_peer_on_restart() {
     validator_pubkeys.insert(addr1, pk1);
     validator_pubkeys.insert(addr2, pk2);
 
+    let sk1_for_qc = sk1.clone();
     let node1 = ConsensusNode::new(sk1, validator_set.clone(), validator_pubkeys.clone(), 1000);
     let node2 = ConsensusNode::new(sk2, validator_set, validator_pubkeys, 1000);
 
@@ -137,13 +139,18 @@ fn test_sync_from_peer_on_restart() {
         db2.put(novai_state::KEY_SMT_ROOT, &root_bytes).unwrap();
     }
 
-    // Simulate node1 responding with blocks
+    // Simulate node1 responding with blocks, each carrying a valid
+    // certifying QC. Post Fix A2 the cursor only advances across blocks
+    // that carry a valid certifying QC, so the honest catch-up path must
+    // supply them.
+    let qc1 = certifying_qc(&sk1_for_qc, addr1, &block1);
+    let qc2 = certifying_qc(&sk1_for_qc, addr1, &block2);
     let response = BlockResponse {
         responder: addr1,
         request_start: 1,
         request_end: 2,
         blocks: vec![block1, block2],
-        qcs: vec![None, None],
+        qcs: vec![Some(qc1), Some(qc2)],
     };
 
     // Node2 handles the response
@@ -541,4 +548,213 @@ fn test_block_response_carries_qcs_positionally() {
     assert_eq!(response.qcs[1], Some(qc2));
 
     println!("✅ build_block_response pairs blocks and QCs positionally");
+}
+
+// ===== Stage 2 Fix A2 (gate-equivocation-535004): certify before advancing =====
+
+/// A domain-separated, validly signed vote.
+fn signed_vote(
+    signer: &SigningKey,
+    voter: Address,
+    height: u64,
+    round: u64,
+    block_hash: [u8; 32],
+) -> Vote {
+    let unsigned = Vote {
+        height,
+        round,
+        block_hash,
+        voter,
+        signature: [0u8; 64],
+        ai_signal_commitment: None,
+    };
+    let unsigned_bytes = novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned);
+    let mut to_sign = Vec::new();
+    to_sign.extend_from_slice(b"NOVAI_VOTE_V1");
+    to_sign.extend_from_slice(&unsigned_bytes);
+    let signature = novai_crypto::sign_bytes(signer, &to_sign);
+    Vote {
+        signature,
+        ..unsigned
+    }
+}
+
+/// A single-vote QC that certifies `block` (quorum is 1 for a 2-validator set).
+fn certifying_qc(signer: &SigningKey, voter: Address, block: &Block) -> QC {
+    let block_hash = novai_consensus_types::block_hash(block);
+    QC {
+        height: block.height,
+        round: block.round,
+        block_hash,
+        votes: vec![signed_vote(
+            signer,
+            voter,
+            block.height,
+            block.round,
+            block_hash,
+        )],
+    }
+}
+
+/// A receiver (node2) behind at committed_height 0, plus the addr1 signing
+/// key for certifying QCs and a two-block chain to sync.
+fn a2_receiver_fixture() -> (ConsensusNode, SigningKey, Address, Block, Block) {
+    let sk1 = SigningKey::generate(&mut OsRng);
+    let sk2 = SigningKey::generate(&mut OsRng);
+    let pk1 = sk1.verifying_key();
+    let pk2 = sk2.verifying_key();
+    let addr1 = address_from_pubkey(&pk1);
+    let addr2 = address_from_pubkey(&pk2);
+    let validator_set = vec![addr1, addr2];
+    let mut validator_pubkeys = HashMap::new();
+    validator_pubkeys.insert(addr1, pk1);
+    validator_pubkeys.insert(addr2, pk2);
+    // node2 is the receiver under test; sk1 is retained to sign certifying
+    // QCs as addr1.
+    let node2 = ConsensusNode::new(sk2, validator_set, validator_pubkeys, 1000);
+
+    let block1 = Block {
+        height: 1,
+        round: 0,
+        parent_hash: [0u8; 32],
+        state_root: [0xaa; 32],
+        txs: vec![],
+    };
+    let block2 = Block {
+        height: 2,
+        round: 0,
+        parent_hash: novai_consensus_types::block_hash(&block1),
+        state_root: [0xbb; 32],
+        txs: vec![],
+    };
+
+    // The receiver's SMT root must match the first synced block's state_root
+    // so the existing C-01 state-root check passes and execution reaches the
+    // Fix A2 certification logic.
+    {
+        let mut db2 = node2.db.lock().unwrap();
+        let root_bytes = novai_state::encode_smt_root_v1(&block1.state_root);
+        db2.put(novai_state::KEY_SMT_ROOT, &root_bytes).unwrap();
+    }
+    (node2, sk1, addr1, block1, block2)
+}
+
+#[test]
+fn sync_rejects_uncertified_block() {
+    // THE 535004 regression: a block carrying no certifying QC must NOT
+    // advance committed_height via the lenient sync path. This is the exact
+    // mechanism that let the uncertified 535003 become committed and wedged
+    // the chain.
+    let (node2, _sk1, addr1, block1, block2) = a2_receiver_fixture();
+    let response = BlockResponse {
+        responder: addr1,
+        request_start: 1,
+        request_end: 2,
+        blocks: vec![block1, block2],
+        qcs: vec![None, None],
+    };
+    node2.handle_block_response(response).unwrap();
+    assert_eq!(
+        node2.state.lock().unwrap().committed_height,
+        0,
+        "uncertified blocks must not advance the cursor"
+    );
+}
+
+#[test]
+fn sync_advances_only_certified_prefix() {
+    // block1 carries a valid QC, block2 does not: the cursor advances to 1
+    // and stops, never reaching the uncertified block2.
+    let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
+    let qc1 = certifying_qc(&sk1, addr1, &block1);
+    let response = BlockResponse {
+        responder: addr1,
+        request_start: 1,
+        request_end: 2,
+        blocks: vec![block1, block2],
+        qcs: vec![Some(qc1), None],
+    };
+    node2.handle_block_response(response).unwrap();
+    assert_eq!(
+        node2.state.lock().unwrap().committed_height,
+        1,
+        "the cursor must stop at the first uncertified block"
+    );
+}
+
+#[test]
+fn sync_rejects_wrong_height_qc() {
+    // A QC validly certifying block1's hash but claiming the wrong height
+    // must not certify block1.
+    let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
+    let mut qc = certifying_qc(&sk1, addr1, &block1);
+    qc.height = 9;
+    let response = BlockResponse {
+        responder: addr1,
+        request_start: 1,
+        request_end: 2,
+        blocks: vec![block1, block2],
+        qcs: vec![Some(qc), None],
+    };
+    node2.handle_block_response(response).unwrap();
+    assert_eq!(
+        node2.state.lock().unwrap().committed_height,
+        0,
+        "a wrong-height QC must not certify the block"
+    );
+}
+
+#[test]
+fn sync_rejects_qc_for_different_block() {
+    // A QC at block1's height, validly signed, but bound to block2's hash
+    // must not certify block1.
+    let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
+    let wrong_hash = novai_consensus_types::block_hash(&block2);
+    let qc = QC {
+        height: 1,
+        round: 0,
+        block_hash: wrong_hash,
+        votes: vec![signed_vote(&sk1, addr1, 1, 0, wrong_hash)],
+    };
+    let response = BlockResponse {
+        responder: addr1,
+        request_start: 1,
+        request_end: 2,
+        blocks: vec![block1, block2],
+        qcs: vec![Some(qc), None],
+    };
+    node2.handle_block_response(response).unwrap();
+    assert_eq!(
+        node2.state.lock().unwrap().committed_height,
+        0,
+        "a QC bound to a different block must not certify block1"
+    );
+}
+
+#[test]
+fn sync_persists_certified_qc_rows() {
+    // The Stage 1 to Stage 2 delta: a certified sync writes the QC row at
+    // qc_key(height), so the synced node can in turn serve and certify it to
+    // the next lagging peer.
+    let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
+    let qc1 = certifying_qc(&sk1, addr1, &block1);
+    let qc2 = certifying_qc(&sk1, addr1, &block2);
+    let response = BlockResponse {
+        responder: addr1,
+        request_start: 1,
+        request_end: 2,
+        blocks: vec![block1, block2],
+        qcs: vec![Some(qc1.clone()), Some(qc2.clone())],
+    };
+    node2.handle_block_response(response).unwrap();
+    assert_eq!(node2.state.lock().unwrap().committed_height, 2);
+    let db2 = node2.db.lock().unwrap();
+    assert_eq!(
+        ConsensusState::load_qc_at_height(&*db2, 1).unwrap(),
+        Some(qc1)
+    );
+    assert_eq!(
+        ConsensusState::load_qc_at_height(&*db2, 2).unwrap(),
+        Some(qc2)
+    );
 }

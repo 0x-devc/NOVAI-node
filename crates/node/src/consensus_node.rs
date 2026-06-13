@@ -838,12 +838,21 @@ impl ConsensusNode {
 
         // Filter out blocks we've already committed (stale sync response).
         // This happens when committed_height advances between request and response.
-        let blocks: Vec<_> = response
+        //
+        // Fix A2 (gate-equivocation-535004): pair each fresh block with its
+        // positionally-paired certifying QC from the Stage 1 qcs field, and
+        // filter already-committed blocks while keeping each block aligned
+        // with its QC. response.qcs.get(i) tolerates a malicious peer that
+        // sends fewer qcs than blocks: an unpaired block gets None and so is
+        // treated as uncertified when the cursor advance certifies below.
+        let pairs: Vec<(Block, Option<QC>)> = response
             .blocks
             .iter()
-            .filter(|b| b.height > committed_height)
-            .cloned()
+            .enumerate()
+            .filter(|(_, b)| b.height > committed_height)
+            .map(|(i, b)| (b.clone(), response.qcs.get(i).cloned().flatten()))
             .collect();
+        let blocks: Vec<Block> = pairs.iter().map(|(b, _)| b.clone()).collect();
 
         if blocks.is_empty() {
             if let (Some(first), Some(last)) = (response.blocks.first(), response.blocks.last()) {
@@ -962,8 +971,6 @@ impl ConsensusNode {
             "Cached synced blocks"
         );
 
-        let last_received_height = blocks.last().unwrap().height;
-
         // Try commit rule with current highest_qc (may succeed if we now
         // have enough blocks for the 3-chain rule).
         if let Some(hqc) = state.highest_qc.clone() {
@@ -996,19 +1003,75 @@ impl ConsensusNode {
             }
         }
 
-        // Advance committed_height for verified sync blocks even if the
-        // full commit chain to highest_qc isn't available yet.
-        // These blocks are chain-verified and stored to DB — they were
-        // already committed by network consensus.
+        // Fix A2 (gate-equivocation-535004): advance committed_height ONLY
+        // across the contiguous prefix of synced blocks that each carry a
+        // valid certifying QC. The Q1 invariant: no block advances
+        // committed_height unless a valid certifying QC for THAT block is
+        // verified locally first. This replaces the previous lenient cursor
+        // advance, which trusted contiguity and the state root alone and so
+        // let an uncertified block (the 535003 wedge) become committed via
+        // sync, with the cursor then sitting above highest_qc forever.
         //
-        // The cursor Put is folded into the same sync_ops batch as the
-        // block storage above so that "blocks stored" and "cursor
-        // advanced" are atomic; previously they were two separate writes
-        // (see latent bug A comment near the sync_ops accumulator).
-        if state.committed_height < last_received_height {
-            // Execute synced blocks not already committed via the QC path above
+        // The QC-path commit above (the 3-chain rule) may have already
+        // advanced committed_height; the walk below starts from the current
+        // committed_height + 1 and certifies only blocks beyond it. Blocks
+        // already committed by that path are skipped. The cursor Put and the
+        // certified QC rows are folded into the same sync_ops batch as the
+        // block storage so all three are atomic (latent bug A).
+        let n = self.validator_set.len();
+        let f = (n - 1) / 3;
+        let quorum = 2 * f + 1;
+
+        let mut certified: Vec<Block> = Vec::new();
+        let mut certified_qcs: Vec<(u64, QC)> = Vec::new();
+        let mut expected = state.committed_height + 1;
+        for (block, qc) in &pairs {
+            if block.height < expected {
+                continue; // already committed (e.g. by the QC-path commit above)
+            }
+            if block.height != expected {
+                break; // gap in the contiguous prefix, certify no further
+            }
+            let qc = match qc {
+                Some(qc) => qc,
+                None => {
+                    tracing::warn!(
+                        height = block.height,
+                        "Fix A2: synced block has no certifying QC, halting cursor advance"
+                    );
+                    break;
+                }
+            };
+            let block_hash = novai_consensus_types::block_hash(block);
+            if qc.height != block.height || qc.block_hash != block_hash {
+                tracing::warn!(
+                    height = block.height,
+                    qc_height = qc.height,
+                    "Fix A2: certifying QC not bound to this block, halting cursor advance"
+                );
+                break;
+            }
+            if let Err(e) =
+                ConsensusState::verify_qc_well_formed(qc, &self.validator_pubkeys_vec, quorum)
+            {
+                tracing::warn!(
+                    height = block.height,
+                    error = ?e,
+                    "Fix A2: certifying QC failed well-formedness, halting cursor advance"
+                );
+                break;
+            }
+            certified.push(block.clone());
+            certified_qcs.push((block.height, qc.clone()));
+            expected += 1;
+        }
+
+        if let Some(last_certified) = certified.last() {
+            let new_committed_height = last_certified.height;
+            // Execute the certified blocks not already committed via the QC
+            // path above.
             let already = state.committed_height;
-            let remaining: Vec<_> = blocks
+            let remaining: Vec<_> = certified
                 .iter()
                 .filter(|b| b.height > already)
                 .cloned()
@@ -1016,14 +1079,32 @@ impl ConsensusNode {
             if !remaining.is_empty() {
                 self.execute_committed_blocks(&mut db, &remaining);
             }
-            state.committed_height = last_received_height;
+            state.committed_height = new_committed_height;
             sync_ops.push(WriteOp::Put(
                 novai_state::KEY_COMMITTED_HEIGHT.to_vec(),
-                last_received_height.to_be_bytes().to_vec(),
+                new_committed_height.to_be_bytes().to_vec(),
             ));
+            // Persist each certified block's QC at qc_key(height) in the same
+            // atomic batch (the Stage 1 to Stage 2 delta: the sync path now
+            // stores QCs, so a synced node ends up with dense QC rows too and
+            // can in turn serve and certify them to the next lagging peer).
+            for (height, qc) in &certified_qcs {
+                match novai_consensus_types::codec::encode_qc_v1(qc) {
+                    Ok(qc_bytes) => {
+                        sync_ops.push(WriteOp::Put(novai_state::qc_key(*height), qc_bytes));
+                    }
+                    Err(e) => {
+                        // The QC just passed verify_qc_well_formed, which
+                        // calls encode_qc_v1, so this branch is unreachable;
+                        // log defensively rather than drop silently.
+                        tracing::warn!(height, error = ?e, "Fix A2: certified QC failed to encode");
+                    }
+                }
+            }
             tracing::info!(
-                committed_height = last_received_height,
-                "Sync: advanced committed_height (chunk complete)"
+                committed_height = new_committed_height,
+                certified = certified.len(),
+                "Sync: advanced committed_height across certified prefix"
             );
         }
 
