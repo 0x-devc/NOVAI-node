@@ -86,6 +86,11 @@ pub struct BlockResponse {
     pub request_start: u64,
     pub request_end: u64,
     pub blocks: Vec<Block>,
+    /// Certifying QCs carried alongside `blocks`, positionally paired:
+    /// `qcs[i]` accompanies `blocks[i]`. `None` means the responder has
+    /// no QC for that block's height. Stage 1 transports these without
+    /// judgment; receive-side verification is Stage 2.
+    pub qcs: Vec<Option<QC>>,
 }
 
 /// Compute the hash of a block using canonical encoding.

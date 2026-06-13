@@ -701,6 +701,70 @@ impl ConsensusNode {
         Ok(())
     }
 
+    /// Build the response for a block request: blocks from DB with
+    /// in-memory cache fallback, each paired positionally with its
+    /// certifying QC (DB row via load_qc_at_height, qc_cache fallback
+    /// for live-tail QCs not yet written as rows, None when neither).
+    ///
+    /// Extracted from handle_block_request so tests can assert on the
+    /// response without capturing a network broadcast.
+    pub fn build_block_response(
+        &self,
+        request: &novai_consensus_types::BlockRequest,
+    ) -> novai_consensus_types::BlockResponse {
+        // Clamp range to SYNC_CHUNK_SIZE to prevent malicious large requests
+        let clamped_end = request
+            .end_height
+            .min(request.start_height.saturating_add(SYNC_CHUNK_SIZE - 1));
+
+        let state = self.state.lock_or_recover();
+        let db = self.db.lock_or_recover();
+
+        // Load individual blocks from DB, falling back to in-memory cache.
+        // Each served block gets exactly one qcs entry, so the vectors
+        // stay positionally paired. A missing QC is represented
+        // faithfully as None, never skipped silently.
+        let mut blocks = Vec::new();
+        let mut qcs: Vec<Option<QC>> = Vec::new();
+        for height in request.start_height..=clamped_end {
+            match ConsensusState::load_block(&*db, height) {
+                Ok(Some(block)) => blocks.push(block),
+                _ => {
+                    // Fallback: check in-memory block cache
+                    if let Some(block) = state.block_cache.get(&height) {
+                        blocks.push(Block::clone(block));
+                    } else {
+                        break; // Stop at first missing block
+                    }
+                }
+            }
+            let qc = match ConsensusState::load_qc_at_height(&*db, height) {
+                Ok(Some(qc)) => Some(qc),
+                Ok(None) => state.qc_cache.get(&height).cloned(),
+                Err(e) => {
+                    tracing::warn!(
+                        height,
+                        error = ?e,
+                        "Block response: QC row unreadable, sending None"
+                    );
+                    None
+                }
+            };
+            qcs.push(qc);
+        }
+
+        drop(db);
+        drop(state);
+
+        novai_consensus_types::BlockResponse {
+            responder: self.our_address,
+            request_start: request.start_height,
+            request_end: request.end_height,
+            blocks,
+            qcs,
+        }
+    }
+
     /// Handle incoming block request from a peer.
     ///
     /// Serves blocks from DB first, falling back to in-memory cache for blocks
@@ -716,35 +780,11 @@ impl ConsensusNode {
             "Received block request"
         );
 
-        // Clamp range to SYNC_CHUNK_SIZE to prevent malicious large requests
-        let clamped_end = request
-            .end_height
-            .min(request.start_height.saturating_add(SYNC_CHUNK_SIZE - 1));
-
-        let state = self.state.lock_or_recover();
-        let db = self.db.lock_or_recover();
-
-        // Load individual blocks from DB, falling back to in-memory cache
-        let mut blocks = Vec::new();
-        for height in request.start_height..=clamped_end {
-            match ConsensusState::load_block(&*db, height) {
-                Ok(Some(block)) => blocks.push(block),
-                _ => {
-                    // Fallback: check in-memory block cache
-                    if let Some(block) = state.block_cache.get(&height) {
-                        blocks.push(Block::clone(block));
-                    } else {
-                        break; // Stop at first missing block
-                    }
-                }
-            }
-        }
-
-        drop(db);
-        drop(state);
+        let response = self.build_block_response(&request);
 
         tracing::debug!(
-            count = blocks.len(),
+            count = response.blocks.len(),
+            qc_count = response.qcs.iter().filter(|q| q.is_some()).count(),
             start_height = request.start_height,
             end_height = request.end_height,
             requester = ?&request.requester[..4],
@@ -752,13 +792,6 @@ impl ConsensusNode {
         );
 
         // Send response with whatever blocks we have
-        let response = novai_consensus_types::BlockResponse {
-            responder: self.our_address,
-            request_start: request.start_height,
-            request_end: request.end_height,
-            blocks,
-        };
-
         self.broadcast(NetworkMessage::BlockResponse(response))?;
 
         Ok(())

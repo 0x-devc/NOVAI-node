@@ -143,6 +143,7 @@ fn test_sync_from_peer_on_restart() {
         request_start: 1,
         request_end: 2,
         blocks: vec![block1, block2],
+        qcs: vec![None, None],
     };
 
     // Node2 handles the response

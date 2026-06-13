@@ -51,7 +51,12 @@ pub const TIMEOUT_SIGNED_V1: u8 = 0x01;
 pub const BLOCK_REQUEST_V1: u8 = 0x01;
 
 /// Codec version for `BlockResponse`.
+/// Superseded by [`BLOCK_RESPONSE_V2`]; V1 payloads are rejected at
+/// decode since the qcs trailer became mandatory.
 pub const BLOCK_RESPONSE_V1: u8 = 0x01;
+
+/// Codec version for `BlockResponse` (V2 adds the mandatory qcs trailer).
+pub const BLOCK_RESPONSE_V2: u8 = 0x02;
 
 /// Maximum transactions per block (`DoS` prevention).
 pub const MAX_TXS_PER_BLOCK: usize = 10_000;
@@ -689,18 +694,28 @@ pub const MAX_BLOCKS_PER_RESPONSE: usize = 1000;
 ///
 /// Format:
 /// ```text
-/// [version:1][responder:32][request_start:8][request_end:8][block_count:4][blocks_bytes]
+/// [version:1][responder:32][request_start:8][request_end:8]
+/// [block_count:4][blocks_bytes][qc_count:4][qc_entries]
+/// qc_entry: [has_qc:1][qc_bytes?]
 /// ```
 ///
+/// The qcs trailer is positionally paired with blocks by the producer
+/// (qcs[i] accompanies blocks[i]); the codec does not enforce equal
+/// lengths, it transports what it is given. Pairing enforcement is a
+/// consumer concern (Stage 2).
+///
 /// # Errors
-/// Returns error if too many blocks or block encoding fails.
-pub fn encode_block_response_v1(resp: &BlockResponse) -> Result<Vec<u8>, CodecError> {
+/// Returns error if too many blocks or qcs, or if encoding fails.
+pub fn encode_block_response_v2(resp: &BlockResponse) -> Result<Vec<u8>, CodecError> {
     if resp.blocks.len() > MAX_BLOCKS_PER_RESPONSE {
         return Err(CodecError::TooManyTransactions); // Reuse error for now
     }
+    if resp.qcs.len() > MAX_BLOCKS_PER_RESPONSE {
+        return Err(CodecError::TooManyVotes); // Reuse error for now
+    }
 
     let mut buf = Vec::new();
-    buf.push(BLOCK_RESPONSE_V1);
+    buf.push(BLOCK_RESPONSE_V2);
     buf.extend_from_slice(&resp.responder);
     buf.extend_from_slice(&resp.request_start.to_be_bytes());
     buf.extend_from_slice(&resp.request_end.to_be_bytes());
@@ -714,18 +729,43 @@ pub fn encode_block_response_v1(resp: &BlockResponse) -> Result<Vec<u8>, CodecEr
         buf.extend_from_slice(&block_bytes);
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    let qc_count = resp.qcs.len() as u32;
+    buf.extend_from_slice(&qc_count.to_be_bytes());
+
+    for qc in &resp.qcs {
+        match qc {
+            Some(qc) => {
+                buf.push(0x01); // has_qc = true
+                let qc_bytes = encode_qc_v1(qc)?;
+                buf.extend_from_slice(&qc_bytes);
+            }
+            None => buf.push(0x00), // has_qc = false
+        }
+    }
+
     Ok(buf)
 }
 
 /// Decode a `BlockResponse` from canonical bytes.
 ///
+/// V1 payloads (version byte 0x01, no qcs trailer) are rejected with
+/// `UnsupportedVersion`: the fleet redeploys on one binary from fresh
+/// genesis, and a QC-less legacy response would silently undermine the
+/// Stage 2 certification check.
+///
+/// The decoder does not enforce `qcs.len() == blocks.len()`; it
+/// faithfully reproduces what was encoded. Pairing enforcement is a
+/// consumer concern (Stage 2).
+///
 /// # Errors
-/// Returns error if buffer is too short, version is unsupported, or block decoding fails.
+/// Returns error if buffer is too short, version is unsupported, counts
+/// exceed limits, the `has_qc` flag is not 0x00/0x01, or decoding fails.
 ///
 /// # Panics
 /// Panics if `MAX_BLOCKS_PER_RESPONSE` constant doesn't fit in u32 (should never happen).
-pub fn decode_block_response_v1(buf: &[u8]) -> Result<BlockResponse, CodecError> {
-    const MIN_SIZE: usize = 1 + 32 + 8 + 8 + 4; // 53 bytes
+pub fn decode_block_response_v2(buf: &[u8]) -> Result<BlockResponse, CodecError> {
+    const MIN_SIZE: usize = 1 + 32 + 8 + 8 + 4 + 4; // 57 bytes (empty blocks + empty qcs)
 
     if buf.len() < MIN_SIZE {
         return Err(CodecError::BufferTooShort);
@@ -734,7 +774,7 @@ pub fn decode_block_response_v1(buf: &[u8]) -> Result<BlockResponse, CodecError>
     let mut input = buf;
 
     let version = read_u8(&mut input)?;
-    if version != BLOCK_RESPONSE_V1 {
+    if version != BLOCK_RESPONSE_V2 {
         return Err(CodecError::UnsupportedVersion);
     }
 
@@ -755,11 +795,35 @@ pub fn decode_block_response_v1(buf: &[u8]) -> Result<BlockResponse, CodecError>
         blocks.push(block);
     }
 
+    let qc_count = read_u32_be(&mut input)?;
+    if qc_count > max_blocks {
+        return Err(CodecError::TooManyVotes); // Reuse error
+    }
+
+    // DoS prevention: each qc entry is at least the 1-byte has_qc flag.
+    // Bound the allocation by what the buffer can actually hold.
+    if input.len() < qc_count as usize {
+        return Err(CodecError::BufferTooShort);
+    }
+
+    let mut qcs = Vec::with_capacity(qc_count as usize);
+    for _ in 0..qc_count {
+        let has_qc = read_u8(&mut input)?;
+        match has_qc {
+            0x00 => qcs.push(None),
+            0x01 => qcs.push(Some(decode_qc_v1_internal(&mut input)?)),
+            // Canonical encoding: exactly one valid byte per logical
+            // value. Any other flag byte is malformed input.
+            _ => return Err(CodecError::UnsupportedVersion),
+        }
+    }
+
     Ok(BlockResponse {
         responder,
         request_start,
         request_end,
         blocks,
+        qcs,
     })
 }
 
@@ -1173,16 +1237,18 @@ mod tests {
             request_start: 10,
             request_end: 20,
             blocks: vec![],
+            qcs: vec![],
         };
 
-        let encoded = encode_block_response_v1(&response_empty).unwrap();
-        let decoded = decode_block_response_v1(&encoded).unwrap();
+        let encoded = encode_block_response_v2(&response_empty).unwrap();
+        let decoded = decode_block_response_v2(&encoded).unwrap();
 
         assert_eq!(decoded.responder, response_empty.responder);
         assert_eq!(decoded.request_start, response_empty.request_start);
         assert_eq!(decoded.request_end, response_empty.request_end);
         assert_eq!(decoded.blocks.len(), 0);
-        assert_eq!(encoded.len(), 53); // version + responder + start + end + count
+        assert_eq!(decoded.qcs.len(), 0);
+        assert_eq!(encoded.len(), 57); // version + responder + start + end + block_count + qc_count
 
         // Test BlockResponse roundtrip (with blocks)
         let block1 = Block {
@@ -1206,10 +1272,11 @@ mod tests {
             request_start: 10,
             request_end: 11,
             blocks: vec![block1.clone(), block2.clone()],
+            qcs: vec![None, None],
         };
 
-        let encoded = encode_block_response_v1(&response_with_blocks).unwrap();
-        let decoded = decode_block_response_v1(&encoded).unwrap();
+        let encoded = encode_block_response_v2(&response_with_blocks).unwrap();
+        let decoded = decode_block_response_v2(&encoded).unwrap();
 
         assert_eq!(decoded.responder, response_with_blocks.responder);
         assert_eq!(decoded.request_start, response_with_blocks.request_start);

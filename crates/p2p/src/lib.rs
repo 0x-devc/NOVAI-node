@@ -108,7 +108,7 @@ pub fn encode_wire_message(msg: &NetworkMessage) -> Result<Vec<u8>, P2PError> {
             (MessageKind::BlockRequest, bytes)
         }
         NetworkMessage::BlockResponse(resp) => {
-            let bytes = novai_consensus_types::codec::encode_block_response_v1(resp)
+            let bytes = novai_consensus_types::codec::encode_block_response_v2(resp)
                 .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
             (MessageKind::BlockResponse, bytes)
         }
@@ -192,7 +192,7 @@ pub fn read_wire_message(stream: &mut impl Read) -> Result<NetworkMessage, P2PEr
             Ok(NetworkMessage::BlockRequest(req))
         }
         MessageKind::BlockResponse => {
-            let resp = novai_consensus_types::codec::decode_block_response_v1(&payload)
+            let resp = novai_consensus_types::codec::decode_block_response_v2(&payload)
                 .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
             Ok(NetworkMessage::BlockResponse(resp))
         }
