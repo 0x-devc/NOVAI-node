@@ -758,3 +758,71 @@ fn sync_persists_certified_qc_rows() {
         Some(qc2)
     );
 }
+
+// ===== Stage 2 Fix D (gate-equivocation-535004): check_timeout backoff =====
+
+/// The check_timeout failure path must record the attempt so the existing
+/// rebroadcast throttle backs off repeated create_timeout failures. Before
+/// Fix D the error branch returned None without setting last_timeout_time,
+/// so the throttle never engaged and the loop spun at roughly 195/sec.
+#[test]
+fn check_timeout_backs_off_on_repeated_failure() {
+    use std::time::{Duration, Instant};
+
+    let sk = SigningKey::generate(&mut OsRng);
+    let pk = sk.verifying_key();
+    let addr = address_from_pubkey(&pk);
+    let mut validator_pubkeys = HashMap::new();
+    validator_pubkeys.insert(addr, pk);
+    // base_timeout_ms 1000 gives a 1s throttle window, far larger than the
+    // microseconds between the two check_timeout calls below.
+    let node = ConsensusNode::new(sk, vec![addr], validator_pubkeys, 1000);
+
+    // Make the round timer appear long-elapsed so check_timeout reaches
+    // create_timeout without sleeping.
+    *node.round_start_time.lock().unwrap() = Instant::now()
+        .checked_sub(Duration::from_secs(3600))
+        .expect("test host uptime should exceed one hour");
+
+    // Poison highest_qc with a duplicate-voter QC so create_timeout fails to
+    // encode it (the node2 shape from the incident).
+    {
+        let dup_vote = Vote {
+            height: 1,
+            round: 0,
+            block_hash: [0x11; 32],
+            voter: addr,
+            signature: [0u8; 64],
+            ai_signal_commitment: None,
+        };
+        let mut state = node.state.lock().unwrap();
+        state.highest_qc = Some(QC {
+            height: 1,
+            round: 0,
+            block_hash: [0x11; 32],
+            votes: vec![dup_vote.clone(), dup_vote],
+        });
+    }
+
+    // First call: create_timeout fails. Fix D records the attempt time.
+    assert!(
+        node.check_timeout().is_none(),
+        "a failed create_timeout yields no timeout"
+    );
+    assert!(
+        node.last_timeout_time.lock().unwrap().is_some(),
+        "Fix D must record the failed attempt so the throttle can engage"
+    );
+
+    // Repair highest_qc so create_timeout WOULD now succeed.
+    node.state.lock().unwrap().highest_qc = None;
+
+    // Second call, microseconds later: the throttle must suppress it even
+    // though create_timeout could now succeed. Without Fix D the first call
+    // left last_timeout_time None, this call would reach create_timeout and
+    // return Some, and this assertion would fail.
+    assert!(
+        node.check_timeout().is_none(),
+        "the rebroadcast throttle must back off the immediate retry"
+    );
+}

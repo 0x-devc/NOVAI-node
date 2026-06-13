@@ -902,7 +902,38 @@ impl ConsensusState {
         timeout: Timeout,
         validator_pubkeys: &[(Address, VerifyingKey)],
     ) -> Result<(), ConsensusError> {
-        // Verify timeout is for next height
+        // Fix D (gate-equivocation-535004): adopt a dominating QC from this
+        // timeout BEFORE the height gate below, so a node stuck at a wrong
+        // view can self-heal. Without this, a height-mismatched timeout is
+        // rejected at the gate and the node never learns the dominating QC
+        // that would let it catch up. The embedded QC is fully verified here
+        // via verify_qc_well_formed (quorum distinct voters, each in the set,
+        // each signature valid), so it is trustworthy independent of this
+        // timeout wrapper's own signature, which is not checked until after
+        // the gate. This is best-effort: a malformed embedded QC is ignored
+        // here, not an error, and the gate below still decides the timeout's
+        // own fate. The post-gate H-01 adoption is duplicated, not moved, so
+        // the in-view path is unchanged (it becomes a no-op once this adopts).
+        if let Some(ref qc) = timeout.highest_qc {
+            let dominated = match &self.highest_qc {
+                None => true,
+                Some(existing) => {
+                    qc.height > existing.height
+                        || (qc.height == existing.height && qc.round > existing.round)
+                }
+            };
+            if dominated {
+                let n = validator_pubkeys.len();
+                let f = (n - 1) / 3;
+                let quorum = 2 * f + 1;
+                if Self::verify_qc_well_formed(qc, validator_pubkeys, quorum).is_ok() {
+                    self.highest_qc = Some(qc.clone());
+                }
+            }
+        }
+
+        // Verify timeout is for next height. Computed AFTER the early adoption
+        // above so the gate reflects a freshly self-healed view.
         // Expected timeout height is max(committed_height, highest_qc_height) + 1
         let expected_timeout_height = match &self.highest_qc {
             Some(qc) => std::cmp::max(self.height, qc.height) + 1,
@@ -3652,6 +3683,122 @@ mod tests {
         assert!(
             state.add_vote_verified(vote, &pubkeys).is_err(),
             "add_vote_verified must reject a same-round duplicate via voted_in_round"
+        );
+    }
+
+    // ===== Stage 2 Fix D (gate-equivocation-535004): self-heal on timeout =====
+
+    /// Build a domain-separated, validly signed timeout carrying `qc`.
+    fn fixd_signed_timeout(
+        signer: &SigningKey,
+        voter: Address,
+        height: u64,
+        round: u64,
+        qc: Option<QC>,
+    ) -> Timeout {
+        let unsigned = Timeout {
+            height,
+            round,
+            voter,
+            highest_qc: qc,
+            signature: [0u8; 64],
+        };
+        let unsigned_bytes =
+            novai_consensus_types::codec::encode_timeout_v1_unsigned(&unsigned).unwrap();
+        let mut to_sign = Vec::new();
+        to_sign.extend_from_slice(b"NOVAI_TIMEOUT_V1");
+        to_sign.extend_from_slice(&unsigned_bytes);
+        let signature = novai_crypto::sign_bytes(signer, &to_sign);
+        Timeout {
+            signature,
+            ..unsigned
+        }
+    }
+
+    #[test]
+    fn add_timeout_early_adoption_self_heals_wrong_view() {
+        // A node at view 0 receives a timeout from a peer far ahead, carrying
+        // a dominating valid QC. Before Fix D the height gate rejected the
+        // timeout and the node never learned the QC; now it adopts the QC
+        // before the gate and self-heals.
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let bh = [0x55; 32];
+        let qc5 = QC {
+            height: 5,
+            round: 0,
+            block_hash: bh,
+            votes: (0..3)
+                .map(|i| fixb_signed_vote(&validators[i].1, validators[i].0, 5, 0, bh))
+                .collect(),
+        };
+        // After adopting QC(5), the node's expected timeout height is 6, so a
+        // timeout for height 6 is processed rather than rejected.
+        let timeout = fixd_signed_timeout(&validators[1].1, validators[1].0, 6, 0, Some(qc5));
+
+        let mut state = ConsensusState::new(validator_set[0]);
+        let result = state.add_timeout(timeout, &pubkeys);
+
+        assert!(
+            result.is_ok(),
+            "the bringing timeout should be accepted after self-heal, got {result:?}"
+        );
+        assert_eq!(
+            state.highest_qc.as_ref().map(|q| q.height),
+            Some(5),
+            "the wrong-view node must adopt the dominating QC and self-heal"
+        );
+    }
+
+    #[test]
+    fn add_timeout_height_mismatch_absent_qc_rejected() {
+        // A height-mismatched timeout carrying no QC has nothing to adopt and
+        // is still rejected at the gate.
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let timeout = fixd_signed_timeout(&validators[1].1, validators[1].0, 6, 0, None);
+
+        let mut state = ConsensusState::new(validator_set[0]);
+        let result = state.add_timeout(timeout, &pubkeys);
+        assert!(
+            result.is_err(),
+            "a height-mismatched timeout with no QC must still be rejected"
+        );
+        assert!(state.highest_qc.is_none());
+    }
+
+    #[test]
+    fn add_timeout_height_mismatch_invalid_qc_rejected_no_adoption() {
+        // A height-mismatched timeout carrying a sub-quorum QC must not adopt
+        // the QC (it fails verify_qc_well_formed) and is still rejected.
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let bh = [0x55; 32];
+        let bad_qc = QC {
+            height: 5,
+            round: 0,
+            block_hash: bh,
+            votes: (0..2)
+                .map(|i| fixb_signed_vote(&validators[i].1, validators[i].0, 5, 0, bh))
+                .collect(),
+        };
+        let timeout = fixd_signed_timeout(&validators[1].1, validators[1].0, 6, 0, Some(bad_qc));
+
+        let mut state = ConsensusState::new(validator_set[0]);
+        let result = state.add_timeout(timeout, &pubkeys);
+        assert!(
+            result.is_err(),
+            "a height-mismatched timeout with an invalid QC must be rejected"
+        );
+        assert!(
+            state.highest_qc.is_none(),
+            "an invalid QC must NOT be adopted even via the early-adoption pass"
         );
     }
 }

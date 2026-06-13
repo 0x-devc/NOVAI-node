@@ -591,7 +591,17 @@ impl ConsensusNode {
                 Some(timeout)
             }
             Err(e) => {
+                // Fix D (gate-equivocation-535004): record the attempt time on
+                // the failure path too. The success branch above sets
+                // last_timeout_time, but this branch previously did not, so the
+                // rebroadcast throttle never engaged on repeated create_timeout
+                // failures and the loop spun at roughly 195/sec, producing 64MB
+                // in 30 minutes and overwriting the incident onset logs.
+                // Setting it here reuses the existing throttle with no new
+                // field: the next attempt waits one timeout interval, which
+                // preserves forensic history.
                 tracing::error!(?e, "Failed to create timeout");
+                *self.last_timeout_time.lock_or_recover() = Some(Instant::now());
                 None
             }
         }
