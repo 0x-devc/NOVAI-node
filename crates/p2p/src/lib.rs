@@ -638,4 +638,104 @@ mod tests {
         assert_eq!(timeout.height, 5);
         assert_eq!(timeout.round, 2);
     }
+
+    #[test]
+    fn full_block_response_with_qcs_fits_wire_cap() {
+        use novai_consensus_types::codec::MAX_BLOCKS_PER_RESPONSE;
+        use novai_consensus_types::Block;
+
+        // A maximal response: MAX_BLOCKS_PER_RESPONSE empty blocks, each
+        // paired with a quorum-3 QC (the 4-validator testnet shape). The
+        // qcs trailer must not push this over MAX_WIRE_MSG_BYTES.
+        let max = u64::try_from(MAX_BLOCKS_PER_RESPONSE).unwrap();
+        let mut blocks = Vec::with_capacity(MAX_BLOCKS_PER_RESPONSE);
+        let mut qcs = Vec::with_capacity(MAX_BLOCKS_PER_RESPONSE);
+        for height in 1..=max {
+            blocks.push(Block {
+                height,
+                round: 0,
+                parent_hash: [0u8; 32],
+                state_root: [0u8; 32],
+                txs: vec![],
+            });
+            let votes: Vec<Vote> = (1u8..=3)
+                .map(|v| Vote {
+                    height,
+                    round: 0,
+                    block_hash: [0x42; 32],
+                    voter: [v; 32],
+                    signature: [v; 64],
+                    ai_signal_commitment: None,
+                })
+                .collect();
+            qcs.push(Some(QC {
+                height,
+                round: 0,
+                block_hash: [0x42; 32],
+                votes,
+            }));
+        }
+        let resp = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 1,
+            request_end: max,
+            blocks,
+            qcs,
+        };
+
+        let wire = encode_wire_message(&NetworkMessage::BlockResponse(resp))
+            .expect("maximal empty-block response with QCs must fit the wire cap");
+        assert!(wire.len() <= 4 + MAX_WIRE_MSG_BYTES as usize);
+    }
+
+    #[test]
+    fn oversized_block_response_fails_cleanly_at_encode() {
+        use novai_consensus_types::Block;
+
+        // Inflate the payload past MAX_WIRE_MSG_BYTES with two QCs of
+        // 8000 distinct voters each (about 1.2MB per QC, legal for the QC
+        // codec, which allows up to MAX_VOTES_PER_QC = 11000). The
+        // encoder must refuse with MessageTooLarge: a clean failure, not
+        // a panic and not a truncated send.
+        let big_qc = |height: u64| {
+            let votes: Vec<Vote> = (0u32..8000)
+                .map(|i| {
+                    let mut voter = [0u8; 32];
+                    voter[0] = u8::try_from(i % 256).unwrap();
+                    voter[1] = u8::try_from(i / 256).unwrap();
+                    Vote {
+                        height,
+                        round: 0,
+                        block_hash: [0x42; 32],
+                        voter,
+                        signature: [0x11; 64],
+                        ai_signal_commitment: None,
+                    }
+                })
+                .collect();
+            QC {
+                height,
+                round: 0,
+                block_hash: [0x42; 32],
+                votes,
+            }
+        };
+        let block = |height: u64| Block {
+            height,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs: vec![],
+        };
+        let resp = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 1,
+            request_end: 2,
+            blocks: vec![block(1), block(2)],
+            qcs: vec![Some(big_qc(1)), Some(big_qc(2))],
+        };
+
+        let err = encode_wire_message(&NetworkMessage::BlockResponse(resp)).unwrap_err();
+        assert!(matches!(err, P2PError::MessageTooLarge(_)));
+    }
 }

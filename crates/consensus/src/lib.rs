@@ -2975,4 +2975,215 @@ mod tests {
             }
         }
     }
+
+    // ===== Stage 1 (gate-equivocation-535004): dense per-height QC rows =====
+
+    /// Build a parent-chained run of empty blocks starting at `start`,
+    /// each paired with the QC that certifies it (same height, matching
+    /// block hash).
+    fn make_chained_blocks_with_qcs(start: u64, count: u64) -> (Vec<Block>, Vec<QC>) {
+        let mut blocks = Vec::new();
+        let mut qcs = Vec::new();
+        let mut parent = [0u8; 32];
+        for height in start..start + count {
+            let block = Block {
+                height,
+                round: 0,
+                parent_hash: parent,
+                state_root: [0xAA; 32],
+                txs: vec![],
+            };
+            let hash = novai_consensus_types::codec::hash_block_v1(&block).unwrap();
+            qcs.push(QC {
+                height,
+                round: 0,
+                block_hash: hash,
+                votes: vec![],
+            });
+            parent = hash;
+            blocks.push(block);
+        }
+        (blocks, qcs)
+    }
+
+    #[test]
+    fn test_dense_qc_row_for_every_committed_height() {
+        use novai_state::MemKv;
+
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+        let mut db = MemKv::new();
+
+        let (blocks, qcs) = make_chained_blocks_with_qcs(1, 3);
+        for qc in &qcs {
+            state.qc_cache.insert(qc.height, qc.clone());
+        }
+
+        // A trigger QC at height 5 commits the batch 1..=3 under the
+        // 3-chain rule (commit target = trigger height minus 2).
+        let trigger = QC {
+            height: 5,
+            round: 0,
+            block_hash: [0x55; 32],
+            votes: vec![],
+        };
+        state
+            .persist_commit_atomic(&mut db, &blocks, &trigger, 3, None)
+            .unwrap();
+
+        // Stage 1 invariant: every committed height has a retrievable
+        // certifying QC whose block_hash matches the committed block.
+        for (block, qc) in blocks.iter().zip(&qcs) {
+            let loaded = ConsensusState::load_qc_at_height(&db, block.height)
+                .unwrap()
+                .expect("committed height must have a QC row");
+            assert_eq!(loaded, *qc);
+            let block_hash = novai_consensus_types::codec::hash_block_v1(block).unwrap();
+            assert_eq!(loaded.block_hash, block_hash);
+        }
+
+        // The trigger QC row at its own height is unchanged behavior.
+        assert!(db.get(&qc_key(5)).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_dense_qc_missing_cache_entry_leaves_faithful_gap() {
+        use novai_state::MemKv;
+
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+        let mut db = MemKv::new();
+
+        let (blocks, qcs) = make_chained_blocks_with_qcs(1, 3);
+        // Height 2's certifying QC was never observed (the sync catch-up
+        // shape until Stage 2 carries QCs over the wire).
+        state.qc_cache.insert(1, qcs[0].clone());
+        state.qc_cache.insert(3, qcs[2].clone());
+
+        let trigger = QC {
+            height: 5,
+            round: 0,
+            block_hash: [0x55; 32],
+            votes: vec![],
+        };
+        state
+            .persist_commit_atomic(&mut db, &blocks, &trigger, 3, None)
+            .unwrap();
+
+        // The commit itself proceeds; the gap is recorded faithfully as
+        // an absent row, never fabricated.
+        assert_eq!(ConsensusState::load_committed_height(&db).unwrap(), 3);
+        assert!(ConsensusState::load_qc_at_height(&db, 1).unwrap().is_some());
+        assert!(ConsensusState::load_qc_at_height(&db, 2).unwrap().is_none());
+        assert!(ConsensusState::load_qc_at_height(&db, 3).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_dense_qc_mismatched_cache_entry_not_written() {
+        use novai_state::MemKv;
+
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+        let mut db = MemKv::new();
+
+        let (blocks, qcs) = make_chained_blocks_with_qcs(1, 3);
+        state.qc_cache.insert(1, qcs[0].clone());
+        state.qc_cache.insert(3, qcs[2].clone());
+        // The cached QC at height 2 certifies a DIFFERENT block. It must
+        // not be written as height 2's certifying QC row.
+        let mut wrong = qcs[1].clone();
+        wrong.block_hash = [0xEE; 32];
+        state.qc_cache.insert(2, wrong);
+
+        let trigger = QC {
+            height: 5,
+            round: 0,
+            block_hash: [0x55; 32],
+            votes: vec![],
+        };
+        state
+            .persist_commit_atomic(&mut db, &blocks, &trigger, 3, None)
+            .unwrap();
+
+        assert_eq!(ConsensusState::load_committed_height(&db).unwrap(), 3);
+        assert!(ConsensusState::load_qc_at_height(&db, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_dense_qc_batch_spanning_prune_boundary() {
+        use novai_state::MemKv;
+
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+        let mut db = MemKv::new();
+
+        // Seed old rows at heights 1..=3 that the prune must delete.
+        let (old_blocks, old_qcs) = make_chained_blocks_with_qcs(1, 3);
+        for (block, qc) in old_blocks.iter().zip(&old_qcs) {
+            db.put(&block_key(block.height), &encode_block_v1(block).unwrap())
+                .unwrap();
+            db.put(&qc_key(qc.height), &encode_qc_v1(qc).unwrap())
+                .unwrap();
+        }
+
+        // Commit a batch at heights PRUNE_RETAIN_BLOCKS + 1..=+3. Each
+        // committed height h prunes h - PRUNE_RETAIN_BLOCKS, so this batch
+        // deletes exactly heights 1..=3 while writing its own dense QC
+        // rows, all in one atomic batch.
+        let start = PRUNE_RETAIN_BLOCKS + 1;
+        let (blocks, qcs) = make_chained_blocks_with_qcs(start, 3);
+        for qc in &qcs {
+            state.qc_cache.insert(qc.height, qc.clone());
+        }
+        let trigger = QC {
+            height: start + 4,
+            round: 0,
+            block_hash: [0x55; 32],
+            votes: vec![],
+        };
+        state
+            .persist_commit_atomic(&mut db, &blocks, &trigger, start + 2, None)
+            .unwrap();
+
+        // Pruned: block and QC rows at heights 1..=3 are gone.
+        for height in 1..=3u64 {
+            assert!(db.get(&block_key(height)).unwrap().is_none());
+            assert!(ConsensusState::load_qc_at_height(&db, height)
+                .unwrap()
+                .is_none());
+        }
+        // Dense rows for the committed batch survive and decode correctly.
+        for (block, qc) in blocks.iter().zip(&qcs) {
+            let loaded = ConsensusState::load_qc_at_height(&db, block.height)
+                .unwrap()
+                .expect("dense QC row must survive the prune");
+            assert_eq!(loaded, *qc);
+        }
+    }
+
+    #[test]
+    fn test_load_qc_at_height_present_absent_corrupt() {
+        use novai_state::MemKv;
+
+        let mut db = MemKv::new();
+        let qc = QC {
+            height: 7,
+            round: 1,
+            block_hash: [0x77; 32],
+            votes: vec![],
+        };
+        db.put(&qc_key(7), &encode_qc_v1(&qc).unwrap()).unwrap();
+
+        // Present height: the exact QC comes back.
+        assert_eq!(ConsensusState::load_qc_at_height(&db, 7).unwrap(), Some(qc));
+        // Absent height: None, not an error.
+        assert_eq!(ConsensusState::load_qc_at_height(&db, 8).unwrap(), None);
+        // Corrupt row: a decode error surfaces as Err.
+        db.put(&qc_key(9), b"garbage").unwrap();
+        assert!(ConsensusState::load_qc_at_height(&db, 9).is_err());
+    }
 }

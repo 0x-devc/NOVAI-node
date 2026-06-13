@@ -2,7 +2,7 @@
 
 use ed25519_dalek::SigningKey;
 use novai_consensus::ConsensusState;
-use novai_consensus_types::{Block, BlockRequest, BlockResponse};
+use novai_consensus_types::{Block, BlockRequest, BlockResponse, QC};
 use novai_crypto::address_from_pubkey;
 use novai_node::consensus_node::ConsensusNode;
 use novai_state::Kv;
@@ -447,4 +447,98 @@ fn follower_evicts_committed_txs_under_single_sender_load() {
     println!(
         "✅ Follower mempool evicted {total_cycles} single-sender committed txs without hitting SenderLimitExceeded"
     );
+}
+
+/// Stage 1 (gate-equivocation-535004): build_block_response pairs each
+/// served block positionally with its certifying QC. Absence is a
+/// faithful None, and qc_cache covers live-tail QCs whose rows are not
+/// yet on disk.
+#[test]
+fn test_block_response_carries_qcs_positionally() {
+    let sk1 = SigningKey::generate(&mut OsRng);
+    let sk2 = SigningKey::generate(&mut OsRng);
+    let pk1 = sk1.verifying_key();
+    let pk2 = sk2.verifying_key();
+    let addr1 = address_from_pubkey(&pk1);
+    let addr2 = address_from_pubkey(&pk2);
+
+    let validator_set = vec![addr1, addr2];
+    let mut validator_pubkeys = HashMap::new();
+    validator_pubkeys.insert(addr1, pk1);
+    validator_pubkeys.insert(addr2, pk2);
+
+    let node1 = ConsensusNode::new(sk1, validator_set.clone(), validator_pubkeys.clone(), 1000);
+    let _node2 = ConsensusNode::new(sk2, validator_set, validator_pubkeys, 1000);
+
+    let block1 = Block {
+        height: 1,
+        round: 0,
+        parent_hash: [0u8; 32],
+        state_root: [0xaa; 32],
+        txs: vec![],
+    };
+    let block2 = Block {
+        height: 2,
+        round: 0,
+        parent_hash: novai_consensus_types::block_hash(&block1),
+        state_root: [0xbb; 32],
+        txs: vec![],
+    };
+
+    let qc1 = QC {
+        height: 1,
+        round: 0,
+        block_hash: novai_consensus_types::block_hash(&block1),
+        votes: vec![],
+    };
+
+    // Blocks 1 and 2 on disk; a QC row for height 1 only.
+    {
+        let mut db1 = node1.db.lock().unwrap();
+        db1.put(
+            &novai_state::block_key(1),
+            &novai_consensus_types::codec::encode_block_v1(&block1).unwrap(),
+        )
+        .unwrap();
+        db1.put(
+            &novai_state::block_key(2),
+            &novai_consensus_types::codec::encode_block_v1(&block2).unwrap(),
+        )
+        .unwrap();
+        db1.put(
+            &novai_state::qc_key(1),
+            &novai_consensus_types::codec::encode_qc_v1(&qc1).unwrap(),
+        )
+        .unwrap();
+    }
+
+    let request = BlockRequest {
+        requester: addr2,
+        start_height: 1,
+        end_height: 2,
+    };
+
+    let response = node1.build_block_response(&request);
+    assert_eq!(response.blocks.len(), 2);
+    assert_eq!(response.qcs.len(), 2, "one qcs entry per served block");
+    assert_eq!(response.qcs[0], Some(qc1.clone()));
+    assert_eq!(
+        response.qcs[1], None,
+        "missing QC must surface as an explicit None, never be skipped"
+    );
+
+    // Live-tail fallback: height 2's QC exists only in qc_cache.
+    let qc2 = QC {
+        height: 2,
+        round: 0,
+        block_hash: novai_consensus_types::block_hash(&block2),
+        votes: vec![],
+    };
+    node1.state.lock().unwrap().qc_cache.insert(2, qc2.clone());
+
+    let response = node1.build_block_response(&request);
+    assert_eq!(response.qcs[0], Some(qc1));
+    assert_eq!(response.qcs[1], Some(qc2));
+
+    println!("✅ build_block_response pairs blocks and QCs positionally");
 }

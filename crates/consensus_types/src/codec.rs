@@ -1285,4 +1285,288 @@ mod tests {
         assert_eq!(decoded.blocks[0].height, block1.height);
         assert_eq!(decoded.blocks[1].height, block2.height);
     }
+
+    // ===== Stage 1 (gate-equivocation-535004): BlockResponse V2 qcs =====
+
+    fn sample_qc(height: u64, block_hash: [u8; 32]) -> QC {
+        let mk_vote = |voter_byte: u8, signal: Option<[u8; 32]>| Vote {
+            height,
+            round: 0,
+            block_hash,
+            voter: [voter_byte; 32],
+            signature: [voter_byte; 64],
+            ai_signal_commitment: signal,
+        };
+        // Voters are pre-sorted so the encoder (which sorts) round-trips
+        // to an identical struct.
+        QC {
+            height,
+            round: 0,
+            block_hash,
+            votes: vec![
+                mk_vote(0xa1, None),
+                mk_vote(0xa2, Some([0xc2; 32])),
+                mk_vote(0xa3, None),
+            ],
+        }
+    }
+
+    fn sample_block(height: u64) -> Block {
+        Block {
+            height,
+            round: 0,
+            parent_hash: [0x10; 32],
+            state_root: [0x20; 32],
+            txs: vec![],
+        }
+    }
+
+    #[test]
+    fn block_response_v2_roundtrip_all_some() {
+        let b1 = sample_block(10);
+        let b2 = sample_block(11);
+        let q1 = sample_qc(10, hash_block_v1(&b1).unwrap());
+        let q2 = sample_qc(11, hash_block_v1(&b2).unwrap());
+        let resp = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 10,
+            request_end: 11,
+            blocks: vec![b1, b2],
+            qcs: vec![Some(q1), Some(q2)],
+        };
+
+        let encoded = encode_block_response_v2(&resp).unwrap();
+        assert_eq!(encoded[0], BLOCK_RESPONSE_V2);
+        let decoded = decode_block_response_v2(&encoded).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    #[test]
+    fn block_response_v2_roundtrip_mixed_and_empty_qcs() {
+        let b1 = sample_block(10);
+        let b2 = sample_block(11);
+        let q1 = sample_qc(10, hash_block_v1(&b1).unwrap());
+
+        // Mixed Some/None, positionally paired.
+        let mixed = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 10,
+            request_end: 11,
+            blocks: vec![b1.clone(), b2.clone()],
+            qcs: vec![Some(q1), None],
+        };
+        let decoded = decode_block_response_v2(&encode_block_response_v2(&mixed).unwrap()).unwrap();
+        assert_eq!(decoded, mixed);
+
+        // Empty qcs alongside nonempty blocks round-trips too: Stage 1
+        // carries what it is given.
+        let empty_qcs = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 10,
+            request_end: 11,
+            blocks: vec![b1, b2],
+            qcs: vec![],
+        };
+        let decoded =
+            decode_block_response_v2(&encode_block_response_v2(&empty_qcs).unwrap()).unwrap();
+        assert_eq!(decoded, empty_qcs);
+    }
+
+    #[test]
+    fn block_response_v2_mismatched_counts_roundtrip() {
+        // The codec does not enforce qcs.len() == blocks.len(): Stage 1
+        // transports faithfully and the Stage 2 receive-side check is the
+        // enforcement point for pairing.
+        let b1 = sample_block(10);
+        let q = sample_qc(10, hash_block_v1(&b1).unwrap());
+
+        let more_qcs = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 10,
+            request_end: 10,
+            blocks: vec![b1.clone()],
+            qcs: vec![Some(q.clone()), None, Some(q.clone())],
+        };
+        let decoded =
+            decode_block_response_v2(&encode_block_response_v2(&more_qcs).unwrap()).unwrap();
+        assert_eq!(decoded, more_qcs);
+
+        let fewer_qcs = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 10,
+            request_end: 11,
+            blocks: vec![b1, sample_block(11)],
+            qcs: vec![Some(q)],
+        };
+        let decoded =
+            decode_block_response_v2(&encode_block_response_v2(&fewer_qcs).unwrap()).unwrap();
+        assert_eq!(decoded, fewer_qcs);
+    }
+
+    #[test]
+    fn block_response_v2_wrong_height_qc_round_trips() {
+        // A well-formed QC for a DIFFERENT height (and different block
+        // hash) than the block it accompanies. Stage 1 must transport it
+        // byte-faithfully without judgment. Stage 2's certification check
+        // MUST catch this mismatch (qcs[i].height == blocks[i].height and
+        // qcs[i].block_hash == hash(blocks[i])) before any cursor advance.
+        let block = sample_block(10);
+        let wrong_height_qc = sample_qc(99, [0xee; 32]);
+        let resp = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 10,
+            request_end: 10,
+            blocks: vec![block],
+            qcs: vec![Some(wrong_height_qc)],
+        };
+
+        let encoded = encode_block_response_v2(&resp).unwrap();
+        let decoded = decode_block_response_v2(&encoded).unwrap();
+        assert_eq!(decoded, resp);
+        assert_eq!(decoded.qcs[0].as_ref().unwrap().height, 99);
+        assert_eq!(decoded.blocks[0].height, 10);
+    }
+
+    #[test]
+    fn block_response_v2_rejects_v1_payloads() {
+        // A genuine minimal V1 empty response is 53 bytes; V2's minimum
+        // is 57 (the qc_count field is mandatory), so it fails the size
+        // gate first.
+        let mut v1_minimal = vec![BLOCK_RESPONSE_V1];
+        v1_minimal.extend_from_slice(&[0xbb; 32]);
+        v1_minimal.extend_from_slice(&10u64.to_be_bytes());
+        v1_minimal.extend_from_slice(&20u64.to_be_bytes());
+        v1_minimal.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(v1_minimal.len(), 53);
+        assert_eq!(
+            decode_block_response_v2(&v1_minimal),
+            Err(CodecError::BufferTooShort)
+        );
+
+        // A V1-tagged buffer long enough to pass the size gate is
+        // rejected on the version byte itself: no legacy acceptance path.
+        let resp = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 10,
+            request_end: 10,
+            blocks: vec![sample_block(10)],
+            qcs: vec![None],
+        };
+        let mut tagged_v1 = encode_block_response_v2(&resp).unwrap();
+        tagged_v1[0] = BLOCK_RESPONSE_V1;
+        assert_eq!(
+            decode_block_response_v2(&tagged_v1),
+            Err(CodecError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
+    fn block_response_v2_qc_count_cap_enforced() {
+        // Encode side: one over the cap is rejected before any bytes are
+        // produced.
+        let resp = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 0,
+            request_end: 0,
+            blocks: vec![],
+            qcs: vec![None; MAX_BLOCKS_PER_RESPONSE + 1],
+        };
+        assert_eq!(
+            encode_block_response_v2(&resp),
+            Err(CodecError::TooManyVotes)
+        );
+
+        // Decode side: a crafted header claiming an over-cap qc_count is
+        // rejected before any allocation sized by the claim.
+        let mut buf = vec![BLOCK_RESPONSE_V2];
+        buf.extend_from_slice(&[0xbb; 32]);
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes()); // block_count = 0
+        #[allow(clippy::cast_possible_truncation)]
+        let over_cap = (MAX_BLOCKS_PER_RESPONSE as u32) + 1;
+        buf.extend_from_slice(&over_cap.to_be_bytes());
+        assert_eq!(
+            decode_block_response_v2(&buf),
+            Err(CodecError::TooManyVotes)
+        );
+    }
+
+    #[test]
+    fn block_response_v2_truncated_qc_trailer_rejected() {
+        // qc_count claims two entries but zero trailer bytes remain: the
+        // bounds check fires before Vec::with_capacity.
+        let mut buf = vec![BLOCK_RESPONSE_V2];
+        buf.extend_from_slice(&[0xbb; 32]);
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes()); // block_count = 0
+        buf.extend_from_slice(&2u32.to_be_bytes()); // qc_count = 2, no entries
+        assert_eq!(
+            decode_block_response_v2(&buf),
+            Err(CodecError::BufferTooShort)
+        );
+    }
+
+    #[test]
+    fn block_response_v2_invalid_has_qc_flag_rejected() {
+        // Canonical encoding: the has_qc flag is exactly 0x00 or 0x01.
+        let resp = BlockResponse {
+            responder: [0xbb; 32],
+            request_start: 0,
+            request_end: 0,
+            blocks: vec![],
+            qcs: vec![None],
+        };
+        let mut encoded = encode_block_response_v2(&resp).unwrap();
+        let last = encoded.len() - 1;
+        encoded[last] = 0x02; // corrupt the single None entry's flag byte
+        assert_eq!(
+            decode_block_response_v2(&encoded),
+            Err(CodecError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
+    fn block_response_v2_duplicate_voter_qc_decodes_faithfully() {
+        // encode_qc_v1 refuses duplicate-voter QCs, so an honest encoder
+        // cannot produce this trailer. A malicious peer can hand-craft
+        // the bytes, and decode_qc_v1_internal performs no duplicate
+        // check, so the decode succeeds. Stage 1 transports it
+        // faithfully; Stage 2's install-time encode-validate MUST reject
+        // it (the node2 poisoned QC shape from the 535004 incident).
+        let mut buf = vec![BLOCK_RESPONSE_V2];
+        buf.extend_from_slice(&[0xbb; 32]);
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes()); // block_count = 0
+        buf.extend_from_slice(&1u32.to_be_bytes()); // qc_count = 1
+        buf.push(0x01); // has_qc = true
+        buf.push(QC_V1);
+        buf.extend_from_slice(&5u64.to_be_bytes()); // qc height
+        buf.extend_from_slice(&0u64.to_be_bytes()); // qc round
+        buf.extend_from_slice(&[0x99; 32]); // qc block_hash
+        buf.extend_from_slice(&2u32.to_be_bytes()); // vote_count = 2
+        for _ in 0..2 {
+            buf.push(VOTE_UNSIGNED_V1);
+            buf.extend_from_slice(&5u64.to_be_bytes()); // vote height
+            buf.extend_from_slice(&0u64.to_be_bytes()); // vote round
+            buf.extend_from_slice(&[0x99; 32]); // vote block_hash
+            buf.extend_from_slice(&[0xdd; 32]); // voter (duplicated)
+            buf.extend_from_slice(&[0x11; 64]); // signature
+            buf.push(0x00); // has_signal = false
+        }
+
+        let decoded = decode_block_response_v2(&buf).unwrap();
+        let qc = decoded.qcs[0].as_ref().unwrap();
+        assert_eq!(qc.votes.len(), 2);
+        assert_eq!(qc.votes[0].voter, qc.votes[1].voter);
+        // Re-encoding through the honest encoder fails, which is exactly
+        // the containment that bricked node2: it could hold such a QC but
+        // never re-encode it.
+        assert_eq!(
+            encode_block_response_v2(&decoded),
+            Err(CodecError::DuplicateVoter)
+        );
+    }
 }

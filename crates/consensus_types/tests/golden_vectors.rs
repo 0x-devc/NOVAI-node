@@ -5,7 +5,7 @@
 //!   `UPDATE_VECTORS=1` cargo test -p novai-consensus-types
 
 use novai_consensus_types::codec::*;
-use novai_consensus_types::{Block, Timeout, Vote, QC};
+use novai_consensus_types::{Block, BlockResponse, Timeout, Vote, QC};
 use std::fs;
 use std::path::Path;
 
@@ -422,4 +422,57 @@ fn vote_backward_compatibility_old_format() {
         decoded.ai_signal_commitment, None,
         "Old votes should decode with None"
     );
+}
+
+#[test]
+fn golden_block_response_v2() {
+    let block = Block {
+        height: 10,
+        round: 5,
+        parent_hash: [0xaa; 32],
+        state_root: [0xbb; 32],
+        txs: vec![],
+    };
+
+    let vote_a = Vote {
+        height: 10,
+        round: 5,
+        block_hash: [0x99; 32],
+        voter: [0xaa; 32],
+        signature: [0x11; 64],
+        ai_signal_commitment: None,
+    };
+    let vote_b = Vote {
+        height: 10,
+        round: 5,
+        block_hash: [0x99; 32],
+        voter: [0xbb; 32],
+        signature: [0x22; 64],
+        ai_signal_commitment: Some([0xcc; 32]),
+    };
+    let qc = QC {
+        height: 10,
+        round: 5,
+        block_hash: [0x99; 32],
+        votes: vec![vote_a, vote_b],
+    };
+
+    let resp = BlockResponse {
+        responder: [0xdd; 32],
+        request_start: 10,
+        request_end: 11,
+        blocks: vec![block.clone(), block],
+        qcs: vec![Some(qc), None],
+    };
+
+    let bytes = encode_block_response_v2(&resp).unwrap();
+    let path = vectors_dir().join("block_response_v2.bin");
+
+    if should_update_vectors() {
+        fs::write(&path, &bytes).unwrap();
+        println!("Updated: {path:?}");
+    } else {
+        let expected = fs::read(&path).expect("golden vector missing");
+        assert_eq!(bytes, expected, "BlockResponse V2 encoding drifted!");
+    }
 }
