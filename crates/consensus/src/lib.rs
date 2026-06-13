@@ -1791,6 +1791,35 @@ impl ConsensusState {
         }
     }
 
+    /// Load the certifying QC for a given height from the database.
+    ///
+    /// Returns `Ok(None)` if no QC row exists at that height. Absence is a
+    /// meaningful result, not an error: a height can legitimately lack a QC
+    /// row (pruned past the retention window, synced before QCs travel on
+    /// the wire, or never observed by this node).
+    ///
+    /// # Errors
+    /// Returns error if database read or decoding fails.
+    pub fn load_qc_at_height<K>(db: &K, height: u64) -> Result<Option<QC>, ConsensusError>
+    where
+        K: Kv,
+        K::Error: std::fmt::Debug,
+    {
+        let key = qc_key(height);
+        match db.get(&key) {
+            Ok(Some(bytes)) => {
+                let qc = decode_qc_v1(&bytes).map_err(|e| {
+                    ConsensusError::CodecError(format!("Failed to decode QC: {e:?}"))
+                })?;
+                Ok(Some(qc))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(ConsensusError::StateError(format!(
+                "Failed to load QC: {e:?}"
+            ))),
+        }
+    }
+
     /// Load a block from the database.
     ///
     /// # Errors
