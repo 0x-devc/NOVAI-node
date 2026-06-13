@@ -137,12 +137,6 @@ pub struct ConsensusState {
     pub last_proposed: Option<(u64, u64)>,
     /// Voters in current round (deduplication).
     pub voted_in_round: HashSet<Address>,
-    /// Per-height vote tracking: maps voter → block_hash they voted for.
-    /// Persists across round advances within the same height. Cleared
-    /// only when height advances (QC formation or commit).
-    /// Detects cross-round equivocation: voting for different blocks
-    /// at the same consensus height.
-    pub voted_at_height: HashMap<Address, [u8; 32]>,
     /// Highest committed height.
     pub committed_height: u64,
     /// Block cache by height (for commit rule). Uses Arc to avoid
@@ -178,7 +172,6 @@ impl ConsensusState {
             our_address,
             last_proposed: None,
             voted_in_round: HashSet::new(),
-            voted_at_height: HashMap::new(),
             committed_height: 0,
             block_cache: HashMap::new(),
             qc_cache: HashMap::new(),
@@ -538,19 +531,6 @@ impl ConsensusState {
             .map(|(_, pk)| pk)
             .ok_or_else(|| ConsensusError::InvalidVote("Voter not in validator set".to_string()))?;
 
-        // Cross-round equivocation detection: check if this voter already
-        // voted for a DIFFERENT block at this height in a previous round.
-        // voted_in_round catches within-round duplicates;
-        // voted_at_height catches across-round equivocation.
-        if let Some(prev_hash) = self.voted_at_height.get(&vote.voter) {
-            if *prev_hash != vote.block_hash {
-                return Err(ConsensusError::InvalidVote(format!(
-                    "Equivocation: voter {:?} voted for different blocks at same height",
-                    &vote.voter[..4],
-                )));
-            }
-        }
-
         // Check for duplicate vote from same voter in this round (BEFORE expensive signature check)
         if self.voted_in_round.contains(&vote.voter) {
             return Err(ConsensusError::InvalidVote(
@@ -585,9 +565,8 @@ impl ConsensusState {
             tracing::debug!(?commitment, "Vote includes AI signal");
         }
 
-        // Mark this voter as having voted in this round and at this height
+        // Mark this voter as having voted in this round
         self.voted_in_round.insert(vote.voter);
-        self.voted_at_height.insert(vote.voter, vote.block_hash);
 
         // Add vote to pending votes (capped to prevent unbounded memory from
         // Byzantine vote spam — each block hash stores at most validator_count + 5 votes)
@@ -655,7 +634,6 @@ impl ConsensusState {
 
         // Mark voted
         self.voted_in_round.insert(vote.voter);
-        self.voted_at_height.insert(vote.voter, vote.block_hash);
 
         // Add vote (capped)
         let max_per_hash = validator_pubkeys.len() + 5;
@@ -666,10 +644,10 @@ impl ConsensusState {
         // this scan the same voter's vote can land in pending_votes twice
         // across a round boundary. try_form_qc now dedups too, but keeping
         // the duplicate out of pending_votes is the cheaper first line and
-        // bounds memory. This scan is intentionally NOT a voted_at_height
-        // check, so the Stage 2 Fix C removal of voted_at_height does not
-        // undo it. Idempotent: a duplicate is a silent no-op, the same
-        // contract as the cap below.
+        // bounds memory. It scans pending_votes directly rather than a
+        // separate per-voter map, so it does not depend on any state that a
+        // round advance clears. Idempotent: a duplicate is a silent no-op,
+        // the same contract as the cap below.
         if votes_for_hash.iter().any(|v| v.voter == vote.voter) {
             return Ok(());
         }
@@ -1265,7 +1243,6 @@ impl ConsensusState {
                 self.round = 0;
                 self.pending_votes.clear();
                 self.voted_in_round.clear();
-                self.voted_at_height.clear();
                 self.timed_out_in_round.clear();
                 self.pending_timeouts.clear();
                 self.last_proposed = None;
@@ -1275,7 +1252,6 @@ impl ConsensusState {
                 // over millions of blocks.
                 self.pending_votes.shrink_to_fit();
                 self.voted_in_round.shrink_to_fit();
-                self.voted_at_height.shrink_to_fit();
                 self.timed_out_in_round.shrink_to_fit();
                 self.pending_timeouts.shrink_to_fit();
             }
@@ -1499,7 +1475,6 @@ impl ConsensusState {
         if !blocks.is_empty() {
             self.pending_votes.clear();
             self.voted_in_round.clear();
-            self.voted_at_height.clear();
             self.timed_out_in_round.clear();
             self.pending_timeouts.clear();
             self.last_proposed = None;
@@ -1555,7 +1530,6 @@ impl ConsensusState {
             self.pending_votes.shrink_to_fit();
             self.pending_timeouts.shrink_to_fit();
             self.voted_in_round.shrink_to_fit();
-            self.voted_at_height.shrink_to_fit();
             self.timed_out_in_round.shrink_to_fit();
         }
     }
@@ -2178,7 +2152,6 @@ impl ConsensusState {
             our_address,
             last_proposed: None,
             voted_in_round: HashSet::new(),
-            voted_at_height: HashMap::new(),
             committed_height,
             block_cache: HashMap::new(),
             qc_cache: HashMap::new(),
@@ -3590,6 +3563,95 @@ mod tests {
         assert!(
             state.highest_qc.is_none(),
             "a sub-quorum QC must not be adopted as highest_qc"
+        );
+    }
+
+    // ===== Stage 2 Fix C (gate-equivocation-535004): voted_at_height removed =====
+
+    #[test]
+    fn view_change_reproposal_not_equivocation() {
+        // Regression for the 535004 Layer 3 halt. voted_at_height was keyed
+        // by voter and NOT cleared on round advance, so a leader that
+        // self-voted at height H round 0 failed its own equivocation guard
+        // on every later round's re-proposal (a different block hash at the
+        // same height), wedging the leader. With voted_at_height removed, a
+        // self-vote for the round-1 re-proposal at the same height must be
+        // accepted, not rejected as equivocation.
+        let validators = make_test_validators(1);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let mut state = ConsensusState::new(validator_set[0]);
+
+        // Two different blocks at the SAME height; the round differs so the
+        // hash differs, the shape of a re-proposal after a view change.
+        let block_r0 = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs: vec![],
+        };
+        let block_r1 = Block {
+            height: 1,
+            round: 1,
+            parent_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            txs: vec![],
+        };
+        assert_ne!(
+            novai_consensus_types::codec::hash_block_v1(&block_r0).unwrap(),
+            novai_consensus_types::codec::hash_block_v1(&block_r1).unwrap(),
+            "the two re-proposals must hash differently for this test to be meaningful"
+        );
+
+        // Self-vote for the round-0 block.
+        let vote0 = state.create_vote(&block_r0, &validators[0].1).unwrap();
+        state.add_vote(vote0, &pubkeys).unwrap();
+
+        // View change: advance the round, which clears voted_in_round (as
+        // try_advance_round does). Before Fix C, voted_at_height carried the
+        // round-0 hash across this boundary and tripped the guard below.
+        state.round = 1;
+        state.voted_in_round.clear();
+
+        // Self-vote for the round-1 re-proposal at the same height.
+        let vote1 = state.create_vote(&block_r1, &validators[0].1).unwrap();
+        let result = state.add_vote(vote1, &pubkeys);
+
+        assert!(
+            result.is_ok(),
+            "post-view-change re-proposal must not be rejected as equivocation, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn within_round_duplicate_still_rejected_on_both_paths() {
+        // Removing voted_at_height must NOT lose within-round duplicate
+        // detection: voted_in_round still catches it on add_vote and
+        // add_vote_verified alike.
+        let validators = make_test_validators(4);
+        let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let bh = [0x11; 32];
+
+        // add_vote path.
+        let mut state = ConsensusState::new(validator_set[0]);
+        let vote = fixb_signed_vote(&validators[1].1, validators[1].0, 1, 0, bh);
+        state.add_vote(vote.clone(), &pubkeys).unwrap();
+        assert!(
+            state.add_vote(vote, &pubkeys).is_err(),
+            "a second vote from the same voter in the same round must be rejected"
+        );
+
+        // add_vote_verified path.
+        let mut state = ConsensusState::new(validator_set[0]);
+        let vote = fixb_signed_vote(&validators[1].1, validators[1].0, 1, 0, bh);
+        state.add_vote_verified(vote.clone(), &pubkeys).unwrap();
+        assert!(
+            state.add_vote_verified(vote, &pubkeys).is_err(),
+            "add_vote_verified must reject a same-round duplicate via voted_in_round"
         );
     }
 }
