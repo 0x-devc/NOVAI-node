@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#
+# pre-commit: identity guard + staged-content PII / attribution guard.
+#
+# PURPOSE:
+#   1. Identity guard (ported from the prior .git/hooks/pre-commit, which a
+#      core.hooksPath=hooks switch would otherwise bypass): the commit author
+#      and committer must equal the canonical project identity.
+#   2. Content guard: scan only the ADDED lines of the staged diff and refuse
+#      any commit that introduces local home paths, a personal name, the
+#      production host IP, the external service domains, or AI-assist
+#      attribution phrasing.
+#
+# INVARIANTS:
+#   - Matching is fixed-string and case-insensitive (no regex surprises).
+#   - This file assembles its match patterns from fragments, so the tracked
+#     detector never stores the verbatim identifiers it blocks. That keeps it
+#     clean for history-verification scans and stops a future --replace-text
+#     pass from silently corrupting these patterns.
+#   - The hook excludes its own files from the content scan.
+#   - ai_service product references (the API client type, the API key/URL
+#     environment names) and model ids (claude-sonnet-*) are NOT markers and
+#     pass unchanged.
+#
+# FAILURE MODE: prints each offending category + line and exits 1, aborting
+#   the commit. Exit 0 means clean. Bypass one vetted commit with:
+#       git commit --no-verify
+#
+# ACTIVATE in a fresh clone (git does not clone hook config):
+#       git config core.hooksPath hooks
+#
+# -----------------------------------------------------------------------------
+
+# ---- 1. Identity guard ------------------------------------------------------
+expected="$(git config hook.userIdentity 2>/dev/null || true)"
+if [ -z "$expected" ]; then
+    expected="NOVAInetwork <NOVAInetwork@protonmail.com>"
+fi
+author="$(git var GIT_AUTHOR_IDENT 2>/dev/null | sed -E 's/ [0-9]+ [+-][0-9]{4}$//')"
+committer="$(git var GIT_COMMITTER_IDENT 2>/dev/null | sed -E 's/ [0-9]+ [+-][0-9]{4}$//')"
+if [ "$author" != "$expected" ] || [ "$committer" != "$expected" ]; then
+    echo "COMMIT BLOCKED by hooks/pre-commit: git identity mismatch." >&2
+    echo "  expected:  $expected" >&2
+    echo "  author:    $author" >&2
+    echo "  committer: $committer" >&2
+    echo "  fix: git config --local user.name \"NOVAInetwork\" && \\" >&2
+    echo "       git config --local user.email \"NOVAInetwork@protonmail.com\"" >&2
+    exit 1
+fi
+
+# ---- 2. Content guard -------------------------------------------------------
+diff_out="$(git diff --cached --no-color -U0 --diff-filter=ACM -- \
+    '.' ':(exclude)hooks/pre-commit' ':(exclude)hooks/README.md' 2>/dev/null || true)"
+added="$(printf '%s\n' "$diff_out" | grep -E '^\+' | grep -Ev '^\+\+\+' || true)"
+
+if [ -n "$added" ]; then
+    # (label, needle) pairs. Each needle is assembled from adjacent quoted
+    # fragments (the shell concatenates them) so no verbatim identifier is
+    # stored in this file. Add new patterns the same way.
+    labels=();  needles=()
+    labels+=("home directory path");              needles+=("/Users/")
+    labels+=("personal username");                needles+=("victor""hol""sten")
+    labels+=("personal surname");                 needles+=("hol""sten")
+    labels+=("production host IP");               needles+=("77.""42.""80.""38")
+    labels+=("external domain (a)");              needles+=("mesh""ledger"".io")
+    labels+=("external domain (b)");              needles+=("tx""desk"".io")
+    labels+=("attribution: author tag");          needles+=("author: ""claude")
+    labels+=("attribution: by tag");              needles+=("by: ""claude")
+    labels+=("attribution: co-author trailer");   needles+=("co-""authored-""by")
+    labels+=("attribution: tool (spaced)");       needles+=("claude"" code")
+    labels+=("attribution: tool (hyphen)");       needles+=("claude""-code")
+    labels+=("attribution: service URL");         needles+=("claude"".ai")
+    labels+=("attribution: generation phrase");   needles+=("generated"" with")
+    labels+=("attribution: parenthetical");       needles+=("(""claude"")")
+    labels+=("attribution: frozen-by tag");       needles+=("frozen by: ""claude")
+    labels+=("attribution: prepared-by tag");     needles+=("prepared by: ""claude")
+    labels+=("local-only config filename");       needles+=("CLAUDE"".md")
+
+    violations=0
+    i=0
+    count="${#needles[@]}"
+    while [ "$i" -lt "$count" ]; do
+        needle="${needles[$i]}"
+        label="${labels[$i]}"
+        hits="$(printf '%s\n' "$added" | grep -iF -- "$needle" || true)"
+        if [ -n "$hits" ]; then
+            if [ "$violations" -eq 0 ]; then
+                echo "COMMIT BLOCKED by hooks/pre-commit: staged additions contain forbidden strings." >&2
+                echo "" >&2
+            fi
+            echo "  - $label" >&2
+            printf '%s\n' "$hits" | sed 's/^+//' | sed 's/^/        /' >&2
+            violations=$((violations + 1))
+        fi
+        i=$((i + 1))
+    done
+
+    if [ "$violations" -gt 0 ]; then
+        echo "" >&2
+        echo "Remove the strings above (or restage) and retry." >&2
+        echo "If a hit is a verified false positive, scope the pattern in hooks/pre-commit." >&2
+        exit 1
+    fi
+fi
+
+exit 0
