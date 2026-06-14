@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#
+# commit-msg: reject em/en dash variants and AI-assist attribution markers in
+# the commit message. $1 is the path to the proposed message file.
+#
+# PURPOSE: a pre-commit hook cannot see the message, so this closes that gap
+#   (the message-body half of the project's no-dash / no-attribution rule).
+#
+# INVARIANTS:
+#   - Dash needles are built from octal byte escapes and marker needles from
+#     adjacent quoted fragments, so this file stores no verbatim literal.
+#   - The verbose-diff scissors section and comment lines are stripped before
+#     scanning, so a `git commit -v` diff never triggers a false positive.
+#   - ai_service product strings and model ids are NOT markers and pass.
+#
+# FAILURE MODE: prints each offending category + line and exits 1. Exit 0 is
+#   clean. Bypass one vetted commit with: git commit --no-verify
+#
+# ACTIVATE in a fresh clone:  git config core.hooksPath hooks
+# -----------------------------------------------------------------------------
+
+msg_file="$1"
+if [ -z "$msg_file" ] || [ ! -f "$msg_file" ]; then
+    exit 0
+fi
+
+# Determine the comment char, then drop the verbose scissors section (from the
+# scissors line to EOF) and remaining comment lines, so only the real message
+# is scanned.
+cc="$(git config core.commentChar 2>/dev/null || true)"
+if [ -z "$cc" ] || [ "$cc" = "auto" ]; then
+    cc="#"
+fi
+scan_src="$(sed "/^${cc}.*>8/,\$d" "$msg_file" | grep -v "^${cc}" || true)"
+
+if [ -z "$scan_src" ]; then
+    exit 0
+fi
+
+labels=();  needles=()
+# Dash variants, assembled from octal byte escapes (no verbatim dash stored).
+labels+=("em dash (U+2014)");                needles+=("$(printf '\342\200\224')")
+labels+=("en dash (U+2013)");                needles+=("$(printf '\342\200\223')")
+labels+=("figure dash (U+2012)");            needles+=("$(printf '\342\200\222')")
+labels+=("horizontal bar (U+2015)");         needles+=("$(printf '\342\200\225')")
+labels+=("minus sign (U+2212)");             needles+=("$(printf '\342\210\222')")
+# Attribution markers, assembled from adjacent quoted fragments.
+labels+=("attribution: co-author trailer");  needles+=("co-""authored-""by")
+labels+=("attribution: author tag");         needles+=("author: ""claude")
+labels+=("attribution: by tag");             needles+=("by: ""claude")
+labels+=("attribution: tool (spaced)");      needles+=("claude"" code")
+labels+=("attribution: tool (hyphen)");      needles+=("claude""-code")
+labels+=("attribution: service URL");        needles+=("claude"".ai")
+labels+=("attribution: generation phrase");  needles+=("generated"" with")
+labels+=("attribution: parenthetical");      needles+=("(""claude"")")
+labels+=("attribution: frozen-by tag");      needles+=("frozen by: ""claude")
+labels+=("attribution: prepared-by tag");    needles+=("prepared by: ""claude")
+labels+=("local-only config filename");      needles+=("CLAUDE"".md")
+
+violations=0
+i=0
+count="${#needles[@]}"
+while [ "$i" -lt "$count" ]; do
+    needle="${needles[$i]}"
+    label="${labels[$i]}"
+    hits="$(printf '%s\n' "$scan_src" | grep -iF -- "$needle" || true)"
+    if [ -n "$hits" ]; then
+        if [ "$violations" -eq 0 ]; then
+            echo "COMMIT BLOCKED by hooks/commit-msg: message contains forbidden strings." >&2
+            echo "" >&2
+        fi
+        echo "  - $label" >&2
+        printf '%s\n' "$hits" | sed 's/^/        /' >&2
+        violations=$((violations + 1))
+    fi
+    i=$((i + 1))
+done
+
+if [ "$violations" -gt 0 ]; then
+    echo "" >&2
+    echo "Rewrite the message without the above (use the ASCII hyphen-minus for dashes)." >&2
+    echo "Bypass one vetted commit with: git commit --no-verify" >&2
+    exit 1
+fi
+exit 0

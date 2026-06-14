@@ -45,6 +45,20 @@ It deliberately does **not** flag the `ai_service` product code: the API client
 type, the API key/URL environment names, and the model id are real product
 references, not attribution markers.
 
+## commit-msg
+
+A `pre-commit` hook cannot see the commit message, so this companion hook scans
+the proposed message and aborts (non-zero exit) on:
+
+- an em dash, en dash, figure dash, horizontal bar, or minus sign (use the
+  ASCII hyphen-minus instead)
+- the same AI-assist attribution phrasing the content guard blocks
+
+It strips comment lines and any verbose-diff scissors section before scanning,
+and it ignores the `ai_service` product strings and the model id. Like
+`pre-commit`, it assembles its patterns from fragments (the dash characters via
+byte escapes), so the file stores no verbatim literal.
+
 ## Notes
 
 - The hook assembles its match patterns from fragments, so this directory never
