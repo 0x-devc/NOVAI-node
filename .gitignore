@@ -13,6 +13,7 @@
 .private/
 NOVAI_ROADMAP.md
 CLAUDE.md
+docs/gate-*.md
 .claude/
 clippy_full.txt
 week8.sh
