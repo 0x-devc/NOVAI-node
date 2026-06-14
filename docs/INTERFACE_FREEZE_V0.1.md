@@ -840,7 +840,7 @@ For questions about interface changes or freeze exceptions:
 ## Signatures
 
 **Freeze Date**: January 19, 2026
-**Frozen By**: Claude Sonnet 4.5 (NOVAI Protocol Engineer)
+**Frozen By**: NOVAI Protocol Engineer
 **Git Tag**: `testnet-v0.1`
 **Review Status**: Week 12 Review Gate Complete
 **Next Review**: Before Week 20 (if needed)

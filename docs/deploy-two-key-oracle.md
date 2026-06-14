@@ -5,7 +5,7 @@ from the single-key Type-8 model to the two-key Type-10 model. The
 model is validated locally (80/80 unit tests pass; a live smoke test
 on the chain confirmed all four pass criteria). This document is for
 the operator to follow on the production box; nothing here was
-executed from a Claude Code session.
+executed in advance.
 
 Reference: `docs/gate-oracle-funding-model-diagnosis.md` (design),
 `docs/gate-oracle-two-key-smoke-test-runbook.md` (runbook), and

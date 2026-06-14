@@ -251,7 +251,7 @@ The protocol is **technically ready** for the interface freeze. The pending crit
 
 ## Signatures
 
-**Prepared by**: Claude Sonnet 4.5 (NOVAI Protocol Engineer)
+**Prepared by**: NOVAI Protocol Engineer
 **Date**: January 19, 2026
 **Review Gate**: Week 12 - Testnet v0.1
 **Recommendation**: PROCEED
