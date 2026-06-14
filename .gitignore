@@ -14,6 +14,11 @@
 NOVAI_ROADMAP.md
 CLAUDE.md
 docs/gate-*.md
+RESUME_BUG1_GATE2.md
+docs/gate3-bug1-diagnosis.md
+docs/deploy-bug1-fix.md
+docs/bug1-load-test-plan.md
+scripts/verify-host-fix.sh
 .claude/
 clippy_full.txt
 week8.sh
