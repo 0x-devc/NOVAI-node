@@ -759,6 +759,104 @@ fn sync_persists_certified_qc_rows() {
     );
 }
 
+#[test]
+fn sync_installs_highest_qc_across_certified_prefix() {
+    // Finding 2.1 (gate-equivocation-535004 Stage 4): a fully certified
+    // multi-block A2 sync must advance committed_height AND install the
+    // certified prefix's top QC as highest_qc, so committed_height never
+    // exceeds highest_qc.height (the section 7 soak invariant), AND persist it
+    // to KEY_HIGHEST_QC so a restart reloads the correct propose parent.
+    // Pre-fix the cursor advances while highest_qc stays None and
+    // KEY_HIGHEST_QC is absent, reproducing 2.1.
+    let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
+    let block2_hash = novai_consensus_types::block_hash(&block2);
+    let qc1 = certifying_qc(&sk1, addr1, &block1);
+    let qc2 = certifying_qc(&sk1, addr1, &block2);
+    let response = BlockResponse {
+        responder: addr1,
+        request_start: 1,
+        request_end: 2,
+        blocks: vec![block1, block2],
+        qcs: vec![Some(qc1), Some(qc2)],
+    };
+    node2.handle_block_response(response).unwrap();
+
+    let state = node2.state.lock().unwrap();
+    assert_eq!(
+        state.committed_height, 2,
+        "certified prefix must advance the cursor to 2"
+    );
+    let hqc_height = state.highest_qc.as_ref().map(|q| q.height);
+    assert_eq!(
+        hqc_height,
+        Some(2),
+        "Finding 2.1: a certified sync must install the prefix top QC as highest_qc"
+    );
+    assert!(
+        hqc_height.is_some_and(|h| state.committed_height <= h),
+        "section 7 soak invariant: committed_height must never exceed highest_qc.height"
+    );
+    assert_eq!(
+        state.height, 2,
+        "self.height must track the committed prefix"
+    );
+    drop(state);
+
+    // Persisted so recover() reloads the correct propose parent, not a stale QC.
+    let db2 = node2.db.lock().unwrap();
+    let bytes = db2
+        .get(novai_state::KEY_HIGHEST_QC)
+        .expect("db get KEY_HIGHEST_QC")
+        .expect("Finding 2.1: KEY_HIGHEST_QC must be persisted after a certified sync");
+    let decoded =
+        novai_consensus_types::codec::decode_qc_v1(&bytes).expect("KEY_HIGHEST_QC must decode");
+    assert_eq!(decoded.height, 2);
+    assert_eq!(
+        decoded.block_hash, block2_hash,
+        "persisted highest_qc must certify block 2"
+    );
+}
+
+#[test]
+fn sync_certified_prefix_lifts_stale_lower_highest_qc() {
+    // Finding 2.1, strict numeric form: with a stale lower highest_qc already
+    // installed (a QC at height 1), a certified sync to height 2 must lift
+    // highest_qc to the certified prefix's top QC, so committed_height does
+    // not sit above highest_qc.height. Pre-fix highest_qc stays at height 1
+    // while committed_height advances to 2, so 2 <= 1 is false.
+    let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
+    let qc1 = certifying_qc(&sk1, addr1, &block1);
+    let qc2 = certifying_qc(&sk1, addr1, &block2);
+    // Seed a stale lower highest_qc (height 1) before the sync.
+    node2.state.lock().unwrap().highest_qc = Some(qc1.clone());
+    let response = BlockResponse {
+        responder: addr1,
+        request_start: 1,
+        request_end: 2,
+        blocks: vec![block1, block2],
+        qcs: vec![Some(qc1), Some(qc2)],
+    };
+    node2.handle_block_response(response).unwrap();
+
+    let state = node2.state.lock().unwrap();
+    assert_eq!(state.committed_height, 2);
+    let hqc_height = state
+        .highest_qc
+        .as_ref()
+        .map(|q| q.height)
+        .expect("highest_qc was seeded, must remain present");
+    assert!(
+        state.committed_height <= hqc_height,
+        "section 7 soak invariant: committed_height ({}) must not exceed highest_qc.height ({})",
+        state.committed_height,
+        hqc_height
+    );
+    assert_eq!(
+        hqc_height, 2,
+        "the certified prefix top QC (height 2) must dominate the seeded QC (height 1)"
+    );
+}
+
 // ===== Stage 2 Fix D (gate-equivocation-535004): check_timeout backoff =====
 
 /// The check_timeout failure path must record the attempt so the existing

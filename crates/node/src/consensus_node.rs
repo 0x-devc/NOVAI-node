@@ -1094,6 +1094,48 @@ impl ConsensusNode {
                 novai_state::KEY_COMMITTED_HEIGHT.to_vec(),
                 new_committed_height.to_be_bytes().to_vec(),
             ));
+            // Finding 2.1 (gate-equivocation-535004 Stage 4): the cursor just
+            // advanced across the certified prefix. Install that prefix's top
+            // QC as highest_qc when it dominates, bump self.height to the
+            // committed prefix, and persist KEY_HIGHEST_QC in the SAME atomic
+            // sync_ops batch as KEY_COMMITTED_HEIGHT. Without this,
+            // committed_height sits above highest_qc.height (the section 7 soak
+            // invariant), and a restart reloads a stale highest_qc whose
+            // block_hash propose_block uses as a stale parent. The top QC
+            // already passed verify_qc_well_formed in the cursor walk above, so
+            // no new verification runs; the domination rule mirrors
+            // cache_qc_and_check_commit.
+            if let Some((_, top_qc)) = certified_qcs.last() {
+                let dominates = match &state.highest_qc {
+                    None => true,
+                    Some(existing) => {
+                        top_qc.height > existing.height
+                            || (top_qc.height == existing.height
+                                && top_qc.round > existing.round)
+                    }
+                };
+                if dominates {
+                    state.highest_qc = Some(top_qc.clone());
+                    match novai_consensus_types::codec::encode_qc_v1(top_qc) {
+                        Ok(qc_bytes) => {
+                            sync_ops.push(WriteOp::Put(
+                                novai_state::KEY_HIGHEST_QC.to_vec(),
+                                qc_bytes,
+                            ));
+                        }
+                        Err(e) => tracing::warn!(
+                            height = new_committed_height,
+                            error = ?e,
+                            "Finding 2.1: installed highest_qc failed to encode, KEY_HIGHEST_QC left as is"
+                        ),
+                    }
+                }
+            }
+            // Mirror apply_commits: self.height tracks the committed prefix and
+            // never regresses a legitimately higher view.
+            if state.height < new_committed_height {
+                state.height = new_committed_height;
+            }
             // Persist each certified block's QC at qc_key(height) in the same
             // atomic batch (the Stage 1 to Stage 2 delta: the sync path now
             // stores QCs, so a synced node ends up with dense QC rows too and
