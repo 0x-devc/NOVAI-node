@@ -36,7 +36,7 @@ systemd/            unit file and env template
 
 ## Prerequisites
 
-- Python 3.12 on the host ([redacted-host] has it; macOS via `brew install python@3.12`).
+- Python 3.12 on the host (the production host has it; macOS via `brew install python@3.12`).
 - The `novai_sdk` package importable in whatever Python the unit runs
   under. The locked deploy uses a per-agent venv at
   `/opt/novai-price-oracle/.venv` with the SDK editable-installed from

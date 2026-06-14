@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     /// Regression test for the follower-mempool-eviction leak observed on
-    /// [redacted-host] 2026-06-04 (price-oracle entity 0a110df8).
+    /// the production host 2026-06-04 (price-oracle entity 0a110df8).
     ///
     /// `TxMempool::remove` clears `by_id`, decrements `total_bytes`, and
     /// drops `insertion_times`, but the original implementation did not

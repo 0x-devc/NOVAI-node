@@ -1051,7 +1051,7 @@ fn signal_failure_does_not_wedge_entity() {
 // ============================================================================
 // TEST 20: pre_fix_entity_without_reverse_index_still_fails_under_beta4a
 //
-// Production-recovery pin. The [redacted-host] price oracle entity
+// Production-recovery pin. The production price oracle entity
 // 0a110df84a9ab852987be12b46e1e5e343ec489f2440b67e4e1a67ead54a36db was
 // registered against a binary that did NOT write the
 // `ai/entities_by_addr/{creator}` reverse-index row. Under β4-A the signal

@@ -446,7 +446,7 @@ done
 # crates/execution/src/lib.rs:9124-9132. sender-1 is the creator of
 # ORACLE_EID, so signing with sender-1.key gives tx.from = sender-1.addr
 # which resolves correctly. This is the same path that wedged the
-# [redacted-host] price-oracle at IssuerNotFound; avoided here by matching the
+# production price-oracle at IssuerNotFound; avoided here by matching the
 # signer to the type-8 creator and ensuring sender-1 has registered
 # exactly one type-8 entity (so the reverse index points at ORACLE_EID).
 

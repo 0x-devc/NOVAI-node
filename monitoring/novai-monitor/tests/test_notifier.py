@@ -55,12 +55,12 @@ def test_md_escape_handles_empty():
 # ---------------------------------------------------------------------------
 
 def test_format_alert_message_includes_severity_alert_id_and_playbook():
-    msg = format_alert_message(_spec(), "FIRE", "height=184231 (no change)", "[redacted-host]", "2026-06-03T14:22:18Z")
+    msg = format_alert_message(_spec(), "FIRE", "height=184231 (no change)", "prod-1", "2026-06-03T14:22:18Z")
     # Severity is bold (asterisks unescaped, surrounding the escaped content).
     assert msg.startswith("*CRITICAL* block\\_height\\_stuck\n")
     assert "height\\=184231 \\(no change\\)" in msg
     assert "playbook: docs/playbooks/EMERGENCY\\_FREEZE\\.md" in msg
-    assert "[redacted-host]\\-[redacted-dc] at 2026\\-06\\-03T14:22:18Z" in msg
+    assert "prod\\-1 at 2026\\-06\\-03T14:22:18Z" in msg
 
 
 def test_format_alert_message_omits_playbook_line_when_none():

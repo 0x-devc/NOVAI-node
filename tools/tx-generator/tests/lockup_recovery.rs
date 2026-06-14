@@ -1,6 +1,6 @@
 //! Integration test: workers recover from a mid-run MempoolFull period.
 //!
-//! Reproduces the original [redacted-host] lockup scenario in a self-contained
+//! Reproduces the original production lockup scenario in a self-contained
 //! test harness. Phase 1 confirms the system is healthy. Phase 2 swaps
 //! the mock to MempoolFull responses so the submitter engages the pause
 //! flag and the generator stops sending. Phase 3 swaps the mock back to

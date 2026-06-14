@@ -342,7 +342,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
 
 /// Follower-side mempool eviction regression test.
 ///
-/// Reproduces the production lockup observed on [redacted-host] 2026-06-04 14:35 to
+/// Reproduces the production lockup observed on the production host 2026-06-04 14:35 to
 /// 18:40 UTC where a price-oracle agent (entity 0a110df8) submitting a
 /// single-sender continuous workload to a non-leader RPC accumulated the
 /// per-sender pending count without ever evicting the committed txs. After
