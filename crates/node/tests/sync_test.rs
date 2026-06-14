@@ -245,7 +245,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
         let mut state = node.state.lock().unwrap();
         // Cache block 1 (as if we voted on it via handle_proposal)
         state.cache_block(block1).unwrap();
-        // Crucially: highest_qc is still None — the QC broadcast hasn't arrived
+        // Crucially: highest_qc is still None, the QC broadcast hasn't arrived
         assert!(state.highest_qc.is_none(), "Precondition: no QC yet");
     }
 
@@ -825,4 +825,177 @@ fn check_timeout_backs_off_on_repeated_failure() {
         node.check_timeout().is_none(),
         "the rebroadcast throttle must back off the immediate retry"
     );
+}
+
+/// Stage 3 (gate-handle-qc-unverified-535004) RED test.
+///
+/// A gossiped QC is an unauthenticated network payload. `handle_qc` must route
+/// it through `verify_qc_well_formed` before it can reach
+/// `cache_qc_and_check_commit`, whose only install gate (`encode_qc_v1`) accepts
+/// a zero-vote QC. Without that guard, a single
+/// `QC{height: 1_000_000, votes: []}` installs as `highest_qc` and persists to
+/// KEY_HIGHEST_QC, pinning `expected_height` near 1_000_001 everywhere and
+/// wedging the node permanently across restart (a single message kill switch).
+///
+/// This test asserts the desired post-fix behavior by inspecting STATE, not the
+/// return value: the current Err arm of `handle_qc` still falls through to
+/// `Ok(())`, so the return value reveals nothing. Against the current, unfixed
+/// code it FAILS, reproducing the wedge: `highest_qc` becomes
+/// `Some(1_000_000)` and KEY_HIGHEST_QC is written. Phase 2 adds the guard and
+/// this test goes green.
+#[test]
+fn handle_qc_rejects_unverified_gossiped_qc() {
+    // Four validators (quorum = 3), mirroring the live config and the diagnosis.
+    let sks: Vec<SigningKey> = (0..4).map(|_| SigningKey::generate(&mut OsRng)).collect();
+    let pks: Vec<_> = sks.iter().map(|sk| sk.verifying_key()).collect();
+    let addrs: Vec<Address> = pks.iter().map(address_from_pubkey).collect();
+
+    let validator_set: Vec<Address> = addrs.clone();
+    let mut validator_pubkeys = HashMap::new();
+    for (addr, pk) in addrs.iter().zip(pks.iter()) {
+        validator_pubkeys.insert(*addr, *pk);
+    }
+
+    let node = ConsensusNode::new(sks[0].clone(), validator_set, validator_pubkeys, 1000);
+
+    // Precondition: a fresh node holds no highest_qc and sits at height 0.
+    {
+        let state = node.state.lock().unwrap();
+        assert!(
+            state.highest_qc.is_none(),
+            "precondition: a fresh node must have no highest_qc"
+        );
+        assert_eq!(
+            state.committed_height, 0,
+            "precondition: committed_height starts at 0"
+        );
+    }
+
+    // Action: gossip a forged, zero-vote, high-height QC straight into handle_qc.
+    let poison = QC {
+        height: 1_000_000,
+        round: 0,
+        block_hash: [0u8; 32],
+        votes: vec![],
+    };
+    // The return value is intentionally ignored: the current Err arm of
+    // handle_qc still returns Ok(()), so only the resulting STATE is diagnostic.
+    let _ = node.handle_qc(poison);
+
+    // Inspect state, then disk, under separate lock scopes (lock order state, db).
+    let (hqc_height, committed) = {
+        let state = node.state.lock().unwrap();
+        (
+            state.highest_qc.as_ref().map(|q| q.height),
+            state.committed_height,
+        )
+    };
+    let key_persisted = {
+        let db = node.db.lock().unwrap();
+        db.get(novai_state::KEY_HIGHEST_QC)
+            .expect("db get KEY_HIGHEST_QC")
+            .is_some()
+    };
+
+    assert!(
+        hqc_height.is_none(),
+        "WEDGE REPRODUCED: a gossiped zero-vote QC installed as highest_qc (height={hqc_height:?}); one unauthenticated message moved the view"
+    );
+    assert!(
+        !key_persisted,
+        "WEDGE REPRODUCED: the forged QC was persisted to KEY_HIGHEST_QC; the wedge survives restart"
+    );
+    assert_eq!(
+        committed, 0,
+        "committed_height must not advance on a forged QC"
+    );
+}
+
+/// Stage 3 (gate-handle-qc-unverified-535004) positive test.
+///
+/// The guard added to `handle_qc` must reject only forged QCs, never a
+/// legitimately gossiped one. A genuine standalone QC (the output of
+/// `try_form_qc`, broadcast at consensus_node.rs:1817) always carries quorum
+/// distinct, correctly signed votes. This test feeds such a QC through
+/// `handle_qc` and asserts it still installs and persists, so the fix is not
+/// over-strict.
+#[test]
+fn handle_qc_accepts_valid_quorum_qc() {
+    // Four validators (quorum = 3), same setup as the RED test above.
+    let sks: Vec<SigningKey> = (0..4).map(|_| SigningKey::generate(&mut OsRng)).collect();
+    let pks: Vec<_> = sks.iter().map(|sk| sk.verifying_key()).collect();
+    let addrs: Vec<Address> = pks.iter().map(address_from_pubkey).collect();
+
+    let validator_set: Vec<Address> = addrs.clone();
+    let mut validator_pubkeys = HashMap::new();
+    for (addr, pk) in addrs.iter().zip(pks.iter()) {
+        validator_pubkeys.insert(*addr, *pk);
+    }
+    let node = ConsensusNode::new(sks[0].clone(), validator_set, validator_pubkeys, 1000);
+
+    // A height-1 block. A QC at height 1 has qc_height < 2, so
+    // cache_qc_and_check_commit installs highest_qc and returns Ok(empty) with no
+    // commit walk; handle_qc then persists highest_qc via its Ok-empty arm.
+    let block1 = Block {
+        height: 1,
+        round: 0,
+        parent_hash: [0u8; 32],
+        state_root: [0u8; 32],
+        txs: vec![],
+    };
+    let block1_hash = novai_consensus_types::block_hash(&block1);
+
+    // A legitimately gossiped QC carries quorum (3) distinct, correctly signed
+    // votes, exactly what try_form_qc broadcasts.
+    let votes: Vec<Vote> = sks
+        .iter()
+        .zip(addrs.iter())
+        .take(3)
+        .map(|(sk, addr)| signed_vote(sk, *addr, 1, 0, block1_hash))
+        .collect();
+    let valid_qc = QC {
+        height: 1,
+        round: 0,
+        block_hash: block1_hash,
+        votes,
+    };
+
+    let result = node.handle_qc(valid_qc);
+    assert!(
+        result.is_ok(),
+        "a valid quorum-signed gossiped QC must be accepted, got: {:?}",
+        result.err()
+    );
+
+    // Installed in memory as highest_qc.
+    {
+        let state = node.state.lock().unwrap();
+        let hqc = state
+            .highest_qc
+            .as_ref()
+            .expect("highest_qc must be installed after a valid gossiped QC");
+        assert_eq!(hqc.height, 1, "highest_qc should be for height 1");
+        assert_eq!(
+            hqc.block_hash, block1_hash,
+            "highest_qc should reference block 1"
+        );
+    }
+
+    // Persisted to KEY_HIGHEST_QC and decodes back to the same quorum QC.
+    {
+        let db = node.db.lock().unwrap();
+        let bytes = db
+            .get(novai_state::KEY_HIGHEST_QC)
+            .expect("db get KEY_HIGHEST_QC")
+            .expect("KEY_HIGHEST_QC must be present after a valid gossiped QC");
+        let decoded =
+            novai_consensus_types::codec::decode_qc_v1(&bytes).expect("KEY_HIGHEST_QC must decode");
+        assert_eq!(decoded.height, 1);
+        assert_eq!(decoded.block_hash, block1_hash);
+        assert_eq!(
+            decoded.votes.len(),
+            3,
+            "the persisted QC keeps its quorum votes"
+        );
+    }
 }

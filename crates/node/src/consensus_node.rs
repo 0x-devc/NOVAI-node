@@ -1824,6 +1824,22 @@ impl ConsensusNode {
     pub fn handle_qc(&self, qc: QC) -> Result<(), String> {
         tracing::debug!(height = qc.height, round = qc.round, "Received QC");
 
+        // Stage 3 (gate-handle-qc-unverified-535004): a gossiped QC is an
+        // unauthenticated network payload. Verify it fully (quorum of distinct
+        // in-set voters, every vote bound to this QC, every signature valid)
+        // BEFORE it can reach cache_qc_and_check_commit, whose only install gate
+        // is encode_qc_v1 (well-formedness, which accepts a zero-vote QC). Without
+        // this, a single QC{height: huge, votes: []} installs as highest_qc and
+        // persists to KEY_HIGHEST_QC, wedging the node permanently across restart.
+        // Quorum is derived from validator_pubkeys_vec, the same set
+        // verify_qc_well_formed checks membership against, so the threshold and the
+        // membership test agree. Rejecting here, before the locks below, means a
+        // forged QC touches no state and holds no lock.
+        let n = self.validator_pubkeys_vec.len();
+        let quorum = 2 * ((n - 1) / 3) + 1;
+        ConsensusState::verify_qc_well_formed(&qc, &self.validator_pubkeys_vec, quorum)
+            .map_err(|e| format!("Rejecting unverified gossiped QC: {e:?}"))?;
+
         // CRITICAL FIX: Hold state lock across cache_qc_and_check_commit AND apply_commits
         // to prevent race condition where timeouts arriving between the two operations
         // get wiped out by apply_commits clearing pending_timeouts.
