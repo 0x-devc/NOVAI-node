@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# commit-msg: reject em/en dash variants and AI-assist attribution markers in
-# the commit message. $1 is the path to the proposed message file.
+# commit-msg: reject em/en/figure/bar/minus dash variants in the commit message.
+# $1 is the path to the proposed message file.
 #
 # PURPOSE: a pre-commit hook cannot see the message, so this closes that gap
-#   (the message-body half of the project's no-dash / no-attribution rule).
+#   (the message-body half of the project's no-dash rule).
 #
 # INVARIANTS:
-#   - Dash needles are built from octal byte escapes and marker needles from
-#     adjacent quoted fragments, so this file stores no verbatim literal.
+#   - Dash needles are built from octal byte escapes (no verbatim dash stored).
 #   - The verbose-diff scissors section and comment lines are stripped before
 #     scanning, so a `git commit -v` diff never triggers a false positive.
-#   - ai_service product strings and model ids are NOT markers and pass.
+#   - AI-vendor attribution is ALLOWED by project policy and is not scanned.
+#     ai_service product strings and model ids were never markers and pass.
 #
 # FAILURE MODE: prints each offending category + line and exits 1. Exit 0 is
 #   clean. Bypass one vetted commit with: git commit --no-verify
@@ -44,17 +44,10 @@ labels+=("en dash (U+2013)");                needles+=("$(printf '\342\200\223')
 labels+=("figure dash (U+2012)");            needles+=("$(printf '\342\200\222')")
 labels+=("horizontal bar (U+2015)");         needles+=("$(printf '\342\200\225')")
 labels+=("minus sign (U+2212)");             needles+=("$(printf '\342\210\222')")
-# Attribution markers, assembled from adjacent quoted fragments.
-labels+=("attribution: co-author trailer");  needles+=("co-""authored-""by")
-labels+=("attribution: author tag");         needles+=("author: ""claude")
-labels+=("attribution: by tag");             needles+=("by: ""claude")
-labels+=("attribution: tool (spaced)");      needles+=("claude"" code")
-labels+=("attribution: tool (hyphen)");      needles+=("claude""-code")
-labels+=("attribution: service URL");        needles+=("claude"".ai")
-labels+=("attribution: generation phrase");  needles+=("generated"" with")
-labels+=("attribution: parenthetical");      needles+=("(""claude"")")
-labels+=("attribution: frozen-by tag");      needles+=("frozen by: ""claude")
-labels+=("attribution: prepared-by tag");    needles+=("prepared by: ""claude")
+# AI-vendor attribution (co-author / author / by / prepared / frozen tags, tool
+# names, service URL, generation phrasing) is ALLOWED by project policy and is
+# intentionally NOT scanned. Do not re-add those needles without a policy
+# change. The one remaining marker is the local-only config filename.
 labels+=("local-only config filename");      needles+=("CLAUDE"".md")
 
 violations=0
