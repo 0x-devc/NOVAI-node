@@ -36,7 +36,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 BIN="${BIN:-${PROJECT_ROOT}/target/release/novai-node}"
 LOG_DIR="${LOG_DIR:-/var/log/novai}"
-DATA_DIR="${DATA_DIR:-[redacted-server]/.novai/data}"
+DATA_DIR="${DATA_DIR:-$HOME/.novai/data}"
 BASE_TIMEOUT="${BASE_TIMEOUT:-1000}"
 PROPOSAL_INTERVAL="${PROPOSAL_INTERVAL:-5}"
 PID_DIR="${LOG_DIR}/pids"
@@ -373,7 +373,7 @@ case "${1:-}" in
         echo "  PROPOSAL_INTERVAL=5     Proposal interval (ms, min 5)"
         echo "  BIN=./target/release/novai-node"
         echo "  LOG_DIR=/var/log/novai"
-        echo "  DATA_DIR=[redacted-server]/.novai/data"
+        echo "  DATA_DIR=$HOME/.novai/data"
         exit 1
         ;;
 esac
