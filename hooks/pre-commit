@@ -36,7 +36,7 @@
 # ---- 1. Identity guard ------------------------------------------------------
 expected="$(git config hook.userIdentity 2>/dev/null || true)"
 if [ -z "$expected" ]; then
-    expected="NOVAInetwork <NOVAInetwork@protonmail.com>"
+    expected="NOVAInetwork <251796703+0x-devc@users.noreply.github.com>"
 fi
 author="$(git var GIT_AUTHOR_IDENT 2>/dev/null | sed -E 's/ [0-9]+ [+-][0-9]{4}$//')"
 committer="$(git var GIT_COMMITTER_IDENT 2>/dev/null | sed -E 's/ [0-9]+ [+-][0-9]{4}$//')"
@@ -46,7 +46,7 @@ if [ "$author" != "$expected" ] || [ "$committer" != "$expected" ]; then
     echo "  author:    $author" >&2
     echo "  committer: $committer" >&2
     echo "  fix: git config --local user.name \"NOVAInetwork\" && \\" >&2
-    echo "       git config --local user.email \"NOVAInetwork@protonmail.com\"" >&2
+    echo "       git config --local user.email \"251796703+0x-devc@users.noreply.github.com\"" >&2
     exit 1
 fi
 
