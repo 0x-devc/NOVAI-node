@@ -36,6 +36,9 @@ export {
   keypairFromSeed,
   loadKeyFile,
   addressFromPubkey,
+  deriveSlaAcceptSignalHash,
+  signChannelState,
+  deriveOracleAnchorSignalHash,
 } from "./keys";
 
 // Transaction builders
@@ -51,6 +54,45 @@ export {
   creditAiEntity,
   registerAiEntityWithKey,
 } from "./tx";
+
+// Signal extras builders (per-type payload tails for signalCommitment)
+export {
+  buildReputationUpdateExtras,
+  buildSignalPurchaseExtras,
+  buildStakeDepositExtras,
+  buildStakeWithdrawExtras,
+  buildStakeSlashExtras,
+  buildCompositionCheckExtras,
+  buildSubscriptionCreateExtras,
+  buildSubscriptionCancelExtras,
+  buildSlaAcceptExtras,
+  buildChannelAcceptExtras,
+  buildChannelCloseExtras,
+  buildChannelFinalizeExtras,
+  channelStateSigningBytes,
+  NOVAI_CHANNEL_CHAIN_ID,
+  buildProofSubmissionStubExtras,
+  buildProofSubmissionGroth16Extras,
+  buildProofSubmissionGroth16RegisteredExtras,
+  PROOF_SUBMISSION_MAX_VK_BYTES,
+  PROOF_SUBMISSION_MAX_PROOF_BYTES,
+  buildPaymentRequestExtras,
+  buildServiceAttestationExtras,
+  buildOracleAnchorExtras,
+  validatePaymentSplits,
+  paymentConditionAnchorExists,
+  paymentConditionAnchorDataHashEquals,
+  paymentConditionAnchorTagEquals,
+  paymentConditionAnchorNotExpired,
+  PaymentSplit,
+  PaymentCondition,
+  PAYMENT_CONDITION_MARKER,
+  MIN_PAYMENT_SPLITS_WHEN_PRESENT,
+  MAX_PAYMENT_SPLITS,
+  BPS_DENOMINATOR,
+  ORACLE_ANCHOR_DATA_TAG_MIN_LEN,
+  ORACLE_ANCHOR_DATA_TAG_MAX_LEN,
+} from "./signals";
 
 // Encoding utilities
 export {
@@ -76,6 +118,9 @@ export {
   SignatureBytes,
   AutonomyMode,
   SignalType,
+  ProofType,
+  PaymentAttestationStatus,
+  PaymentConditionKind,
   MemoryObjectType,
   Capabilities,
   AiEntityInfo,

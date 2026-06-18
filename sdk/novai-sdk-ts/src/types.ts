@@ -46,6 +46,45 @@ export enum SignalType {
   AuditReport = 4,
   SpamRisk = 5,
   CongestionForecast = 6,
+  ReputationUpdate = 7,
+  SignalPurchase = 8,
+  StakeDeposit = 9,
+  StakeWithdraw = 10,
+  StakeSlash = 11,
+  CompositionCheck = 12,
+  ProofSubmission = 13,
+  SubscriptionCreate = 14,
+  SubscriptionCancel = 15,
+  PaymentRequest = 16,
+  ServiceAttestation = 17,
+  SlaAccept = 18,
+  ChannelAccept = 19,
+  ChannelClose = 20,
+  ChannelFinalize = 21,
+  OracleAnchor = 22,
+}
+
+/** Proof system discriminant carried in ProofSubmission (type 13) signals. */
+export enum ProofType {
+  Stub = 0,
+  Groth16 = 1,
+  Plonk = 2,
+  Groth16Registered = 3,
+  PlonkRegistered = 4,
+}
+
+/** Status byte of a ServiceAttestation (type 17) signal. */
+export enum PaymentAttestationStatus {
+  Delivered = 0,
+  Failed = 1,
+}
+
+/** Kind byte of a PaymentRequest (type 16) conditional-execution gate. */
+export enum PaymentConditionKind {
+  AnchorExists = 1,
+  AnchorDataHashEquals = 2,
+  AnchorTagEquals = 3,
+  AnchorNotExpired = 4,
 }
 
 /** Memory object types. */

@@ -95,20 +95,33 @@ export function transfer(
 // Type 2: Signal Commitment
 // ============================================================================
 
-/** Build a signal commitment transaction. */
+/**
+ * Build a signal commitment transaction (tx payload type 2).
+ *
+ * Envelope layout: `[0x02][signal_hash:32][signal_type:1][issuer_entity_id:32]`
+ * (66 bytes). Signal types that carry an inline payload tail append their
+ * type-specific `extras` after the envelope; build the tail with the matching
+ * `build*Extras` helper from `./signals`. Types 0-6 carry no extras, so callers
+ * for those omit the argument (preserving the 66-byte payload).
+ */
 export function signalCommitment(
   kp: Keypair,
   nonce: bigint,
   fee: bigint,
   signalHash: Uint8Array,
   signalType: SignalType,
-  issuerEntityId: Uint8Array
+  issuerEntityId: Uint8Array,
+  extras?: Uint8Array
 ): TxV1 {
-  const payload = new Uint8Array(66);
+  const extrasLen = extras?.length ?? 0;
+  const payload = new Uint8Array(66 + extrasLen);
   payload[0] = 2;
   payload.set(signalHash, 1);
   payload[33] = signalType;
   payload.set(issuerEntityId, 34);
+  if (extras && extras.length > 0) {
+    payload.set(extras, 66);
+  }
   return buildSigned(kp, nonce, fee, payload);
 }
 
