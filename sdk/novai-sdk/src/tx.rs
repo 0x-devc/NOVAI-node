@@ -99,11 +99,36 @@ pub fn signal_commitment(
     signal_type: AiSignalType,
     issuer_entity_id: &[u8; 32],
 ) -> Result<TxV1, Error> {
-    let mut payload = Vec::with_capacity(66);
+    signal_commitment_with_extras(sk, nonce, fee, signal_hash, signal_type, issuer_entity_id, &[])
+}
+
+/// Build a signal commitment transaction carrying a type-specific extras tail.
+///
+/// Payload: `[0x02][signal_hash:32][signal_type:1][issuer_entity_id:32][extras:N]`.
+///
+/// Signal types 0-6 carry no tail (pass an empty `extras`, as
+/// [`signal_commitment`] does). Types 7-22 append a tail built by the matching
+/// helper in [`crate::signals`]; the caller pairs `signal_type` with the
+/// corresponding extras encoder.
+///
+/// # Errors
+///
+/// Returns error if signing fails.
+pub fn signal_commitment_with_extras(
+    sk: &SigningKey,
+    nonce: u64,
+    fee: u64,
+    signal_hash: &[u8; 32],
+    signal_type: AiSignalType,
+    issuer_entity_id: &[u8; 32],
+    extras: &[u8],
+) -> Result<TxV1, Error> {
+    let mut payload = Vec::with_capacity(66 + extras.len());
     payload.push(2);
     payload.extend_from_slice(signal_hash);
     payload.push(signal_type.to_byte());
     payload.extend_from_slice(issuer_entity_id);
+    payload.extend_from_slice(extras);
     build_signed(sk, nonce, fee, payload)
 }
 
@@ -422,5 +447,52 @@ mod tests {
         assert_eq!(&tx.payload[1..33], &entity_id[..]);
         assert_eq!(&tx.payload[33..65], &new_code_hash[..]);
         assert_eq!(&tx.payload[65..97], &[0u8; 32][..]);
+    }
+
+    /// The bare `signal_commitment` builder (signal types 0-6) is the 66-byte
+    /// envelope with no tail; the type byte is the `AiSignalType` discriminant.
+    #[test]
+    fn signal_commitment_base_is_66_bytes() {
+        let sk = test_signing_key();
+        let signal_hash = [0xA1u8; 32];
+        let issuer = [0xB2u8; 32];
+
+        let tx = signal_commitment(&sk, 0, 1000, &signal_hash, AiSignalType::Anomaly, &issuer)
+            .expect("signal_commitment should build");
+
+        assert_eq!(tx.payload.len(), 66, "base SignalCommitment payload is 66 bytes");
+        assert_eq!(tx.payload[0], 0x02, "tx type byte is 2");
+        assert_eq!(&tx.payload[1..33], &signal_hash[..]);
+        assert_eq!(tx.payload[33], AiSignalType::Anomaly.to_byte()); // 0
+        assert_eq!(&tx.payload[34..66], &issuer[..]);
+    }
+
+    /// `signal_commitment_with_extras` appends the type-specific tail after the
+    /// 66-byte envelope. A StakeDeposit (type 9) tail is used as the example;
+    /// the total length (82) is the chain's `STAKE_DEPOSIT` payload length.
+    #[test]
+    fn signal_commitment_with_extras_appends_tail() {
+        let sk = test_signing_key();
+        let signal_hash = [0xA1u8; 32];
+        let issuer = [0xB2u8; 32];
+        let extras = crate::signals::stake_deposit_extras(1_000_000);
+
+        let tx = signal_commitment_with_extras(
+            &sk,
+            0,
+            1000,
+            &signal_hash,
+            AiSignalType::StakeDeposit,
+            &issuer,
+            &extras,
+        )
+        .expect("signal_commitment_with_extras should build");
+
+        assert_eq!(tx.payload.len(), 66 + extras.len()); // 82
+        assert_eq!(tx.payload[0], 0x02);
+        assert_eq!(&tx.payload[1..33], &signal_hash[..]);
+        assert_eq!(tx.payload[33], AiSignalType::StakeDeposit.to_byte()); // 9
+        assert_eq!(&tx.payload[34..66], &issuer[..]);
+        assert_eq!(&tx.payload[66..], &extras[..]);
     }
 }

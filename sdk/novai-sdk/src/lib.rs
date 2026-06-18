@@ -33,6 +33,7 @@
 pub mod client;
 pub mod error;
 pub mod keys;
+pub mod signals;
 pub mod tx;
 
 pub use client::{AiEntityInfo, Client, MemoryObjectInfo, SignalInfo};
