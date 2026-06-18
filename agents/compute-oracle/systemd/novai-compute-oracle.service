@@ -1,0 +1,24 @@
+[Unit]
+Description=NOVAI compute oracle (GPU pricing anchor publisher)
+# See agents/compute-oracle/README.md for the operator guide.
+After=network-online.target
+Wants=network-online.target
+# Soft dependency on the local NOVAI node. The oracle tolerates the node
+# being unreachable (logs, retries) so it does not need to be a hard order.
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/novai-compute-oracle
+EnvironmentFile=/etc/novai/compute-oracle.env
+ExecStart=/opt/novai-compute-oracle/.venv/bin/python /opt/novai-compute-oracle/oracle.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=novai-compute-oracle
+
+[Install]
+WantedBy=multi-user.target

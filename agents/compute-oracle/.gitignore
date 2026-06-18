@@ -1,0 +1,12 @@
+# bytecode and local virtualenvs
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# never commit secrets; the systemd/*.example template is the only env in git
+*.env
+*-keys.json
+*.key
+*.pem
