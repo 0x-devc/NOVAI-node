@@ -347,9 +347,9 @@ The subscription protocol promotes ad-hoc, off-chain "I'll pay you per call" rel
 
 ### `ai_service`
 
-**Purpose.** Optional Anthropic Claude API integration for off-chain LLM analysis ("Rail B" - non-deterministic, advisory-only, never feeds back into consensus). Used to enrich the copilot's signals with natural-language context. Disabled by default; enable with `NOVAI_AI_API_KEY`.
+**Purpose.** Optional multi-provider LLM integration for off-chain analysis ("Rail B": non-deterministic, advisory-only, never feeds back into consensus). Used to enrich the copilot's signals with natural-language context. The provider is configurable through `AiServiceConfig`: the Anthropic Messages API, or any OpenAI-compatible Chat Completions endpoint including local or self-hosted models (Ollama, vLLM, LM Studio, llama.cpp). Disabled by default. See `docs/AI_PROVIDER_CONFIGURATION.md` for configuration and a local-model walkthrough.
 
-**Key items.** `AnthropicClient`, `AiServiceRunner`, `AiAnalysisResponse`, `FeatureFlags`, `PromptBuilder`, the bridge's circuit breaker.
+**Key items.** `AiClient` (with the backward-compatible `AnthropicClient` alias), `AiProvider`, `AiServiceConfig`, `AiServiceRunner`, `AiAnalysisResponse`, `FeatureFlags`, `PromptBuilder`, the bridge's circuit breaker.
 
 **Workspace deps.** `ai_entities`, `copilot`.
 

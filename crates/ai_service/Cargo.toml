@@ -3,7 +3,7 @@ name = "novai-ai-service"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "AI Service: Anthropic Claude API integration for NOVAI validator intelligence"
+description = "AI Service: multi-provider LLM integration (Anthropic and OpenAI-compatible/local) for NOVAI validator intelligence"
 
 [dependencies]
 # Internal crates

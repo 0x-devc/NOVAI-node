@@ -4,14 +4,78 @@
 //! and chain state snapshots. All types are Rail B (advisory only).
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+
+/// AI provider wire protocol.
+///
+/// `Anthropic` targets the Anthropic Messages API. `OpenAiCompatible` targets
+/// any endpoint speaking the OpenAI Chat Completions API. That covers the
+/// hosted OpenAI API and, more importantly for a decentralized network, local
+/// or self-hosted runtimes such as Ollama, vLLM, LM Studio, and the llama.cpp
+/// server. Selecting `OpenAiCompatible` with a loopback `base_url` lets a
+/// validator run inference with no external provider at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AiProvider {
+    /// Anthropic Messages API (`x-api-key` auth, `/v1/messages`).
+    Anthropic,
+    /// OpenAI Chat Completions API and compatible local servers
+    /// (`Authorization: Bearer` auth when a key is set, `/v1/chat/completions`).
+    OpenAiCompatible,
+}
+
+impl AiProvider {
+    /// Stable lowercase identifier for logging, metrics, and config files.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAiCompatible => "openai_compatible",
+        }
+    }
+}
+
+impl Default for AiProvider {
+    fn default() -> Self {
+        Self::Anthropic
+    }
+}
+
+impl FromStr for AiProvider {
+    type Err = String;
+
+    /// Parse a provider from a config string. Spellings are case-insensitive
+    /// and surrounding whitespace is ignored.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "anthropic" | "claude" => Ok(Self::Anthropic),
+            "openai" | "openai-compatible" | "openai_compatible" | "local" => {
+                Ok(Self::OpenAiCompatible)
+            }
+            other => Err(format!("unknown AI provider: {other}")),
+        }
+    }
+}
 
 /// Configuration for the AI service.
 #[derive(Debug, Clone)]
 pub struct AiServiceConfig {
-    /// Anthropic API key. If `None`, reads from `ANTHROPIC_API_KEY` env var.
+    /// Which provider wire protocol to use. Defaults to `Anthropic`.
+    pub provider: AiProvider,
+
+    /// Endpoint override. When `None`, the Anthropic provider uses its public
+    /// Messages endpoint. The `OpenAiCompatible` provider requires this (for
+    /// example `http://localhost:11434` for Ollama). A bare host, or a host
+    /// ending in `/v1`, is expanded to the chat completions path.
+    pub base_url: Option<String>,
+
+    /// API key. When `None`, the Anthropic provider reads `ANTHROPIC_API_KEY`
+    /// and the OpenAI-compatible provider reads `OPENAI_API_KEY`. A local
+    /// OpenAI-compatible server usually needs no key, so `None` is valid there.
     pub api_key: Option<String>,
 
-    /// Model identifier (e.g., `"claude-sonnet-4-20250514"`).
+    /// Model identifier. Provider-specific (for example
+    /// `"claude-sonnet-4-20250514"` for Anthropic, or `"llama3.1"` for a local
+    /// Ollama model).
     pub model: String,
 
     /// Maximum tokens in API response.
@@ -43,6 +107,8 @@ pub struct AiServiceConfig {
 impl Default for AiServiceConfig {
     fn default() -> Self {
         Self {
+            provider: AiProvider::Anthropic,
+            base_url: None,
             api_key: None,
             model: "claude-sonnet-4-20250514".to_string(),
             max_tokens: 2048,
@@ -190,6 +256,39 @@ mod tests {
         assert!(config.api_key.is_none());
         assert_eq!(config.max_concurrent, 2);
         assert_eq!(config.circuit_breaker_threshold, 5);
+    }
+
+    #[test]
+    fn default_provider_is_anthropic() {
+        let config = AiServiceConfig::default();
+        assert_eq!(config.provider, AiProvider::Anthropic);
+        assert!(config.base_url.is_none());
+    }
+
+    #[test]
+    fn provider_parses_known_spellings() {
+        assert_eq!("anthropic".parse::<AiProvider>(), Ok(AiProvider::Anthropic));
+        assert_eq!("Claude".parse::<AiProvider>(), Ok(AiProvider::Anthropic));
+        assert_eq!("openai".parse::<AiProvider>(), Ok(AiProvider::OpenAiCompatible));
+        assert_eq!(
+            "openai-compatible".parse::<AiProvider>(),
+            Ok(AiProvider::OpenAiCompatible)
+        );
+        assert_eq!(
+            "  LOCAL ".parse::<AiProvider>(),
+            Ok(AiProvider::OpenAiCompatible)
+        );
+    }
+
+    #[test]
+    fn provider_rejects_unknown() {
+        assert!("gemini".parse::<AiProvider>().is_err());
+    }
+
+    #[test]
+    fn provider_name_is_stable() {
+        assert_eq!(AiProvider::Anthropic.name(), "anthropic");
+        assert_eq!(AiProvider::OpenAiCompatible.name(), "openai_compatible");
     }
 
     #[test]

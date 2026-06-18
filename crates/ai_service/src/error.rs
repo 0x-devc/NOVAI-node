@@ -1,7 +1,7 @@
 //! Error types for the AI service.
 //!
-//! PURPOSE: Unified error enum covering all failure modes of the Anthropic
-//! API client, circuit breaker, and configuration.
+//! PURPOSE: Unified error enum covering all failure modes of the AI provider
+//! client, circuit breaker, and configuration.
 
 use std::fmt;
 
@@ -39,6 +39,10 @@ pub enum AiServiceError {
 
     /// AI service is disabled in configuration.
     Disabled,
+
+    /// Invalid configuration (for example, an OpenAI-compatible provider
+    /// selected without a `base_url`).
+    Config(String),
 }
 
 impl fmt::Display for AiServiceError {
@@ -67,6 +71,7 @@ impl fmt::Display for AiServiceError {
                 write!(f, "Circuit breaker open — too many consecutive failures")
             }
             Self::Disabled => write!(f, "AI service is disabled"),
+            Self::Config(msg) => write!(f, "AI service configuration error: {msg}"),
         }
     }
 }
@@ -96,6 +101,7 @@ mod tests {
             AiServiceError::Timeout,
             AiServiceError::CircuitBreakerOpen,
             AiServiceError::Disabled,
+            AiServiceError::Config("missing base_url".into()),
         ];
 
         for err in &cases {

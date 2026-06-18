@@ -44,11 +44,14 @@ rewrite these:
   project. The scrub skill currently reports it as a personal email; see
   `docs/SCRUB-SKILL.md` for the one-line allowlist that clears that false
   positive.
-- **The product strings in the AI service code:** the API client type name
-  `AnthropicClient`, the environment variable names `ANTHROPIC_API_KEY` and
-  `ANTHROPIC_API_URL`, and the model id string (the `claude-sonnet-...` form).
-  These are real product references in `crates/ai_service`, not attribution
-  markers, and the code does not work without them.
+- **The product strings in the AI service code:** the client type names
+  `AiClient` and the `AnthropicClient` alias, the provider names `Anthropic` and
+  `OpenAiCompatible`, the environment variable names `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_API_URL`, and `OPENAI_API_KEY`, the Anthropic model id string (the
+  `claude-sonnet-...` form), and the names of local OpenAI-compatible runtimes
+  referenced in docs and examples (Ollama, vLLM, LM Studio, llama.cpp). These
+  are real product references in `crates/ai_service`, not attribution markers,
+  and the code does not work without them.
 - **Determinism-critical constants:** genesis public keys, golden-vector hex,
   and test or example IP addresses. Scrubbing any of these changes a hash or a
   fixture and breaks the tests. Concretely this covers the documentation address

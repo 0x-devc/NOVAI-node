@@ -83,7 +83,7 @@ What is **not** live: smart contracts, dynamic code execution, the NNPX privacy 
 | `crates/governance` | Proposal lifecycle: 5 types, timelocks, AI autonomy upgrade gates |
 | `crates/genesis` | Deterministic genesis state generation |
 | `crates/copilot` | Validator advisory: statistics-based anomaly detection (non-binding) |
-| `crates/ai_service` | Anthropic Claude API sidecar framework (not wired to consensus) |
+| `crates/ai_service` | Multi-provider LLM sidecar: Anthropic or OpenAI-compatible/local (not wired to consensus) |
 | `tools/novai-cli` | Developer CLI: 17 commands for the full AI entity lifecycle |
 | `tools/tx-generator` | Load testing tool: configurable TPS, retry logic, metrics |
 | `tools/genesis-generator` | Deterministic genesis JSON + state root generation |

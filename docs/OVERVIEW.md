@@ -51,7 +51,7 @@ The protocol is currently in active development, having completed core consensus
 
 AI & Governance Extensions:
 +-> ai_entities (first-class AI: signals, gates, tiers, memory)
-+-> ai_service (Anthropic Claude API integration)
++-> ai_service (multi-provider LLM integration: Anthropic or OpenAI-compatible/local)
 +-> copilot (validator co-pilot: anomaly detection)
 +-> governance (proposal lifecycle, timelocks)
 ```
@@ -72,7 +72,7 @@ AI & Governance Extensions:
 | `crypto` | Ed25519 signatures, Blake3 hashing, address derivation |
 | `types` | Protocol primitives: TxV1, Block, Address, Nonce |
 | `ai_entities` | AI primitives: AiSignalV1, ApprovalGate, autonomy tiers, memory objects |
-| `ai_service` | Anthropic Claude API sidecar for AI entity execution |
+| `ai_service` | Multi-provider LLM sidecar (Anthropic or OpenAI-compatible/local) for AI entity execution |
 | `copilot` | Statistics-based anomaly detection: missed blocks, vote delays, peer churn |
 | `governance` | Proposal types, lifecycle, timelocks, AI autonomy upgrade gates |
 | `genesis` | Deterministic chain initialization |

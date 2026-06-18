@@ -1,24 +1,29 @@
-//! Anthropic Claude API client with circuit breaker and concurrency control.
+//! AI provider client with circuit breaker and concurrency control.
 //!
-//! PURPOSE: Makes HTTP requests to the Anthropic Messages API, parses responses
-//! into structured findings. Includes circuit breaker to prevent cascading
-//! failures and semaphore to limit concurrent requests.
+//! PURPOSE: Makes HTTP requests to a configured AI provider (the Anthropic
+//! Messages API, or any OpenAI-compatible Chat Completions endpoint including
+//! local servers) and parses responses into structured findings. Includes a
+//! circuit breaker to prevent cascading failures and a semaphore to limit
+//! concurrent requests.
 //!
 //! INVARIANTS:
 //! - API key is never logged or included in error messages
-//! - Circuit breaker transitions: Closed → Open (after threshold failures) → HalfOpen → Closed
+//! - Circuit breaker transitions Closed, Open (after threshold failures),
+//!   HalfOpen, then back to Closed
 //! - Semaphore ensures max_concurrent requests at any time
 //! - Rate limiting (HTTP 429) does NOT trip the circuit breaker
 //!
 //! FAILURE MODES:
-//! - Network failure → HttpError, circuit breaker counts failure
-//! - API error (4xx/5xx) → ApiError, circuit breaker counts failure
-//! - Timeout → Timeout error, circuit breaker counts failure
-//! - Rate limited → RateLimited error, circuit breaker NOT affected
+//! - Network failure: HttpError, circuit breaker counts failure
+//! - API error (4xx/5xx): ApiError, circuit breaker counts failure
+//! - Timeout: Timeout error, circuit breaker counts failure
+//! - Rate limited: RateLimited error, circuit breaker NOT affected
 
 use crate::error::AiServiceError;
 use crate::prompt::PromptBuilder;
-use crate::types::{AiAnalysisResponse, AiServiceConfig, ChainSnapshot, Finding, InferenceType};
+use crate::types::{
+    AiAnalysisResponse, AiProvider, AiServiceConfig, ChainSnapshot, Finding, InferenceType,
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -164,6 +169,33 @@ struct ApiErrorDetail {
     message: String,
 }
 
+/// OpenAI-compatible Chat Completions request body.
+#[derive(Serialize)]
+struct OpenAiRequest {
+    model: String,
+    max_tokens: u32,
+    temperature: f64,
+    messages: Vec<ApiMessage>,
+}
+
+/// OpenAI-compatible Chat Completions response body.
+#[derive(Deserialize)]
+struct OpenAiResponse {
+    choices: Vec<OpenAiChoice>,
+}
+
+/// A single choice in an OpenAI-compatible response.
+#[derive(Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiResponseMessage,
+}
+
+/// The assistant message inside an OpenAI-compatible choice.
+#[derive(Deserialize)]
+struct OpenAiResponseMessage {
+    content: String,
+}
+
 /// Intermediate parsed structure for structured model output.
 #[derive(Deserialize)]
 struct ParsedAnalysis {
@@ -176,11 +208,12 @@ struct ParsedAnalysis {
 // CLIENT
 // ============================================================================
 
-/// Client for the Anthropic Messages API.
+/// Client for a configured AI provider.
 ///
 /// Thread-safe: can be shared via `Arc` across async tasks.
-pub struct AnthropicClient {
-    api_key: String,
+pub struct AiClient {
+    endpoint: String,
+    api_key: Option<String>,
     config: AiServiceConfig,
     http: Client,
     circuit_breaker: Mutex<CircuitBreaker>,
@@ -188,29 +221,37 @@ pub struct AnthropicClient {
     prompt_builder: PromptBuilder,
 }
 
-impl AnthropicClient {
-    /// Create a new Anthropic client.
+/// Backward-compatible alias for [`AiClient`].
+///
+/// The client became provider-agnostic with the multi-provider change; this
+/// alias keeps existing call sites that referred to `AnthropicClient` working.
+pub type AnthropicClient = AiClient;
+
+impl AiClient {
+    /// Create a new AI client for the configured provider.
     ///
     /// API key resolution order:
-    /// 1. `config.api_key` field (if `Some`)
-    /// 2. `ANTHROPIC_API_KEY` environment variable
-    /// 3. Returns `AiServiceError::ApiKeyMissing`
+    /// 1. `config.api_key` field (if `Some` and non-empty)
+    /// 2. The provider's environment variable (`ANTHROPIC_API_KEY` for
+    ///    Anthropic, `OPENAI_API_KEY` for OpenAI-compatible)
+    ///
+    /// The Anthropic provider requires a key. The OpenAI-compatible provider
+    /// treats the key as optional, because a local server (Ollama, vLLM, LM
+    /// Studio, llama.cpp) typically needs no authentication.
     ///
     /// # Errors
     ///
     /// Returns `AiServiceError::Disabled` if `config.enabled` is false.
-    /// Returns `AiServiceError::ApiKeyMissing` if no API key is available.
+    /// Returns `AiServiceError::Config` if the OpenAI-compatible provider has no `base_url`.
+    /// Returns `AiServiceError::ApiKeyMissing` if the Anthropic provider has no key.
     /// Returns `AiServiceError::HttpError` if the HTTP client fails to build.
     pub fn new(config: AiServiceConfig) -> Result<Self, AiServiceError> {
         if !config.enabled {
             return Err(AiServiceError::Disabled);
         }
 
-        let api_key = config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-            .ok_or(AiServiceError::ApiKeyMissing)?;
+        let endpoint = resolve_endpoint(config.provider, config.base_url.as_deref())?;
+        let api_key = resolve_api_key(config.provider, config.api_key.as_deref())?;
 
         let http = Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
@@ -234,6 +275,7 @@ impl AnthropicClient {
         };
 
         Ok(Self {
+            endpoint,
             api_key,
             config,
             http,
@@ -296,7 +338,7 @@ impl AnthropicClient {
         result
     }
 
-    /// Make the actual HTTP request to the Anthropic API.
+    /// Make the actual HTTP request to the configured AI provider.
     async fn call_api(
         &self,
         inference_type: InferenceType,
@@ -305,33 +347,39 @@ impl AnthropicClient {
         let system_prompt = self.prompt_builder.system_prompt(&inference_type);
         let user_message = self.prompt_builder.user_message(snapshot);
 
-        let request = ApiRequest {
-            model: self.config.model.clone(),
-            max_tokens: self.config.max_tokens,
-            temperature: self.config.temperature,
-            system: system_prompt,
-            messages: vec![ApiMessage {
-                role: "user".to_string(),
-                content: user_message,
-            }],
+        let body = build_request_body(
+            self.config.provider,
+            &self.config.model,
+            self.config.max_tokens,
+            self.config.temperature,
+            &system_prompt,
+            &user_message,
+        );
+
+        let mut request = self
+            .http
+            .post(&self.endpoint)
+            .header("content-type", "application/json");
+
+        request = match self.config.provider {
+            AiProvider::Anthropic => request
+                .header("x-api-key", self.api_key.as_deref().unwrap_or_default())
+                .header("anthropic-version", ANTHROPIC_VERSION),
+            AiProvider::OpenAiCompatible => {
+                match self.api_key.as_deref().filter(|k| !k.is_empty()) {
+                    Some(key) => request.header("authorization", format!("Bearer {key}")),
+                    None => request,
+                }
+            }
         };
 
-        let response = self
-            .http
-            .post(ANTHROPIC_API_URL)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    AiServiceError::Timeout
-                } else {
-                    AiServiceError::HttpError(e.to_string())
-                }
-            })?;
+        let response = request.json(&body).send().await.map_err(|e| {
+            if e.is_timeout() {
+                AiServiceError::Timeout
+            } else {
+                AiServiceError::HttpError(e.to_string())
+            }
+        })?;
 
         let status = response.status().as_u16();
 
@@ -355,19 +403,13 @@ impl AnthropicClient {
             return Err(AiServiceError::ApiError { status, message });
         }
 
-        // Parse successful response
-        let api_response: ApiResponse = response
-            .json()
+        // Parse successful response (provider-specific shape)
+        let body = response
+            .text()
             .await
             .map_err(|e| AiServiceError::ParseError(e.to_string()))?;
 
-        let raw_response = api_response
-            .content
-            .iter()
-            .filter(|b| b.content_type == "text")
-            .filter_map(|b| b.text.as_deref())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let raw_response = extract_text(self.config.provider, &body)?;
 
         if raw_response.is_empty() {
             return Err(AiServiceError::ParseError(
@@ -376,6 +418,7 @@ impl AnthropicClient {
         }
 
         tracing::debug!(
+            provider = self.config.provider.name(),
             inference_type = inference_type.name(),
             response_len = raw_response.len(),
             "Inference response received"
@@ -428,6 +471,138 @@ fn extract_json_block(text: &str) -> Option<&str> {
     let start = text.find("```json\n").map(|i| i + 8)?;
     let end = text[start..].find("\n```").map(|i| i + start)?;
     Some(&text[start..end])
+}
+
+/// Resolve the full HTTP endpoint for a provider.
+///
+/// Anthropic uses its public Messages endpoint unless `base_url` overrides it.
+/// OpenAI-compatible requires a `base_url`. A bare host or a host ending in
+/// `/v1` is expanded to `/v1/chat/completions`, while a URL that already targets
+/// `chat/completions` is used unchanged.
+fn resolve_endpoint(provider: AiProvider, base_url: Option<&str>) -> Result<String, AiServiceError> {
+    match provider {
+        AiProvider::Anthropic => Ok(base_url
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(ANTHROPIC_API_URL)
+            .trim_end_matches('/')
+            .to_string()),
+        AiProvider::OpenAiCompatible => {
+            let base = base_url.map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
+                AiServiceError::Config(
+                    "OpenAI-compatible provider requires base_url (for example http://localhost:11434)"
+                        .to_string(),
+                )
+            })?;
+            let trimmed = base.trim_end_matches('/');
+            if trimmed.contains("chat/completions") {
+                Ok(trimmed.to_string())
+            } else if trimmed.ends_with("/v1") {
+                Ok(format!("{trimmed}/chat/completions"))
+            } else {
+                Ok(format!("{trimmed}/v1/chat/completions"))
+            }
+        }
+    }
+}
+
+/// Resolve the API key for a provider from config or the provider's env var.
+///
+/// The Anthropic provider requires a key. The OpenAI-compatible provider allows
+/// `None`, which is the normal case for a local server with no authentication.
+fn resolve_api_key(
+    provider: AiProvider,
+    config_key: Option<&str>,
+) -> Result<Option<String>, AiServiceError> {
+    let key = config_key
+        .map(str::to_string)
+        .filter(|k| !k.is_empty())
+        .or_else(|| {
+            let env_var = match provider {
+                AiProvider::Anthropic => "ANTHROPIC_API_KEY",
+                AiProvider::OpenAiCompatible => "OPENAI_API_KEY",
+            };
+            std::env::var(env_var).ok().filter(|k| !k.is_empty())
+        });
+
+    match provider {
+        AiProvider::Anthropic => match key {
+            Some(k) => Ok(Some(k)),
+            None => Err(AiServiceError::ApiKeyMissing),
+        },
+        AiProvider::OpenAiCompatible => Ok(key),
+    }
+}
+
+/// Build the provider-specific JSON request body.
+fn build_request_body(
+    provider: AiProvider,
+    model: &str,
+    max_tokens: u32,
+    temperature: f64,
+    system_prompt: &str,
+    user_message: &str,
+) -> serde_json::Value {
+    match provider {
+        AiProvider::Anthropic => {
+            let request = ApiRequest {
+                model: model.to_string(),
+                max_tokens,
+                temperature,
+                system: system_prompt.to_string(),
+                messages: vec![ApiMessage {
+                    role: "user".to_string(),
+                    content: user_message.to_string(),
+                }],
+            };
+            serde_json::to_value(request).unwrap_or_default()
+        }
+        AiProvider::OpenAiCompatible => {
+            let request = OpenAiRequest {
+                model: model.to_string(),
+                max_tokens,
+                temperature,
+                messages: vec![
+                    ApiMessage {
+                        role: "system".to_string(),
+                        content: system_prompt.to_string(),
+                    },
+                    ApiMessage {
+                        role: "user".to_string(),
+                        content: user_message.to_string(),
+                    },
+                ],
+            };
+            serde_json::to_value(request).unwrap_or_default()
+        }
+    }
+}
+
+/// Extract the assistant text from a provider-specific successful response body.
+fn extract_text(provider: AiProvider, body: &str) -> Result<String, AiServiceError> {
+    match provider {
+        AiProvider::Anthropic => {
+            let parsed: ApiResponse = serde_json::from_str(body)
+                .map_err(|e| AiServiceError::ParseError(e.to_string()))?;
+            Ok(parsed
+                .content
+                .iter()
+                .filter(|b| b.content_type == "text")
+                .filter_map(|b| b.text.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        AiProvider::OpenAiCompatible => {
+            let parsed: OpenAiResponse = serde_json::from_str(body)
+                .map_err(|e| AiServiceError::ParseError(e.to_string()))?;
+            Ok(parsed
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| c.message.content)
+                .unwrap_or_default())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -622,6 +797,137 @@ mod tests {
         };
 
         let client = AnthropicClient::new(config).expect("should create client");
-        assert_eq!(client.api_key, "test-key-12345");
+        assert_eq!(client.api_key.as_deref(), Some("test-key-12345"));
+    }
+
+    // Provider abstraction tests
+
+    #[test]
+    fn endpoint_anthropic_uses_default_and_override() {
+        assert_eq!(
+            resolve_endpoint(AiProvider::Anthropic, None).expect("anthropic default"),
+            ANTHROPIC_API_URL
+        );
+        assert_eq!(
+            resolve_endpoint(AiProvider::Anthropic, Some("http://localhost:8080/v1/messages"))
+                .expect("anthropic override"),
+            "http://localhost:8080/v1/messages"
+        );
+    }
+
+    #[test]
+    fn endpoint_openai_expands_paths() {
+        let cases = [
+            (
+                "http://localhost:11434",
+                "http://localhost:11434/v1/chat/completions",
+            ),
+            (
+                "http://localhost:11434/",
+                "http://localhost:11434/v1/chat/completions",
+            ),
+            (
+                "http://localhost:8000/v1",
+                "http://localhost:8000/v1/chat/completions",
+            ),
+            (
+                "http://localhost:8000/v1/chat/completions",
+                "http://localhost:8000/v1/chat/completions",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                resolve_endpoint(AiProvider::OpenAiCompatible, Some(input))
+                    .expect("openai endpoint"),
+                expected,
+                "input {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_openai_requires_base_url() {
+        assert!(matches!(
+            resolve_endpoint(AiProvider::OpenAiCompatible, None),
+            Err(AiServiceError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn anthropic_body_carries_system_field() {
+        let body = build_request_body(AiProvider::Anthropic, "claude-x", 256, 0.3, "SYS", "USER");
+        assert_eq!(body["model"], "claude-x");
+        assert_eq!(body["max_tokens"].as_u64(), Some(256));
+        assert_eq!(body["system"], "SYS");
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "USER");
+        assert!(body.get("choices").is_none());
+    }
+
+    #[test]
+    fn openai_body_uses_message_roles() {
+        let body =
+            build_request_body(AiProvider::OpenAiCompatible, "llama3.1", 256, 0.3, "SYS", "USER");
+        assert_eq!(body["model"], "llama3.1");
+        assert_eq!(body["max_tokens"].as_u64(), Some(256));
+        assert!(body.get("system").is_none());
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "SYS");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"], "USER");
+    }
+
+    #[test]
+    fn extract_text_handles_anthropic_shape() {
+        let body = r#"{"content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]}"#;
+        assert_eq!(
+            extract_text(AiProvider::Anthropic, body).expect("anthropic text"),
+            "hello\nworld"
+        );
+    }
+
+    #[test]
+    fn extract_text_handles_openai_shape() {
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"hi there"}}]}"#;
+        assert_eq!(
+            extract_text(AiProvider::OpenAiCompatible, body).expect("openai text"),
+            "hi there"
+        );
+    }
+
+    #[test]
+    fn extract_text_rejects_malformed() {
+        assert!(extract_text(AiProvider::OpenAiCompatible, "not json").is_err());
+    }
+
+    #[test]
+    fn openai_compatible_builds_without_key() {
+        std::env::remove_var("OPENAI_API_KEY");
+        let config = AiServiceConfig {
+            enabled: true,
+            provider: AiProvider::OpenAiCompatible,
+            base_url: Some("http://localhost:11434".into()),
+            api_key: None,
+            ..AiServiceConfig::default()
+        };
+        let client = AiClient::new(config).expect("local client builds without a key");
+        assert_eq!(client.config.provider, AiProvider::OpenAiCompatible);
+        assert_eq!(client.endpoint, "http://localhost:11434/v1/chat/completions");
+        assert!(client.api_key.is_none());
+    }
+
+    #[test]
+    fn openai_compatible_requires_base_url_at_construction() {
+        let config = AiServiceConfig {
+            enabled: true,
+            provider: AiProvider::OpenAiCompatible,
+            base_url: None,
+            api_key: Some("k".into()),
+            ..AiServiceConfig::default()
+        };
+        assert!(matches!(
+            AiClient::new(config),
+            Err(AiServiceError::Config(_))
+        ));
     }
 }

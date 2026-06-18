@@ -1,19 +1,23 @@
-//! AI Service: Anthropic Claude API integration for NOVAI validator intelligence.
+//! AI Service: multi-provider LLM integration for NOVAI validator intelligence.
 //!
-//! PURPOSE: Provides real LLM analysis via the Anthropic Messages API. This is
-//! Rail B (non-deterministic, advisory only) — results NEVER influence consensus.
+//! PURPOSE: Provides off-chain LLM analysis through a configurable provider.
+//! Supported providers are the Anthropic Messages API and any OpenAI-compatible
+//! Chat Completions endpoint, including local or self-hosted runtimes such as
+//! Ollama, vLLM, LM Studio, and the llama.cpp server. This is Rail B
+//! (non-deterministic, advisory only): results NEVER influence consensus.
 //!
 //! INVARIANTS:
 //! - All API calls are async and non-blocking
-//! - Circuit breaker prevents cascading failures on API outages
+//! - Circuit breaker prevents cascading failures on provider outages
 //! - Concurrency limited by semaphore (max_concurrent config)
-//! - API key loaded from environment variable (never hardcoded)
+//! - Anthropic loads its key from config or ANTHROPIC_API_KEY; a local
+//!   OpenAI-compatible server may run with no key at all
 //!
 //! FAILURE MODES:
-//! - API key missing → `AiServiceError::ApiKeyMissing`
-//! - API unreachable → circuit breaker opens after threshold failures
-//! - Rate limited → error propagated with retry-after hint
-//! - Response unparseable → falls back to raw text finding
+//! - API key missing for a provider that requires one: `AiServiceError::ApiKeyMissing`
+//! - Provider unreachable: circuit breaker opens after threshold failures
+//! - Rate limited: error propagated with retry-after hint
+//! - Response unparseable: falls back to raw text finding
 
 pub mod bridge;
 pub mod client;
@@ -24,7 +28,7 @@ pub mod scheduler;
 pub mod types;
 
 pub use bridge::{AiTriggerCallback, AnomalyTrigger};
-pub use client::AnthropicClient;
+pub use client::{AiClient, AnthropicClient};
 pub use error::AiServiceError;
 pub use prompt::PromptBuilder;
 pub use runner::{AiServiceRunner, FeatureFlags};
@@ -32,6 +36,6 @@ pub use scheduler::{
     InferenceCallback, InferenceScheduler, InferenceTask, LoggingInferenceCallback,
 };
 pub use types::{
-    AiAnalysisResponse, AiServiceConfig, AnomalyReport, ChainSnapshot, Finding, InferenceType,
-    ValidatorStat,
+    AiAnalysisResponse, AiProvider, AiServiceConfig, AnomalyReport, ChainSnapshot, Finding,
+    InferenceType, ValidatorStat,
 };
