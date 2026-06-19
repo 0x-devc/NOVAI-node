@@ -45,6 +45,37 @@ STRESS_DURATION="${STRESS_DURATION:-120}"
 STRESS_INTERVAL="${STRESS_INTERVAL:-5}"
 
 # ---------------------------------------------------------------------------
+# Cluster bring-up configuration (full-mesh local devnet, Phase 2+)
+# ---------------------------------------------------------------------------
+
+# Repo root, resolved from this file's location (stress/lib/common.sh).
+_STRESS_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STRESS_REPO_ROOT="${STRESS_REPO_ROOT:-$(cd "$_STRESS_COMMON_DIR/../.." && pwd)}"
+
+# Node binary (built via: cargo build --release -p novai-node).
+STRESS_NODE_BIN="${STRESS_NODE_BIN:-$STRESS_REPO_ROOT/target/release/novai-node}"
+
+# PID files for cluster nodes.
+STRESS_RUN_DIR="${STRESS_RUN_DIR:-$STRESS_LOG_DIR/pids}"
+
+# Expected connected peers per node in a full mesh (each node sees the other N-1).
+STRESS_EXPECTED_PEERS="${STRESS_EXPECTED_PEERS:-$(( STRESS_NODES - 1 ))}"
+
+# Consensus knobs passed to each node (milliseconds).
+STRESS_BASE_TIMEOUT="${STRESS_BASE_TIMEOUT:-1000}"
+STRESS_PROPOSAL_INTERVAL="${STRESS_PROPOSAL_INTERVAL:-5}"
+
+# Readiness wait timeout (seconds) for the cluster to start committing.
+STRESS_READY_TIMEOUT="${STRESS_READY_TIMEOUT:-60}"
+
+# State-root agreement is sampled at (min_committed_height - margin) so every
+# node is guaranteed to already have the block.
+STRESS_SAMPLE_MARGIN="${STRESS_SAMPLE_MARGIN:-1}"
+
+# Minimum block progress required across the soak window.
+STRESS_MIN_PROGRESS="${STRESS_MIN_PROGRESS:-1}"
+
+# ---------------------------------------------------------------------------
 # Colors (disabled when stdout is not a TTY)
 # ---------------------------------------------------------------------------
 if [ -t 1 ]; then
