@@ -39,8 +39,18 @@ sr_verdict_from_pairs() {
   local line label root
   while IFS= read -r line; do
     [ -z "$line" ] && continue
+    # Only accept a well-formed "label|root" reading. A line with no '|'
+    # separator is not a node root (a diagnostic that leaked onto the
+    # collection stream, or an absent/unreached node): skip it so it stays
+    # excluded from the comparison, never carried into the roots array as a
+    # bogus value that would masquerade as a dissenter.
+    case "$line" in
+      *'|'*) ;;
+      *) continue ;;
+    esac
     label="${line%%|*}"
     root="${line#*|}"
+    [ -z "$label" ] && continue
     [ -z "$root" ] && continue
     labels+=("$label")
     roots+=("$root")
@@ -190,6 +200,17 @@ node3|bbbb"
   _sr_case "subset-agree" 0 "NONE" \
 "node0|aaaa
 node2|aaaa"
+
+  # Case 6: a stray non-pair line (a diagnostic that leaked onto the collection
+  # stream, or an absent/unreached node) must be excluded entirely, not carried
+  # in as a bogus root. The reachable nodes agree -> agreement (rc 0), NO
+  # dissenters. Regression guard for the kill-node false fork, where an absent
+  # victim was being counted as a dissenter.
+  _sr_case "stray-line-excluded" 0 "NONE" \
+"node0|aaaa
+[WARN] node1 has not reached height 99 (or RPC unavailable); excluded from this check
+node2|aaaa
+node3|aaaa"
 
   echo
   if [ "$_SR_FAILS" -eq 0 ]; then

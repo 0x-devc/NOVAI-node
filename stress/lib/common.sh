@@ -138,7 +138,7 @@ stress_ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
 log_info()  { printf '%s[INFO]%s %s\n'  "$C_BLUE"   "$C_NC" "$*"; }
 log_ok()    { printf '%s[OK]%s %s\n'    "$C_GREEN"  "$C_NC" "$*"; }
-log_warn()  { printf '%s[WARN]%s %s\n'  "$C_YELLOW" "$C_NC" "$*"; }
+log_warn()  { printf '%s[WARN]%s %s\n'  "$C_YELLOW" "$C_NC" "$*" >&2; }
 log_error() { printf '%s[ERROR]%s %s\n' "$C_RED"    "$C_NC" "$*" >&2; }
 # Loud failure marker used by assertions and the fork check.
 log_fail()  { printf '%s[FAIL]%s %s\n'  "$C_RED"    "$C_NC" "$*" >&2; }
