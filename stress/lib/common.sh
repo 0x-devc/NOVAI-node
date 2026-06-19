@@ -76,6 +76,30 @@ STRESS_SAMPLE_MARGIN="${STRESS_SAMPLE_MARGIN:-1}"
 STRESS_MIN_PROGRESS="${STRESS_MIN_PROGRESS:-1}"
 
 # ---------------------------------------------------------------------------
+# Load scenario configuration (Phase 3)
+# ---------------------------------------------------------------------------
+
+# Load tool binary (built via: cargo build --release -p tx-generator).
+STRESS_TXGEN_BIN="${STRESS_TXGEN_BIN:-$STRESS_REPO_ROOT/target/release/tx-generator}"
+
+# Load parameters.
+STRESS_TPS="${STRESS_TPS:-100}"
+STRESS_SENDERS="${STRESS_SENDERS:-10}"
+STRESS_TX_TYPE="${STRESS_TX_TYPE:-transfer}"
+STRESS_WORKERS="${STRESS_WORKERS:-4}"
+
+# Which node's RPC the load targets.
+STRESS_LOAD_NODE="${STRESS_LOAD_NODE:-0}"
+
+# Number of dev-genesis funded sender accounts (indices 0..N-1). The tx-generator
+# has no faucet; apply_dev_genesis funds exactly these deterministic addresses, so
+# --senders must stay at or below this count.
+STRESS_DEV_FUNDED_ACCOUNTS="${STRESS_DEV_FUNDED_ACCOUNTS:-100}"
+
+# TPS above this safe cap requires STRESS_ENABLE_DESTRUCTIVE=1 (high-rate gate).
+STRESS_TPS_SAFE_CAP="${STRESS_TPS_SAFE_CAP:-1000}"
+
+# ---------------------------------------------------------------------------
 # Colors (disabled when stdout is not a TTY)
 # ---------------------------------------------------------------------------
 if [ -t 1 ]; then

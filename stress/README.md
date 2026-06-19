@@ -85,7 +85,15 @@ stress/
 
 ## Phase status
 
-- Phase 1 (this commit): lib core, dispatcher, README, self-test. Done.
-- Phase 2: soak scenario.
-- Phase 3: load scenario.
-- Phase 4: cluster control and kill-node scenario.
+- Phase 1: lib core, dispatcher, README, self-test. Done.
+- Phase 2: full-mesh launcher and baseline soak scenario. Done.
+- Phase 3: load scenario (tx-generator under the mesh, concurrent invariant sampling). Done.
+- Phase 4: per-node kill and restart, and the kill-node fault scenario.
+
+## Load funding precondition
+
+The tx-generator has no faucet; it derives sender keys deterministically and
+expects them pre-funded. The dev-keys genesis funds the first 100 of those exact
+addresses (indices 0..99). So the load scenario keeps `--senders` at or below 100
+(default 10) and refuses more. High-rate load (tps above the safe cap) requires
+`--enable-destructive`.
