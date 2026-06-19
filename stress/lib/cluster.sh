@@ -15,8 +15,8 @@
 # LOCAL devnet config (port offsets, local data-dir), never a production value or
 # remote endpoint. A localhost guard refuses any non-local host.
 #
-# This module owns full-cluster start/stop/status/readiness. Per-node kill and
-# restart for the fault scenario are added in Phase 4.
+# This module owns full-cluster start/stop/status/readiness AND per-node kill and
+# restart (used by the kill-node fault scenario).
 
 if [ -n "${STRESS_CLUSTER_SOURCED:-}" ]; then
   return 0
@@ -34,8 +34,15 @@ cluster_node_datadir() { printf '%s/%s' "$STRESS_DATA_DIR" "$1"; }
 # Populate the global array CLUSTER_ARGV with the exact `novai-node run` argv for
 # node i. Built from LOCAL config only: 127.0.0.1 binds and peers, per-node local
 # data-dir, port offsets. Never a remote endpoint or production value.
+#
+# peer_mode (optional, default "incremental"):
+#   incremental : dial nodes 0..i-1 only (used at initial start; each pair is
+#                 dialed once by the higher-indexed node, so peer_count == N-1).
+#   full        : dial every other node (used on rejoin so any victim, not just
+#                 the highest-indexed one, re-establishes all its connections;
+#                 peers that did not re-dial it get a fresh inbound instead).
 cluster_build_argv() {
-  local i="$1" j
+  local i="$1" peer_mode="${2:-incremental}" j
   assert_localhost_or_die "http://$STRESS_HOST" "cluster host"
   CLUSTER_ARGV=(
     "$STRESS_NODE_BIN" run
@@ -49,8 +56,9 @@ cluster_build_argv() {
     --base-timeout "$STRESS_BASE_TIMEOUT"
     --proposal-interval "$STRESS_PROPOSAL_INTERVAL"
   )
-  # Full mesh: dial every lower-indexed node on localhost.
-  for (( j = 0; j < i; j++ )); do
+  for (( j = 0; j < STRESS_NODES; j++ )); do
+    [ "$j" -eq "$i" ] && continue
+    if [ "$peer_mode" = "incremental" ] && [ "$j" -ge "$i" ]; then continue; fi
     CLUSTER_ARGV+=( --peer "127.0.0.1:$(( STRESS_P2P_BASE + j ))" )
   done
 }
@@ -74,6 +82,18 @@ cluster_build_check() {
   fi
 }
 
+# Launch a single validator (nohup, PID file). peer_mode is passed through to
+# cluster_build_argv. Internal helper used by cluster_start and cluster_restart_node.
+_cluster_launch_node() {
+  local i="$1" peer_mode="${2:-incremental}" pid
+  mkdir -p "$(cluster_node_datadir "$i")"
+  cluster_build_argv "$i" "$peer_mode"
+  nohup "${CLUSTER_ARGV[@]}" >> "$(cluster_node_logfile "$i")" 2>&1 &
+  pid=$!
+  echo "$pid" > "$(cluster_node_pidfile "$i")"
+  printf '%s' "$pid"
+}
+
 # Start the full-mesh cluster. Localhost only.
 cluster_start() {
   assert_localhost_or_die "http://$STRESS_HOST" "cluster host"
@@ -86,15 +106,43 @@ cluster_start() {
       log_warn "validator $i already running (pid $(cat "$(cluster_node_pidfile "$i")")); leaving as is"
       continue
     fi
-    mkdir -p "$(cluster_node_datadir "$i")"
-    cluster_build_argv "$i"
-    nohup "${CLUSTER_ARGV[@]}" >> "$(cluster_node_logfile "$i")" 2>&1 &
-    pid=$!
-    echo "$pid" > "$(cluster_node_pidfile "$i")"
+    pid="$(_cluster_launch_node "$i" incremental)"
     log_ok "validator $i started (pid $pid, port $(( STRESS_P2P_BASE + i )))"
     # Give the seed node a head start so leaves have something to dial.
     if [ "$i" -eq 0 ]; then sleep 2; else sleep 1; fi
   done
+}
+
+# Kill a single validator by its PID file (SIGTERM, then SIGKILL if needed).
+# Kills only the node recorded in our PID file, never some other novai-node.
+cluster_kill_node() {
+  local i="$1" pf pid
+  pf="$(cluster_node_pidfile "$i")"
+  if [ ! -f "$pf" ]; then
+    log_warn "no PID file for validator $i; nothing to kill"
+    return 1
+  fi
+  pid="$(cat "$pf" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+  fi
+  rm -f "$pf"
+  log_ok "validator $i killed"
+}
+
+# Restart a single validator, dialing ALL other nodes (full peer mode) so any
+# victim rejoins the full mesh, reusing its persisted data-dir so it re-syncs.
+cluster_restart_node() {
+  local i="$1" pid
+  assert_localhost_or_die "http://$STRESS_HOST" "cluster host"
+  if cluster_validator_running "$i"; then
+    log_warn "validator $i already running; not restarting"
+    return 0
+  fi
+  pid="$(_cluster_launch_node "$i" full)"
+  log_ok "validator $i restarted (pid $pid, dialing all peers to rejoin the mesh)"
 }
 
 # Stop the cluster. Only kills nodes recorded in our PID files (never some other
@@ -164,18 +212,19 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -uo pipefail
   case "${1:-}" in
     plan)
-      # Print the launch argv for each node WITHOUT executing (safe inspection).
       for (( _i = 0; _i < STRESS_NODES; _i++ )); do
-        cluster_build_argv "$_i"
+        cluster_build_argv "$_i" "${2:-incremental}"
         printf 'node %s: ' "$_i"; printf '%s ' "${CLUSTER_ARGV[@]}"; printf '\n'
       done
       ;;
-    start)  stress_preflight; cluster_start; cluster_wait_ready ;;
-    stop)   cluster_stop ;;
-    status) cluster_status ;;
-    ready)  cluster_wait_ready ;;
+    start)   stress_preflight; cluster_start; cluster_wait_ready ;;
+    stop)    cluster_stop ;;
+    status)  cluster_status ;;
+    ready)   cluster_wait_ready ;;
+    kill)    cluster_kill_node "${2:?usage: cluster.sh kill <node-index>}" ;;
+    restart) cluster_restart_node "${2:?usage: cluster.sh restart <node-index>}" ;;
     *)
-      printf 'Usage: %s {plan|start|stop|status|ready}\n' "$0"
+      printf 'Usage: %s {plan [mode]|start|stop|status|ready|kill <i>|restart <i>}\n' "$0"
       exit 2
       ;;
   esac

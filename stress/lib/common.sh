@@ -100,6 +100,28 @@ STRESS_DEV_FUNDED_ACCOUNTS="${STRESS_DEV_FUNDED_ACCOUNTS:-100}"
 STRESS_TPS_SAFE_CAP="${STRESS_TPS_SAFE_CAP:-1000}"
 
 # ---------------------------------------------------------------------------
+# Kill-node fault scenario configuration (Phase 4)
+# ---------------------------------------------------------------------------
+
+# Victim validator index to kill (0..N-1). Any node works because the restart
+# dials all peers; default is a non-seed follower.
+STRESS_VICTIM="${STRESS_VICTIM:-1}"
+
+# How long to run on the surviving quorum after the kill (seconds).
+STRESS_KILL_DURATION="${STRESS_KILL_DURATION:-30}"
+
+# How long to wait for the restarted victim to rejoin and catch up (seconds).
+STRESS_REJOIN_TIMEOUT="${STRESS_REJOIN_TIMEOUT:-90}"
+
+# Number of sampling passes in the baseline and post phases.
+STRESS_BASELINE_SAMPLES="${STRESS_BASELINE_SAMPLES:-3}"
+STRESS_POST_SAMPLES="${STRESS_POST_SAMPLES:-3}"
+
+# How long to wait for the survivors to detect the kill and settle to peer_count
+# N-2 (seconds). Set above the p2p idle socket timeout to be safe.
+STRESS_KILL_DETECT_TIMEOUT="${STRESS_KILL_DETECT_TIMEOUT:-35}"
+
+# ---------------------------------------------------------------------------
 # Colors (disabled when stdout is not a TTY)
 # ---------------------------------------------------------------------------
 if [ -t 1 ]; then

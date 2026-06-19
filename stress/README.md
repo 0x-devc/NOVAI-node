@@ -88,7 +88,17 @@ stress/
 - Phase 1: lib core, dispatcher, README, self-test. Done.
 - Phase 2: full-mesh launcher and baseline soak scenario. Done.
 - Phase 3: load scenario (tx-generator under the mesh, concurrent invariant sampling). Done.
-- Phase 4: per-node kill and restart, and the kill-node fault scenario.
+- Phase 4: per-node kill and restart, and the kill-node fault scenario. Done.
+
+## Kill-node scenario (destructive, default off)
+
+`stress/run.sh kill-node --enable-destructive` kills one validator (f=1, quorum
+kept), proves the survivors keep committing and agreeing, then restarts the victim
+and proves it rejoins (peer_count back to N-1 on every node) and catches up to the
+majority `state_root`. It checks the no-fork property continuously, at every
+sampled height, across the kill, the downtime, and the rejoin, so it is the local
+stand-in for the fault behavior the locked-QC safety rule governs. It is OFF by
+default and refuses to run without `--enable-destructive` on a localhost cluster.
 
 ## Load funding precondition
 
