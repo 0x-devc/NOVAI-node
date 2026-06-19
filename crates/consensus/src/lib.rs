@@ -7,7 +7,9 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use novai_consensus_types::codec::{decode_block_v1, decode_qc_v1, encode_block_v1, encode_qc_v1};
 use novai_consensus_types::{Block, Timeout, Vote, QC};
-use novai_state::{block_key, qc_key, Kv, KvBatch, KEY_COMMITTED_HEIGHT, KEY_HIGHEST_QC};
+use novai_state::{
+    block_key, qc_key, Kv, KvBatch, KEY_COMMITTED_HEIGHT, KEY_HIGHEST_QC, KEY_LOCKED_QC,
+};
 use novai_types::{Address, TxV1};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -159,6 +161,12 @@ pub struct ConsensusState {
     /// whether our proposal was committed (clear buffered txs) or orphaned by
     /// a sibling block (keep buffered txs so `take_abandoned_txs` can recover).
     pub last_proposed_block_hash: Option<[u8; 32]>,
+    /// Locked QC: the highest QC this node has adopted on its own branch
+    /// (535004 Layer 4 safety lock). Advances monotonically in height at QC
+    /// adoption (the 1-chain) and is NEVER cleared by round / commit / view
+    /// resets. Gates voting and QC migration via `safe_to_extend`, so a node
+    /// cannot adopt or vote a conflicting same-height branch.
+    pub locked_qc: Option<QC>,
 }
 
 impl ConsensusState {
@@ -181,6 +189,7 @@ impl ConsensusState {
             view_changes_total: 0,
             last_proposed_txs: Vec::new(),
             last_proposed_block_hash: None,
+            locked_qc: None,
         }
     }
 
@@ -389,6 +398,21 @@ impl ConsensusState {
             return Err(ConsensusError::InvalidBlock(
                 "Parent hash mismatch".to_string(),
             ));
+        }
+
+        // 535004 Layer 4 voting gate: refuse to vote a block whose certifying
+        // QC (our highest_qc, which the parent check above ties this block to)
+        // is not safe to extend under the lock. The migration gate keeps
+        // highest_qc on the locked branch so this is normally satisfied; it is
+        // the explicit safety-rule statement and defends any path that set
+        // highest_qc without the gate (for example a reload).
+        if let Some(ref hqc) = self.highest_qc {
+            if !self.safe_to_extend(hqc) {
+                return Err(ConsensusError::InvalidBlock(
+                    "block extends a QC that conflicts with the locked QC (535004 lock)"
+                        .to_string(),
+                ));
+            }
         }
 
         // Verify state root matches current state
@@ -926,8 +950,13 @@ impl ConsensusState {
                 let n = validator_pubkeys.len();
                 let f = (n - 1) / 3;
                 let quorum = 2 * f + 1;
-                if Self::verify_qc_well_formed(qc, validator_pubkeys, quorum).is_ok() {
+                if Self::verify_qc_well_formed(qc, validator_pubkeys, quorum).is_ok()
+                    && self.safe_to_extend(qc)
+                {
+                    // 535004 Layer 4 migration gate + SET (1-chain): adopt and
+                    // lock only when the lock permits this branch.
                     self.highest_qc = Some(qc.clone());
+                    self.locked_qc = Some(qc.clone());
                 }
             }
         }
@@ -1019,7 +1048,13 @@ impl ConsensusState {
                 let f = (n - 1) / 3;
                 let quorum = 2 * f + 1;
                 Self::verify_qc_well_formed(qc, validator_pubkeys, quorum)?;
-                self.highest_qc = Some(qc.clone());
+                // 535004 Layer 4 migration gate + SET (1-chain): adopt and lock
+                // only when the lock permits. The well-formedness check above
+                // still errors on a malformed QC regardless of the lock.
+                if self.safe_to_extend(qc) {
+                    self.highest_qc = Some(qc.clone());
+                    self.locked_qc = Some(qc.clone());
+                }
             }
         }
 
@@ -1194,6 +1229,25 @@ impl ConsensusState {
         Ok(())
     }
 
+    /// 535004 Layer 4 safety predicate. Returns whether it is safe to adopt
+    /// `candidate` as `highest_qc`, or to vote a block that extends it, given
+    /// this node's lock. Safe iff: this node is not locked yet (no QC adopted),
+    /// the candidate certifies the same block as the lock, or the candidate is
+    /// at a strictly greater height than the lock. The strict-height arm is the
+    /// unlock: a genuinely higher branch is always adoptable, while a
+    /// conflicting same-height (or lower) QC is refused. A conflicting branch
+    /// can never out-height an honest node's lock (the overlap honest voter is
+    /// locked), so the unlock is only ever satisfied by a legitimate higher
+    /// branch.
+    fn safe_to_extend(&self, candidate: &QC) -> bool {
+        match &self.locked_qc {
+            None => true,
+            Some(locked) => {
+                candidate.block_hash == locked.block_hash || candidate.height > locked.height
+            }
+        }
+    }
+
     /// Cache a QC and check if commit rule triggers.
     ///
     /// # 3-Chain Commit Rule
@@ -1287,7 +1341,17 @@ impl ConsensusState {
                 self.pending_timeouts.shrink_to_fit();
             }
 
-            self.highest_qc = Some(qc.clone());
+            // 535004 Layer 4 migration gate + SET (1-chain): adopt and lock only
+            // when the lock permits. The only dominated-but-unsafe case is a
+            // same-height higher-round conflicting QC, which never reaches the
+            // view reset above (that fires only on a strict height advance), so
+            // gating the swap here keeps highest_qc on the locked branch.
+            // locked_qc tracks highest_qc and is NEVER cleared by the resets
+            // (here, in apply_commits, or in the round-sync), only advanced.
+            if self.safe_to_extend(&qc) {
+                self.highest_qc = Some(qc.clone());
+                self.locked_qc = Some(qc.clone());
+            }
         }
 
         // Cache the QC
@@ -1502,7 +1566,9 @@ impl ConsensusState {
             }
         }
 
-        // Clear pending votes and voted_in_round after commits
+        // Clear pending votes and voted_in_round after commits. NOTE (535004
+        // Layer 4): locked_qc is intentionally NOT cleared here; it is a safety
+        // invariant that must survive commits and view changes, only advancing.
         if !blocks.is_empty() {
             self.pending_votes.clear();
             self.voted_in_round.clear();
@@ -1703,6 +1769,17 @@ impl ConsensusState {
                 ConsensusError::StateError(format!("Failed to persist highest QC: {e:?}"))
             })?;
         }
+        // 535004 Layer 4: co-persist the lock wherever highest_qc is persisted,
+        // so a recovered node restores its lock and cannot vote a conflicting
+        // block after a crash. locked_qc invariantly tracks highest_qc.
+        if let Some(ref qc) = self.locked_qc {
+            let value = encode_qc_v1(qc).map_err(|e| {
+                ConsensusError::CodecError(format!("Failed to encode locked QC: {e:?}"))
+            })?;
+            db.put(KEY_LOCKED_QC, &value).map_err(|e| {
+                ConsensusError::StateError(format!("Failed to persist locked QC: {e:?}"))
+            })?;
+        }
         Ok(())
     }
     /// Persist commit state atomically (all-or-nothing).
@@ -1821,6 +1898,15 @@ impl ConsensusState {
             ops.push(WriteOp::Put(KEY_HIGHEST_QC.to_vec(), hqc_v));
         }
 
+        // 4b. Locked QC (535004 Layer 4): co-persist the safety lock atomically
+        // with highest_qc so recovery restores it.
+        if let Some(ref lqc) = self.locked_qc {
+            let lqc_v = encode_qc_v1(lqc).map_err(|e| {
+                ConsensusError::CodecError(format!("Failed to encode locked QC: {e:?}"))
+            })?;
+            ops.push(WriteOp::Put(KEY_LOCKED_QC.to_vec(), lqc_v));
+        }
+
         // 5. AI operations (if provided)
         if let Some(ai_operations) = ai_ops {
             ops.extend_from_slice(ai_operations);
@@ -1897,6 +1983,33 @@ impl ConsensusState {
             Ok(None) => Ok(None),
             Err(e) => Err(ConsensusError::StateError(format!(
                 "Failed to load highest QC: {e:?}"
+            ))),
+        }
+    }
+
+    /// Load the locked QC (535004 Layer 4 safety lock) from the database.
+    ///
+    /// Returns `Ok(None)` if the row is absent (a node that never locked, or a
+    /// database written before this fix). Recovery substitutes `highest_qc` in
+    /// that case, so a restarted node is never briefly unlocked.
+    ///
+    /// # Errors
+    /// Returns error if database read or decoding fails.
+    pub fn load_locked_qc<K>(db: &K) -> Result<Option<QC>, ConsensusError>
+    where
+        K: Kv,
+        K::Error: std::fmt::Debug,
+    {
+        match db.get(KEY_LOCKED_QC) {
+            Ok(Some(bytes)) => {
+                let qc = decode_qc_v1(&bytes).map_err(|e| {
+                    ConsensusError::CodecError(format!("Failed to decode locked QC: {e:?}"))
+                })?;
+                Ok(Some(qc))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(ConsensusError::StateError(format!(
+                "Failed to load locked QC: {e:?}"
             ))),
         }
     }
@@ -2165,6 +2278,12 @@ impl ConsensusState {
     {
         let committed_height = Self::load_committed_height(db)?;
         let highest_qc = Self::load_highest_qc(db)?;
+        // 535004 Layer 4: restore the lock. If the lock row is absent (a DB
+        // written before this fix, or a node that never locked), fall back to
+        // highest_qc, since the lock invariantly tracks highest_qc; this keeps a
+        // recovered node locked rather than briefly unlocked and able to vote a
+        // conflicting block.
+        let locked_qc = Self::load_locked_qc(db)?.or_else(|| highest_qc.clone());
 
         // Determine current height from committed height
         let height = committed_height;
@@ -2192,6 +2311,7 @@ impl ConsensusState {
             view_changes_total: 0,
             last_proposed_txs: Vec::new(),
             last_proposed_block_hash: None,
+            locked_qc,
         })
     }
 }
@@ -3683,6 +3803,373 @@ mod tests {
         assert!(
             state.add_vote_verified(vote, &pubkeys).is_err(),
             "add_vote_verified must reject a same-round duplicate via voted_in_round"
+        );
+    }
+
+    // ===== 535004 Layer 4 (locked-QC absent): two conflicting commits =====
+
+    /// Executable specification of the locked-QC safety bug (Verdict A).
+    ///
+    /// n=4, f=1, quorum=3. V3 is Byzantine and equivocates (validly signs votes
+    /// for BOTH branches). V1 is honest and stays on branch A; V2 is honest and
+    /// stays on branch A'. V0 is the honest quorum-overlap that votes BOTH
+    /// branches. The ONLY mechanism V0 uses is the same-height dominating-QC
+    /// migration: a round-1 QC at a height replaces a round-0 QC at the SAME
+    /// height with no round reset (`cache_qc_and_check_commit` adopts via the
+    /// `qc.height == existing.height && qc.round > existing.round` clause at
+    /// lib.rs:1232/1290, and the reset at lib.rs:1265 is gated on a STRICT
+    /// height increase, so it does not fire). After the migration `verify_block`
+    /// (lib.rs:367) blesses the conflicting child because it only checks height
+    /// and parent against the migrated `highest_qc` and consults no lock.
+    ///
+    /// FAITHFULNESS (so this test is not stronger than the real threat):
+    /// - V0's votes come from the production decision path: V0 votes a block iff
+    ///   `verify_block` accepts it, and the vote is the real `create_vote` output.
+    ///   That single gate is what the locked-QC fix will change.
+    /// - V1/V2/V3 votes are produced by `fixb_signed_vote` (validly signed under
+    ///   the real domain-separated vote encoding). V3 signing two conflicting
+    ///   votes is exactly what a real equivocating validator can do.
+    /// - Every QC the test assembles is checked with `verify_qc_well_formed`
+    ///   (distinct quorum, each vote bound to the QC and validly signed), so each
+    ///   QC is one a real node would accept. No QC is fabricated.
+    /// - A branch-A' QC forms only if V0 actually contributed a vote; V2+V3 alone
+    ///   are sub-quorum. So the conflicting commit is causally gated on V0's real
+    ///   `verify_block` verdict, the precise thing the fix flips.
+    ///
+    /// Against HEAD this FAILS at the final safety assertion: both honest nodes
+    /// commit at height 1 and the two committed block hashes differ.
+    #[test]
+    fn two_conflicting_commits_via_qc_migration_535004() {
+        use novai_state::MemKv;
+
+        let validators = make_test_validators(4);
+        let pubkeys: Vec<(Address, VerifyingKey)> =
+            validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+        let quorum = 3usize; // n=4, f=1 => 2f+1
+        // Empty DB: KEY_SMT_ROOT absent => verify_block expects state_root [0;32].
+        let db = MemKv::new();
+        let v0_addr = validators[0].0;
+        let v0_key = &validators[0].1;
+
+        // V0 votes via the PRODUCTION path: vote iff verify_block accepts, and
+        // the cast vote is the real create_vote output. The fix changes this gate.
+        let gated = |v0: &ConsensusState, block: &Block| -> Option<Vote> {
+            if v0.verify_block(block, &db).is_ok() {
+                Some(
+                    v0.create_vote(block, v0_key)
+                        .expect("create_vote must succeed for a structurally valid block"),
+                )
+            } else {
+                None
+            }
+        };
+
+        // A validly signed vote from one of the synthetic validators.
+        let synth = |idx: usize, height: u64, round: u64, bh: [u8; 32]| -> Vote {
+            fixb_signed_vote(&validators[idx].1, validators[idx].0, height, round, bh)
+        };
+
+        // Assemble a QC from real votes and PROVE it is one a real node accepts.
+        // Returns None when distinct voters are below quorum (how branch A'
+        // starves when V0 declines to contribute).
+        let assemble_qc =
+            |height: u64, round: u64, block_hash: [u8; 32], votes: Vec<Vote>| -> Option<QC> {
+                let mut seen = HashSet::new();
+                let mut distinct = Vec::new();
+                for v in votes {
+                    if seen.insert(v.voter) {
+                        distinct.push(v);
+                    }
+                }
+                if distinct.len() < quorum {
+                    return None;
+                }
+                let qc = QC {
+                    height,
+                    round,
+                    block_hash,
+                    votes: distinct,
+                };
+                ConsensusState::verify_qc_well_formed(&qc, &pubkeys, quorum).expect(
+                    "assembled QC must be well-formed (distinct quorum, each vote validly \
+                     signed) -- if this trips the test fabricated an impossible QC",
+                );
+                Some(qc)
+            };
+
+        // Two conflicting branches diverging at height 1. Branch A at round 0,
+        // branch A' at round 1 (A' must out-round A at each height so its QC
+        // dominates A's via the same-height-higher-round clause).
+        let hash = |b: &Block| novai_consensus_types::codec::hash_block_v1(b).unwrap();
+        let mk = |height: u64, round: u64, parent: [u8; 32]| Block {
+            height,
+            round,
+            parent_hash: parent,
+            state_root: [0u8; 32],
+            txs: vec![],
+        };
+        let b1 = mk(1, 0, [0u8; 32]);
+        let h_b1 = hash(&b1);
+        let b2 = mk(2, 0, h_b1);
+        let h_b2 = hash(&b2);
+        let b3 = mk(3, 0, h_b2);
+        let h_b3 = hash(&b3);
+        let b1p = mk(1, 1, [0u8; 32]);
+        let h_b1p = hash(&b1p);
+        let b2p = mk(2, 1, h_b1p);
+        let h_b2p = hash(&b2p);
+        let b3p = mk(3, 1, h_b2p);
+        let h_b3p = hash(&b3p);
+        assert_ne!(h_b1, h_b1p, "branches must conflict at height 1");
+
+        let mut v0 = ConsensusState::new(v0_addr);
+
+        // Height 1: V0 votes BOTH bottom blocks. No QC exists yet, so V0 is not
+        // committed to any branch and verify_block accepts both.
+        let v0_b1 = gated(&v0, &b1).expect("V0 accepts B_1");
+        let v0_b1p = gated(&v0, &b1p).expect("V0 accepts B'_1 (no lock at height 1)");
+        let qc_a_h1 = assemble_qc(1, 0, h_b1, vec![v0_b1, synth(1, 1, 0, h_b1), synth(3, 1, 0, h_b1)])
+            .expect("branch-A height-1 QC {V0,V1,V3}");
+        let qc_ap_h1 =
+            assemble_qc(1, 1, h_b1p, vec![v0_b1p, synth(2, 1, 1, h_b1p), synth(3, 1, 1, h_b1p)])
+                .expect("branch-A' height-1 QC {V0,V2,V3}");
+
+        // V0 adopts branch A's bottom QC, votes branch A's middle block.
+        v0.cache_qc_and_check_commit(qc_a_h1, &db).unwrap();
+        let v0_b2 = gated(&v0, &b2).expect("V0 accepts B_2 on branch A");
+
+        // *** THE MIGRATION (mechanic #1) *** feed V0 the SAME-height round-1 QC.
+        v0.cache_qc_and_check_commit(qc_ap_h1, &db).unwrap();
+        let migrated = v0.highest_qc.as_ref().map(|q| q.block_hash) == Some(h_b1p);
+        println!(
+            "[535004] V0 highest_qc migrated to conflicting B'_1? {migrated} (round now {}, no \
+             strict-height reset fired)",
+            v0.highest_qc.as_ref().unwrap().round
+        );
+
+        // *** mechanic #2 *** does V0 now vote the CONFLICTING middle block?
+        let v0_b2p = gated(&v0, &b2p);
+        println!("[535004] V0 voted conflicting middle B'_2: {}", v0_b2p.is_some());
+
+        // Branch A' middle QC forms ONLY with V0's contribution (V2,V3 = sub-quorum).
+        let mut ap_h2_votes = vec![synth(2, 2, 1, h_b2p), synth(3, 2, 1, h_b2p)];
+        if let Some(vote) = v0_b2p {
+            ap_h2_votes.push(vote);
+        }
+        let qc_ap_h2 = assemble_qc(2, 1, h_b2p, ap_h2_votes);
+
+        // Branch A advances to its top block (always; it is the legit branch).
+        let qc_a_h2 = assemble_qc(2, 0, h_b2, vec![v0_b2, synth(1, 2, 0, h_b2), synth(3, 2, 0, h_b2)])
+            .expect("branch-A height-2 QC {V0,V1,V3}");
+        v0.cache_qc_and_check_commit(qc_a_h2, &db).unwrap();
+        let v0_b3 = gated(&v0, &b3).expect("V0 accepts B_3 on branch A");
+        let qc_a_h3 = assemble_qc(3, 0, h_b3, vec![v0_b3, synth(1, 3, 0, h_b3), synth(3, 3, 0, h_b3)])
+            .expect("branch-A height-3 QC {V0,V1,V3}");
+
+        // Branch A' advances to its top block ONLY if its middle QC formed.
+        let qc_ap_h3 = qc_ap_h2.and_then(|mid| {
+            v0.cache_qc_and_check_commit(mid, &db).unwrap(); // migration #2 (h2 r1 over h2 r0)
+            let mut votes = vec![synth(2, 3, 1, h_b3p), synth(3, 3, 1, h_b3p)];
+            if let Some(vote) = gated(&v0, &b3p) {
+                votes.push(vote);
+            }
+            assemble_qc(3, 1, h_b3p, votes)
+        });
+        println!("[535004] branch A' top QC formed: {}", qc_ap_h3.is_some());
+
+        // Honest V1 commits along branch A (3-chain: QC@h3 commits height 1).
+        let mut v1 = ConsensusState::new(validators[1].0);
+        v1.cache_block(b1.clone()).unwrap();
+        v1.cache_block(b2.clone()).unwrap();
+        v1.cache_block(b3.clone()).unwrap();
+        let v1_chain = v1
+            .cache_qc_and_check_commit(qc_a_h3, &db)
+            .expect("V1 branch-A commit walk");
+        v1.apply_commits(&v1_chain).expect("V1 apply_commits");
+        let v1_h1 = v1_chain.iter().find(|b| b.height == 1).map(hash);
+
+        // Honest V2 commits along branch A' (reachable only if the conflicting
+        // 3-chain completed, which requires V0's migrated vote).
+        let v2_h1 = qc_ap_h3.and_then(|qc| {
+            let mut v2 = ConsensusState::new(validators[2].0);
+            v2.cache_block(b1p.clone()).unwrap();
+            v2.cache_block(b2p.clone()).unwrap();
+            v2.cache_block(b3p.clone()).unwrap();
+            let chain = v2
+                .cache_qc_and_check_commit(qc, &db)
+                .expect("V2 branch-A' commit walk");
+            v2.apply_commits(&chain).expect("V2 apply_commits");
+            chain.iter().find(|b| b.height == 1).map(hash)
+        });
+
+        println!("[535004] V1 committed at height 1: {v1_h1:02x?}");
+        println!("[535004] V2 committed at height 1: {v2_h1:02x?}");
+
+        // Harness sanity (holds before AND after the fix): the honest legit
+        // branch always commits B_1. A failure here is a harness fault.
+        assert_eq!(
+            v1_h1,
+            Some(h_b1),
+            "harness: honest branch A must commit B_1 at height 1"
+        );
+
+        // SAFETY: two honest nodes must NEVER commit different blocks at one
+        // height. On HEAD V2 committed B'_1, so this assertion trips with two
+        // differing hashes. After the locked-QC fix V2 never commits at height 1
+        // (branch A' starves) and this passes.
+        if let Some(h_v2) = v2_h1 {
+            assert_eq!(
+                h_v2, h_b1,
+                "535004 SAFETY VIOLATION: V1 and V2 (both honest) committed DIFFERENT blocks at \
+                 height 1 (V1 B_1={:02x?}, V2 B'_1={:02x?}). Reached because honest V0 migrated \
+                 highest_qc between same-height QCs (round 0 -> round 1) with no round reset and \
+                 then voted the conflicting middle block, completing BOTH 3-chains.",
+                &h_b1[..8],
+                &h_v2[..8]
+            );
+        }
+    }
+
+    /// 535004 Layer 4 no-clear invariant (view-change reset): the lock must
+    /// SURVIVE the round/pending-state reset that fires on a strict height
+    /// advance in cache_qc_and_check_commit (lines ~1328-1342), and still block
+    /// a conflicting same-height migration afterward. No prior test drives a
+    /// reset between conflicting migration attempts, so this guards the
+    /// post-reset end state (lock present and still gating). The dangerous
+    /// "stray locked_qc = None in a reset NOT followed by a re-SET" case is
+    /// guarded by the post-commit sibling test below.
+    #[test]
+    fn lock_survives_view_change_reset_and_still_blocks_conflict() {
+        use novai_state::MemKv;
+        let validators = make_test_validators(4);
+        let db = MemKv::new();
+        let mut state = ConsensusState::new(validators[0].0);
+
+        let hash = |b: &Block| novai_consensus_types::codec::hash_block_v1(b).unwrap();
+        let mk = |height: u64, round: u64, parent: [u8; 32]| Block {
+            height,
+            round,
+            parent_hash: parent,
+            state_root: [0u8; 32],
+            txs: vec![],
+        };
+        let b1 = mk(1, 0, [0u8; 32]);
+        let h_b1 = hash(&b1);
+        let b2 = mk(2, 0, h_b1);
+        let h_b2 = hash(&b2);
+        // Conflicting block at the SAME height as B_2, higher round.
+        let b2p = mk(2, 1, h_b1);
+        let h_b2p = hash(&b2p);
+        assert_ne!(h_b2, h_b2p, "the conflicting block must hash differently");
+
+        // Empty-votes QCs, the convention of commit_rule_3_chain: the commit
+        // path adopts via encode_qc_v1 (distinct-voter check), not signatures.
+        let qc_a_h1 = QC { height: 1, round: 0, block_hash: h_b1, votes: vec![] };
+        let qc_a_h2 = QC { height: 2, round: 0, block_hash: h_b2, votes: vec![] };
+        let qc_ap_h2 = QC { height: 2, round: 1, block_hash: h_b2p, votes: vec![] };
+
+        // Adopt h1, then h2. The h2 adoption is a strict height advance, so the
+        // view-change reset fires. Set round nonzero first so the reset shows.
+        state.cache_qc_and_check_commit(qc_a_h1, &db).unwrap();
+        state.round = 5;
+        state.cache_qc_and_check_commit(qc_a_h2, &db).unwrap();
+        assert_eq!(state.round, 0, "view-change reset must have fired (round cleared to 0)");
+
+        // The reset advanced the lock to B_2; it did NOT null it.
+        assert_eq!(
+            state.locked_qc.as_ref().map(|q| q.block_hash),
+            Some(h_b2),
+            "locked_qc must survive the view-change reset (advanced to B_2, not nulled)"
+        );
+
+        // A conflicting same-height higher-round QC is still refused after the
+        // reset: highest_qc stays on B_2, the lock did not migrate to B'_2.
+        state.cache_qc_and_check_commit(qc_ap_h2, &db).unwrap();
+        assert_eq!(
+            state.highest_qc.as_ref().map(|q| q.block_hash),
+            Some(h_b2),
+            "lock must still block the conflicting same-height migration after a reset"
+        );
+        assert_eq!(
+            state.locked_qc.as_ref().map(|q| q.block_hash),
+            Some(h_b2),
+            "locked_qc unchanged by the refused conflicting QC"
+        );
+    }
+
+    /// 535004 Layer 4 no-clear invariant (post-commit reset): the lock must
+    /// SURVIVE the reset in apply_commits, which clears round-scoped state on
+    /// every commit and, unlike the view-change reset, is NOT followed by a
+    /// lock SET. A stray `locked_qc = None` here would therefore NOT be re-set,
+    /// silently reopening the attack, and would pass the whole suite today. This
+    /// is the test that catches that regression directly.
+    ///
+    /// The round-sync reset in add_timeout (the fast-forward clear) is
+    /// deliberately not given its own test: it is structurally identical to
+    /// this one (clears round-scoped state, no following lock SET), covered by
+    /// the same reasoning and the write-site census (locked_qc is written only
+    /// in new, the three gated adoptions, and recover, never in a reset).
+    #[test]
+    fn lock_survives_commit_reset_and_still_blocks_conflict() {
+        use novai_state::MemKv;
+        let validators = make_test_validators(4);
+        let db = MemKv::new();
+        let mut state = ConsensusState::new(validators[0].0);
+
+        let hash = |b: &Block| novai_consensus_types::codec::hash_block_v1(b).unwrap();
+        let mk = |height: u64, round: u64, parent: [u8; 32]| Block {
+            height,
+            round,
+            parent_hash: parent,
+            state_root: [0u8; 32],
+            txs: vec![],
+        };
+        let b1 = mk(1, 0, [0u8; 32]);
+        let h_b1 = hash(&b1);
+        let b2 = mk(2, 0, h_b1);
+        let h_b2 = hash(&b2);
+        let b3 = mk(3, 0, h_b2);
+        let h_b3 = hash(&b3);
+        // Conflicting block at the SAME height as B_3, higher round.
+        let b3p = mk(3, 1, h_b2);
+        let h_b3p = hash(&b3p);
+        assert_ne!(h_b3, h_b3p, "the conflicting block must hash differently");
+
+        state.cache_block(b1).unwrap();
+        state.cache_block(b2).unwrap();
+        state.cache_block(b3).unwrap();
+
+        let qc_a_h1 = QC { height: 1, round: 0, block_hash: h_b1, votes: vec![] };
+        let qc_a_h2 = QC { height: 2, round: 0, block_hash: h_b2, votes: vec![] };
+        let qc_a_h3 = QC { height: 3, round: 0, block_hash: h_b3, votes: vec![] };
+        let qc_ap_h3 = QC { height: 3, round: 1, block_hash: h_b3p, votes: vec![] };
+
+        // 3-chain: a QC at height 3 commits the block at height 1.
+        state.cache_qc_and_check_commit(qc_a_h1, &db).unwrap();
+        state.cache_qc_and_check_commit(qc_a_h2, &db).unwrap();
+        let to_commit = state.cache_qc_and_check_commit(qc_a_h3, &db).unwrap();
+        assert_eq!(to_commit.len(), 1, "QC at height 3 commits block 1");
+
+        // Drive the post-commit reset. Set round nonzero first so it shows.
+        state.round = 5;
+        state.apply_commits(&to_commit).unwrap();
+        assert_eq!(state.committed_height, 1, "block 1 committed");
+        assert_eq!(state.round, 0, "post-commit reset must have fired (round cleared to 0)");
+
+        // The commit reset did NOT null the lock.
+        assert_eq!(
+            state.locked_qc.as_ref().map(|q| q.block_hash),
+            Some(h_b3),
+            "locked_qc must survive the post-commit reset (still B_3, not nulled)"
+        );
+
+        // A conflicting same-height higher-round QC is still refused after the
+        // commit reset: highest_qc stays on B_3, no migration to B'_3.
+        state.cache_qc_and_check_commit(qc_ap_h3, &db).unwrap();
+        assert_eq!(
+            state.highest_qc.as_ref().map(|q| q.block_hash),
+            Some(h_b3),
+            "lock must still block the conflicting same-height migration after the commit reset"
         );
     }
 
