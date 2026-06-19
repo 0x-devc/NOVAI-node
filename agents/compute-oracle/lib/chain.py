@@ -1,0 +1,418 @@
+"""PURPOSE: Single funnel for chain interaction, with a DRY_RUN path.
+
+All chain interaction goes through the Chain class. oracle.py and bootstrap.py
+never import novai_sdk transport directly except Keypair (pure local crypto).
+
+DRY_RUN MODEL (the central addition over price-oracle):
+- In dry_run the write methods (post_anchor, submit_reputation_update) build
+  the full signed transaction locally (SDK payload builder + sign_tx_v1 +
+  encode_tx_v1_signed) and return a DryRunResult. They never reference the RPC
+  client.
+- In dry_run the read methods and the funding writes raise DryRunError. The
+  loop and bootstrap skip those paths in dry_run, so no RPC call is ever made.
+  Any accidental read in dry_run fails loudly instead of silently going live.
+- When dry_run is on, no NOVAIClient is constructed at all unless a client is
+  injected for tests.
+
+INVARIANTS:
+- COMPUTE_ORACLE_CODE_HASH is locked at v1; bumping it produces a NEW entity_id
+  and forces a new registration.
+- The agent identity tuple is (COMPUTE_ORACLE_CODE_HASH, funder_address). The
+  entity signing pubkey is bound separately at registration.
+
+FAILURE MODES:
+- See map_submit_error for the SDK-exception to reason mapping (live path).
+- DryRunError if a network-bound method is reached in dry_run.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Optional
+
+from novai_sdk import (
+    AiSignalType,
+    AutonomyMode,
+    Capabilities,
+    FeeTooLowError,
+    Keypair,
+    MempoolFullError,
+    NOVAIClient,
+    NonceTooLowError,
+    NovaiRpcError,
+    RateLimitedError,
+    SenderLimitExceededError,
+    SubmissionResult,
+    TxV1,
+    ValidationError,
+    compute_entity_id,
+    encode_tx_v1_signed,
+    sign_tx_v1,
+    txid_v1,
+)
+from novai_sdk.crypto import blake3_hash
+
+from lib.signal import build_oracle_anchor, build_reputation_update
+
+LOG = logging.getLogger("compute_oracle.chain")
+
+POST_ORACLE_ANCHORS_BIT = 0x40
+SUBMIT_REPUTATION_UPDATES_BIT = 0x20
+
+# Distinct entity from the price oracle: a different code_hash yields a
+# different entity_id under the same funder address.
+COMPUTE_ORACLE_CODE_HASH: bytes = blake3_hash(b"novai-compute-oracle-v1")
+
+_SUBMIT_ERROR_MAP: tuple[tuple[type[BaseException], str], ...] = (
+    (FeeTooLowError, "fee_too_low"),
+    (NonceTooLowError, "nonce_too_low"),
+    (MempoolFullError, "mempool_full"),
+    (SenderLimitExceededError, "sender_limit"),
+    (ValidationError, "validation_failed"),
+    (RateLimitedError, "rpc_rate_limited"),
+)
+
+
+class DryRunError(RuntimeError):
+    """Raised when a network-bound chain method is reached while in DRY_RUN."""
+
+
+def map_submit_error(exc: BaseException) -> str:
+    """Map an SDK exception to a Prometheus reason label (live submit path)."""
+    for exc_type, reason in _SUBMIT_ERROR_MAP:
+        if isinstance(exc, exc_type):
+            return reason
+    if isinstance(exc, NovaiRpcError):
+        if "InsufficientFunds" in (exc.message or ""):
+            return "insufficient_funds"
+        return "rpc_error"
+    return "rpc_unreachable"
+
+
+def map_faucet_error(exc: BaseException) -> str:
+    """Map a faucet-call exception to a Prometheus reason label (live path)."""
+    if isinstance(exc, RateLimitedError):
+        return "rate_limited"
+    if isinstance(exc, MempoolFullError):
+        return "mempool_full"
+    if isinstance(exc, NovaiRpcError):
+        msg = (exc.message or "").lower()
+        if "faucet disabled" in msg:
+            return "disabled"
+        if "global cooldown" in msg:
+            return "rate_limited"
+        return "rpc_error"
+    return "rpc_unreachable"
+
+
+def map_credit_error(exc: BaseException) -> str:
+    """Map a CreditAiEntity submission exception to a reason label (live path)."""
+    if isinstance(exc, NonceTooLowError):
+        return "nonce_mismatch"
+    if isinstance(exc, NovaiRpcError):
+        msg = exc.message or ""
+        if "NonceMismatch" in msg:
+            return "nonce_mismatch"
+        if "InsufficientFunds" in msg:
+            return "insufficient_funds"
+        return "rpc_error"
+    return "rpc_unreachable"
+
+
+@dataclass(frozen=True)
+class EntityStatus:
+    exists: bool
+    has_post_oracle_anchors: bool
+    has_submit_reputation_updates: bool
+    capabilities: int
+    entity_id: bytes
+    entity_id_hex: str
+
+
+@dataclass(frozen=True)
+class DryRunResult:
+    """The bytes a write WOULD submit, constructed and signed locally.
+
+    nonce is a DRY_RUN placeholder; the live path fetches the real nonce at
+    submit time. The signal_hash and payload are the real consensus bytes and
+    do not depend on the nonce.
+    """
+
+    kind: str
+    signal_type: int
+    issuer_entity_id: bytes
+    signal_hash: bytes
+    payload: bytes
+    signed_tx: bytes
+    txid: bytes
+    nonce: int
+    fee: int
+
+    @property
+    def txid_hex(self) -> str:
+        return self.txid.hex()
+
+    @property
+    def signal_hash_hex(self) -> str:
+        return self.signal_hash.hex()
+
+    @property
+    def payload_hex(self) -> str:
+        return self.payload.hex()
+
+    @property
+    def signed_tx_hex(self) -> str:
+        return self.signed_tx.hex()
+
+    @property
+    def payload_len(self) -> int:
+        return len(self.payload)
+
+    @property
+    def signed_tx_len(self) -> int:
+        return len(self.signed_tx)
+
+    def summary_lines(self) -> list[str]:
+        return [
+            f"kind={self.kind}",
+            f"signal_type={self.signal_type}",
+            f"issuer_entity_id={self.issuer_entity_id.hex()}",
+            f"signal_hash={self.signal_hash_hex}",
+            f"payload_len={self.payload_len}",
+            f"payload_hex={self.payload_hex}",
+            f"signed_tx_len={self.signed_tx_len}",
+            f"txid={self.txid_hex}",
+            f"nonce={self.nonce} (DRY_RUN placeholder)",
+            f"fee={self.fee}",
+        ]
+
+
+class Chain:
+    """Wrapper around NOVAIClient with a DRY_RUN construct-and-log path."""
+
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        dry_run: bool = True,
+        dry_run_nonce: int = 0,
+        timeout_seconds: float = 30.0,
+        client: object | None = None,
+    ) -> None:
+        self._endpoint = endpoint
+        self._dry_run = dry_run
+        self._dry_run_nonce = dry_run_nonce
+        if client is not None:
+            # Test injection. In dry_run the code paths below never touch it.
+            self._client = client
+        elif dry_run:
+            self._client = None
+        else:
+            self._client = NOVAIClient(endpoint, timeout_seconds=timeout_seconds)
+
+    @property
+    def endpoint(self) -> str:
+        return self._endpoint
+
+    @property
+    def dry_run(self) -> bool:
+        return self._dry_run
+
+    def entity_id_for(self, address: bytes) -> bytes:
+        """Deterministic entity_id for this agent. Pure local hashing; no RPC."""
+        return compute_entity_id(COMPUTE_ORACLE_CODE_HASH, address)
+
+    def _require_live_client(self):
+        if self._dry_run or self._client is None:
+            raise DryRunError(
+                "chain read/funding call reached while DRY_RUN is on; "
+                "the loop and bootstrap must skip these paths in dry_run"
+            )
+        return self._client
+
+    # -- Reads (live only) ---------------------------------------------------
+
+    def get_balance(self, address: bytes) -> int:
+        result = self._require_live_client().get_balance(address)
+        return int(result.balance)
+
+    def get_account_nonce(self, address: bytes) -> int:
+        """On-chain account.nonce via novai_getBalance (account-signed txs)."""
+        result = self._require_live_client().get_balance(address)
+        return int(result.nonce)
+
+    def get_entity_economic_balance(self, entity_id: bytes) -> int:
+        info = self._require_live_client().get_ai_entity(entity_id)
+        if info is None:
+            raise ValueError(f"entity not registered: {entity_id.hex()}")
+        return int(info.economic_balance)
+
+    def get_entity_status(self, entity_id: bytes) -> EntityStatus:
+        info = self._require_live_client().get_ai_entity(entity_id)
+        entity_id_hex = entity_id.hex()
+        if info is None:
+            return EntityStatus(False, False, False, 0, entity_id, entity_id_hex)
+        caps = int(info.capabilities)
+        return EntityStatus(
+            exists=True,
+            has_post_oracle_anchors=bool(caps & POST_ORACLE_ANCHORS_BIT),
+            has_submit_reputation_updates=bool(caps & SUBMIT_REPUTATION_UPDATES_BIT),
+            capabilities=caps,
+            entity_id=entity_id,
+            entity_id_hex=entity_id_hex,
+        )
+
+    def latest_block_height(self) -> Optional[int]:
+        block = self._require_live_client().get_latest_block()
+        if block is None:
+            return None
+        return int(block.height)
+
+    # -- Funding writes (live only) ------------------------------------------
+
+    def faucet(self, address: bytes):
+        return self._require_live_client().faucet(address)
+
+    def credit_entity(
+        self,
+        kp: Keypair,
+        entity_id: bytes,
+        amount: int,
+        *,
+        nonce: int,
+        fee: int = 100,
+    ) -> SubmissionResult:
+        return self._require_live_client().credit_entity(
+            keypair=kp, entity_id=entity_id, amount=amount, fee=fee, nonce=nonce
+        )
+
+    def register_oracle_with_key(
+        self,
+        funder_kp: Keypair,
+        entity_pubkey: bytes,
+        *,
+        capabilities: Capabilities | None = None,
+        fee: int = 5_000,
+        initial_balance: int = 0,
+    ) -> SubmissionResult:
+        caps = capabilities if capabilities is not None else Capabilities.oracle()
+        return self._require_live_client().register_entity_with_key(
+            keypair=funder_kp,
+            code_hash=COMPUTE_ORACLE_CODE_HASH,
+            entity_pubkey=entity_pubkey,
+            capabilities=caps,
+            autonomy_mode=AutonomyMode.GATED,
+            initial_balance=initial_balance,
+            fee=fee,
+        )
+
+    # -- Signal writes (DRY_RUN constructs locally; live submits) ------------
+
+    def post_anchor(
+        self,
+        kp: Keypair,
+        entity_id: bytes,
+        data_hash: bytes,
+        external_timestamp: int,
+        data_tag: str,
+        *,
+        source_hash: bytes,
+        expiry_height: int = 0,
+        fee: int = 1_000,
+    ):
+        artifacts = build_oracle_anchor(
+            issuer_entity_id=entity_id,
+            data_hash=data_hash,
+            external_timestamp=external_timestamp,
+            source_hash=source_hash,
+            expiry_height=expiry_height,
+            data_tag=data_tag,
+        )
+        if self._dry_run:
+            return self._build_dry_run_result(
+                "oracle_anchor",
+                kp,
+                AiSignalType.ORACLE_ANCHOR,
+                entity_id,
+                artifacts.signal_hash,
+                artifacts.payload,
+                fee,
+            )
+        return self._client.post_oracle_anchor(
+            keypair=kp,
+            issuer_entity_id=entity_id,
+            data_hash=data_hash,
+            external_timestamp=external_timestamp,
+            data_tag=data_tag,
+            source_hash=source_hash,
+            expiry_height=expiry_height,
+            fee=fee,
+        )
+
+    def submit_reputation_update(
+        self,
+        kp: Keypair,
+        issuer_entity_id: bytes,
+        target_entity_id: bytes,
+        event_type: int,
+        points_delta: int,
+        *,
+        fee: int = 1_000,
+    ):
+        artifacts = build_reputation_update(
+            issuer_entity_id=issuer_entity_id,
+            target_entity_id=target_entity_id,
+            event_type=event_type,
+            points_delta=points_delta,
+        )
+        if self._dry_run:
+            return self._build_dry_run_result(
+                "reputation_update",
+                kp,
+                AiSignalType.REPUTATION_UPDATE,
+                issuer_entity_id,
+                artifacts.signal_hash,
+                artifacts.payload,
+                fee,
+            )
+        return self._client.publish_signal(
+            keypair=kp,
+            signal_hash=artifacts.signal_hash,
+            signal_type=AiSignalType.REPUTATION_UPDATE,
+            issuer_entity_id=issuer_entity_id,
+            extras=artifacts.extras,
+            fee=fee,
+        )
+
+    def _build_dry_run_result(
+        self,
+        kind: str,
+        kp: Keypair,
+        signal_type: AiSignalType,
+        issuer_entity_id: bytes,
+        signal_hash: bytes,
+        payload: bytes,
+        fee: int,
+    ) -> DryRunResult:
+        """Build and sign the transaction locally. No network reference."""
+        tx = TxV1(
+            from_address=kp.address,
+            pubkey=kp.pubkey,
+            nonce=self._dry_run_nonce,
+            fee=fee,
+            payload=payload,
+        )
+        tx.sig = sign_tx_v1(kp.signing_key, tx)
+        signed = encode_tx_v1_signed(tx)
+        return DryRunResult(
+            kind=kind,
+            signal_type=int(signal_type),
+            issuer_entity_id=issuer_entity_id,
+            signal_hash=signal_hash,
+            payload=payload,
+            signed_tx=signed,
+            txid=txid_v1(tx),
+            nonce=self._dry_run_nonce,
+            fee=fee,
+        )

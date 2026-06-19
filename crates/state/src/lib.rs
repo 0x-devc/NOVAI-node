@@ -55,6 +55,11 @@ pub const KEY_PREFIX_QCS: &[u8] = b"consensus/qcs/";
 /// Canonical key for the highest QC seen.
 pub const KEY_HIGHEST_QC: &[u8] = b"consensus/highest_qc";
 
+/// Canonical key for the locked QC (535004 Layer 4 safety lock): the highest QC
+/// a node has adopted on its own branch. Restored on recovery so a restarted
+/// node cannot vote a conflicting block.
+pub const KEY_LOCKED_QC: &[u8] = b"consensus/locked_qc";
+
 // ============================================================================
 // AI STORAGE KEY PREFIXES (Retrofit Week 3)
 // ============================================================================
