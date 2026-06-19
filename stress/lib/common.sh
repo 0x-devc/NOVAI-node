@@ -23,9 +23,12 @@ STRESS_NODES="${STRESS_NODES:-4}"
 # Host the local cluster binds to. Localhost only by construction.
 STRESS_HOST="${STRESS_HOST:-127.0.0.1}"
 
-# Port bases, matching the repo convention (P2P 9000+i, metrics 8080+i, rpc 3030+i).
+# Port bases (P2P 9000+i, rpc 3030+i). Metrics defaults to 18080+i rather than
+# the node's usual 8080+i: 8080 is a common local dev-server port, and a collision
+# there makes the metrics scrape silently read the wrong service (an HTML page
+# instead of Prometheus text), so the framework defaults higher to avoid it.
 STRESS_P2P_BASE="${STRESS_P2P_BASE:-9000}"
-STRESS_METRICS_BASE="${STRESS_METRICS_BASE:-8080}"
+STRESS_METRICS_BASE="${STRESS_METRICS_BASE:-18080}"
 STRESS_RPC_BASE="${STRESS_RPC_BASE:-3030}"
 
 # Runtime directories. Kept under $HOME, gitignored, never committed.
@@ -193,10 +196,28 @@ require_cmd() {
   fi
 }
 
+# Warn (never fail) if any port this run will use is already bound by another
+# process. A bound metrics/RPC/P2P port is the most common cause of a node
+# failing to start, or of the metrics scrape reading a wrong service. Best-effort:
+# silently skipped when lsof is unavailable so it never adds fragility.
+stress_warn_port_conflicts() {
+  command -v lsof >/dev/null 2>&1 || return 0
+  local i port owner
+  for (( i = 0; i < STRESS_NODES; i++ )); do
+    for port in "$(( STRESS_METRICS_BASE + i ))" "$(( STRESS_RPC_BASE + i ))" "$(( STRESS_P2P_BASE + i ))"; do
+      if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        owner="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -Fc 2>/dev/null | grep '^c' | head -n1 | cut -c2- || true)"
+        log_warn "port ${port} already bound${owner:+ by ${owner}}; a stress node may collide here (override STRESS_*_BASE if this is not our cluster)"
+      fi
+    done
+  done
+}
+
 # Standard preflight for any scenario that queries nodes.
 stress_preflight() {
   require_cmd curl jq
   mkdir -p "$STRESS_LOG_DIR" "$STRESS_REPORT_DIR" 2>/dev/null || true
+  stress_warn_port_conflicts
 }
 
 # ---------------------------------------------------------------------------
@@ -213,12 +234,34 @@ node_rpc_url()     { printf 'http://%s:%s' "$STRESS_HOST" "$(node_rpc_port "$1")
 # Metrics scrape (reuses the grep/awk idiom from testnet-status.sh)
 # ---------------------------------------------------------------------------
 
-# scrape_metric <metrics_url> <metric_name> -> prints value; returns 1 if the
-# endpoint is unreachable. A reachable endpoint with no such metric prints empty.
+# _body_is_prometheus <body> -> 0 if <body> looks like Prometheus exposition.
+# An HTML page (a wrong service answering the port) fails; a genuine Prometheus
+# endpoint that simply lacks one metric still passes (it has other metric lines).
+# Uses here-strings (not pipes) so grep -q closing early cannot trip pipefail.
+_body_is_prometheus() {
+  local body="$1"
+  # Obvious HTML markers => some other service answered, not Prometheus.
+  if grep -qiE '<html|<!doctype' <<<"$body"; then return 1; fi
+  # Otherwise require at least one Prometheus metric-shaped line.
+  grep -qE '^[a-zA-Z_][a-zA-Z0-9_]*[ {]' <<<"$body"
+}
+
+# scrape_metric <metrics_url> <metric_name> -> prints the metric value on stdout
+# (empty if the metric is simply absent from a real Prometheus endpoint).
+#   return 0 : reachable Prometheus endpoint (value printed; empty == metric absent)
+#   return 1 : endpoint unreachable (empty body)
+#   return 2 : endpoint reachable but the body is NOT Prometheus exposition, e.g.
+#              an HTML page from another service holding the port (a port
+#              collision). Prints nothing and logs a loud error naming the URL,
+#              so this can never be mistaken for "metric absent".
 scrape_metric() {
   local url="$1" name="$2" body val
   body="$(curl -s --connect-timeout "$STRESS_CONNECT_TIMEOUT" "$url" 2>/dev/null || true)"
   [ -z "$body" ] && return 1
+  if ! _body_is_prometheus "$body"; then
+    log_error "metrics endpoint ${url} returned non-Prometheus content (port collision or wrong service?)"
+    return 2
+  fi
   val="$(printf '%s\n' "$body" | grep "^${name} " | awk '{print $2}' | head -n1 || true)"
   printf '%s' "$val"
 }

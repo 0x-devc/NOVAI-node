@@ -174,19 +174,33 @@ cluster_stop() {
 # Wait until every node is reachable and has committed at least one block.
 cluster_wait_ready() {
   local timeout="${1:-$STRESS_READY_TIMEOUT}"
-  local start now i h ready
+  local start now i h rc ready bad_endpoint bad_node
   start="$(date +%s)"
   log_info "Waiting up to ${timeout}s for all $STRESS_NODES node(s) to start committing..."
   while :; do
     ready=1
+    bad_endpoint=""; bad_node=""
     for (( i = 0; i < STRESS_NODES; i++ )); do
-      h="$(get_node_metric "$i" novai_committed_height 2>/dev/null || true)"
+      rc=0
+      # 2>/dev/null suppresses scrape_metric's own error during polling (no spam);
+      # rc=2 means the endpoint answered with non-Prometheus content, which we
+      # surface in the timeout message below rather than letting it read as height=''.
+      h="$(get_node_metric "$i" novai_committed_height 2>/dev/null)" || rc=$?
+      if [ "$rc" -eq 2 ]; then
+        bad_endpoint="$(node_metrics_url "$i")"; bad_node="$i"
+        ready=0; break
+      fi
       if ! is_uint "$h" || [ "$h" -lt 1 ]; then ready=0; break; fi
     done
     if [ "$ready" -eq 1 ]; then log_ok "all nodes committing"; return 0; fi
     now="$(date +%s)"
     if [ "$(( now - start ))" -ge "$timeout" ]; then
-      log_error "cluster not ready after ${timeout}s (node $i height='$h')"
+      if [ -n "$bad_endpoint" ]; then
+        log_error "cluster not ready after ${timeout}s: node ${bad_node} metrics endpoint ${bad_endpoint} returned non-Prometheus content."
+        log_error "Another service is likely holding metrics port $(node_metrics_port "$bad_node") (a port collision). Set STRESS_METRICS_BASE to a free base (current default ${STRESS_METRICS_BASE}) and retry."
+      else
+        log_error "cluster not ready after ${timeout}s (node $i height='$h')"
+      fi
       return 1
     fi
     sleep 2
