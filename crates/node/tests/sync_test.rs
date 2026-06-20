@@ -73,10 +73,12 @@ fn test_block_request_response_roundtrip() {
     println!("✅ Block request/response roundtrip succeeded");
 }
 
-/// Test that a node can sync from a peer after restarting behind.
+/// A node that fell behind re-syncs canonical history and finalizes the
+/// 3-chain prefix, deferring the 2-block tip. With QCs through height 4,
+/// heights 1 and 2 each have a QC two heights above and commit; heights 3 and
+/// 4 sit in the safety margin and are stored but not committed.
 #[test]
 fn test_sync_from_peer_on_restart() {
-    // Create two validator nodes
     let sk1 = SigningKey::generate(&mut OsRng);
     let sk2 = SigningKey::generate(&mut OsRng);
     let pk1 = sk1.verifying_key();
@@ -93,7 +95,7 @@ fn test_sync_from_peer_on_restart() {
     let node1 = ConsensusNode::new(sk1, validator_set.clone(), validator_pubkeys.clone(), 1000);
     let node2 = ConsensusNode::new(sk2, validator_set, validator_pubkeys, 1000);
 
-    // Simulate node1 being ahead with committed blocks
+    // node1 is ahead with a 4-block canonical chain.
     let block1 = Block {
         height: 1,
         round: 0,
@@ -101,85 +103,77 @@ fn test_sync_from_peer_on_restart() {
         state_root: [0xaa; 32],
         txs: vec![],
     };
+    let block2 = next_block(&block1, [0xbb; 32]);
+    let block3 = next_block(&block2, [0xcc; 32]);
+    let block4 = next_block(&block3, [0xdd; 32]);
 
-    let block2 = Block {
-        height: 2,
-        round: 0,
-        parent_hash: novai_consensus_types::block_hash(&block1),
-        state_root: [0xbb; 32],
-        txs: vec![],
-    };
-
-    // Store blocks in node1
     {
         let mut db1 = node1.db.lock().unwrap();
-        let key1 = novai_state::block_key(1);
-        let value1 = novai_consensus_types::codec::encode_block_v1(&block1).unwrap();
-        db1.put(&key1, &value1).unwrap();
-
-        let key2 = novai_state::block_key(2);
-        let value2 = novai_consensus_types::codec::encode_block_v1(&block2).unwrap();
-        db1.put(&key2, &value2).unwrap();
-
-        // Update node1's committed height
-        let mut state1 = node1.state.lock().unwrap();
-        state1.committed_height = 2;
+        for b in [&block1, &block2, &block3, &block4] {
+            db1.put(
+                &novai_state::block_key(b.height),
+                &novai_consensus_types::codec::encode_block_v1(b).unwrap(),
+            )
+            .unwrap();
+        }
+        node1.state.lock().unwrap().committed_height = 4;
     }
 
-    // Node2 is behind (committed_height = 0)
-    // Node2 requests blocks from node1
-    let result = node2.request_blocks_from_peer(1, 2);
+    // node2 is behind at committed_height 0 and requests the range.
+    let result = node2.request_blocks_from_peer(1, 4);
     assert!(result.is_ok(), "Block request failed: {result:?}");
 
-    // Set node2's SMT root to match the first synced block's state_root
-    // (C-01 fix: synced blocks are now verified against local state root)
+    // node2's SMT root must match the first synced block's state_root for the
+    // existing C-01 state-root check.
     {
         let mut db2 = node2.db.lock().unwrap();
         let root_bytes = novai_state::encode_smt_root_v1(&block1.state_root);
         db2.put(novai_state::KEY_SMT_ROOT, &root_bytes).unwrap();
     }
 
-    // Simulate node1 responding with blocks, each carrying a valid
-    // certifying QC. Post Fix A2 the cursor only advances across blocks
-    // that carry a valid certifying QC, so the honest catch-up path must
-    // supply them.
-    let qc1 = certifying_qc(&sk1_for_qc, addr1, &block1);
-    let qc2 = certifying_qc(&sk1_for_qc, addr1, &block2);
+    // node1 responds with the four blocks, each carrying its certifying QC.
     let response = BlockResponse {
         responder: addr1,
         request_start: 1,
-        request_end: 2,
-        blocks: vec![block1, block2],
-        qcs: vec![Some(qc1), Some(qc2)],
+        request_end: 4,
+        blocks: vec![
+            block1.clone(),
+            block2.clone(),
+            block3.clone(),
+            block4.clone(),
+        ],
+        qcs: vec![
+            Some(certifying_qc(&sk1_for_qc, addr1, &block1)),
+            Some(certifying_qc(&sk1_for_qc, addr1, &block2)),
+            Some(certifying_qc(&sk1_for_qc, addr1, &block3)),
+            Some(certifying_qc(&sk1_for_qc, addr1, &block4)),
+        ],
     };
 
-    // Node2 handles the response
-    let result = node2.handle_block_response(response);
-    assert!(result.is_ok(), "Block response handling failed: {result:?}");
+    node2.handle_block_response(response).unwrap();
 
-    // Verify node2 has caught up
-    {
-        let state2 = node2.state.lock().unwrap();
-        assert_eq!(
-            state2.committed_height, 2,
-            "Node2 should have caught up to height 2"
+    // The 3-chain rule finalizes heights 1 and 2 (QCs at 3 and 4 chain back to
+    // them) and defers heights 3 and 4 (the 2-block tip margin).
+    let state2 = node2.state.lock().unwrap();
+    assert_eq!(
+        state2.committed_height, 2,
+        "catch-up finalizes the 3-chain prefix (heights 1 and 2)"
+    );
+    assert_ne!(
+        state2.committed_height, 4,
+        "the 2-block tip (heights 3 and 4) must be deferred, not finalized"
+    );
+    drop(state2);
+
+    // All four blocks are stored (committed prefix and deferred tip) so the
+    // node can serve them and the next chunk's backward walk can find them.
+    let db2 = node2.db.lock().unwrap();
+    for h in 1..=4u64 {
+        assert!(
+            ConsensusState::load_block(&*db2, h).unwrap().is_some(),
+            "block {h} should be stored after sync"
         );
     }
-
-    // Verify blocks are stored in node2's DB
-    {
-        let db2 = node2.db.lock().unwrap();
-        let loaded_block1 = ConsensusState::load_block(&*db2, 1).unwrap();
-        let loaded_block2 = ConsensusState::load_block(&*db2, 2).unwrap();
-
-        assert!(loaded_block1.is_some(), "Block 1 should be stored");
-        assert!(loaded_block2.is_some(), "Block 2 should be stored");
-
-        assert_eq!(loaded_block1.unwrap().height, 1);
-        assert_eq!(loaded_block2.unwrap().height, 2);
-    }
-
-    println!("✅ Node successfully synced from peer on restart");
 }
 
 /// Test: QC catch-up via justify_qc in proposal (race condition fix).
@@ -596,6 +590,17 @@ fn certifying_qc(signer: &SigningKey, voter: Address, block: &Block) -> QC {
     }
 }
 
+/// The next block in a chain, parented to `parent`, with no transactions.
+fn next_block(parent: &Block, state_root: [u8; 32]) -> Block {
+    Block {
+        height: parent.height + 1,
+        round: 0,
+        parent_hash: novai_consensus_types::block_hash(parent),
+        state_root,
+        txs: vec![],
+    }
+}
+
 /// A receiver (node2) behind at committed_height 0, plus the addr1 signing
 /// key for certifying QCs and a two-block chain to sync.
 fn a2_receiver_fixture() -> (ConsensusNode, SigningKey, Address, Block, Block) {
@@ -663,22 +668,28 @@ fn sync_rejects_uncertified_block() {
 
 #[test]
 fn sync_advances_only_certified_prefix() {
-    // block1 carries a valid QC, block2 does not: the cursor advances to 1
-    // and stops, never reaching the uncertified block2.
+    // Under the 3-chain rule the cursor advances only across blocks that have a
+    // QC two heights above them. With QCs through height 3, only height 1 has a
+    // QC two above (height 3) and commits; heights 2 and 3 lack a descendant QC
+    // and are deferred.
     let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
-    let qc1 = certifying_qc(&sk1, addr1, &block1);
+    let block3 = next_block(&block2, [0xcc; 32]);
     let response = BlockResponse {
         responder: addr1,
         request_start: 1,
-        request_end: 2,
-        blocks: vec![block1, block2],
-        qcs: vec![Some(qc1), None],
+        request_end: 3,
+        blocks: vec![block1.clone(), block2.clone(), block3.clone()],
+        qcs: vec![
+            Some(certifying_qc(&sk1, addr1, &block1)),
+            Some(certifying_qc(&sk1, addr1, &block2)),
+            Some(certifying_qc(&sk1, addr1, &block3)),
+        ],
     };
     node2.handle_block_response(response).unwrap();
     assert_eq!(
         node2.state.lock().unwrap().committed_height,
         1,
-        "the cursor must stop at the first uncertified block"
+        "the cursor advances only the 3-chain prefix (height 1); heights 2 and 3 lack a QC two above and defer"
     );
 }
 
@@ -733,72 +744,97 @@ fn sync_rejects_qc_for_different_block() {
 
 #[test]
 fn sync_persists_certified_qc_rows() {
-    // The Stage 1 to Stage 2 delta: a certified sync writes the QC row at
-    // qc_key(height), so the synced node can in turn serve and certify it to
-    // the next lagging peer.
+    // A committed sync writes a dense QC row at qc_key(height) for each
+    // committed height (via persist_commit_atomic's dense step, fed by the
+    // seeded qc_cache), so the synced node can serve and certify them to the
+    // next lagging peer. With QCs through height 4, heights 1 and 2 commit and
+    // get dense rows.
     let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
+    let block3 = next_block(&block2, [0xcc; 32]);
+    let block4 = next_block(&block3, [0xdd; 32]);
     let qc1 = certifying_qc(&sk1, addr1, &block1);
     let qc2 = certifying_qc(&sk1, addr1, &block2);
     let response = BlockResponse {
         responder: addr1,
         request_start: 1,
-        request_end: 2,
-        blocks: vec![block1, block2],
-        qcs: vec![Some(qc1.clone()), Some(qc2.clone())],
+        request_end: 4,
+        blocks: vec![
+            block1.clone(),
+            block2.clone(),
+            block3.clone(),
+            block4.clone(),
+        ],
+        qcs: vec![
+            Some(qc1.clone()),
+            Some(qc2.clone()),
+            Some(certifying_qc(&sk1, addr1, &block3)),
+            Some(certifying_qc(&sk1, addr1, &block4)),
+        ],
     };
     node2.handle_block_response(response).unwrap();
     assert_eq!(node2.state.lock().unwrap().committed_height, 2);
     let db2 = node2.db.lock().unwrap();
     assert_eq!(
         ConsensusState::load_qc_at_height(&*db2, 1).unwrap(),
-        Some(qc1)
+        Some(qc1),
+        "committed height 1 must have a dense QC row for serving"
     );
     assert_eq!(
         ConsensusState::load_qc_at_height(&*db2, 2).unwrap(),
-        Some(qc2)
+        Some(qc2),
+        "committed height 2 must have a dense QC row for serving"
     );
 }
 
 #[test]
 fn sync_installs_highest_qc_across_certified_prefix() {
-    // Finding 2.1 (gate-equivocation-535004 Stage 4): a fully certified
-    // multi-block A2 sync must advance committed_height AND install the
-    // certified prefix's top QC as highest_qc, so committed_height never
-    // exceeds highest_qc.height (the section 7 soak invariant), AND persist it
-    // to KEY_HIGHEST_QC so a restart reloads the correct propose parent.
-    // Pre-fix the cursor advances while highest_qc stays None and
-    // KEY_HIGHEST_QC is absent, reproducing 2.1.
+    // A committed sync adopts the driving top QC as highest_qc and persists it
+    // to KEY_HIGHEST_QC (so a restart reloads the correct propose parent), and
+    // committed_height stays at or below highest_qc.height (the soak invariant,
+    // automatic under the 3-chain rule: committing H requires a QC at H+2).
+    // With QCs through height 4, heights 1 and 2 commit and highest_qc is the
+    // height-4 driver.
     let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
-    let block2_hash = novai_consensus_types::block_hash(&block2);
-    let qc1 = certifying_qc(&sk1, addr1, &block1);
-    let qc2 = certifying_qc(&sk1, addr1, &block2);
+    let block3 = next_block(&block2, [0xcc; 32]);
+    let block4 = next_block(&block3, [0xdd; 32]);
+    let block4_hash = novai_consensus_types::block_hash(&block4);
     let response = BlockResponse {
         responder: addr1,
         request_start: 1,
-        request_end: 2,
-        blocks: vec![block1, block2],
-        qcs: vec![Some(qc1), Some(qc2)],
+        request_end: 4,
+        blocks: vec![
+            block1.clone(),
+            block2.clone(),
+            block3.clone(),
+            block4.clone(),
+        ],
+        qcs: vec![
+            Some(certifying_qc(&sk1, addr1, &block1)),
+            Some(certifying_qc(&sk1, addr1, &block2)),
+            Some(certifying_qc(&sk1, addr1, &block3)),
+            Some(certifying_qc(&sk1, addr1, &block4)),
+        ],
     };
     node2.handle_block_response(response).unwrap();
 
     let state = node2.state.lock().unwrap();
     assert_eq!(
         state.committed_height, 2,
-        "certified prefix must advance the cursor to 2"
+        "the 3-chain prefix (heights 1 and 2) commits"
     );
     let hqc_height = state.highest_qc.as_ref().map(|q| q.height);
     assert_eq!(
         hqc_height,
-        Some(2),
-        "Finding 2.1: a certified sync must install the prefix top QC as highest_qc"
+        Some(4),
+        "the driving top QC (height 4) is adopted as highest_qc"
     );
     assert!(
         hqc_height.is_some_and(|h| state.committed_height <= h),
-        "section 7 soak invariant: committed_height must never exceed highest_qc.height"
+        "soak invariant: committed_height must never exceed highest_qc.height"
     );
     assert_eq!(
         state.height, 2,
-        "self.height must track the committed prefix"
+        "self.height tracks the committed prefix"
     );
     drop(state);
 
@@ -807,39 +843,49 @@ fn sync_installs_highest_qc_across_certified_prefix() {
     let bytes = db2
         .get(novai_state::KEY_HIGHEST_QC)
         .expect("db get KEY_HIGHEST_QC")
-        .expect("Finding 2.1: KEY_HIGHEST_QC must be persisted after a certified sync");
+        .expect("KEY_HIGHEST_QC must be persisted after a committed sync");
     let decoded =
         novai_consensus_types::codec::decode_qc_v1(&bytes).expect("KEY_HIGHEST_QC must decode");
-    assert_eq!(decoded.height, 2);
+    assert_eq!(decoded.height, 4);
     assert_eq!(
-        decoded.block_hash, block2_hash,
-        "persisted highest_qc must certify block 2"
+        decoded.block_hash, block4_hash,
+        "persisted highest_qc must certify block 4 (the driving top QC)"
     );
 }
 
 #[test]
 fn sync_certified_prefix_lifts_stale_lower_highest_qc() {
-    // Finding 2.1, strict numeric form: with a stale lower highest_qc already
-    // installed (a QC at height 1), a certified sync to height 2 must lift
-    // highest_qc to the certified prefix's top QC, so committed_height does
-    // not sit above highest_qc.height. Pre-fix highest_qc stays at height 1
-    // while committed_height advances to 2, so 2 <= 1 is false.
+    // With a stale lower highest_qc already installed (height 1), a committed
+    // sync lifts highest_qc to the driving top QC (height 4), so
+    // committed_height (2) never sits above highest_qc.height (the soak
+    // invariant).
     let (node2, sk1, addr1, block1, block2) = a2_receiver_fixture();
+    let block3 = next_block(&block2, [0xcc; 32]);
+    let block4 = next_block(&block3, [0xdd; 32]);
     let qc1 = certifying_qc(&sk1, addr1, &block1);
-    let qc2 = certifying_qc(&sk1, addr1, &block2);
     // Seed a stale lower highest_qc (height 1) before the sync.
     node2.state.lock().unwrap().highest_qc = Some(qc1.clone());
     let response = BlockResponse {
         responder: addr1,
         request_start: 1,
-        request_end: 2,
-        blocks: vec![block1, block2],
-        qcs: vec![Some(qc1), Some(qc2)],
+        request_end: 4,
+        blocks: vec![
+            block1.clone(),
+            block2.clone(),
+            block3.clone(),
+            block4.clone(),
+        ],
+        qcs: vec![
+            Some(qc1),
+            Some(certifying_qc(&sk1, addr1, &block2)),
+            Some(certifying_qc(&sk1, addr1, &block3)),
+            Some(certifying_qc(&sk1, addr1, &block4)),
+        ],
     };
     node2.handle_block_response(response).unwrap();
 
     let state = node2.state.lock().unwrap();
-    assert_eq!(state.committed_height, 2);
+    assert_eq!(state.committed_height, 2, "the 3-chain prefix commits");
     let hqc_height = state
         .highest_qc
         .as_ref()
@@ -847,13 +893,13 @@ fn sync_certified_prefix_lifts_stale_lower_highest_qc() {
         .expect("highest_qc was seeded, must remain present");
     assert!(
         state.committed_height <= hqc_height,
-        "section 7 soak invariant: committed_height ({}) must not exceed highest_qc.height ({})",
+        "soak invariant: committed_height ({}) must not exceed highest_qc.height ({})",
         state.committed_height,
         hqc_height
     );
     assert_eq!(
-        hqc_height, 2,
-        "the certified prefix top QC (height 2) must dominate the seeded QC (height 1)"
+        hqc_height, 4,
+        "the driving top QC (height 4) lifts the stale seeded QC (height 1)"
     );
 }
 

@@ -981,6 +981,49 @@ impl ConsensusNode {
             "Cached synced blocks"
         );
 
+        // Verify each synced block's certifying QC and seed qc_cache so the
+        // 3-chain commit rule below can find those QCs and persist_commit_atomic
+        // writes a dense qc_key row for each committed height (preserving
+        // peer-serving). This pass does NOT advance committed_height. Because
+        // committed_height now advances only through the 3-chain rule, a block
+        // that earned a QC in one round but lost a same-height view change (no
+        // canonical descendant, so no QC two heights above) can never be
+        // finalized via sync: the backward walk from a canonical QC never
+        // passes through an abandoned block.
+        let n = self.validator_set.len();
+        let f = (n - 1) / 3;
+        let quorum = 2 * f + 1;
+        let mut top_qc: Option<QC> = None;
+        for (block, qc) in &pairs {
+            let Some(qc) = qc else {
+                continue;
+            };
+            let block_hash = novai_consensus_types::block_hash(block);
+            if qc.height != block.height || qc.block_hash != block_hash {
+                continue;
+            }
+            if let Err(e) =
+                ConsensusState::verify_qc_well_formed(qc, &self.validator_pubkeys_vec, quorum)
+            {
+                tracing::warn!(
+                    height = block.height,
+                    error = ?e,
+                    "Sync: synced block carries a malformed certifying QC, ignoring it"
+                );
+                continue;
+            }
+            // qc_cache is pruned behind committed_height by prune_old_blocks, so
+            // seeding it here adds no unbounded growth.
+            state.qc_cache.insert(qc.height, qc.clone());
+            let is_higher = match &top_qc {
+                None => true,
+                Some(c) => qc.height > c.height,
+            };
+            if is_higher {
+                top_qc = Some(qc.clone());
+            }
+        }
+
         // Try commit rule with current highest_qc (may succeed if we now
         // have enough blocks for the 3-chain rule).
         if let Some(hqc) = state.highest_qc.clone() {
@@ -1007,162 +1050,61 @@ impl ConsensusNode {
                     );
                 }
                 Ok(_) | Err(_) => {
-                    // Commit chain incomplete — not enough blocks to reach
+                    // Commit chain incomplete, not enough blocks to reach
                     // highest_qc yet. This is expected during chunked sync.
                 }
             }
         }
 
-        // Fix A2 (gate-equivocation-535004): advance committed_height ONLY
-        // across the contiguous prefix of synced blocks that each carry a
-        // valid certifying QC. The Q1 invariant: no block advances
-        // committed_height unless a valid certifying QC for THAT block is
-        // verified locally first. This replaces the previous lenient cursor
-        // advance, which trusted contiguity and the state root alone and so
-        // let an uncertified block (the 535003 wedge) become committed via
-        // sync, with the cursor then sitting above highest_qc forever.
-        //
-        // The QC-path commit above (the 3-chain rule) may have already
-        // advanced committed_height; the walk below starts from the current
-        // committed_height + 1 and certifies only blocks beyond it. Blocks
-        // already committed by that path are skipped. The cursor Put and the
-        // certified QC rows are folded into the same sync_ops batch as the
-        // block storage so all three are atomic (latent bug A).
-        let n = self.validator_set.len();
-        let f = (n - 1) / 3;
-        let quorum = 2 * f + 1;
-
-        let mut certified: Vec<Block> = Vec::new();
-        let mut certified_qcs: Vec<(u64, QC)> = Vec::new();
-        let mut expected = state.committed_height + 1;
-        for (block, qc) in &pairs {
-            if block.height < expected {
-                continue; // already committed (e.g. by the QC-path commit above)
-            }
-            if block.height != expected {
-                break; // gap in the contiguous prefix, certify no further
-            }
-            let qc = match qc {
-                Some(qc) => qc,
-                None => {
-                    tracing::warn!(
-                        height = block.height,
-                        "Fix A2: synced block has no certifying QC, halting cursor advance"
+        // Second commit attempt: drive the SAME 3-chain rule with the highest
+        // verified QC carried in this response. Its certified block was just
+        // synced, so the backward parent-linkage walk in cache_qc_and_check_commit
+        // succeeds during chunked catch-up even when highest_qc is far ahead of
+        // this chunk (the highest_qc attempt above errors with the top block
+        // missing, which is expected). This mirrors the live handle_qc order:
+        // commit rule, persist, apply, execute. cache_qc_and_check_commit is
+        // idempotent past the cursor (it returns nothing when commit_target is
+        // at or below committed_height), so any height already committed by the
+        // attempt above is not committed again, and the rule never finalizes a
+        // block lacking a QC two heights above it.
+        if let Some(tqc) = top_qc {
+            match state.cache_qc_and_check_commit(tqc.clone(), &*db) {
+                Ok(to_commit) if !to_commit.is_empty() => {
+                    let new_committed_height = to_commit.last().unwrap().height;
+                    state
+                        .persist_commit_atomic(
+                            &mut *db,
+                            &to_commit,
+                            &tqc,
+                            new_committed_height,
+                            None,
+                        )
+                        .map_err(|e| format!("Sync commit persist failed: {e:?}"))?;
+                    state
+                        .apply_commits(&to_commit)
+                        .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during sync: {e:?}"))?;
+                    self.execute_committed_blocks(&mut db, &to_commit);
+                    tracing::info!(
+                        committed_height = new_committed_height,
+                        count = to_commit.len(),
+                        "Sync: committed via 3-chain rule"
                     );
-                    break;
                 }
-            };
-            let block_hash = novai_consensus_types::block_hash(block);
-            if qc.height != block.height || qc.block_hash != block_hash {
-                tracing::warn!(
-                    height = block.height,
-                    qc_height = qc.height,
-                    "Fix A2: certifying QC not bound to this block, halting cursor advance"
-                );
-                break;
+                Ok(_) | Err(_) => {
+                    // Incomplete 3-chain: the tip blocks have no descendant QC
+                    // yet. Defer; they finalize on a later chunk as the chain
+                    // advances. Deferring is the correct safety margin and never
+                    // finalizes an unconfirmed block.
+                }
             }
-            if let Err(e) =
-                ConsensusState::verify_qc_well_formed(qc, &self.validator_pubkeys_vec, quorum)
-            {
-                tracing::warn!(
-                    height = block.height,
-                    error = ?e,
-                    "Fix A2: certifying QC failed well-formedness, halting cursor advance"
-                );
-                break;
-            }
-            certified.push(block.clone());
-            certified_qcs.push((block.height, qc.clone()));
-            expected += 1;
         }
 
-        if let Some(last_certified) = certified.last() {
-            let new_committed_height = last_certified.height;
-            // Execute the certified blocks not already committed via the QC
-            // path above.
-            let already = state.committed_height;
-            let remaining: Vec<_> = certified
-                .iter()
-                .filter(|b| b.height > already)
-                .cloned()
-                .collect();
-            if !remaining.is_empty() {
-                self.execute_committed_blocks(&mut db, &remaining);
-            }
-            state.committed_height = new_committed_height;
-            sync_ops.push(WriteOp::Put(
-                novai_state::KEY_COMMITTED_HEIGHT.to_vec(),
-                new_committed_height.to_be_bytes().to_vec(),
-            ));
-            // Finding 2.1 (gate-equivocation-535004 Stage 4): the cursor just
-            // advanced across the certified prefix. Install that prefix's top
-            // QC as highest_qc when it dominates, bump self.height to the
-            // committed prefix, and persist KEY_HIGHEST_QC in the SAME atomic
-            // sync_ops batch as KEY_COMMITTED_HEIGHT. Without this,
-            // committed_height sits above highest_qc.height (the section 7 soak
-            // invariant), and a restart reloads a stale highest_qc whose
-            // block_hash propose_block uses as a stale parent. The top QC
-            // already passed verify_qc_well_formed in the cursor walk above, so
-            // no new verification runs; the domination rule mirrors
-            // cache_qc_and_check_commit.
-            if let Some((_, top_qc)) = certified_qcs.last() {
-                let dominates = match &state.highest_qc {
-                    None => true,
-                    Some(existing) => {
-                        top_qc.height > existing.height
-                            || (top_qc.height == existing.height
-                                && top_qc.round > existing.round)
-                    }
-                };
-                if dominates {
-                    state.highest_qc = Some(top_qc.clone());
-                    match novai_consensus_types::codec::encode_qc_v1(top_qc) {
-                        Ok(qc_bytes) => {
-                            sync_ops.push(WriteOp::Put(
-                                novai_state::KEY_HIGHEST_QC.to_vec(),
-                                qc_bytes,
-                            ));
-                        }
-                        Err(e) => tracing::warn!(
-                            height = new_committed_height,
-                            error = ?e,
-                            "Finding 2.1: installed highest_qc failed to encode, KEY_HIGHEST_QC left as is"
-                        ),
-                    }
-                }
-            }
-            // Mirror apply_commits: self.height tracks the committed prefix and
-            // never regresses a legitimately higher view.
-            if state.height < new_committed_height {
-                state.height = new_committed_height;
-            }
-            // Persist each certified block's QC at qc_key(height) in the same
-            // atomic batch (the Stage 1 to Stage 2 delta: the sync path now
-            // stores QCs, so a synced node ends up with dense QC rows too and
-            // can in turn serve and certify them to the next lagging peer).
-            for (height, qc) in &certified_qcs {
-                match novai_consensus_types::codec::encode_qc_v1(qc) {
-                    Ok(qc_bytes) => {
-                        sync_ops.push(WriteOp::Put(novai_state::qc_key(*height), qc_bytes));
-                    }
-                    Err(e) => {
-                        // The QC just passed verify_qc_well_formed, which
-                        // calls encode_qc_v1, so this branch is unreachable;
-                        // log defensively rather than drop silently.
-                        tracing::warn!(height, error = ?e, "Fix A2: certified QC failed to encode");
-                    }
-                }
-            }
-            tracing::info!(
-                committed_height = new_committed_height,
-                certified = certified.len(),
-                "Sync: advanced committed_height across certified prefix"
-            );
-        }
-
-        // Atomic write: block storage and (when present) the
-        // KEY_COMMITTED_HEIGHT cursor advance commit together or not at
-        // all. See the latent bug A comment near the sync_ops accumulator.
+        // Atomic write of synced block storage. committed_height, highest_qc,
+        // locked_qc, voted_view, and the dense per-height QC rows for committed
+        // blocks are written separately and atomically by persist_commit_atomic
+        // above. This batch persists the synced blocks themselves (both the
+        // committed prefix and the deferred tip) so the node can serve them to
+        // peers and the next chunk's backward walk can find them.
         db.apply_batch(&sync_ops)
             .map_err(|e| format!("Failed to persist sync chunk atomically: {e:?}"))?;
 
