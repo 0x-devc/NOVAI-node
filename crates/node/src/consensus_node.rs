@@ -62,6 +62,18 @@ impl Kv for Storage {
         }
     }
 
+    // gate 9: forward to the inner backend's synced put so the RocksDB path
+    // reaches the real WAL fsync. The trait default would call Storage::put,
+    // which is NOT synced; MemKv has no WAL, so its default is correct.
+    fn put_synced(&mut self, key: &[u8], value: &[u8]) -> Result<(), String> {
+        match self {
+            Storage::Memory(kv) => kv
+                .put_synced(key, value)
+                .map_err(|()| "in-memory storage error".into()),
+            Storage::Rocks(kv) => kv.put_synced(key, value).map_err(|e| e.to_string()),
+        }
+    }
+
     fn delete(&mut self, key: &[u8]) -> Result<(), String> {
         match self {
             Storage::Memory(kv) => kv
@@ -1225,7 +1237,26 @@ impl ConsensusNode {
         nonce_provider: &impl mempool::NonceProvider,
     ) -> Result<bool, String> {
         let mut state = self.state.lock_or_recover();
-        let db = self.db.lock_or_recover();
+        let mut db = self.db.lock_or_recover();
+
+        // gate 9: refuse to propose/self-vote at a view this node already durably
+        // voted at (a restart replay of a view voted before the crash). Compute
+        // the view propose_block would use; if already voted there, skip without
+        // draining the mempool. A legitimate first vote at a new view passes. This
+        // keeps the durable vote high-water mark global across the leader and
+        // follower self-vote sites.
+        let intended_height = match &state.highest_qc {
+            Some(qc) => std::cmp::max(state.height, qc.height) + 1,
+            None => state.height + 1,
+        };
+        if !state.may_vote(intended_height, state.round) {
+            tracing::warn!(
+                height = intended_height,
+                round = state.round,
+                "gate 9: already durably voted at this view; not proposing after restart"
+            );
+            return Ok(false);
+        }
 
         // Try to propose - NotLeader and AlreadyProposed are expected outcomes, not errors
         let block = match state.propose_block(mempool, nonce_provider, &*db, &self.validator_set) {
@@ -1248,6 +1279,14 @@ impl ConsensusNode {
         state
             .add_vote(self_vote, &self.validator_pubkeys_vec)
             .map_err(|e| format!("Leader self-vote add failed: {e:?}"))?;
+
+        // gate 9: synced persist-before-broadcast. add_vote advanced the vote
+        // high-water mark via note_self_vote; fsync it now, while the locks are
+        // held, so it is durable before the proposal (and the QC this leader will
+        // form, which embeds this vote) goes out below.
+        state
+            .persist_voted_view(&mut *db)
+            .map_err(|e| format!("gate 9: persist voted_view failed: {e:?}"))?;
 
         // Build justify_qc for the proposal
         let justify_qc = if block.height == 1 {
@@ -1605,12 +1644,37 @@ impl ConsensusNode {
                 return Ok(());
             }
 
+            // gate 9: durable equivocation guard. Refuse to vote at a view this
+            // node already durably voted at (restart replay or a stale proposal);
+            // otherwise advance the high-water mark. This survives restart, unlike
+            // voted_in_round above. A higher-round re-proposal after a view change
+            // is admitted, so it does not reintroduce the height-only halt.
+            if let Err(e) = state.note_self_vote(block.height, block.round) {
+                tracing::debug!(
+                    height = block.height,
+                    round = block.round,
+                    error = ?e,
+                    "gate 9: refusing self-vote at an already-voted view"
+                );
+                drop(db);
+                drop(state);
+                return Ok(());
+            }
+
             let vote = state
                 .create_vote(block, &self.signing_key)
                 .map_err(|e| format!("Vote creation failed: {e:?}"))?;
 
             // Mark ourselves as voted so duplicate proposals are rejected
             state.voted_in_round.insert(self.our_address);
+
+            // gate 9: synced persist-before-broadcast. This fsync must return
+            // before the vote is broadcast. The state and db locks are held until
+            // the end of this block; the broadcast is after the lock drop, so the
+            // durable write strictly precedes the network send.
+            state
+                .persist_voted_view(&mut *db)
+                .map_err(|e| format!("gate 9: persist voted_view failed: {e:?}"))?;
 
             // Reset round timer BEFORE dropping state lock to prevent race with
             // check_timeout (same pattern as handle_vote and handle_qc).
@@ -1671,7 +1735,9 @@ impl ConsensusNode {
         match state.add_vote_verified(vote.clone(), &self.validator_pubkeys_vec) {
             Ok(()) => {}
             Err(novai_consensus::ConsensusError::InvalidVote(ref msg))
-                if msg.contains("Duplicate vote") || msg.contains("height mismatch") =>
+                if msg.contains("Duplicate vote")
+                    || msg.contains("height mismatch")
+                    || msg.contains("durable vote guard") =>
             {
                 return Ok(());
             }

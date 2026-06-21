@@ -827,10 +827,76 @@ pub fn decode_block_response_v2(buf: &[u8]) -> Result<BlockResponse, CodecError>
     })
 }
 
+// ============================================================================
+// Vote high-water mark encoding (gate 9: persistent vote tracking)
+// ============================================================================
+
+/// Codec version for the durable vote high-water mark.
+pub const VOTED_VIEW_V1: u8 = 0x01;
+
+/// Encode the durable vote high-water mark (gate 9) to canonical bytes.
+///
+/// Format:
+/// ```text
+/// [version:1][height:8][round:8]
+/// ```
+/// 17 bytes, big-endian, version-prefixed so a node on a mixed-version network
+/// during a rolling upgrade decodes it unambiguously.
+#[must_use]
+pub fn encode_voted_view_v1(height: u64, round: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(17);
+    buf.push(VOTED_VIEW_V1);
+    buf.extend_from_slice(&height.to_be_bytes());
+    buf.extend_from_slice(&round.to_be_bytes());
+    buf
+}
+
+/// Decode the durable vote high-water mark (gate 9).
+///
+/// # Errors
+/// Returns `CodecError::BufferTooShort` if fewer than 17 bytes, or
+/// `CodecError::UnsupportedVersion` if the version byte is not `VOTED_VIEW_V1`.
+pub fn decode_voted_view_v1(bytes: &[u8]) -> Result<(u64, u64), CodecError> {
+    if bytes.len() < 17 {
+        return Err(CodecError::BufferTooShort);
+    }
+    if bytes[0] != VOTED_VIEW_V1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+    let mut height = [0u8; 8];
+    height.copy_from_slice(&bytes[1..9]);
+    let mut round = [0u8; 8];
+    round.copy_from_slice(&bytes[9..17]);
+    Ok((u64::from_be_bytes(height), u64::from_be_bytes(round)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use novai_types::{TxV1, TxVersion};
+
+    #[test]
+    fn voted_view_v1_golden_and_roundtrip() {
+        // Golden bytes: version 0x01, then height 7 and round 3, big-endian.
+        let bytes = encode_voted_view_v1(7, 3);
+        assert_eq!(
+            bytes,
+            vec![0x01, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 3],
+            "encode_voted_view_v1 must be the canonical 17-byte layout"
+        );
+        assert_eq!(decode_voted_view_v1(&bytes).unwrap(), (7, 3));
+        // A short buffer and an unknown version are rejected, not misparsed.
+        assert_eq!(
+            decode_voted_view_v1(&bytes[..16]),
+            Err(CodecError::BufferTooShort)
+        );
+        let mut bad = bytes;
+        bad[0] = 0xFF;
+        assert_eq!(
+            decode_voted_view_v1(&bad),
+            Err(CodecError::UnsupportedVersion)
+        );
+    }
 
     fn dummy_tx() -> TxV1 {
         TxV1 {

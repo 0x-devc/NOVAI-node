@@ -60,6 +60,12 @@ pub const KEY_HIGHEST_QC: &[u8] = b"consensus/highest_qc";
 /// node cannot vote a conflicting block.
 pub const KEY_LOCKED_QC: &[u8] = b"consensus/locked_qc";
 
+/// Canonical key for the durable vote high-water mark (gate 9): the highest
+/// (height, round) this node has voted at, stored as a version byte followed by
+/// two big-endian u64s. Force-fsynced before a vote is observable on the network
+/// and restored on recovery, so a restarted node never votes twice at one view.
+pub const KEY_VOTED_VIEW: &[u8] = b"consensus/voted_view";
+
 // ============================================================================
 // AI STORAGE KEY PREFIXES (Retrofit Week 3)
 // ============================================================================
@@ -577,6 +583,19 @@ pub trait Kv {
     /// Results MUST be ordered lexicographically by key for determinism.
     /// This is required for consensus-safe range queries (Week 14 - D14.5).
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error>;
+
+    /// Put a value and force it durable (fsync) before returning.
+    ///
+    /// The default delegates to `put`: a backend with no write-ahead log (the
+    /// in-memory store) needs nothing more, and a backend used only for tests or
+    /// devnet is never the durability target. A durable backend overrides this
+    /// to fsync its WAL before returning, so a caller may rely on the write
+    /// surviving a crash once this returns. This is the primitive behind the
+    /// consensus persist-before-broadcast vote guarantee (gate 9); it is written
+    /// once per (height, round), i.e. once per block, never per transaction.
+    fn put_synced(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
+        self.put(key, value)
+    }
 }
 
 /// Extended KV trait with atomic batch support.

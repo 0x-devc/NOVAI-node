@@ -5,10 +5,14 @@
 #![forbid(unsafe_code)]
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use novai_consensus_types::codec::{decode_block_v1, decode_qc_v1, encode_block_v1, encode_qc_v1};
+use novai_consensus_types::codec::{
+    decode_block_v1, decode_qc_v1, decode_voted_view_v1, encode_block_v1, encode_qc_v1,
+    encode_voted_view_v1,
+};
 use novai_consensus_types::{Block, Timeout, Vote, QC};
 use novai_state::{
     block_key, qc_key, Kv, KvBatch, KEY_COMMITTED_HEIGHT, KEY_HIGHEST_QC, KEY_LOCKED_QC,
+    KEY_VOTED_VIEW,
 };
 use novai_types::{Address, TxV1};
 use std::collections::{HashMap, HashSet};
@@ -167,6 +171,13 @@ pub struct ConsensusState {
     /// resets. Gates voting and QC migration via `safe_to_extend`, so a node
     /// cannot adopt or vote a conflicting same-height branch.
     pub locked_qc: Option<QC>,
+    /// Durable vote high-water mark (gate 9): the highest (height, round) this
+    /// node has voted at. Advances monotonically, is NEVER cleared by round /
+    /// commit / view resets, and is force-fsynced before a vote is observable on
+    /// the network and restored on recovery, so a restarted node never votes
+    /// twice at one view. Keyed by (height, round), not height, so a legitimate
+    /// higher-round re-proposal after a view change is still admitted.
+    pub voted_view: Option<(u64, u64)>,
 }
 
 impl ConsensusState {
@@ -190,6 +201,7 @@ impl ConsensusState {
             last_proposed_txs: Vec::new(),
             last_proposed_block_hash: None,
             locked_qc: None,
+            voted_view: None,
         }
     }
 
@@ -460,6 +472,45 @@ impl ConsensusState {
         Ok(())
     }
 
+    /// gate 9: may this node cast a vote at `(height, round)`? Only if it is
+    /// strictly ahead of the highest view already durably voted. `None` means
+    /// this node has never voted, so the first vote is allowed. The strict
+    /// lexicographic compare admits a legitimate higher-round re-proposal after a
+    /// view change (`(H, R+1) > (H, R)`) and a new height (`(H+1, 0) > (H, R)`),
+    /// while refusing a duplicate or a regress; it never reintroduces the
+    /// height-only re-proposal halt that the removed `voted_at_height` caused.
+    #[must_use]
+    pub fn may_vote(&self, height: u64, round: u64) -> bool {
+        self.voted_view.is_none_or(|hwm| (height, round) > hwm)
+    }
+
+    /// gate 9: advance the durable vote high-water mark. Monotonic; never
+    /// regresses, so it is safe to call on any accepted self-vote.
+    fn record_vote(&mut self, height: u64, round: u64) {
+        let candidate = (height, round);
+        if self.voted_view.is_none_or(|hwm| candidate > hwm) {
+            self.voted_view = Some(candidate);
+        }
+    }
+
+    /// gate 9: gate and record THIS node's own vote at `(height, round)`.
+    ///
+    /// Refuses (without recording) a vote at a view this node already voted at
+    /// or higher; otherwise advances the high-water mark. The caller is
+    /// responsible for the synced persist before the vote is broadcast.
+    ///
+    /// # Errors
+    /// Returns `InvalidVote` if this node already voted at this view or higher.
+    pub fn note_self_vote(&mut self, height: u64, round: u64) -> Result<(), ConsensusError> {
+        if !self.may_vote(height, round) {
+            return Err(ConsensusError::InvalidVote(
+                "durable vote guard: already voted at this (height, round) or higher".to_string(),
+            ));
+        }
+        self.record_vote(height, round);
+        Ok(())
+    }
+
     /// Create a vote for a block.
     ///
     /// # Errors
@@ -584,6 +635,13 @@ impl ConsensusState {
             return Err(ConsensusError::InvalidVote("Invalid signature".to_string()));
         }
 
+        // gate 9: durable equivocation guard for THIS node's own vote. The
+        // signature is verified above, so a vote whose voter is our address is
+        // genuinely ours; a peer cannot forge it. Peer votes are unaffected.
+        if vote.voter == self.our_address {
+            self.note_self_vote(vote.height, vote.round)?;
+        }
+
         // Advisory AI signal logging (does NOT affect vote validity)
         if let Some(commitment) = vote.ai_signal_commitment {
             tracing::debug!(?commitment, "Vote includes AI signal");
@@ -642,6 +700,13 @@ impl ConsensusState {
                 "Unknown voter {:?}",
                 &vote.voter[..4]
             )));
+        }
+
+        // gate 9: durable equivocation guard for THIS node's own vote. The
+        // caller verified the signature (this method's contract), so a vote whose
+        // voter is our address is genuinely ours. Peer votes are unaffected.
+        if vote.voter == self.our_address {
+            self.note_self_vote(vote.height, vote.round)?;
         }
 
         // Duplicate check
@@ -1780,6 +1845,42 @@ impl ConsensusState {
                 ConsensusError::StateError(format!("Failed to persist locked QC: {e:?}"))
             })?;
         }
+        // gate 9: co-persist the vote high-water mark wherever highest_qc is
+        // persisted, mirroring locked_qc. This is a NON-synced freshness write;
+        // the persist-before-broadcast guarantee is the synced persist_voted_view.
+        if let Some((h, r)) = self.voted_view {
+            let value = encode_voted_view_v1(h, r);
+            db.put(KEY_VOTED_VIEW, &value).map_err(|e| {
+                ConsensusError::StateError(format!("Failed to co-persist voted view: {e:?}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Persist the durable vote high-water mark with a forced fsync (gate 9).
+    ///
+    /// This is the persist-before-broadcast safety guarantee: the synced write
+    /// must return (WAL fsync complete) BEFORE this node's vote is observable on
+    /// the network. Written once per (height, round), i.e. once per block, so the
+    /// fsync cost is constant in block size and never scales with transactions.
+    /// Distinct from the NON-synced co-persists in `persist_highest_qc` and
+    /// `persist_commit_atomic`, which are freshness writes mirroring `locked_qc`
+    /// and must NOT be relied on for the persist-before-broadcast property.
+    ///
+    /// # Errors
+    /// Returns `StateError` if the synced write fails; the caller MUST abort the
+    /// vote (not broadcast) when this errors.
+    pub fn persist_voted_view<K>(&self, db: &mut K) -> Result<(), ConsensusError>
+    where
+        K: Kv,
+        K::Error: std::fmt::Debug,
+    {
+        if let Some((h, r)) = self.voted_view {
+            let value = encode_voted_view_v1(h, r);
+            db.put_synced(KEY_VOTED_VIEW, &value).map_err(|e| {
+                ConsensusError::StateError(format!("Failed to persist voted view: {e:?}"))
+            })?;
+        }
         Ok(())
     }
     /// Persist commit state atomically (all-or-nothing).
@@ -1907,6 +2008,13 @@ impl ConsensusState {
             ops.push(WriteOp::Put(KEY_LOCKED_QC.to_vec(), lqc_v));
         }
 
+        // 4c. gate 9: co-persist the vote high-water mark in the commit batch,
+        // mirroring locked_qc. NON-synced freshness; the synced persist_voted_view
+        // at vote time is the persist-before-broadcast guarantee.
+        if let Some((h, r)) = self.voted_view {
+            ops.push(WriteOp::Put(KEY_VOTED_VIEW.to_vec(), encode_voted_view_v1(h, r)));
+        }
+
         // 5. AI operations (if provided)
         if let Some(ai_operations) = ai_ops {
             ops.extend_from_slice(ai_operations);
@@ -2010,6 +2118,33 @@ impl ConsensusState {
             Ok(None) => Ok(None),
             Err(e) => Err(ConsensusError::StateError(format!(
                 "Failed to load locked QC: {e:?}"
+            ))),
+        }
+    }
+
+    /// Load the durable vote high-water mark (gate 9) from the database.
+    ///
+    /// Returns `Ok(None)` if absent (a fresh node, or a DB written before this
+    /// gate): absence means this node has never voted, so the first vote is
+    /// allowed.
+    ///
+    /// # Errors
+    /// Returns error if the database read or the decode fails.
+    pub fn load_voted_view<K>(db: &K) -> Result<Option<(u64, u64)>, ConsensusError>
+    where
+        K: Kv,
+        K::Error: std::fmt::Debug,
+    {
+        match db.get(KEY_VOTED_VIEW) {
+            Ok(Some(bytes)) => {
+                let (h, r) = decode_voted_view_v1(&bytes).map_err(|e| {
+                    ConsensusError::CodecError(format!("Failed to decode voted view: {e:?}"))
+                })?;
+                Ok(Some((h, r)))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(ConsensusError::StateError(format!(
+                "Failed to load voted view: {e:?}"
             ))),
         }
     }
@@ -2285,6 +2420,10 @@ impl ConsensusState {
         // conflicting block.
         let locked_qc = Self::load_locked_qc(db)?.or_else(|| highest_qc.clone());
 
+        // gate 9: restore the durable vote high-water mark so a restarted node
+        // refuses to vote again at any (height, round) it already voted at.
+        let voted_view = Self::load_voted_view(db)?;
+
         // Determine current height from committed height
         let height = committed_height;
 
@@ -2312,6 +2451,7 @@ impl ConsensusState {
             last_proposed_txs: Vec::new(),
             last_proposed_block_hash: None,
             locked_qc,
+            voted_view,
         })
     }
 }

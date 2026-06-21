@@ -15,7 +15,8 @@ use crate::{is_nnpx_key, Kv, KvBatch, WriteOp, CF_DEFAULT, CF_NNPX};
 
 #[cfg(feature = "rocksdb")]
 use rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB,
+    BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch,
+    WriteOptions, DB,
 };
 
 #[cfg(feature = "rocksdb")]
@@ -194,6 +195,21 @@ impl Kv for RocksKv {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
         let cf = self.cf_for_key(key);
         self.db.put_cf(cf, key, value)
+    }
+
+    /// Durable put: fsync the WAL before returning (gate 9).
+    ///
+    /// `put`/`apply_batch` use default write options, which only bandwidth-fsync
+    /// the WAL (`set_wal_bytes_per_sync` in `open`), so a recent write can sit in
+    /// an unfsynced WAL segment and be lost on a crash. This forces a per-write
+    /// fsync via `WriteOptions::set_sync`, so the value is on stable storage once
+    /// this returns. Used only for the once-per-block vote high-water mark, so the
+    /// fsync cost is constant in block size and never scales with transactions.
+    fn put_synced(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
+        let cf = self.cf_for_key(key);
+        let mut opts = WriteOptions::default();
+        opts.set_sync(true);
+        self.db.put_cf_opt(cf, key, value, &opts)
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error> {
