@@ -1,0 +1,97 @@
+"""PURPOSE: Canonical observation encoding and OracleAnchor byte construction.
+
+This module turns an observation into the exact on-chain bytes for an OracleAnchor
+(signal type 22). All construction goes through the novai_sdk builders so the bytes
+match the protocol source of truth, not a hand-rolled copy.
+
+INVARIANTS:
+- The same observation produces the same data_hash byte for byte. The encoding is
+  canonical ASCII per OBSERVATION_FORMAT and never depends on Python's float repr.
+- The OracleAnchor signal_hash, extras, and payload come from novai_sdk verbatim.
+
+NEVER-LIE:
+- data_hash commits only to an observation the caller actually computed. The loop
+  skips a cycle on missing data rather than hashing a placeholder.
+- source_hash is the hash of the source identifier the agent queried.
+
+The observation section below (OBSERVATION_FORMAT plus the three encoding functions)
+is generated from the spec. Everything else is the shared SDK-builder framework.
+"""
+
+from __future__ import annotations
+
+import math  # noqa: F401  (used by generated observation validation)
+from dataclasses import dataclass
+
+from novai_sdk.crypto import blake3_hash
+from novai_sdk.enums import AiSignalType
+from novai_sdk.signals.oracle import (
+    build_oracle_anchor_extras,
+    derive_oracle_anchor_signal_hash,
+)
+from novai_sdk.tx.signal import build_signal_commitment_payload
+
+
+def source_hash_for(source_id: str | bytes) -> bytes:
+    """Compute the 32-byte provenance hash of the source identifier queried."""
+    raw = source_id.encode("utf-8") if isinstance(source_id, str) else source_id
+    return blake3_hash(raw)
+
+
+# ----- generated observation encoding (from the spec) -----------------------------
+
+@@OBSERVATION_SECTION@@
+
+# ----- shared OracleAnchor construction (SDK builders, verbatim) -------------------
+
+
+@dataclass(frozen=True)
+class OracleAnchorArtifacts:
+    issuer_entity_id: bytes
+    data_hash: bytes
+    external_timestamp: int
+    source_hash: bytes
+    expiry_height: int
+    data_tag: str
+    signal_hash: bytes
+    extras: bytes
+    payload: bytes
+
+
+def build_oracle_anchor(
+    issuer_entity_id: bytes,
+    data_hash: bytes,
+    external_timestamp: int,
+    source_hash: bytes,
+    expiry_height: int,
+    data_tag: str,
+) -> OracleAnchorArtifacts:
+    """Construct the full OracleAnchor commitment payload via the SDK builders."""
+    signal_hash = derive_oracle_anchor_signal_hash(
+        issuer_entity_id=issuer_entity_id,
+        data_hash=data_hash,
+        external_timestamp=external_timestamp,
+        source_hash=source_hash,
+        data_tag=data_tag,
+    )
+    extras = build_oracle_anchor_extras(
+        data_hash=data_hash,
+        external_timestamp=external_timestamp,
+        source_hash=source_hash,
+        expiry_height=expiry_height,
+        data_tag=data_tag,
+    )
+    payload = build_signal_commitment_payload(
+        signal_hash, AiSignalType.ORACLE_ANCHOR, issuer_entity_id, extras
+    )
+    return OracleAnchorArtifacts(
+        issuer_entity_id=issuer_entity_id,
+        data_hash=data_hash,
+        external_timestamp=external_timestamp,
+        source_hash=source_hash,
+        expiry_height=expiry_height,
+        data_tag=data_tag,
+        signal_hash=signal_hash,
+        extras=extras,
+        payload=payload,
+    )

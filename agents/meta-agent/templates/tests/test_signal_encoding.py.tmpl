@@ -1,0 +1,47 @@
+"""Determinism and layout of the generated observation encoding.
+
+These assert the on-chain bytes are stable and well-formed. They do NOT assert the
+observation is correct: that is the human-authored parser's job (see the failing
+placeholder parser test).
+"""
+
+from __future__ import annotations
+
+from lib.@@SOURCE_MODULE@@ import @@OBS_CLASS@@
+from lib.signal import build_oracle_anchor, data_hash_for_observation, source_hash_for
+
+
+def test_source_hash_is_deterministic_and_32_bytes():
+    a = source_hash_for("@@SOURCE_ID@@")
+    b = source_hash_for("@@SOURCE_ID@@")
+    assert a == b
+    assert len(a) == 32
+
+
+def test_data_hash_is_deterministic_and_32_bytes():
+    obs = @@SAMPLE_OBS_CONSTRUCT@@
+    a = data_hash_for_observation(obs, 1_718_000_000)
+    b = data_hash_for_observation(obs, 1_718_000_000)
+    assert a == b
+    assert len(a) == 32
+
+
+def test_data_hash_changes_with_timestamp():
+    obs = @@SAMPLE_OBS_CONSTRUCT@@
+    first = data_hash_for_observation(obs, 1_718_000_000)
+    second = data_hash_for_observation(obs, 1_718_000_001)
+    assert first != second
+
+
+def test_oracle_anchor_payload_layout():
+    art = build_oracle_anchor(
+        issuer_entity_id=bytes(32),
+        data_hash=bytes([1] * 32),
+        external_timestamp=1_718_000_000,
+        source_hash=bytes([2] * 32),
+        expiry_height=0,
+        data_tag="@@DATA_TAG@@",
+    )
+    assert art.payload[0] == 2  # SIGNAL_COMMITMENT
+    assert art.payload[33] == 22  # ORACLE_ANCHOR
+    assert len(art.signal_hash) == 32

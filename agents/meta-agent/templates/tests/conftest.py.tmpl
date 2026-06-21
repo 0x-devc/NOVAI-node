@@ -1,0 +1,14 @@
+"""Put the agent root on sys.path so tests can import lib and the entrypoints.
+
+No fixtures. Tests inject the network layer through the fetch opener seam and the chain
+through a FakeChain or the _ExplodingClient, so nothing here touches the network.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))

@@ -1,0 +1,97 @@
+"""PURPOSE: Data-source contract for the @@NAME@@ agent. CONTRACT STUB.
+
+GENERATED STUB. The generator does NOT and CANNOT write correct fetch logic for an
+arbitrary source. This module declares the contract the oracle loop depends on:
+
+  - the @@OBS_CLASS@@ observation dataclass,
+  - the five error classes the loop maps to Prometheus reasons,
+  - the @@FETCH_FN@@(url, timeout) entry point.
+
+@@FETCH_FN@@ raises NoDataError until a human implements the real read-only HTTP GET
+and parser. While it does, the oracle loop SKIPS every cycle and never posts a
+fabricated observation, so an unimplemented source is safe by construction (it cannot
+write to the chain). The agent is not ready for live submission until:
+
+  1. @@FETCH_FN@@ performs a real fetch and parse and returns @@OBS_CLASS@@,
+     raising the matching error class on each failure mode (never returning a guess),
+  2. tests/test_@@SOURCE_MODULE@@_parser.py is filled with real fixture bytes and
+     passes (it ships as a failing placeholder for exactly this reason).
+
+NEVER-LIE: on any ambiguity the parser must raise NoDataError and let the loop skip,
+rather than returning a stale or invented value.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+DEFAULT_URL = "@@SOURCE_URL@@"
+DEFAULT_TIMEOUT_SECS = @@HTTP_TIMEOUT@@.0
+DEFAULT_SOURCE_ID = "@@SOURCE_ID@@"
+USER_AGENT = "novai-@@NAME@@/1.0"
+
+
+class SourceError(Exception):
+    """Base class for data-source fetch failures."""
+
+
+class RateLimitError(SourceError):
+    def __init__(self, retry_after_secs: float) -> None:
+        super().__init__(f"rate_limited retry_after_secs={retry_after_secs:.0f}")
+        self.retry_after_secs = retry_after_secs
+
+
+class ServerError(SourceError):
+    def __init__(self, status: int) -> None:
+        super().__init__(f"server_error status={status}")
+        self.status = status
+
+
+class NetworkError(SourceError):
+    pass
+
+
+class ParseError(SourceError):
+    pass
+
+
+class NoDataError(SourceError):
+    """Source responded but carried no usable observation."""
+
+
+@dataclass(frozen=True)
+class @@OBS_CLASS@@:
+    """The canonical observation the data_hash commits to.
+
+    The fields below mirror the spec. ``sample_size`` records how many source
+    samples fed the observation; ``source`` is the stable source identifier.
+    """
+
+@@OBSERVATION_FIELDS@@
+    source: str = DEFAULT_SOURCE_ID
+    sample_size: int = 1
+
+
+def @@FETCH_FN@@(
+    url: str = DEFAULT_URL,
+    timeout: float = DEFAULT_TIMEOUT_SECS,
+    opener: object | None = None,
+    source_id: str = DEFAULT_SOURCE_ID,
+) -> @@OBS_CLASS@@:
+    """CONTRACT STUB: a human MUST implement the real fetch and parse here.
+
+    Until then this raises NoDataError so the oracle loop SKIPS the cycle and never
+    posts a fabricated observation. Implement a read-only HTTP GET against ``url``
+    (stdlib urllib is sufficient; keep ``opener`` injectable so the parser test can
+    swap the network layer), parse the response into @@OBS_CLASS@@, and raise:
+
+      - RateLimitError(retry_after_secs) on HTTP 429,
+      - ServerError(status) on HTTP 5xx,
+      - NetworkError on transport or timeout failures,
+      - ParseError on malformed or unexpected response shape,
+      - NoDataError when the response is well-formed but carries no usable value.
+    """
+    raise NoDataError(
+        "@@FETCH_FN@@ is a generated contract stub; implement the real fetch and "
+        "parser, and fill tests/test_@@SOURCE_MODULE@@_parser.py, before enabling live"
+    )

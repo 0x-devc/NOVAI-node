@@ -1,0 +1,132 @@
+"""PURPOSE: Parse the @@NS@@_* environment into a frozen config.
+
+Shared by oracle.py (the long-running loop) and bootstrap.py (setup), so the two
+entrypoints cannot drift on defaults.
+
+INVARIANTS:
+- DRY_RUN defaults to ON. The agent builds and logs the signal it would submit
+  without contacting the chain unless the operator opts into live submission.
+- Bad numeric values fall back to the documented default with a warning, never
+  crash the process at parse time.
+
+FAILURE MODES:
+- None at parse time. Validation of keys, capabilities, and on-chain state happens
+  later in chain.py and the entrypoints.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+LOG = logging.getLogger("@@NAME_SNAKE@@.config")
+
+DEFAULTS: dict[str, str] = {
+    "@@NS@@_RPC_ENDPOINT": "http://localhost:3030",
+    "@@NS@@_KEY_PATH": "@@KEY_PATH@@",
+    "@@NS@@_SOURCE_URL": "@@SOURCE_URL@@",
+    "@@NS@@_SOURCE_ID": "@@SOURCE_ID@@",
+    "@@NS@@_DATA_TAG": "@@DATA_TAG@@",
+    "@@NS@@_METRICS_HOST": "127.0.0.1",
+    "@@NS@@_METRICS_PORT": "@@METRICS_PORT@@",
+    "@@NS@@_LOOP_INTERVAL_SECS": "@@LOOP_INTERVAL@@",
+    "@@NS@@_HTTP_TIMEOUT_SECS": "@@HTTP_TIMEOUT@@",
+    "@@NS@@_LOG_LEVEL": "INFO",
+    "@@NS@@_DRY_RUN": "1",
+    "@@NS@@_DRY_RUN_NONCE": "0",
+    "@@NS@@_RUN_ONCE": "0",
+    "@@NS@@_EXPIRY_HEIGHT": "0",
+    "@@NS@@_ANCHOR_FEE": "@@ANCHOR_FEE@@",
+    "@@NS@@_ENTITY_MIN_BALANCE": "@@ENTITY_MIN_BALANCE@@",
+    "@@NS@@_ACCOUNT_MIN_BALANCE": "@@ACCOUNT_MIN_BALANCE@@",
+    "@@NS@@_CREDIT_AMOUNT": "@@CREDIT_AMOUNT@@",
+    "@@NS@@_CREDIT_RETRY_AFTER_SECS": "300",
+    "@@NS@@_FAUCET_RETRY_AFTER_SECS": "3600",
+}
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off", ""}
+
+
+@dataclass(frozen=True)
+class @@NAME_CAMEL@@Config:
+    endpoint: str
+    key_path: Path
+    source_url: str
+    source_id: str
+    data_tag: str
+    metrics_host: str
+    metrics_port: int
+    loop_interval_secs: float
+    http_timeout_secs: float
+    log_level: str
+    dry_run: bool
+    dry_run_nonce: int
+    run_once: bool
+    expiry_height: int
+    anchor_fee: int
+    entity_min_balance: int
+    account_min_balance: int
+    credit_amount: int
+    credit_retry_after_secs: float
+    faucet_retry_after_secs: float
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> "@@NAME_CAMEL@@Config":
+        env = env if env is not None else dict(os.environ)
+
+        def get(key: str) -> str:
+            return env.get(key, DEFAULTS[key])
+
+        return cls(
+            endpoint=get("@@NS@@_RPC_ENDPOINT"),
+            key_path=Path(get("@@NS@@_KEY_PATH")),
+            source_url=get("@@NS@@_SOURCE_URL"),
+            source_id=get("@@NS@@_SOURCE_ID"),
+            data_tag=get("@@NS@@_DATA_TAG"),
+            metrics_host=get("@@NS@@_METRICS_HOST"),
+            metrics_port=_env_int("@@NS@@_METRICS_PORT", env),
+            loop_interval_secs=_env_float("@@NS@@_LOOP_INTERVAL_SECS", env),
+            http_timeout_secs=_env_float("@@NS@@_HTTP_TIMEOUT_SECS", env),
+            log_level=get("@@NS@@_LOG_LEVEL"),
+            dry_run=_env_bool("@@NS@@_DRY_RUN", env),
+            dry_run_nonce=_env_int("@@NS@@_DRY_RUN_NONCE", env),
+            run_once=_env_bool("@@NS@@_RUN_ONCE", env),
+            expiry_height=_env_int("@@NS@@_EXPIRY_HEIGHT", env),
+            anchor_fee=_env_int("@@NS@@_ANCHOR_FEE", env),
+            entity_min_balance=_env_int("@@NS@@_ENTITY_MIN_BALANCE", env),
+            account_min_balance=_env_int("@@NS@@_ACCOUNT_MIN_BALANCE", env),
+            credit_amount=_env_int("@@NS@@_CREDIT_AMOUNT", env),
+            credit_retry_after_secs=_env_float("@@NS@@_CREDIT_RETRY_AFTER_SECS", env),
+            faucet_retry_after_secs=_env_float("@@NS@@_FAUCET_RETRY_AFTER_SECS", env),
+        )
+
+
+def _env_int(key: str, env: dict[str, str]) -> int:
+    raw = env.get(key, DEFAULTS[key])
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        LOG.warning("config event=bad_int key=%s value=%s falling_back=%s", key, raw, DEFAULTS[key])
+        return int(DEFAULTS[key])
+
+
+def _env_float(key: str, env: dict[str, str]) -> float:
+    raw = env.get(key, DEFAULTS[key])
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        LOG.warning("config event=bad_float key=%s value=%s falling_back=%s", key, raw, DEFAULTS[key])
+        return float(DEFAULTS[key])
+
+
+def _env_bool(key: str, env: dict[str, str]) -> bool:
+    raw = env.get(key, DEFAULTS[key]).strip().lower()
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    LOG.warning("config event=bad_bool key=%s value=%s falling_back=%s", key, raw, DEFAULTS[key])
+    return DEFAULTS[key].strip().lower() in _TRUE

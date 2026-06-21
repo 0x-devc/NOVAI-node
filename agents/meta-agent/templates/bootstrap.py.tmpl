@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""PURPOSE: Idempotent setup for the @@NAME@@ entity, DRY_RUN-safe.
+
+Two-key Type-10 model: a funder keypair pays fees and seeds the entity economic
+balance, and a separate entity keypair signs signals and is bound at registration with
+the oracle capabilities.
+
+DRY_RUN (default) does NO chain write. It loads or generates the keypairs, derives the
+entity_id locally, performs the collision pre-flight, and logs the exact registration
+it WOULD submit (the capability byte spelled out and the 83-byte Type-10 payload).
+Persisting keys and performing the on-chain faucet plus registration is the held
+supervised step, enabled only when DRY_RUN is off (and, for key persistence, when
+@@NS@@_BOOTSTRAP_WRITE_KEYS=1).
+
+COLLISION PRE-FLIGHT: entity_id = blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || funder).
+Funder reuse is silently fatal at EntityAlreadyExists, so the plan checks the id is free.
+Offline by default (it prints the entity_id and the command to run). Set
+@@NS@@_CHECK_ENDPOINT to a node RPC URL for an opt-in read-only existence query; that
+path issues only reads, never a write.
+
+EXIT CODES:
+- 0: success (dry-run plan logged, or live registration confirmed).
+- 2: keyfile load/format error.
+- 3: faucet cooldown and balance too low (live).
+- 4: entity exists without the oracle capability (live).
+- 5: RPC unreachable or registration not confirmed (live).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+
+from novai_sdk import AutonomyMode, Capabilities, Keypair
+from novai_sdk.tx.entities import build_register_with_key_payload
+
+from lib.chain import POST_ORACLE_ANCHORS_BIT, Chain, @@CODE_HASH_CONST@@
+from lib.config import @@NAME_CAMEL@@Config
+from lib.log import configure_logging
+from oracle import load_keypair_from_file
+
+LOG = logging.getLogger("@@NAME_SNAKE@@.bootstrap")
+
+REGISTER_INITIAL_BALANCE = @@INITIAL_ENTITY_BALANCE@@
+REGISTER_FEE = @@REGISTER_FEE@@
+MIN_BALANCE_FOR_REGISTER = REGISTER_INITIAL_BALANCE + REGISTER_FEE + 5_000
+POLL_SECS = 30
+
+
+def capabilities_for() -> Capabilities:
+    """The oracle capability set for this archetype (bits 0,1,2,6 = 0x47)."""
+    return Capabilities.oracle()
+
+
+def load_or_generate_keys(cfg: @@NAME_CAMEL@@Config) -> tuple[Keypair, Keypair, bool]:
+    """Return (funder_kp, entity_kp, generated). Loads a v2 keyfile if present."""
+    if cfg.key_path.exists():
+        funder_kp, entity_kp, _data = load_keypair_from_file(cfg.key_path)
+        LOG.info("keys event=loaded path=%s", cfg.key_path)
+        return funder_kp, entity_kp, False
+    funder_kp = Keypair.generate()
+    entity_kp = Keypair.generate()
+    LOG.info("keys event=generated funder=%s entity=%s", funder_kp.address.hex(), entity_kp.address.hex())
+    return funder_kp, entity_kp, True
+
+
+def keyfile_dict(
+    funder_kp: Keypair,
+    entity_kp: Keypair,
+    *,
+    entity_id_hex: str | None,
+    capabilities_byte: int,
+    registered_at_unix: int | None,
+) -> dict[str, object]:
+    out: dict[str, object] = {
+        "version": 2,
+        "funder_seed_hex": funder_kp.seed.hex(),
+        "funder_pubkey_hex": funder_kp.pubkey.hex(),
+        "funder_address_hex": funder_kp.address.hex(),
+        "entity_seed_hex": entity_kp.seed.hex(),
+        "entity_pubkey_hex": entity_kp.pubkey.hex(),
+        "entity_address_hex": entity_kp.address.hex(),
+        "capabilities_byte": capabilities_byte,
+    }
+    if entity_id_hex is not None:
+        out["entity_id_hex"] = entity_id_hex
+    if registered_at_unix is not None:
+        out["registered_at_unix"] = registered_at_unix
+    return out
+
+
+def write_keyfile_atomic(path: Path, data: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    if sys.platform != "win32":
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def _log_capability_breakdown(caps: Capabilities) -> None:
+    caps_byte = caps.to_byte()
+    LOG.info(
+        "plan event=capability_byte value=0x%02x read_public_chain=%d read_memory_objects=%d "
+        "emit_proposals=%d post_oracle_anchors=%d submit_reputation_updates=%d",
+        caps_byte,
+        int(caps.read_public_chain),
+        int(caps.read_memory_objects),
+        int(caps.emit_proposals),
+        int(caps.post_oracle_anchors),
+        int(caps.submit_reputation_updates),
+    )
+    if not caps.emit_proposals:
+        LOG.error("plan event=invalid_capability reason=emit_proposals_required_for_signal_dispatch")
+    if not caps.post_oracle_anchors:
+        LOG.error("plan event=invalid_capability reason=post_oracle_anchors_required_for_archetype")
+
+
+def _log_type10_payload(entity_kp: Keypair, caps: Capabilities) -> None:
+    payload = build_register_with_key_payload(
+        code_hash=@@CODE_HASH_CONST@@,
+        entity_pubkey=entity_kp.pubkey,
+        autonomy_mode=AutonomyMode.GATED,
+        capabilities=caps,
+        initial_balance=REGISTER_INITIAL_BALANCE,
+    )
+    LOG.info(
+        "plan event=type10_payload tx_type=10 autonomy=GATED len=%d initial_balance=%d fee=%d hex=%s",
+        len(payload),
+        REGISTER_INITIAL_BALANCE,
+        REGISTER_FEE,
+        payload.hex(),
+    )
+
+
+def _collision_preflight(cfg: @@NAME_CAMEL@@Config, funder_kp: Keypair, entity_id: bytes) -> None:
+    check_endpoint = os.environ.get("@@NS@@_CHECK_ENDPOINT", "").strip()
+    if not check_endpoint:
+        LOG.info(
+            "collision_check event=offline entity_id=%s advice=run_read_only_check "
+            "command='novai-cli ai info --entity-id %s' or set @@NS@@_CHECK_ENDPOINT",
+            entity_id.hex(),
+            entity_id.hex(),
+        )
+        return
+    try:
+        reader = Chain(check_endpoint, dry_run=False)  # reads only; never a write here
+        unbound = reader.funder_is_unbound(funder_kp.address)
+    except Exception as exc:  # noqa: BLE001 best-effort read
+        LOG.warning("collision_check event=failed endpoint=%s error=%s", check_endpoint, exc)
+        return
+    LOG.info("collision_check event=done endpoint=%s funder_unbound=%s entity_id=%s", check_endpoint, unbound, entity_id.hex())
+    if not unbound:
+        LOG.error("collision_check event=collision entity_id=%s advice=rotate_funder_address", entity_id.hex())
+
+
+def _bootstrap_dry_run(cfg: @@NAME_CAMEL@@Config, chain: Chain, funder_kp: Keypair, entity_kp: Keypair, generated: bool) -> int:
+    caps = capabilities_for()
+    entity_id = chain.entity_id_for(funder_kp.address)
+    LOG.info(
+        "bootstrap event=dry_run_plan submitted=false funder=%s entity_pubkey=%s entity_id=%s code_hash_label=%s",
+        funder_kp.address.hex(),
+        entity_kp.pubkey.hex(),
+        entity_id.hex(),
+        "@@CODE_HASH_LABEL@@",
+    )
+    _log_capability_breakdown(caps)
+    _log_type10_payload(entity_kp, caps)
+    _collision_preflight(cfg, funder_kp, entity_id)
+    LOG.info("bootstrap event=dry_run_notice detail=no_faucet_no_register_no_chain_write_this_is_the_held_supervised_step")
+    write_keys = os.environ.get("@@NS@@_BOOTSTRAP_WRITE_KEYS", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if write_keys and generated:
+        try:
+            write_keyfile_atomic(
+                cfg.key_path,
+                keyfile_dict(funder_kp, entity_kp, entity_id_hex=None, capabilities_byte=caps.to_byte(), registered_at_unix=None),
+            )
+            LOG.info("keys event=persisted path=%s mode=0600 note=entity_id_set_at_live_register", cfg.key_path)
+        except OSError as exc:
+            LOG.warning("keys event=persist_failed path=%s error=%s", cfg.key_path, exc)
+    else:
+        LOG.info("keys event=not_persisted reason=dry_run_default advice=set_@@NS@@_BOOTSTRAP_WRITE_KEYS=1_to_persist")
+    return 0
+
+
+def _persist(cfg: @@NAME_CAMEL@@Config, funder_kp: Keypair, entity_kp: Keypair, entity_id: bytes, caps_byte: int) -> None:
+    write_keyfile_atomic(
+        cfg.key_path,
+        keyfile_dict(funder_kp, entity_kp, entity_id_hex=entity_id.hex(), capabilities_byte=caps_byte, registered_at_unix=int(time.time())),
+    )
+    LOG.info("keys event=persisted path=%s mode=0600", cfg.key_path)
+
+
+def _bootstrap_live(cfg: @@NAME_CAMEL@@Config, chain: Chain, funder_kp: Keypair, entity_kp: Keypair) -> int:
+    """Live faucet + register + persist. Held supervised step."""
+    caps = capabilities_for()
+    entity_id = chain.entity_id_for(funder_kp.address)
+
+    existing = chain.get_entity_status(entity_id)
+    if existing.exists and existing.has_post_oracle_anchors:
+        LOG.info("bootstrap event=already_registered entity_id=%s caps=0x%02x", entity_id.hex(), existing.capabilities)
+        _persist(cfg, funder_kp, entity_kp, entity_id, caps.to_byte())
+        return 0
+    if existing.exists and not existing.has_post_oracle_anchors:
+        LOG.error("bootstrap event=entity_poisoned entity_id=%s caps=0x%02x", entity_id.hex(), existing.capabilities)
+        return 4
+
+    if chain.get_balance(funder_kp.address) < MIN_BALANCE_FOR_REGISTER:
+        chain.faucet(funder_kp.address)
+        deadline = time.monotonic() + POLL_SECS
+        while time.monotonic() < deadline:
+            if chain.get_balance(funder_kp.address) >= MIN_BALANCE_FOR_REGISTER:
+                break
+            time.sleep(2.0)
+        if chain.get_balance(funder_kp.address) < MIN_BALANCE_FOR_REGISTER:
+            LOG.error("bootstrap event=funding_failed balance_below=%d", MIN_BALANCE_FOR_REGISTER)
+            return 3
+
+    result = chain.register_oracle_with_key(
+        funder_kp, entity_kp.pubkey, capabilities=caps, fee=REGISTER_FEE, initial_balance=REGISTER_INITIAL_BALANCE
+    )
+    LOG.info("bootstrap event=register_submitted txid=%s entity_id=%s", result.txid, entity_id.hex())
+
+    deadline = time.monotonic() + POLL_SECS
+    while time.monotonic() < deadline:
+        status = chain.get_entity_status(entity_id)
+        if status.exists and status.has_post_oracle_anchors:
+            _persist(cfg, funder_kp, entity_kp, entity_id, caps.to_byte())
+            LOG.info("bootstrap event=registered entity_id=%s caps=0x%02x", entity_id.hex(), status.capabilities)
+            return 0
+        if status.exists and not status.has_post_oracle_anchors:
+            LOG.error("bootstrap event=registered_without_capability caps=0x%02x", status.capabilities)
+            return 4
+        time.sleep(2.0)
+    LOG.error("bootstrap event=register_not_confirmed entity_id=%s", entity_id.hex())
+    return 5
+
+
+def main(argv: list[str] | None = None) -> int:
+    cfg = @@NAME_CAMEL@@Config.from_env()
+    configure_logging(cfg.log_level)
+    LOG.info(
+        "bootstrap_init event=loading mode=%s endpoint=%s key_path=%s",
+        "dry_run" if cfg.dry_run else "live",
+        cfg.endpoint,
+        cfg.key_path,
+    )
+    chain = Chain(cfg.endpoint, dry_run=cfg.dry_run, dry_run_nonce=cfg.dry_run_nonce)
+    try:
+        funder_kp, entity_kp, generated = load_or_generate_keys(cfg)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        LOG.error("bootstrap_init event=keyfile_error error=%s path=%s", exc, cfg.key_path)
+        return 2
+
+    if cfg.dry_run:
+        return _bootstrap_dry_run(cfg, chain, funder_kp, entity_kp, generated)
+    return _bootstrap_live(cfg, chain, funder_kp, entity_kp)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

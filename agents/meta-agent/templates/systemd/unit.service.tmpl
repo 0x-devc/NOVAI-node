@@ -1,0 +1,33 @@
+[Unit]
+Description=NOVAI @@NAME@@ (@@DESCRIPTION@@)
+Documentation=https://github.com/0x-devc/NOVAI-node/tree/main/agents/@@NAME@@
+After=network-online.target
+Wants=network-online.target
+# Soft dependency on the local NOVAI node. The agent tolerates the node being
+# unreachable (logs, retries) so it does not need to be a hard order.
+# Direction C restart-throttle placeholders (inert in Direction B; uncomment and tune
+# before any autonomous live-spawn rollout, see docs/gate-meta-agent-design-PLAN.md):
+# StartLimitIntervalSec=300
+# StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=@@INSTALL_DIR@@
+EnvironmentFile=@@ENV_PATH@@
+ExecStart=@@INSTALL_DIR@@/.venv/bin/python @@INSTALL_DIR@@/oracle.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=@@UNIT_NAME@@
+# Direction C resource-cap placeholders (inert in Direction B; tune to the 8GB box
+# before any autonomous live-spawn rollout, see docs/gate-meta-agent-design-PLAN.md):
+# MemoryMax=256M
+# CPUQuota=20%
+# TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,49 @@
+# Golden spec: reproduces the compute-oracle observation so the golden test can assert
+# the generated encoding produces byte-identical on-chain bytes (data_hash and
+# OracleAnchor payload) to the deployed compute-oracle. This is the meta-agent's
+# correctness oracle for the observation path.
+
+[agent]
+name = "compute-oracle"
+version = 1
+description = "GPU pricing anchor publisher"
+archetype = "oracle_anchor"
+
+[identity]
+capabilities = ["read_public_chain", "read_memory_objects", "emit_proposals", "post_oracle_anchors"]
+autonomy_mode = "gated"
+
+[economics]
+initial_entity_balance = 50000
+register_fee = 5000
+anchor_fee = 1000
+entity_min_balance = 5000
+account_min_balance = 200000
+credit_amount = 100000
+
+[data_source]
+module = "gpu_source"
+source_url = "https://console.vast.ai/api/v0/bundles/"
+source_id = "vast.ai/api/v0/bundles"
+fetch_function = "fetch_gpu_price"
+observation_class = "GpuPriceObservation"
+primary_value_field = "price"
+
+[[data_source.observation_fields]]
+name = "model"
+type = "str"
+
+[[data_source.observation_fields]]
+name = "price"
+type = "price"
+fmt = "4f"
+
+[anchor]
+data_tag = "compute/rtx4090-usd-hr"
+observation_format = "GPU-{model}-USD-HR@{ts}={price:.4f}"
+
+[runtime]
+config_namespace = "COMPUTE_ORACLE"
+metrics_port = 9202
+loop_interval_secs = 300
+http_timeout_secs = 10

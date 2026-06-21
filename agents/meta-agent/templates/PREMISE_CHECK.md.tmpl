@@ -1,0 +1,28 @@
+# Premise check: @@NAME@@
+
+GENERATED SKELETON. A human completes this before the agent goes live. The generator
+cannot judge whether the premise is sound; that is the point of this document.
+
+## Premise
+
+TODO: state in one paragraph what this agent observes, why that observation is worth
+anchoring on chain, and who consumes it.
+
+## Data source
+
+- Source: @@SOURCE_ID@@ (@@SOURCE_URL@@)
+- Observation committed by the data_hash: TODO describe the exact value and units.
+- Canonical encoding: see `OBSERVATION_FORMAT` in `lib/signal.py`.
+
+## Never-lie application (per field)
+
+TODO: for each observation field, state what a truthful value is and what the parser
+does on ambiguity. The rule is: skip the cycle (raise NoDataError), never post a stale
+or invented value.
+
+## Held supervised steps
+
+- Implement `@@FETCH_FN@@` in `lib/@@SOURCE_MODULE@@.py`.
+- Make `tests/test_@@SOURCE_MODULE@@_parser.py` pass with real fixtures.
+- Review `REGISTER_PLAN.md` and run the live bootstrap.
+- Flip `@@NS@@_DRY_RUN=0` only after the above.

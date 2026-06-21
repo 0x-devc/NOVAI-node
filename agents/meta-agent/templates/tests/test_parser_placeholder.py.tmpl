@@ -1,0 +1,26 @@
+"""SAFETY GATE: failing placeholder for the human-authored data-source parser test.
+
+This test fails on purpose until a human implements @@FETCH_FN@@ in
+lib/@@SOURCE_MODULE@@.py and replaces this file with real fixture bytes plus assertions
+that the parser returns the expected @@OBS_CLASS@@ and raises the right error class on
+each failure mode (RateLimitError, ServerError, NetworkError, ParseError, NoDataError).
+
+While this test is red, the agent is NOT ready for live: the data-source module is still
+the generated contract stub, which raises NoDataError so the loop only ever skips and
+never posts. The generator cannot prove fetch logic correct; this red test is the gate
+that forces a human to do so before the agent goes live.
+
+Set PARSER_IMPLEMENTED to True once the real parser and real fixtures are in place.
+"""
+
+from __future__ import annotations
+
+PARSER_IMPLEMENTED = False
+
+
+def test_@@SOURCE_MODULE@@_parser_is_implemented():
+    assert PARSER_IMPLEMENTED, (
+        "@@FETCH_FN@@ is still the generated contract stub. Implement the real fetch and "
+        "parser in lib/@@SOURCE_MODULE@@.py, add real fixture bytes and assertions in this "
+        "file, and set PARSER_IMPLEMENTED = True. Until then the agent must not go live."
+    )

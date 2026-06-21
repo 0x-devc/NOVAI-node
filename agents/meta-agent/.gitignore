@@ -1,0 +1,6 @@
+# Generated agent trees from local runs (operator output, not part of the meta-agent).
+.out/
+# Python caches.
+__pycache__/
+*.pyc
+.pytest_cache/

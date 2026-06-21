@@ -1,0 +1,44 @@
+# Example spec: a fictional single-value oracle. Used by the leak test (the generated
+# framework must contain no reference-agent tokens) and the DRY_RUN smoke. It is a
+# template input, not a real agent. The data source is deliberately a stub.
+
+[agent]
+name = "example-oracle"
+version = 1
+description = "Example single-value anchor publisher"
+archetype = "oracle_anchor"
+
+[identity]
+capabilities = ["read_public_chain", "read_memory_objects", "emit_proposals", "post_oracle_anchors"]
+autonomy_mode = "gated"
+
+[economics]
+initial_entity_balance = 50000
+register_fee = 5000
+anchor_fee = 1000
+entity_min_balance = 5000
+account_min_balance = 200000
+credit_amount = 100000
+
+[data_source]
+module = "example_source"
+source_url = "https://example.org/api/value"
+source_id = "example.org/api/value"
+fetch_function = "fetch_example"
+observation_class = "ExampleObservation"
+primary_value_field = "value"
+
+[[data_source.observation_fields]]
+name = "value"
+type = "price"
+fmt = "2f"
+
+[anchor]
+data_tag = "example/demo-value"
+observation_format = "EXAMPLE@{ts}={value:.2f}"
+
+[runtime]
+config_namespace = "EXAMPLE_ORACLE"
+metrics_port = 9210
+loop_interval_secs = 300
+http_timeout_secs = 10
