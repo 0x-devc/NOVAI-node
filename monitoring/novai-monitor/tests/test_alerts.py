@@ -2,17 +2,14 @@
 import os
 
 from alerts import (
-    ALERTS,
+    NODE_ALERTS,
     ANOMALY_CONFIDENCE_BYTE_HIGH,
     compute_counter_rate_per_minute,
     eval_anomaly_high_confidence,
     eval_anomaly_published,
-    eval_block_height_stuck,
     eval_copilot_heartbeat_dead,
     eval_mempool_backlog,
     eval_mempool_empty,
-    eval_peer_count_below_quorum,
-    eval_peer_count_degraded,
     eval_proposer_skipping_txs,
     eval_view_change_elevated,
     eval_view_change_spike,
@@ -25,48 +22,6 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 def _load(name: str) -> dict:
     with open(os.path.join(FIXTURES, name), encoding="utf-8") as f:
         return parse_prometheus_text(f.read())
-
-
-# ---------------------------------------------------------------------------
-# block_height_stuck
-# ---------------------------------------------------------------------------
-
-def test_block_height_stuck_fires_when_height_does_not_advance():
-    snap = {"novai_committed_height": 100.0}
-    prev = {"novai_committed_height": 100.0}
-    r = eval_block_height_stuck(snap, prev, [], 0.0)
-    assert r.firing is True
-
-
-def test_block_height_stuck_clears_when_height_advances():
-    snap = {"novai_committed_height": 101.0}
-    prev = {"novai_committed_height": 100.0}
-    r = eval_block_height_stuck(snap, prev, [], 0.0)
-    assert r.firing is False
-
-
-def test_block_height_stuck_returns_insufficient_when_no_prev():
-    snap = {"novai_committed_height": 100.0}
-    r = eval_block_height_stuck(snap, None, [], 0.0)
-    assert r.firing is False
-    assert "insufficient" in r.detail
-
-
-# ---------------------------------------------------------------------------
-# peer count
-# ---------------------------------------------------------------------------
-
-def test_peer_count_below_quorum_fires_at_two():
-    assert eval_peer_count_below_quorum({"novai_peer_count": 2.0}, None, [], 0.0).firing is True
-
-
-def test_peer_count_below_quorum_clears_at_three():
-    assert eval_peer_count_below_quorum({"novai_peer_count": 3.0}, None, [], 0.0).firing is False
-
-
-def test_peer_count_degraded_warns_at_three_but_not_four():
-    assert eval_peer_count_degraded({"novai_peer_count": 3.0}, None, [], 0.0).firing is True
-    assert eval_peer_count_degraded({"novai_peer_count": 4.0}, None, [], 0.0).firing is False
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +87,8 @@ def test_view_change_elevated_warns_between_two_and_six_per_minute():
 
 def test_counter_reset_does_not_create_fake_spike():
     # Counter resets to 0 mid-window. A naive last-minus-first would compute a
-    # huge negative, then the rate would be negative. We want it to behave as
-    # if the resets are non-events.
+    # huge negative, then the rate would be negative. The expected behavior is
+    # to treat the resets as non-events.
     history = [
         (0.0, {"novai_consensus_view_changes_total": 50.0}),
         (30.0, {"novai_consensus_view_changes_total": 55.0}),
@@ -168,7 +123,7 @@ def test_anomaly_high_confidence_uses_byte_threshold_not_float():
     assert ANOMALY_CONFIDENCE_BYTE_HIGH == 204
     assert eval_anomaly_high_confidence({"novai_anomaly_last_confidence": 230.0}, None, [], 0.0).firing is True
     assert eval_anomaly_high_confidence({"novai_anomaly_last_confidence": 200.0}, None, [], 0.0).firing is False
-    # Passing the float 0.8 must not fire (this is the gotcha we are guarding against).
+    # Passing the float 0.8 must not fire (this is the gotcha being guarded against).
     assert eval_anomaly_high_confidence({"novai_anomaly_last_confidence": 0.8}, None, [], 0.0).firing is False
 
 
@@ -242,17 +197,15 @@ def test_full_eval_stalled_fixture_fires_expected_alerts():
     ]
     now = 300.0
     firing_ids = set()
-    for spec, evaluator in ALERTS:
+    for spec, evaluator in NODE_ALERTS:
         if evaluator(snap, prev, history, now).firing:
             firing_ids.add(spec.alert_id)
-    # Stalled fixture: height same -> stuck. peers 2 -> below quorum + degraded.
-    # mempool 0 -> empty. view changes jumped 7 -> 100 over 300s = 18.6/min ->
-    # both elevated AND spike fire. Copilot counter unchanged -> heartbeat dead.
-    # No tx commits with empty mempool, so proposer_skipping_txs does NOT fire
-    # (it requires mempool > 0).
-    assert "block_height_stuck" in firing_ids
-    assert "peer_count_below_quorum" in firing_ids
-    assert "peer_count_degraded" in firing_ids
+    # Stalled fixture, per-node evaluators only. mempool 0 -> empty. view changes
+    # jumped 7 -> 100 over 300s = 18.6/min -> both elevated AND spike fire.
+    # Copilot counter unchanged -> heartbeat dead. No tx commits with empty
+    # mempool, so proposer_skipping_txs does NOT fire (it requires mempool > 0).
+    # Stuck height and lost peers are now cross-node concerns (node_stuck,
+    # cluster_halt, fault_tolerance), covered in test_cluster_alerts.py.
     assert "mempool_empty" in firing_ids
     assert "view_change_elevated" in firing_ids
     assert "view_change_spike" in firing_ids
@@ -269,12 +222,12 @@ def test_full_eval_high_anomaly_fixture_fires_expected_alerts():
     history = [(0.0, prev), (60.0, snap)]
     now = 60.0
     firing_ids = set()
-    for spec, evaluator in ALERTS:
+    for spec, evaluator in NODE_ALERTS:
         if evaluator(snap, prev, history, now).firing:
             firing_ids.add(spec.alert_id)
     assert "anomaly_high_confidence" in firing_ids
     assert "anomaly_published" in firing_ids
-    # Chain is healthy in the anomaly fixture; consensus alerts should NOT fire.
-    assert "block_height_stuck" not in firing_ids
-    assert "peer_count_below_quorum" not in firing_ids
+    # Chain is healthy in the anomaly fixture; node-local consensus alerts
+    # should NOT fire.
     assert "mempool_empty" not in firing_ids
+    assert "mempool_backlog" not in firing_ids

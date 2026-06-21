@@ -1,18 +1,30 @@
 """
-PURPOSE: Pure-function alert evaluators for the NOVAI metrics monitor.
-Each evaluator takes a snapshot dict (current scrape), an optional previous
-snapshot, an optional list of recent (timestamp, snapshot) history points,
-and returns whether the alert condition is currently true plus a short
-detail string used in the outbound notification body.
+PURPOSE: Pure-function alert evaluators and pure cross-node predicates for the
+NOVAI metrics monitor. Two kinds of logic live here:
+
+1. Per-node evaluators (the NODE_ALERTS registry). Each takes a snapshot dict
+   (current scrape), an optional previous snapshot, an optional list of recent
+   (timestamp, snapshot) history points, and returns whether the alert
+   condition is currently true plus a short detail string.
+
+2. Cross-node pure predicates (node_stuck_fire, cluster_halt_fire,
+   healthy_labels, fault_tolerance_state, classify_divergence) and host
+   predicates (host_disk_*_fire, host_mem_low_fire). These take already
+   gathered values and decide firing. The orchestrator in novai_monitor.py
+   does the I/O (scraping the four nodes and the RPC), then calls these.
 
 INVARIANTS:
-- Evaluators are pure. No I/O, no logging, no mutation of inputs.
-- An evaluator that cannot decide (missing metric, insufficient history)
-  returns firing=False with detail="insufficient_data". The orchestrator
-  treats this as a non-firing observation, not an alert.
+- Everything here is pure. No I/O, no logging, no mutation of inputs.
+- A per-node evaluator that cannot decide (missing metric, insufficient
+  history) returns firing=False with detail="insufficient_data". The
+  orchestrator treats this as a non-firing observation, not an alert.
 - Counter resets (value decreases between samples) are absorbed by
   compute_counter_rate_per_minute as zero-increment intervals, so a
   legitimate node restart does not trigger a false spike alert.
+- Quorum is decided ONLY from healthy validator count (height based), never
+  from transport peer_count. peer_count drives a demoted diagnostic only.
+- Divergence is decided by majority grouping of state_roots at a common
+  height, never by comparing every node to a single reference node.
 
 FAILURE MODES:
 - A metric absent from the snapshot dict is treated as missing, not zero.
@@ -22,16 +34,12 @@ FAILURE MODES:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # novai_anomaly_last_confidence is the raw byte (0..=255) emitted by the
 # copilot anomaly observer, not a 0.0..=1.0 float. Threshold 0.8 == byte 204.
 # See crates/node/src/metrics.rs HELP text and crates/copilot/src/observer.rs.
 ANOMALY_CONFIDENCE_BYTE_HIGH = 204
-
-# 4-node BFT cluster: quorum is 2f+1 with f=1, so 3 peers is the floor.
-PEER_QUORUM_FLOOR = 3
-PEER_FULL_SET = 4
 
 MEMPOOL_EMPTY_VALUE = 0
 MEMPOOL_BACKLOG_THRESHOLD = 1000
@@ -40,6 +48,21 @@ VIEW_CHANGE_SPIKE_PER_MIN = 6.0
 VIEW_CHANGE_ELEVATED_PER_MIN = 2.0
 
 COPILOT_HEARTBEAT_RATE_FLOOR = 0.001  # observations per minute below this is "dead"
+
+# Cross-node calibration. HEIGHT_SKEW_BLOCKS is the lag (cluster max minus this
+# node) at or under which a reachable node still counts as healthy. Locked from
+# a live healthy-cluster read this session: observed healthy tip skew was at
+# most 1 block, so 5 is a safe margin.
+HEIGHT_SKEW_BLOCKS = 5
+
+# Compare state_roots this many blocks below the lowest tip, so a node that is
+# one or two blocks behind is never mislabeled as diverged.
+DIVERGENCE_DEPTH_BLOCKS = 2
+
+# Host resource thresholds (percent free / available).
+HOST_DISK_CRIT_PCT = 10.0
+HOST_DISK_WARN_PCT = 20.0
+HOST_MEM_WARN_PCT = 10.0
 
 HistoryPoint = Tuple[float, Dict[str, float]]
 History = List[HistoryPoint]
@@ -97,33 +120,9 @@ def _get(snap: Optional[Dict[str, float]], name: str) -> Optional[float]:
     return snap.get(name)
 
 
-def eval_block_height_stuck(snap, prev, history, now) -> EvalResult:
-    cur = _get(snap, "novai_committed_height")
-    prv = _get(prev, "novai_committed_height")
-    if cur is None or prv is None:
-        return EvalResult(False, "insufficient_data")
-    if cur == prv:
-        return EvalResult(True, f"height={int(cur)} (no change)")
-    return EvalResult(False, f"height={int(cur)}")
-
-
-def eval_peer_count_below_quorum(snap, prev, history, now) -> EvalResult:
-    peers = _get(snap, "novai_peer_count")
-    if peers is None:
-        return EvalResult(False, "insufficient_data")
-    if peers < PEER_QUORUM_FLOOR:
-        return EvalResult(True, f"peers={int(peers)} (quorum needs {PEER_QUORUM_FLOOR})")
-    return EvalResult(False, f"peers={int(peers)}")
-
-
-def eval_peer_count_degraded(snap, prev, history, now) -> EvalResult:
-    peers = _get(snap, "novai_peer_count")
-    if peers is None:
-        return EvalResult(False, "insufficient_data")
-    if peers < PEER_FULL_SET:
-        return EvalResult(True, f"peers={int(peers)}/{PEER_FULL_SET}")
-    return EvalResult(False, f"peers={int(peers)}")
-
+# ---------------------------------------------------------------------------
+# Per-node evaluators (unchanged behavior, now evaluated once per node)
+# ---------------------------------------------------------------------------
 
 def eval_mempool_empty(snap, prev, history, now) -> EvalResult:
     size = _get(snap, "novai_mempool_size")
@@ -212,16 +211,12 @@ def eval_proposer_skipping_txs(snap, prev, history, now) -> EvalResult:
 Evaluator = Callable[[Dict[str, float], Optional[Dict[str, float]], History, float], EvalResult]
 
 
-ALERTS: List[Tuple[AlertSpec, Evaluator]] = [
-    (AlertSpec("block_height_stuck", "CRITICAL", 30.0,
-               "Block height has not advanced",
-               "EMERGENCY_FREEZE.md"), eval_block_height_stuck),
-    (AlertSpec("peer_count_below_quorum", "CRITICAL", 60.0,
-               "Peer count below BFT quorum",
-               "VALIDATOR_COMPROMISE.md"), eval_peer_count_below_quorum),
-    (AlertSpec("peer_count_degraded", "WARN", 120.0,
-               "Validator set incomplete",
-               "VALIDATOR_COMPROMISE.md"), eval_peer_count_degraded),
+# Per-node alerts. Evaluated once for every validator, with state keyed
+# f"{alert_id}:{label}" so node0 and node1 fire and recover independently.
+# block_height_stuck is retired (superseded by node_stuck + cluster_halt).
+# peer_count_below_quorum and peer_count_degraded are retired as quorum
+# signals (transport_peers_low keeps a demoted transport diagnostic).
+NODE_ALERTS: List[Tuple[AlertSpec, Evaluator]] = [
     (AlertSpec("mempool_empty", "WARN", 300.0,
                "Mempool empty: tx flow regression",
                None), eval_mempool_empty),
@@ -248,12 +243,201 @@ ALERTS: List[Tuple[AlertSpec, Evaluator]] = [
                None), eval_proposer_skipping_txs),
 ]
 
-# A13 (metrics_endpoint_unreachable) is handled by the loop itself, not as an
-# evaluator over a snapshot. Its spec is exposed here for the notifier.
-UNREACHABLE_SPEC = AlertSpec(
-    alert_id="metrics_endpoint_unreachable",
-    severity="WARN",
-    window_secs=120.0,
-    summary="Cannot reach metrics endpoint",
-    playbook=None,
-)
+
+# ---------------------------------------------------------------------------
+# Cross-node pure predicates
+# ---------------------------------------------------------------------------
+
+def node_stuck_fire(
+    label: str,
+    heights_now: Dict[str, float],
+    heights_prev: Dict[str, float],
+) -> bool:
+    """
+    True when this node's committed height did not advance between the previous
+    and current scrape AND at least one other node did advance. The second
+    clause is what makes this "this node is the problem" rather than a whole
+    chain halt, and it keeps the alert silent during a genuine cluster halt
+    (where no node advances) and during true idle (which does not happen at the
+    chain level because the chain emits empty blocks on cadence).
+    Needs a previous sample for this node; returns False without one.
+    """
+    if label not in heights_now or label not in heights_prev:
+        return False
+    node_flat = heights_now[label] <= heights_prev[label]
+    others_advanced = any(
+        other != label and other in heights_now and heights_now[other] > heights_prev[other]
+        for other in heights_prev
+    )
+    return node_flat and others_advanced
+
+
+def cluster_halt_fire(
+    heights_now: Dict[str, float],
+    heights_prev: Dict[str, float],
+    full_count: int,
+) -> bool:
+    """
+    True when no reachable node advanced its committed height between the
+    previous and current scrape. Because a healthy chain emits empty blocks on
+    cadence, a cluster whose max height does not move is halted, not idle.
+    For a single configured node this reduces to "that node is not advancing".
+    For two or more configured nodes I require at least two comparable nodes so
+    a moment when the monitor can see only one node does not read as a halt.
+    """
+    comparable = [label for label in heights_prev if label in heights_now]
+    min_needed = 1 if full_count <= 1 else 2
+    if len(comparable) < min_needed:
+        return False
+    return all(heights_now[label] <= heights_prev[label] for label in comparable)
+
+
+def healthy_labels(
+    heights_now: Dict[str, float],
+    reachable: Set[str],
+    skew: int,
+) -> Set[str]:
+    """
+    The set of reachable nodes whose committed height is within `skew` blocks of
+    the current cluster max. This is the consensus-liveness view of "healthy",
+    derived from height, not from transport peer_count.
+    """
+    healthy: Set[str] = set()
+    if not heights_now:
+        return healthy
+    cluster_max = max(heights_now.values())
+    for label in reachable:
+        height = heights_now.get(label)
+        if height is not None and (cluster_max - height) <= skew:
+            healthy.add(label)
+    return healthy
+
+
+def fault_tolerance_state(healthy_count: int, full_count: int) -> Tuple[bool, bool, int]:
+    """
+    Return (degraded, critical, quorum) for a cluster of full_count validators
+    with healthy_count of them keeping up. For the four-node cluster this is
+    degraded when healthy_count == 3 (bare quorum, zero remaining fault
+    tolerance) and critical when healthy_count < 3 (below quorum). The two
+    bands are mutually exclusive for the four-node case.
+    """
+    quorum = (2 * full_count) // 3 + 1
+    degraded = healthy_count == full_count - 1
+    critical = healthy_count < quorum
+    return degraded, critical, quorum
+
+
+@dataclass(frozen=True)
+class DivergenceVerdict:
+    considered: int
+    canonical: Optional[str]
+    minority: Tuple[str, ...]
+    is_split: bool
+
+
+def classify_divergence(roots: Dict[str, str]) -> DivergenceVerdict:
+    """
+    Group the given {label: state_root} (already gathered at a common height,
+    only for nodes that responded) by value, take the largest group as
+    canonical, and flag every node outside it as a minority. If no group holds
+    a strict majority (for example two versus two), there is no canonical root
+    and is_split is True.
+
+    This groups by value and takes the majority. It never compares every node
+    to a single reference node, because if the reference were the forked node
+    that would mislabel the honest majority as diverged.
+    """
+    labels = sorted(roots)
+    if len(labels) < 2:
+        return DivergenceVerdict(len(labels), None, (), False)
+    groups: Dict[str, List[str]] = {}
+    for label in labels:
+        groups.setdefault(roots[label], []).append(label)
+    # Deterministic pick when sizes are equal; the size tie is handled as a split below.
+    canonical_root = max(groups, key=lambda root: (len(groups[root]), root))
+    largest = len(groups[canonical_root])
+    if largest * 2 <= len(labels):
+        return DivergenceVerdict(len(labels), None, (), True)
+    minority = tuple(sorted(label for label in labels if roots[label] != canonical_root))
+    return DivergenceVerdict(len(labels), canonical_root, minority, False)
+
+
+def host_disk_critical_fire(free_pct: Optional[float]) -> bool:
+    return free_pct is not None and free_pct < HOST_DISK_CRIT_PCT
+
+
+def host_disk_low_fire(free_pct: Optional[float]) -> bool:
+    # The warning band sits above the critical band so the two never page at once.
+    return free_pct is not None and HOST_DISK_CRIT_PCT <= free_pct < HOST_DISK_WARN_PCT
+
+
+def host_mem_low_fire(avail_pct: Optional[float]) -> bool:
+    return avail_pct is not None and avail_pct < HOST_MEM_WARN_PCT
+
+
+# ---------------------------------------------------------------------------
+# Cross-node, host, and transport alert specs.
+# These are driven by the orchestrator in novai_monitor.py, which supplies the
+# already gathered values to the predicates above. Per-node specs are keyed
+# f"{alert_id}:{label}"; cluster-wide specs use the bare alert_id.
+# ---------------------------------------------------------------------------
+
+SPEC_NODE_STUCK = AlertSpec(
+    "node_stuck", "CRITICAL", 90.0,
+    "Validator committed height not advancing while the cluster advances",
+    "EMERGENCY_FREEZE.md")
+
+SPEC_CLUSTER_HALT = AlertSpec(
+    "cluster_halt", "CRITICAL", 60.0,
+    "Cluster committed height not advancing (consensus halted)",
+    "EMERGENCY_FREEZE.md")
+
+SPEC_FT_DEGRADED = AlertSpec(
+    "fault_tolerance_degraded", "WARN", 60.0,
+    "Cluster at bare quorum: zero remaining fault tolerance",
+    "VALIDATOR_COMPROMISE.md")
+
+SPEC_FT_CRITICAL = AlertSpec(
+    "fault_tolerance_critical", "CRITICAL", 30.0,
+    "Healthy validator count below quorum",
+    "VALIDATOR_COMPROMISE.md")
+
+SPEC_DIVERGENCE = AlertSpec(
+    "state_root_divergence", "CRITICAL", 60.0,
+    "Validator state_root differs from cluster majority at a common height",
+    "EMERGENCY_FREEZE.md")
+
+SPEC_DIVERGENCE_SPLIT = AlertSpec(
+    "divergence_split", "CRITICAL", 60.0,
+    "No majority state_root across the cluster (split)",
+    "EMERGENCY_FREEZE.md")
+
+SPEC_NODE_UNREACHABLE = AlertSpec(
+    "node_unreachable", "WARN", 120.0,
+    "Validator metrics endpoint unreachable",
+    None)
+
+SPEC_HOST_DISK_CRIT = AlertSpec(
+    "host_disk_critical", "CRITICAL", 120.0,
+    "Host disk free below 10 percent",
+    None)
+
+SPEC_HOST_DISK_LOW = AlertSpec(
+    "host_disk_low", "WARN", 120.0,
+    "Host disk free below 20 percent",
+    None)
+
+SPEC_HOST_MEM_LOW = AlertSpec(
+    "host_mem_low", "WARN", 120.0,
+    "Host memory available below 10 percent",
+    None)
+
+# Demoted former peer_count alert. This is a TRANSPORT diagnostic only and is
+# explicitly NOT a quorum signal. Quorum is owned by fault_tolerance_* above,
+# which counts healthy validators from height. A node can show a full transport
+# peer count while being consensus-dead, which is exactly why peer_count must
+# never gate quorum.
+SPEC_TRANSPORT_PEERS_LOW = AlertSpec(
+    "transport_peers_low", "WARN", 120.0,
+    "Transport peer links below expected (transport diagnostic only, not a quorum signal)",
+    None)
