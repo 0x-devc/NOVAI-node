@@ -1828,9 +1828,16 @@ pub const PROOF_TYPE_PLONK_REGISTERED: u8 = 4;
 /// kept so existing callers and doc references stay valid.
 pub const PROOF_TYPE_MAX: u8 = PROOF_TYPE_GROTH16;
 
-/// Returns `true` iff `proof_type` is a wired verifier discriminant.
+/// Returns `true` iff `proof_type` is a production-accepted verifier
+/// discriminant.
 ///
-/// The set is non-contiguous: `PROOF_TYPE_PLONK` (= 2) and
+/// `PROOF_TYPE_STUB` (= 0) is deliberately excluded: `StubZkVerifier`
+/// accepts unconditionally, so any entity could forge a type-0 proof.
+/// Keeping it out of this set makes the live decode path reject type-0
+/// with `UnsupportedProofType` before any state effect runs. The stub
+/// struct is retained only for crypto unit tests that call it directly.
+///
+/// The set is also non-contiguous: `PROOF_TYPE_PLONK` (= 2) and
 /// `PROOF_TYPE_PLONK_REGISTERED` (= 4) are reserved at the constant
 /// level but have no verifier implementation, so they remain rejected
 /// at decode time. Adding a new proof system means adding its
@@ -1838,10 +1845,7 @@ pub const PROOF_TYPE_MAX: u8 = PROOF_TYPE_GROTH16;
 /// `apply_signal_commitment_tx_inner`.
 #[must_use]
 pub const fn is_supported_proof_type(proof_type: u8) -> bool {
-    matches!(
-        proof_type,
-        PROOF_TYPE_STUB | PROOF_TYPE_GROTH16 | PROOF_TYPE_GROTH16_REGISTERED
-    )
+    matches!(proof_type, PROOF_TYPE_GROTH16 | PROOF_TYPE_GROTH16_REGISTERED)
 }
 
 /// Inline reputation-update tail carried in `ReputationUpdate` signal payloads.
@@ -6768,7 +6772,7 @@ use novai_ai_entities::{
     SLA_STATUS_VIOLATED,
 };
 use novai_codec::{decode_ai_entity, encode_ai_entity_v5, encode_signal_commitment_v1};
-use novai_crypto::{verify_channel_state_signature, Groth16Verifier, StubZkVerifier, ZkVerifier};
+use novai_crypto::{verify_channel_state_signature, Groth16Verifier, ZkVerifier};
 use novai_state::{
     ai_entity_key, ai_memory_by_type_key, ai_memory_key, ai_memory_object_key,
     ai_signal_by_issuer_key, ai_signal_by_type_key, ai_signal_key,
@@ -7726,9 +7730,7 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
         public_inputs[..32].copy_from_slice(&extra.code_hash);
         public_inputs[32..].copy_from_slice(&extra.computation_hash);
 
-        // Dispatch by proof_type. For PROOF_TYPE_STUB the v1 wire layout
-        // carries no proof bytes, so vk/proof slices are empty and the stub
-        // accepts unconditionally. For PROOF_TYPE_GROTH16 the v2 wire
+        // Dispatch by proof_type. For PROOF_TYPE_GROTH16 the v2 wire
         // layout carries real vk_bytes and proof_bytes which Groth16Verifier
         // deserialises and pairing-checks against `public_inputs`. For
         // PROOF_TYPE_GROTH16_REGISTERED the wire vk_bytes is exactly 32
@@ -7786,13 +7788,6 @@ fn apply_signal_commitment_tx_inner<K: KvBatch>(
             &extra.vk_bytes
         };
         let ok = match extra.proof_type {
-            PROOF_TYPE_STUB => StubZkVerifier::verify_proof(
-                proof_bytes,
-                effective_vk_bytes,
-                &public_inputs,
-                extra.proof_type,
-                &extra.code_hash,
-            ),
             PROOF_TYPE_GROTH16 | PROOF_TYPE_GROTH16_REGISTERED => Groth16Verifier::verify_proof(
                 proof_bytes,
                 effective_vk_bytes,

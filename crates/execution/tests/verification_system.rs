@@ -157,82 +157,6 @@ fn read_verification_records(db: &MemKv, entity_id: &[u8; 32]) -> Vec<MemoryObje
 }
 
 // ============================================================================
-// 1. Smoke + record creation + reputation
-// ============================================================================
-
-#[test]
-fn proof_submission_basic_stub_passes() {
-    let mut db = MemKv::new();
-    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
-
-    let payload = build_proof_submission_payload(
-        issuer.id,
-        PROOF_TYPE_STUB,
-        SAMPLE_CODE_HASH,
-        SAMPLE_COMPUTATION_HASH,
-    );
-    apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
-        .expect("stub-typed proof submission must succeed");
-}
-
-#[test]
-fn proof_submission_creates_verification_record() {
-    let mut db = MemKv::new();
-    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
-
-    let payload = build_proof_submission_payload(
-        issuer.id,
-        PROOF_TYPE_STUB,
-        SAMPLE_CODE_HASH,
-        SAMPLE_COMPUTATION_HASH,
-    );
-    apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
-        .unwrap();
-
-    let records = read_verification_records(&db, &issuer.id);
-    assert_eq!(records.len(), 1, "exactly one VerificationRecord emitted");
-    let record = &records[0];
-    assert_eq!(record.object_type, MemoryObjectType::VerificationRecord);
-    assert_eq!(record.owner_entity, issuer.id);
-    assert_eq!(record.created_at, HEIGHT);
-
-    let decoded = VerificationRecordData::decode(&record.data).expect("decode record");
-    assert_eq!(decoded.proof_type, PROOF_TYPE_STUB);
-    assert_eq!(decoded.code_hash, SAMPLE_CODE_HASH);
-    assert_eq!(decoded.computation_hash, SAMPLE_COMPUTATION_HASH);
-    assert_eq!(decoded.height, HEIGHT);
-    // proof_hash is blake3(empty) in v1 (no proof bytes carried inline yet).
-    assert_eq!(decoded.proof_hash, *blake3::hash(&[]).as_bytes());
-}
-
-#[test]
-fn proof_submission_boosts_reputation() {
-    let mut db = MemKv::new();
-    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
-
-    let before = read_ai_entity(&db, &issuer.id).unwrap().unwrap();
-    let rep_before = before.reputation_score;
-    let events_before = before.reputation_events_count;
-
-    let payload = build_proof_submission_payload(
-        issuer.id,
-        PROOF_TYPE_STUB,
-        SAMPLE_CODE_HASH,
-        SAMPLE_COMPUTATION_HASH,
-    );
-    apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
-        .unwrap();
-
-    let after = read_ai_entity(&db, &issuer.id).unwrap().unwrap();
-    assert_eq!(
-        after.reputation_score,
-        rep_before + 3,
-        "delta +3 applied on verified proof"
-    );
-    assert_eq!(after.reputation_events_count, events_before + 1);
-}
-
-// ============================================================================
 // 2. Rejection paths
 // ============================================================================
 
@@ -263,6 +187,47 @@ fn proof_submission_unsupported_type_rejected() {
 }
 
 #[test]
+fn forged_stub_proof_rejected_on_live_path() {
+    // A forged type-0 submission: attacker-chosen code_hash/computation_hash,
+    // no cryptographic work. The stub verifier used to accept this
+    // unconditionally and mint a VerificationRecord plus +3 reputation, so
+    // any entity could forge verified-proof state. The live execution path
+    // must now reject type-0 outright at decode time, before any state
+    // effect runs.
+    let mut db = MemKv::new();
+    let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
+
+    let payload = build_proof_submission_payload(
+        issuer.id,
+        PROOF_TYPE_STUB,
+        [0xEEu8; 32],
+        [0xEFu8; 32],
+    );
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("forged type-0 proof must be rejected on the live path");
+    assert!(
+        matches!(err, ExecError::UnsupportedProofType { proof_type: 0 }),
+        "got {err:?}"
+    );
+
+    // No state effect: the forgery must not mint a record or move reputation.
+    assert!(
+        read_verification_records(&db, &issuer.id).is_empty(),
+        "forged proof must not mint a VerificationRecord"
+    );
+    let after = read_ai_entity(&db, &issuer.id).unwrap().unwrap();
+    assert_eq!(
+        after.reputation_score, issuer.reputation_score,
+        "forged proof must not change reputation_score"
+    );
+    assert_eq!(
+        after.reputation_events_count, issuer.reputation_events_count,
+        "forged proof must not record a reputation event"
+    );
+}
+
+#[test]
 fn proof_submission_inactive_entity_rejected() {
     let mut db = MemKv::new();
     // Build an issuer with is_active = false; the common signal-handler
@@ -273,11 +238,16 @@ fn proof_submission_inactive_entity_rejected() {
     issuer.is_active = false;
     store_entity(&mut db, &issuer);
 
-    let payload = build_proof_submission_payload(
+    // A decodable GROTH16 (v2) payload with empty vk/proof: decode passes
+    // so the is_active gate is what fires. The verifier is never reached
+    // because EntityNotActive is checked before proof verification.
+    let payload = build_proof_submission_payload_v2(
         issuer.id,
-        PROOF_TYPE_STUB,
+        PROOF_TYPE_GROTH16,
         SAMPLE_CODE_HASH,
         SAMPLE_COMPUTATION_HASH,
+        Vec::new(),
+        Vec::new(),
     );
     let err =
         apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
@@ -295,11 +265,14 @@ fn proof_submission_records_correct_height() {
     let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
 
     let custom_height: u64 = 7_777;
-    let payload = build_proof_submission_payload(
+    let (vk, proof) = gen_valid_groth16_proof(0, SAMPLE_CODE_HASH, SAMPLE_COMPUTATION_HASH);
+    let payload = build_proof_submission_payload_v2(
         issuer.id,
-        PROOF_TYPE_STUB,
+        PROOF_TYPE_GROTH16,
         SAMPLE_CODE_HASH,
         SAMPLE_COMPUTATION_HASH,
+        vk,
+        proof,
     );
     apply_signal_commitment_tx(
         &mut db,
@@ -591,11 +564,14 @@ fn multiple_proofs_same_entity_all_recorded() {
         // has a distinct object_id (id is a hash over owner+type+height+data).
         let mut computation_hash = SAMPLE_COMPUTATION_HASH;
         computation_hash[0] = nonce as u8;
-        let payload = build_proof_submission_payload(
+        let (vk, proof) = gen_valid_groth16_proof(nonce, SAMPLE_CODE_HASH, computation_hash);
+        let payload = build_proof_submission_payload_v2(
             issuer.id,
-            PROOF_TYPE_STUB,
+            PROOF_TYPE_GROTH16,
             SAMPLE_CODE_HASH,
             computation_hash,
+            vk,
+            proof,
         );
         apply_signal_commitment_tx(
             &mut db,
@@ -902,9 +878,11 @@ fn groth16_reputation_updated_on_success() {
 }
 
 #[test]
-fn groth16_proof_type_0_still_works() {
-    // Regression: the stub (PROOF_TYPE_STUB = 0) path must keep its v1
-    // wire layout and always-accept semantics after Groth16 is activated.
+fn proof_type_0_rejected_after_stub_removal() {
+    // Regression: PROOF_TYPE_STUB (= 0) is no longer a supported proof
+    // type. A type-0 submission still encodes as the 131-byte v1 layout
+    // (the encoder is untouched), but the live decode gate now rejects it
+    // before any state effect, closing the forgeable-stub hole.
     let mut db = MemKv::new();
     let issuer = make_issuer(&mut db, [0x11u8; 32], [0x21u8; 32]);
 
@@ -917,17 +895,18 @@ fn groth16_proof_type_0_still_works() {
     assert_eq!(
         payload.len(),
         SIGNAL_COMMITMENT_PAYLOAD_V1_PROOF_LEN,
-        "stub path keeps 131-byte v1 layout"
+        "type-0 still encodes as the 131-byte v1 layout"
     );
-    apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
-        .expect("stub path still succeeds");
+    let err =
+        apply_signal_commitment_tx(&mut db, &make_tx(issuer.id, 0, SIGNAL_FEE, payload), HEIGHT)
+            .expect_err("type-0 must be rejected after stub removal");
+    assert!(
+        matches!(err, ExecError::UnsupportedProofType { proof_type: 0 }),
+        "got {err:?}"
+    );
 
     let records = read_verification_records(&db, &issuer.id);
-    assert_eq!(records.len(), 1);
-    let decoded = VerificationRecordData::decode(&records[0].data).unwrap();
-    assert_eq!(decoded.proof_type, PROOF_TYPE_STUB);
-    // Stub's "proof_bytes" is empty, so proof_hash is blake3 of the empty slice.
-    assert_eq!(decoded.proof_hash, *blake3::hash(&[]).as_bytes());
+    assert!(records.is_empty(), "rejected type-0 must not create a record");
 }
 
 #[test]
