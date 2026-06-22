@@ -1407,60 +1407,19 @@ impl ConsensusNode {
                 ));
             }
 
-            // MUST have quorum votes
-            let n = self.validator_set.len();
-            let f = (n - 1) / 3;
-            let quorum = 2 * f + 1;
-
-            if justify_qc.votes.len() < quorum {
-                return Err(format!(
-                    "Height {} proposal has insufficient justify_qc votes: {} < quorum {}",
-                    block.height,
-                    justify_qc.votes.len(),
-                    quorum
-                ));
-            }
-
-            // Reject oversized QCs before expensive signature verification.
-            // A legitimate QC has at most validator_count votes; anything beyond
-            // quorum + 5 is either malicious or malformed.
-            let max_qc_votes = quorum + 5;
-            if justify_qc.votes.len() > max_qc_votes {
-                return Err(format!(
-                    "Height {} proposal has too many justify_qc votes: {} > max {}",
-                    block.height,
-                    justify_qc.votes.len(),
-                    max_qc_votes
-                ));
-            }
-
-            // Verify each vote signature in justify_qc (prevents malicious leader
-            // from fabricating a QC with fake votes that passes the count check).
-            for vote in &justify_qc.votes {
-                let pubkey = self.validator_pubkeys.get(&vote.voter).ok_or_else(|| {
-                    format!(
-                        "justify_qc vote from unknown validator {:?}",
-                        &vote.voter[..4]
-                    )
-                })?;
-                let unsigned_vote = Vote {
-                    signature: [0u8; 64],
-                    ai_signal_commitment: vote.ai_signal_commitment,
-                    ..*vote
-                };
-                let unsigned_bytes =
-                    novai_consensus_types::codec::encode_vote_v1_unsigned(&unsigned_vote);
-                let domain_tag = b"NOVAI_VOTE_V1";
-                let mut to_verify = Vec::new();
-                to_verify.extend_from_slice(domain_tag);
-                to_verify.extend_from_slice(&unsigned_bytes);
-                if !novai_crypto::verify_bytes(pubkey, &to_verify, &vote.signature) {
-                    return Err(format!(
-                        "justify_qc contains invalid vote signature from {:?}",
-                        &vote.voter[..4]
-                    ));
-                }
-            }
+            // I verify the carried justify_qc with the same canonical helper
+            // that handle_qc and the sync path use, so the proposal path
+            // enforces identical rules: a quorum of distinct voters that are all
+            // in the validator set, every vote bound to this QC's height and
+            // block hash, and every signature valid. The previous inline check
+            // counted raw votes and never bound a vote to the QC it certifies,
+            // so a leader could embed genuine votes that validators cast for a
+            // different block. I derive quorum from validator_pubkeys_vec, the
+            // same set the helper checks membership against, matching handle_qc.
+            let n = self.validator_pubkeys_vec.len();
+            let quorum = 2 * ((n - 1) / 3) + 1;
+            ConsensusState::verify_qc_well_formed(justify_qc, &self.validator_pubkeys_vec, quorum)
+                .map_err(|e| format!("Rejecting proposal with malformed justify_qc: {e:?}"))?;
         }
 
         // 4. Apply justify_qc if it advances our state (QC catch-up).
