@@ -149,13 +149,24 @@ pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
     (sk, pk)
 }
 
+/// Derive the canonical 32-byte Address from raw 32-byte public key bytes:
+/// address = blake3(NOVAI_ADDRESS_V1 || pubkey_bytes)
+///
+/// This is the single source of truth for address derivation. It hashes the raw
+/// bytes and does not validate that they form a canonical ed25519 point, so it
+/// never fails; callers holding a `VerifyingKey` use `address_from_pubkey`, which
+/// forwards the key's canonical encoding here.
+pub fn address_from_pubkey_bytes(pubkey: &[u8; 32]) -> Address {
+    let mut hasher = Hasher::new();
+    hasher.update(b"NOVAI_ADDRESS_V1");
+    hasher.update(pubkey);
+    *hasher.finalize().as_bytes()
+}
+
 /// Derive the canonical 32-byte Address from a public key:
 /// address = blake3(NOVAI_ADDRESS_V1 || pubkey_bytes)
 pub fn address_from_pubkey(pk: &VerifyingKey) -> Address {
-    let mut hasher = Hasher::new();
-    hasher.update(b"NOVAI_ADDRESS_V1");
-    hasher.update(pk.as_bytes());
-    *hasher.finalize().as_bytes()
+    address_from_pubkey_bytes(pk.as_bytes())
 }
 
 /// Sign arbitrary bytes (used for signing TxV1 unsigned bytes).

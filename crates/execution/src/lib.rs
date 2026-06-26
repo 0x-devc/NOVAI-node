@@ -37,14 +37,11 @@ pub const EXECUTION_VERSION: u8 = 1;
 ///
 /// `address = blake3("NOVAI_ADDRESS_V1" || pubkey_bytes)`
 ///
-/// This matches the derivation in `novai-crypto::address_from_pubkey` but operates
-/// on raw bytes, avoiding the need for ed25519 `VerifyingKey` validation at registration
-/// time. Actual key validity is verified when the entity signs a transaction.
+/// Single source of truth: this delegates to `novai_crypto::address_from_pubkey_bytes`.
+/// It operates on raw bytes, avoiding the need for ed25519 `VerifyingKey` validation at
+/// registration time; actual key validity is verified when the entity signs a transaction.
 fn derive_address_from_pubkey_bytes(pubkey: &[u8; 32]) -> Address {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"NOVAI_ADDRESS_V1");
-    hasher.update(pubkey);
-    *hasher.finalize().as_bytes()
+    novai_crypto::address_from_pubkey_bytes(pubkey)
 }
 
 /// Transfer payload version.
