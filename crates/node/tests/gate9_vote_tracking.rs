@@ -56,7 +56,9 @@ fn follower_persists_voted_view_when_voting_and_refuses_after_restart() {
         height: 1,
         round: 0,
         parent_hash: [0u8; 32],
-        state_root: [0u8; 32],
+        // F3: the empty-DB genesis root is now the canonical empty SMT root, so
+        // the leader's genesis proposal must carry it to pass verify_block.
+        state_root: novai_execution::empty_smt_root(),
         txs: vec![],
     };
     let genesis_qc = QC {

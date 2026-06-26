@@ -284,7 +284,7 @@ impl ConsensusState {
             novai_state::decode_smt_root_v1(&bytes)
                 .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
         } else {
-            [0u8; 32] // Genesis root
+            novai_execution::empty_smt_root() // canonical empty SMT root, matches execution and genesis
         };
 
         // Build block
@@ -435,7 +435,7 @@ impl ConsensusState {
             novai_state::decode_smt_root_v1(&bytes)
                 .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
         } else {
-            [0u8; 32]
+            novai_execution::empty_smt_root()
         };
 
         if block.state_root != current_root {
@@ -4041,11 +4041,16 @@ mod tests {
         // branch A' at round 1 (A' must out-round A at each height so its QC
         // dominates A's via the same-height-higher-round clause).
         let hash = |b: &Block| novai_consensus_types::codec::hash_block_v1(b).unwrap();
+        // F3: an empty MemKv now makes verify_block expect the canonical empty
+        // SMT root, not [0u8;32]. The blocks carry that root so V0 still votes via
+        // the real verify_block path. The branch conflict is driven by round
+        // (b1 round 0 vs b1p round 1), not state_root, so it is unchanged.
+        let empty_root = novai_execution::empty_smt_root();
         let mk = |height: u64, round: u64, parent: [u8; 32]| Block {
             height,
             round,
             parent_hash: parent,
-            state_root: [0u8; 32],
+            state_root: empty_root,
             txs: vec![],
         };
         let b1 = mk(1, 0, [0u8; 32]);

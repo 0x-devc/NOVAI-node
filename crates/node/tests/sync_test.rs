@@ -230,7 +230,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
         height: 1,
         round: 0,
         parent_hash: [0u8; 32], // genesis parent
-        state_root: [0u8; 32],  // genesis root (MemKv returns this when empty)
+        state_root: novai_execution::empty_smt_root(), // F3: canonical empty SMT root (MemKv empty)
         txs: vec![],
     };
     let block1_hash = novai_consensus_types::block_hash(&block1);
@@ -280,7 +280,7 @@ fn test_qc_catchup_via_justify_qc_in_proposal() {
         height: 2,
         round: 0,
         parent_hash: block1_hash, // parent is block 1
-        state_root: [0u8; 32],    // same genesis root (no txs executed)
+        state_root: novai_execution::empty_smt_root(), // F3: same canonical empty SMT root (no txs executed)
         txs: vec![],
     };
 

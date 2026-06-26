@@ -939,7 +939,7 @@ impl ConsensusNode {
                 novai_state::decode_smt_root_v1(&bytes)
                     .map_err(|e| format!("Failed to decode SMT root: {e:?}"))?
             } else {
-                [0u8; 32] // Genesis state (no commits yet)
+                novai_execution::empty_smt_root() // canonical empty SMT root, matches execution and genesis
             };
 
             if blocks[0].state_root != current_root {

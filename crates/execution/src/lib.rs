@@ -6398,6 +6398,18 @@ fn read_fee_pool_or_default<K: Kv>(db: &K) -> Result<FeePoolV1, ExecError<K::Err
     }
 }
 
+/// Canonical SMT root of an empty tree (no state writes): `empty_hash_at_height(256)`.
+///
+/// Single source of truth for the absent-root default. `read_smt_root_or_default`
+/// below (and the genesis equivalent) use this value when `KEY_SMT_ROOT` is
+/// absent; consensus (propose, verify, sync) defaults to the same value so a node
+/// with an empty DB agrees with a freshly initialized chain instead of holding a
+/// divergent zero root.
+#[must_use]
+pub fn empty_smt_root() -> Hash32 {
+    empty_hash_at_height(256)
+}
+
 fn read_smt_root_or_default<K: Kv>(db: &K) -> Result<Hash32, ExecError<K::Error>> {
     match db.get(KEY_SMT_ROOT).map_err(ExecError::Db)? {
         None => Ok(empty_hash_at_height(256)),
