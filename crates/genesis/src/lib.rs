@@ -9,13 +9,10 @@ use novai_ai_entities::gates::{ApprovalGate, GateType};
 use novai_ai_entities::{AiEntity, AutonomyMode, Capabilities};
 use novai_codec::{encode_ai_entity_v3, encode_approval_gate_v1};
 use novai_consensus_types::Block;
-use novai_smt::hash::{empty_hash_at_height, Hash32};
-use novai_smt::node::Node;
-use novai_smt::smt::{Smt, SmtError, SmtStore};
+use novai_smt::hash::Hash32;
 use novai_state::{
-    account_key, ai_entity_key, approval_gate_key, decode_smt_root_v1, encode_account_v1,
-    encode_smt_root_v1, smt_key_for_state_key, smt_node_key, AccountStateV1, KvBatch, WriteOp,
-    KEY_SMT_ROOT,
+    account_key, ai_entity_key, approval_gate_key, encode_account_v1, AccountStateV1, KvBatch,
+    WriteOp,
 };
 use novai_types::Address;
 use serde::{Deserialize, Serialize};
@@ -558,139 +555,20 @@ impl GenesisGenerator {
     }
 }
 
-/// Store adapter for SMT operations during genesis.
-/// Buffers writes as `WriteOp::Put`, uses Vec for deterministic ordering.
-struct SmtOverlayStore<'a, K: KvBatch> {
-    db: &'a K,
-    pending: Vec<(Vec<u8>, Vec<u8>)>,
-}
-
-impl<'a, K: KvBatch> SmtOverlayStore<'a, K> {
-    const fn new(db: &'a K) -> Self {
-        Self {
-            db,
-            pending: Vec::new(),
-        }
-    }
-
-    fn into_write_ops(mut self) -> Vec<WriteOp> {
-        // Sort by key for deterministic ordering
-        self.pending.sort_by(|a, b| a.0.cmp(&b.0));
-
-        self.pending
-            .into_iter()
-            .map(|(k, v)| WriteOp::Put(k, v))
-            .collect()
-    }
-
-    fn pending_get(&self, key: &[u8]) -> Option<&[u8]> {
-        // last-write-wins
-        for (k, v) in self.pending.iter().rev() {
-            if k.as_slice() == key {
-                return Some(v.as_slice());
-            }
-        }
-        None
-    }
-}
-
-impl<K: KvBatch> SmtStore for SmtOverlayStore<'_, K> {
-    type Error = K::Error;
-
-    fn get_node(&self, node_hash: &Hash32) -> Result<Option<[u8; Node::ENCODED_LEN]>, Self::Error> {
-        let key = smt_node_key(node_hash);
-
-        // First check buffered writes
-        if let Some(v) = self.pending_get(&key) {
-            if v.len() != Node::ENCODED_LEN {
-                return Ok(None);
-            }
-            let mut out = [0u8; Node::ENCODED_LEN];
-            out.copy_from_slice(v);
-            return Ok(Some(out));
-        }
-
-        match self.db.get(&key)? {
-            None => Ok(None),
-            Some(v) => {
-                if v.len() != Node::ENCODED_LEN {
-                    return Ok(None);
-                }
-                let mut out = [0u8; Node::ENCODED_LEN];
-                out.copy_from_slice(&v);
-                Ok(Some(out))
-            }
-        }
-    }
-
-    fn put_node(
-        &mut self,
-        node_hash: &Hash32,
-        node_bytes: &[u8; Node::ENCODED_LEN],
-    ) -> Result<(), Self::Error> {
-        let key = smt_node_key(node_hash);
-        self.pending.push((key, node_bytes.to_vec()));
-        Ok(())
-    }
-}
-
-/// Helper to read SMT root or return empty root for new genesis.
-fn read_smt_root_or_default<K: KvBatch>(db: &K) -> Result<Hash32, K::Error> {
-    (db.get(KEY_SMT_ROOT)?).map_or_else(
-        || Ok(empty_hash_at_height(256)),
-        |bytes| decode_smt_root_v1(&bytes).map_err(|_| panic!("Invalid SMT root in database")),
-    )
-}
-
 /// Compute SMT operations for genesis state operations.
+///
+/// Single source of truth: this delegates to
+/// `novai_execution::append_smt_ops_for_state_ops`, the canonical SMT-op
+/// generator, so genesis and runtime cannot drift in how state writes are
+/// authenticated into the state SMT. The success path is byte-identical (same
+/// root, same write-ops, same order); only the error is mapped to GenesisError.
 fn append_smt_ops_for_genesis<K: KvBatch>(
     db: &K,
     state_ops: &[WriteOp],
     out_ops: &mut Vec<WriteOp>,
 ) -> Result<Hash32, GenesisError> {
-    let cur_root = read_smt_root_or_default(db)
-        .map_err(|_| GenesisError::ValidationError("Failed to read SMT root".to_string()))?;
-
-    // Build SMT updates in overlay store
-    let store = SmtOverlayStore::new(db);
-    let mut smt = Smt::with_root(store, cur_root);
-
-    for op in state_ops {
-        match op {
-            WriteOp::Put(k, v) => {
-                let sk: Hash32 = smt_key_for_state_key(k);
-                smt.update(sk, v).map_err(|e| match e {
-                    SmtError::Store(_) => {
-                        GenesisError::ValidationError("SMT store error".to_string())
-                    }
-                    _ => GenesisError::ValidationError("SMT update failed".to_string()),
-                })?;
-            }
-            WriteOp::Delete(k) => {
-                let sk: Hash32 = smt_key_for_state_key(k);
-                smt.delete(sk).map_err(|e| match e {
-                    SmtError::Store(_) => {
-                        GenesisError::ValidationError("SMT store error".to_string())
-                    }
-                    _ => GenesisError::ValidationError("SMT delete failed".to_string()),
-                })?;
-            }
-        }
-    }
-
-    let new_root = smt.root();
-    let store = smt.into_store();
-
-    // Add SMT node writes
-    out_ops.extend(store.into_write_ops());
-
-    // Add root record write
-    out_ops.push(WriteOp::Put(
-        KEY_SMT_ROOT.to_vec(),
-        encode_smt_root_v1(&new_root).to_vec(),
-    ));
-
-    Ok(new_root)
+    novai_execution::append_smt_ops_for_state_ops(db, state_ops, out_ops)
+        .map_err(|_| GenesisError::ValidationError("Failed to compute genesis SMT ops".to_string()))
 }
 
 #[cfg(test)]
@@ -1001,6 +879,113 @@ mod genesis_generation_tests {
             "Genesis state root changed! Expected: {}, Got: {}",
             hex::encode(expected_state_root),
             hex::encode(state.state_root)
+        );
+    }
+
+    // F5 adversarial pin: append_smt_ops_for_genesis must emit a byte-identical
+    // SMT root and write-ops for representative inputs across the consolidation
+    // into novai_execution::append_smt_ops_for_state_ops. The expected values are
+    // captured from the pre-refactor implementation and must hold identically
+    // post-refactor; the op fingerprint covers the full write-op set and order.
+    #[test]
+    fn append_smt_ops_for_genesis_byte_identical_across_consolidation() {
+        fn fnv1a(bytes: &[u8], mut h: u64) -> u64 {
+            for &b in bytes {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+            h
+        }
+        fn ops_fingerprint(ops: &[WriteOp]) -> u64 {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for op in ops {
+                match op {
+                    WriteOp::Put(k, v) => {
+                        h = fnv1a(&[0u8], h);
+                        h = fnv1a(&(k.len() as u64).to_le_bytes(), h);
+                        h = fnv1a(k, h);
+                        h = fnv1a(&(v.len() as u64).to_le_bytes(), h);
+                        h = fnv1a(v, h);
+                    }
+                    WriteOp::Delete(k) => {
+                        h = fnv1a(&[1u8], h);
+                        h = fnv1a(&(k.len() as u64).to_le_bytes(), h);
+                        h = fnv1a(k, h);
+                    }
+                }
+            }
+            h
+        }
+        fn run(state_ops: &[WriteOp]) -> ([u8; 32], usize, u64) {
+            let db = novai_state::MemKv::new();
+            let mut out: Vec<WriteOp> = Vec::new();
+            let root = append_smt_ops_for_genesis(&db, state_ops, &mut out).unwrap();
+            (root, out.len(), ops_fingerprint(&out))
+        }
+
+        let k1 = vec![1u8; 8];
+        let k2 = vec![2u8; 8];
+        let k3 = vec![3u8; 8];
+        let v1 = vec![0xAAu8; 16];
+        let v2 = vec![0xBBu8; 16];
+        let v3 = vec![0xCCu8; 16];
+
+        let empty: Vec<WriteOp> = vec![];
+        let single = vec![WriteOp::Put(k1.clone(), v1.clone())];
+        // intentionally unsorted keys to exercise the deterministic sort
+        let multi = vec![
+            WriteOp::Put(k3.clone(), v3.clone()),
+            WriteOp::Put(k1.clone(), v1.clone()),
+            WriteOp::Put(k2.clone(), v2.clone()),
+        ];
+        let with_delete = vec![
+            WriteOp::Put(k1.clone(), v1.clone()),
+            WriteOp::Put(k2.clone(), v2.clone()),
+            WriteOp::Delete(k1.clone()),
+        ];
+
+        let re = run(&empty);
+        let rs = run(&single);
+        let rm = run(&multi);
+        let rd = run(&with_delete);
+
+        // Goldens captured from the pre-refactor genesis implementation; each
+        // tuple is (root_hex, write_op_count, op_fingerprint).
+        assert_eq!(
+            (hex::encode(re.0), re.1, re.2),
+            (
+                "e8f6d60d0a11e182628cbb52f2416c7ec0a1b94e55771eeef33f2685ad2d2589".to_string(),
+                1,
+                0xf6a8_d87f_5df8_2ad0,
+            ),
+            "EMPTY shape root/ops drifted across the consolidation"
+        );
+        assert_eq!(
+            (hex::encode(rs.0), rs.1, rs.2),
+            (
+                "3ccd48e2090c8f914be8311970367b821a16633e4bd5adeb512c8a94304a255b".to_string(),
+                257,
+                0xf521_f47f_e337_1bb3,
+            ),
+            "SINGLE shape root/ops drifted across the consolidation"
+        );
+        assert_eq!(
+            (hex::encode(rm.0), rm.1, rm.2),
+            (
+                "c9639cefb057de16f78b8713e8f4434637f5663a78369cb4342c056de2c462fe".to_string(),
+                769,
+                0x9fb3_5c97_ee94_0708,
+            ),
+            "MULTI shape root/ops drifted across the consolidation"
+        );
+        assert_eq!(
+            (hex::encode(rd.0), rd.1, rd.2),
+            (
+                "f8be57cb3c67647f7c6f139e5c0b9671b1435608794e396000e5288ab9d01c79".to_string(),
+                514,
+                0x2bee_5c74_aae2_2b99,
+            ),
+            "DELETE shape root/ops drifted across the consolidation"
         );
     }
 

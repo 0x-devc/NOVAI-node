@@ -18,6 +18,7 @@ novai-smt = { path = "../smt" }
 novai-consensus-types = { path = "../consensus_types" }
 novai-ai-entities = { path = "../ai_entities" }
 novai-codec = { path = "../codec" }
+novai-execution = { path = "../execution" }
 
 [lints]
 workspace = true

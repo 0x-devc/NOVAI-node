@@ -988,6 +988,7 @@ dependencies = [
  "novai-codec",
  "novai-consensus-types",
  "novai-crypto",
+ "novai-execution",
  "novai-smt",
  "novai-state",
  "novai-types",
