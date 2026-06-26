@@ -310,9 +310,11 @@ pub fn encode_ai_entity_v1(entity: &AiEntity) -> Vec<u8> {
 
 /// Decode an AiEntity from canonical bytes.
 ///
-/// Supports both V1 and V2 formats:
+/// Dispatches on the leading version byte; supports V1 through V5:
 /// - V1 (0x01): 203 bytes, is_active defaults to true
 /// - V2 (0x02): 204 bytes, is_active from encoded byte
+/// - V3, V4, V5: later formats; fields absent in an older version are
+///   filled with safe defaults on decode
 ///
 /// # Errors
 ///
