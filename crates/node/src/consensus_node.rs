@@ -353,6 +353,51 @@ impl ConsensusNode {
         }
     }
 
+    /// Pre-execution state-root guard for the QC-driven catch-up commit path.
+    ///
+    /// The vote path (`verify_block`) and the block-response sync path (C-01)
+    /// both reject a block whose header `state_root` does not match the node's
+    /// current SMT root read BEFORE the block is applied. A block finalized via
+    /// the QC / 3-chain catch-up path is never voted on locally, so it never hit
+    /// that check; this restores the same comparison on that path.
+    ///
+    /// A block header's `state_root` is the PRE-state of that block
+    /// (`post-state(N-1)`), and `to_commit[0]` is at `committed_height + 1`, so a
+    /// correct-but-behind node always satisfies
+    /// `to_commit[0].state_root == current_root` (the same invariant
+    /// `verify_block` and C-01 already enforce). A mismatch means the local
+    /// executed state has diverged from the committed chain; returning an error
+    /// halts the commit. The caller propagates it exactly as it already
+    /// propagates the `apply_commits` safety error, so the node stops committing
+    /// without advancing state and stays up for operator reseed. Absent root
+    /// defaults to `empty_smt_root()` to match execution, genesis, `verify_block`
+    /// and C-01.
+    fn verify_pre_commit_state_root(db: &Storage, to_commit: &[Block]) -> Result<(), String> {
+        if to_commit.is_empty() {
+            return Ok(());
+        }
+        let first = &to_commit[0];
+        let current_root = match db.get(novai_state::KEY_SMT_ROOT) {
+            Ok(Some(bytes)) => novai_state::decode_smt_root_v1(&bytes)
+                .map_err(|e| format!("Failed to decode SMT root: {e:?}"))?,
+            Ok(None) => novai_execution::empty_smt_root(), // canonical empty root (matches execution/genesis)
+            Err(e) => return Err(format!("Failed to read SMT root: {e:?}")),
+        };
+        if first.state_root != current_root {
+            return Err(format!(
+                "CONSENSUS SAFETY HALT: catch-up commit state root mismatch at height {} \
+                 (local={}, expected={}). Local executed state has diverged from the committed \
+                 chain; refusing to commit (this height is the detection point, the divergence \
+                 origin may be earlier). Reseed from a good snapshot or wipe the data dir and \
+                 resync from peers.",
+                first.height,
+                hex::encode(&current_root[..8]),
+                hex::encode(&first.state_root[..8]),
+            ));
+        }
+        Ok(())
+    }
+
     /// Set the known X25519 noise keys for peer identity verification.
     ///
     /// In dev-keys mode, all validator seeds are known so we can precompute
@@ -1458,6 +1503,7 @@ impl ConsensusNode {
                 match state.cache_qc_and_check_commit(justify_qc.clone(), &*db) {
                     Ok(to_commit) if !to_commit.is_empty() => {
                         let new_committed_height = to_commit.last().unwrap().height;
+                        Self::verify_pre_commit_state_root(&*db, &to_commit)?;
                         state
                             .persist_commit_atomic(
                                 &mut *db,
@@ -1758,6 +1804,7 @@ impl ConsensusNode {
             match state.cache_qc_and_check_commit(qc.clone(), &*db) {
                 Ok(to_commit) if !to_commit.is_empty() => {
                     let new_committed_height = to_commit.last().unwrap().height;
+                    Self::verify_pre_commit_state_root(&*db, &to_commit)?;
                     state
                         .persist_commit_atomic(
                             &mut *db,
@@ -1869,6 +1916,7 @@ impl ConsensusNode {
         match state.cache_qc_and_check_commit(qc.clone(), &*db) {
             Ok(to_commit) if !to_commit.is_empty() => {
                 let new_committed_height = to_commit.last().unwrap().height;
+                Self::verify_pre_commit_state_root(&*db, &to_commit)?;
                 state
                     .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
                     .map_err(|e| format!("Atomic persist failed: {e:?}"))?;
