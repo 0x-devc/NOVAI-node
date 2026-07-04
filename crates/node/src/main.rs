@@ -251,20 +251,13 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
             .total_txs_committed
             .fetch_add(total_txs as u64, Ordering::Relaxed);
 
-        // H-07: Periodically purge expired governance proposals (every 1000 blocks)
-        if let Some(last_block) = blocks.last() {
-            if last_block.height % 1000 == 0 {
-                let purged =
-                    novai_execution::purge_expired_proposals(db, last_block.height, 10_000);
-                if purged > 0 {
-                    tracing::info!(
-                        purged,
-                        height = last_block.height,
-                        "Purged expired governance proposals"
-                    );
-                }
-            }
-        }
+        // H-07 (periodic purge of expired governance proposals) is intentionally
+        // not wired here: purge_expired_proposals deletes rows the SMT root still
+        // commits to (raw delete, no root update), and its commit-batch-boundary
+        // trigger is not deterministic across nodes or startup replay. Proposal
+        // expiry must return as a deterministic state transition that keeps rows
+        // and root consistent and restores the H-07 growth bound. See the doc
+        // comment on novai_execution::purge_expired_proposals.
 
         // Update blockchain index for block explorer queries.
         // Cap at 100K entries to prevent unbounded memory growth

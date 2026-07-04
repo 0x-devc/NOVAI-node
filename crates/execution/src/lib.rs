@@ -12363,6 +12363,17 @@ fn read_treasury_balance<K: Kv>(db: &K, key: &[u8]) -> Result<u128, ExecError<K:
 /// - Expired and finalized (`current_height > expires_at + finality_window`)
 ///
 /// Returns the number of proposals purged.
+///
+/// INTENTIONALLY UNCALLED. This deletes proposal rows with a raw `db.delete`,
+/// bypassing the SMT, so `KEY_SMT_ROOT` would keep committing to purged rows
+/// (permanent rows-vs-root divergence the first time it fires). It also cannot
+/// simply be routed through the SMT: the former on_commit trigger fired on the
+/// last block of each commit batch, which differs between live and catch-up
+/// nodes and never runs on startup replay, so a root-affecting purge on that
+/// trigger would fork roots across validators. The future deterministic-expiry
+/// redesign must run inside the state transition (identical on live, catch-up,
+/// and replay paths) and must restore the H-07 growth bound this purge was
+/// added to provide.
 pub fn purge_expired_proposals<K: KvBatch>(
     db: &mut K,
     current_height: u64,
