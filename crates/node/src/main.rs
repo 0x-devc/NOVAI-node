@@ -1638,17 +1638,30 @@ fn main() {
                 // Check for sync timeout every 500ms (not every loop iteration)
                 if last_sync_check.elapsed() >= Duration::from_millis(500) {
                     last_sync_check = std::time::Instant::now();
-                    let mut pending = node.pending_sync_request.lock_or_recover();
-                    if let Some(ref request) = *pending {
-                        if request.request_time.elapsed() >= Duration::from_secs(5) {
-                            tracing::warn!(
-                                peer = ?&request.peer[..4],
-                                start_height = request.start_height,
-                                end_height = request.end_height,
-                                "Sync request timed out"
-                            );
-                            *pending = None;
+                    let timed_out = {
+                        let mut pending = node.pending_sync_request.lock_or_recover();
+                        if let Some(ref request) = *pending {
+                            if request.request_time.elapsed() >= Duration::from_secs(5) {
+                                tracing::warn!(
+                                    peer = ?&request.peer[..4],
+                                    start_height = request.start_height,
+                                    end_height = request.end_height,
+                                    "Sync request timed out"
+                                );
+                                *pending = None;
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
                         }
+                    };
+                    // F1: a timeout is a failed cycle exactly like a served
+                    // empty response; record the strike (after releasing the
+                    // pending lock) so the retry gate backs off.
+                    if timed_out {
+                        node.on_sync_request_timeout();
                     }
                 }
 

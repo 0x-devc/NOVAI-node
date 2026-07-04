@@ -19,11 +19,44 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Maximum number of blocks to request in a single sync chunk.
 /// Prevents timeout on large catch-up ranges (e.g., 50k+ blocks).
 pub const SYNC_CHUNK_SIZE: u64 = 500;
+
+/// F1 sync retry backoff: base delay, doubled per consecutive strike.
+pub const SYNC_RETRY_BASE_MS: u64 = 2_000;
+
+/// F1 sync retry backoff ceiling. Also the period of the behind-retention
+/// low-rate probe and its ERROR escalation log.
+pub const SYNC_RETRY_MAX_MS: u64 = 60_000;
+
+/// Sync strikes at or above this count log at WARN instead of DEBUG.
+pub const SYNC_STRIKE_WARN_THRESHOLD: u32 = 3;
+
+/// Backoff delay before the next sync request after `strikes` consecutive
+/// failed cycles: min(2s * 2^strikes, 60s). Zero strikes means no gate.
+pub fn sync_backoff_ms(strikes: u32) -> u64 {
+    if strikes == 0 {
+        return 0;
+    }
+    SYNC_RETRY_BASE_MS
+        .checked_shl(strikes)
+        .unwrap_or(u64::MAX)
+        .min(SYNC_RETRY_MAX_MS)
+}
+
+/// Pure retry decision for the sync requester: may a new request be issued
+/// `elapsed` after the previous one, given `strikes` consecutive failed
+/// cycles? `None` means no request has been issued yet; the first attempt
+/// is never gated. Pure so it unit-tests without clocks.
+pub fn sync_retry_due(strikes: u32, elapsed: Option<Duration>) -> bool {
+    match elapsed {
+        None => true,
+        Some(e) => e >= Duration::from_millis(sync_backoff_ms(strikes)),
+    }
+}
 
 /// Sized wrapper around a shared `NonceProvider` trait object for gossip tx insertion.
 struct GossipNonceProvider(Arc<dyn mempool::NonceProvider + Send + Sync>);
@@ -157,6 +190,47 @@ pub struct PendingSyncRequest {
     pub request_time: Instant,
 }
 
+/// F1 sync retry state: consecutive failed sync cycles (a matching empty
+/// response or a request timeout, both meaning "the range was not served")
+/// plus the issuance bookkeeping that gates re-requests. Commit progress
+/// resets the strikes; see `try_request_missing_blocks`.
+#[derive(Debug, Default)]
+pub struct SyncRetryState {
+    /// Consecutive failed sync cycles since the last progress or reset.
+    pub strikes: u32,
+    /// When the most recent sync request was issued.
+    pub last_attempt: Option<Instant>,
+    /// `committed_height` observed when the last strike was recorded; any
+    /// commit past this height resets the strikes.
+    pub strike_committed_height: u64,
+    /// When the behind-retention condition was last escalated at ERROR.
+    pub last_escalation_log: Option<Instant>,
+}
+
+/// Outcome of `try_request_missing_blocks` (F1). `BehindRetention` is the
+/// deterministic "cannot block-sync this range, needs snapshot" signal for
+/// the snapshot-sync layer (F4); the other variants let call sites and
+/// tests observe the retry gate. Callers that only opportunistically nudge
+/// sync may ignore the outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncRequestOutcome {
+    /// A sync request was issued and the pending slot armed.
+    Requested,
+    /// No committable gap: highest QC is not beyond committed + 2.
+    NoGap,
+    /// A request is already in flight; dedup suppressed this trigger.
+    AlreadyPending,
+    /// The backoff window from prior strikes has not elapsed yet.
+    BackedOff,
+    /// The request could not be issued (no peers, or broadcast failure).
+    RequestFailed,
+    /// The gap exceeds PRUNE_RETAIN_BLOCKS: no honest peer retains the
+    /// range, so block-range sync is structurally impossible and the node
+    /// needs a snapshot import. `probed` reports whether this call issued
+    /// the low-rate probe request.
+    BehindRetention { probed: bool },
+}
+
 // L-05: Lock contention metrics (e.g., time spent waiting on state/db mutexes)
 // are planned for future observability improvements. Currently, the H-11 fix
 // (signature verification outside lock) is the primary contention mitigation.
@@ -177,6 +251,8 @@ pub struct ConsensusNode {
     /// When we last broadcast a timeout for the current round (None = haven't timed out yet).
     pub last_timeout_time: Arc<Mutex<Option<Instant>>>,
     pub pending_sync_request: Arc<Mutex<Option<PendingSyncRequest>>>,
+    /// F1 sync retry gate state (strikes and backoff bookkeeping).
+    pub sync_retry: Arc<Mutex<SyncRetryState>>,
     /// Configurable base timeout in milliseconds (default: BASE_TIMEOUT_MS = 1000).
     /// Server environments may need higher values (e.g., 3000) to avoid spurious timeouts.
     pub base_timeout_ms: u64,
@@ -288,6 +364,7 @@ impl ConsensusNode {
             round_start_time: Arc::new(Mutex::new(Instant::now())),
             last_timeout_time: Arc::new(Mutex::new(None)),
             pending_sync_request: Arc::new(Mutex::new(None)),
+            sync_retry: Arc::new(Mutex::new(SyncRetryState::default())),
             base_timeout_ms,
             encryption_key,
             known_noise_keys,
@@ -882,20 +959,39 @@ impl ConsensusNode {
         // Accept block responses regardless of pending_sync_request state.
         // Previously, responses arriving after the 5-second pending timeout
         // were silently discarded, causing rejoining validators to never sync.
-        // Now we always process non-empty responses (idempotent: already-committed
+        // Non-empty responses are always processed (idempotent: already-committed
         // blocks are filtered out below).
-        if response.blocks.is_empty() {
-            tracing::debug!(
-                responder = ?&response.responder[..4],
-                "Peer sent empty block response"
-            );
-            return Ok(());
-        }
-
-        // Clear pending request if set, so new requests can be made
-        {
+        //
+        // F1: settle the pending slot only for a response that answers OUR
+        // in-flight request, correlated by the echoed request_start. A
+        // matching EMPTY response is a definitive "peer lacks the range"
+        // answer, not silence: release the slot now instead of burning the
+        // 5s timeout, and record a strike so the retry gate backs off.
+        // Responses to another node's broadcast request (or arriving after
+        // our timeout already cleared the slot) leave the slot alone. The
+        // broadcast fan-in also means only the FIRST matching empty answer
+        // per cycle strikes; later ones find the slot already settled.
+        let matched_pending = {
             let mut pending = self.pending_sync_request.lock_or_recover();
-            *pending = None;
+            match pending.as_ref() {
+                Some(p) if p.start_height == response.request_start => {
+                    *pending = None;
+                    true
+                }
+                _ => false,
+            }
+        };
+
+        if response.blocks.is_empty() {
+            if matched_pending {
+                self.record_sync_strike("matching empty block response");
+            } else {
+                tracing::debug!(
+                    responder = ?&response.responder[..4],
+                    "Peer sent empty block response"
+                );
+            }
+            return Ok(());
         }
 
         // Lock order: state → db
@@ -2063,12 +2159,56 @@ impl ConsensusNode {
         }
     }
 
+    /// Record one failed sync cycle (a matching empty response or a request
+    /// timeout: either way the requested range was not served) and stamp the
+    /// committed height so commit progress can reset the count.
+    /// Observability ladder: early strikes DEBUG, repeated strikes WARN with
+    /// the count and the backoff now in force.
+    fn record_sync_strike(&self, reason: &'static str) {
+        let committed = self.state.lock_or_recover().committed_height;
+        let mut retry = self.sync_retry.lock_or_recover();
+        retry.strikes = retry.strikes.saturating_add(1);
+        retry.strike_committed_height = committed;
+        let backoff_ms = sync_backoff_ms(retry.strikes);
+        if retry.strikes >= SYNC_STRIKE_WARN_THRESHOLD {
+            tracing::warn!(
+                strikes = retry.strikes,
+                backoff_ms,
+                reason,
+                "Sync cycle failed; backing off"
+            );
+        } else {
+            tracing::debug!(
+                strikes = retry.strikes,
+                backoff_ms,
+                reason,
+                "Sync cycle failed"
+            );
+        }
+    }
+
+    /// F1: the binary main-loop sweep calls this after clearing a timed-out
+    /// pending sync request. A dropped response and a served empty response
+    /// both mean the range was not served; both engage the backoff gate.
+    pub fn on_sync_request_timeout(&self) {
+        self.record_sync_strike("sync request timed out");
+    }
+
     /// Trigger a block sync request if committed_height is behind highest_qc.
     ///
     /// Called after "commit chain incomplete" errors to actually initiate sync
-    /// instead of just logging. Uses existing dedup via `pending_sync_request`.
-    /// MUST be called without holding the state lock.
-    pub fn try_request_missing_blocks(&self) {
+    /// instead of just logging, and from the periodic 2s trigger. Uses existing
+    /// dedup via `pending_sync_request`. MUST be called without holding the
+    /// state lock.
+    ///
+    /// F1 retry gate: consecutive failed cycles (matching empty responses or
+    /// request timeouts) back off exponentially per `sync_backoff_ms`, any
+    /// commit progress resets the gate, and a gap beyond PRUNE_RETAIN_BLOCKS
+    /// returns the deterministic `BehindRetention` outcome (block-range sync
+    /// is structurally impossible; the node needs a snapshot import) instead
+    /// of re-issuing an unservable range forever. The in-window zero-strike
+    /// path issues exactly the same request as before the gate existed.
+    pub fn try_request_missing_blocks(&self) -> SyncRequestOutcome {
         let (committed, hqc_height) = {
             let state = self.state.lock_or_recover();
             let committed = state.committed_height;
@@ -2078,7 +2218,63 @@ impl ConsensusNode {
 
         // Need at least 3-chain gap to have committable blocks
         if hqc_height <= committed + 2 {
-            return;
+            return SyncRequestOutcome::NoGap;
+        }
+
+        let mut retry = self.sync_retry.lock_or_recover();
+
+        // Commit progress since the last strike proves the pipeline works
+        // again; reset the gate so catch-up runs at full cadence.
+        if retry.strikes > 0 && committed > retry.strike_committed_height {
+            tracing::debug!(
+                strikes = retry.strikes,
+                committed,
+                "Sync retry strikes reset on commit progress"
+            );
+            retry.strikes = 0;
+        }
+
+        // Behind the fleet retention window no honest peer retains the
+        // range (every peer prunes blocks more than PRUNE_RETAIN_BLOCKS
+        // behind its tip), so re-requesting is structurally futile: only a
+        // snapshot import (F4) can advance committed. Escalate at ERROR and
+        // keep a low-rate probe, each at most once per SYNC_RETRY_MAX_MS.
+        // A served probe commits progress and resets the gate, which also
+        // self-corrects near the retention boundary.
+        if hqc_height - committed > novai_consensus::PRUNE_RETAIN_BLOCKS {
+            let period = Duration::from_millis(SYNC_RETRY_MAX_MS);
+            if retry
+                .last_escalation_log
+                .map_or(true, |at| at.elapsed() >= period)
+            {
+                retry.last_escalation_log = Some(Instant::now());
+                tracing::error!(
+                    committed,
+                    hqc_height,
+                    retention = novai_consensus::PRUNE_RETAIN_BLOCKS,
+                    "Sync range is behind the fleet retention window; \
+                     block-range sync cannot serve it, a snapshot import is \
+                     required (see the reseed procedure)"
+                );
+            }
+            let probe_due = retry
+                .last_attempt
+                .map_or(true, |at| at.elapsed() >= period);
+            let mut probed = false;
+            if probe_due {
+                let end = std::cmp::min(committed + SYNC_CHUNK_SIZE, hqc_height);
+                if self.request_blocks_from_peer(committed + 1, end).is_ok() {
+                    retry.last_attempt = Some(Instant::now());
+                    probed = true;
+                }
+            }
+            return SyncRequestOutcome::BehindRetention { probed };
+        }
+
+        // Backoff gate: after failed cycles, refuse to re-issue until
+        // min(2s * 2^strikes, 60s) has elapsed since the last request.
+        if !sync_retry_due(retry.strikes, retry.last_attempt.map(|at| at.elapsed())) {
+            return SyncRequestOutcome::BackedOff;
         }
 
         // Cap to SYNC_CHUNK_SIZE blocks per request to avoid timeout on large ranges
@@ -2086,12 +2282,14 @@ impl ConsensusNode {
 
         // request_blocks_from_peer already checks pending_sync_request for dedup
         match self.request_blocks_from_peer(committed + 1, end) {
-            Ok(()) => {}
+            Ok(()) => {
+                retry.last_attempt = Some(Instant::now());
+                SyncRequestOutcome::Requested
+            }
+            Err(e) if e.contains("already pending") => SyncRequestOutcome::AlreadyPending,
             Err(e) => {
-                // Expected: "Sync request already pending" — not an error
-                if !e.contains("already pending") {
-                    tracing::warn!(%e, "Block sync request failed");
-                }
+                tracing::warn!(%e, "Block sync request failed");
+                SyncRequestOutcome::RequestFailed
             }
         }
     }
