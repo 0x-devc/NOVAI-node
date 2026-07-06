@@ -25,6 +25,29 @@ use std::time::{Duration, Instant};
 /// Prevents timeout on large catch-up ranges (e.g., 50k+ blocks).
 pub const SYNC_CHUNK_SIZE: u64 = 500;
 
+/// F2 responder byte budget: the maximum encoded BlockResponse payload the
+/// responder assembles, half the wire cap (fixplan: MAX_WIRE_MSG_BYTES / 2)
+/// so a response always encodes with ample headroom. The count clamp alone
+/// let a tx-heavy range assemble past the wire cap and die at
+/// encode_wire_message, sending nothing to any peer and starving the
+/// requester.
+pub const RESPONSE_BYTE_BUDGET: usize = novai_p2p::MAX_WIRE_MSG_BYTES as usize / 2;
+
+/// Fixed BlockResponse payload header: version + responder + request_start
+/// + request_end + block_count + qc_count. Mirrors the decoder's MIN_SIZE
+/// (decode_block_response_v2, consensus_types/codec.rs). Public so the
+/// gate test can pin this constant plus the per-pair formula against the
+/// real encoder output, byte for byte.
+pub const RESPONSE_HEADER_BYTES: usize = 1 + 32 + 8 + 8 + 4 + 4;
+
+// The budget plus the response header plus the 2-byte wire envelope must
+// sit strictly under the hard cap, or a floor pair at the budget boundary
+// could never encode. Compile-time pinned so the budget derivation cannot
+// drift from the p2p constant.
+const _: () = assert!(
+    RESPONSE_BYTE_BUDGET + RESPONSE_HEADER_BYTES + 2 < novai_p2p::MAX_WIRE_MSG_BYTES as usize
+);
+
 /// F1 sync retry backoff: base delay, doubled per consecutive strike.
 pub const SYNC_RETRY_BASE_MS: u64 = 2_000;
 
@@ -850,6 +873,10 @@ impl ConsensusNode {
     /// certifying QC (DB row via load_qc_at_height, qc_cache fallback
     /// for live-tail QCs not yet written as rows, None when neither).
     ///
+    /// F2: the served prefix is additionally bounded by
+    /// RESPONSE_BYTE_BUDGET, measured per encoded (block, QC) pair with a
+    /// floor of one pair; see the budget comment in the assembly loop.
+    ///
     /// Extracted from handle_block_request so tests can assert on the
     /// response without capturing a network broadcast.
     pub fn build_block_response(
@@ -868,20 +895,31 @@ impl ConsensusNode {
         // Each served block gets exactly one qcs entry, so the vectors
         // stay positionally paired. A missing QC is represented
         // faithfully as None, never skipped silently.
+        //
+        // F2: the prefix is bounded by RESPONSE_BYTE_BUDGET, measured by
+        // encoding each candidate (block, QC) PAIR with the same codec the
+        // wire path uses (a hand-maintained size formula would drift). The
+        // block is held, not pushed, until its QC bytes are in the
+        // measurement: QC trailers can dominate the pair. The FIRST pair
+        // is always served (floor) so heavy regions advance one pair at a
+        // time; a single pair beyond the hard wire cap stays unservable
+        // until the F3 cap raise and fails at encode_wire_message exactly
+        // as before this change.
         let mut blocks = Vec::new();
         let mut qcs: Vec<Option<QC>> = Vec::new();
+        let mut response_bytes: usize = RESPONSE_HEADER_BYTES;
         for height in request.start_height..=clamped_end {
-            match ConsensusState::load_block(&*db, height) {
-                Ok(Some(block)) => blocks.push(block),
+            let block = match ConsensusState::load_block(&*db, height) {
+                Ok(Some(block)) => block,
                 _ => {
                     // Fallback: check in-memory block cache
                     if let Some(block) = state.block_cache.get(&height) {
-                        blocks.push(Block::clone(block));
+                        Block::clone(block)
                     } else {
                         break; // Stop at first missing block
                     }
                 }
-            }
+            };
             let qc = match ConsensusState::load_qc_at_height(&*db, height) {
                 Ok(Some(qc)) => Some(qc),
                 Ok(None) => state.qc_cache.get(&height).cloned(),
@@ -894,6 +932,46 @@ impl ConsensusNode {
                     None
                 }
             };
+            let block_bytes = match novai_consensus_types::codec::encode_block_v1(&block) {
+                Ok(bytes) => bytes.len(),
+                Err(e) => {
+                    // Defensive: a stored block that cannot re-encode would
+                    // fail the whole response at the wire; end the prefix
+                    // before it instead.
+                    tracing::warn!(
+                        height,
+                        error = ?e,
+                        "Block response: block unencodable, ending prefix"
+                    );
+                    break;
+                }
+            };
+            let (qc, qc_bytes) = match qc {
+                Some(qc) => match novai_consensus_types::codec::encode_qc_v1(&qc) {
+                    Ok(bytes) => (Some(qc), bytes.len()),
+                    Err(e) => {
+                        // Defensive: an unencodable QC degrades to the same
+                        // faithful None as an unreadable QC row above.
+                        tracing::warn!(
+                            height,
+                            error = ?e,
+                            "Block response: QC unencodable, sending None"
+                        );
+                        (None, 0)
+                    }
+                },
+                None => (None, 0),
+            };
+            // Encoded pair cost in the response payload: block bytes plus
+            // the has_qc flag byte plus QC bytes (encode_block_response_v2
+            // layout). Stop BEFORE the pair that would exceed the budget;
+            // the first pair is exempt (floor).
+            let pair_bytes = block_bytes + 1 + qc_bytes;
+            if !blocks.is_empty() && response_bytes + pair_bytes > RESPONSE_BYTE_BUDGET {
+                break;
+            }
+            response_bytes += pair_bytes;
+            blocks.push(block);
             qcs.push(qc);
         }
 

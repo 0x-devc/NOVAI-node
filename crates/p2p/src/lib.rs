@@ -19,8 +19,10 @@ use std::time::Duration;
 
 use novai_consensus_types::{BlockRequest, BlockResponse, SignedProposal, Timeout, Vote, QC};
 
-/// Maximum wire message size (2MB).
-const MAX_WIRE_MSG_BYTES: u32 = 2 * 1024 * 1024;
+/// Maximum wire message size (2MB). Public so the node's sync responder
+/// derives its response byte budget from the same constant the encoder
+/// enforces (F2), keeping the two from drifting apart.
+pub const MAX_WIRE_MSG_BYTES: u32 = 2 * 1024 * 1024;
 
 /// Wire message kinds.
 #[repr(u8)]
