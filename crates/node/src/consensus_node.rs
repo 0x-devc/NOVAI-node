@@ -25,13 +25,26 @@ use std::time::{Duration, Instant};
 /// Prevents timeout on large catch-up ranges (e.g., 50k+ blocks).
 pub const SYNC_CHUNK_SIZE: u64 = 500;
 
-/// F2 responder byte budget: the maximum encoded BlockResponse payload the
-/// responder assembles, half the wire cap (fixplan: MAX_WIRE_MSG_BYTES / 2)
-/// so a response always encodes with ample headroom. The count clamp alone
-/// let a tx-heavy range assemble past the wire cap and die at
-/// encode_wire_message, sending nothing to any peer and starving the
-/// requester.
+/// F2 responder byte budget at the DEFAULT send cap: half the cap
+/// (fixplan: MAX_WIRE_MSG_BYTES / 2) so a response always encodes with
+/// ample headroom. The count clamp alone let a tx-heavy range assemble
+/// past the wire cap and die at encode_wire_message, sending nothing to
+/// any peer and starving the requester. F3: the responder derives its
+/// effective soft budget from the RUNTIME send cap via
+/// [`response_byte_budget`]; this constant is that rule evaluated at the
+/// default, kept so the deployed Phase A value stays pinned at
+/// compile time.
 pub const RESPONSE_BYTE_BUDGET: usize = novai_p2p::MAX_WIRE_MSG_BYTES as usize / 2;
+
+/// F3 responder soft budget rule: half the runtime wire send cap.
+/// Evaluates to 1,048,576 at the 2 MiB Phase A default (byte-identical
+/// to the deployed F2 behavior) and 8,388,608 at the 16 MiB Phase B cap
+/// (gate F3 diagnosis 12.3, 12.5). Bulk shaping only: the 3-pair floor
+/// in build_block_response is exempt from this budget.
+#[must_use]
+pub const fn response_byte_budget(wire_send_cap: u32) -> usize {
+    wire_send_cap as usize / 2
+}
 
 /// Fixed BlockResponse payload header: version + responder + request_start
 /// + request_end + block_count + qc_count. Mirrors the decoder's MIN_SIZE
@@ -43,10 +56,69 @@ pub const RESPONSE_HEADER_BYTES: usize = 1 + 32 + 8 + 8 + 4 + 4;
 // The budget plus the response header plus the 2-byte wire envelope must
 // sit strictly under the hard cap, or a floor pair at the budget boundary
 // could never encode. Compile-time pinned so the budget derivation cannot
-// drift from the p2p constant.
+// drift from the p2p constant. The same headroom holds at every legal
+// runtime cap because the rule is cap / 2 and validate_wire_send_cap
+// bounds the cap to [default, receive cap].
 const _: () = assert!(
     RESPONSE_BYTE_BUDGET + RESPONSE_HEADER_BYTES + 2 < novai_p2p::MAX_WIRE_MSG_BYTES as usize
 );
+
+/// Fixed SignedProposal envelope bytes around the block txs and the
+/// justify QC: PROPOSAL_V1 tag + proposer + signature (97 bytes,
+/// consensus_types/codec.rs encode_signed_proposal_v1), block header
+/// (85 bytes: version + height + round + parent_hash + state_root +
+/// tx_count, encode_block_v1), and the 2 wire bytes counted in the
+/// length check (p2p encode). The variable remainder is the justify QC,
+/// which the proposer guard MEASURES with the real codec (a hand formula
+/// for a vote-set-sized value would drift; the F2 lesson).
+pub const PROPOSAL_ENVELOPE_FIXED_BYTES: usize = (1 + 32 + 64) + (1 + 8 + 8 + 32 + 32 + 4) + 2;
+
+/// Worst valid encoded (block, QC) pair in a BlockResponse: a block at
+/// MAX_BLOCK_SIZE with its 85-byte header, the has_qc flag byte, and a
+/// QC at the codec ceiling (53-byte header + MAX_VOTES_PER_QC votes at
+/// their 178-byte signed-with-signal encoding). Gate F3 diagnosis 12.1;
+/// the 178 mirrors encode_vote_v1_signed (81 unsigned + 64 signature +
+/// 1 has_signal flag + 32 commitment).
+pub const MAX_PAIR_BYTES: usize = (85 + novai_types::MAX_BLOCK_SIZE)
+    + 1
+    + (53 + novai_consensus_types::codec::MAX_VOTES_PER_QC * 178);
+
+// The frontier guarantee (fixplan :122, gate F3 diagnosis 12.2/12.3): one
+// sync response must be able to carry 3 FULL pairs, because the requester
+// restarts at committed+1 and the 3-chain rule needs committed+1..+3, so
+// anything less re-serves the same prefix forever. Compile-time pinned:
+// if a codec constant grows past this, the receive cap must be re-derived
+// before the build is shippable.
+const _: () = assert!(
+    3 * MAX_PAIR_BYTES + RESPONSE_HEADER_BYTES + 2
+        <= novai_p2p::MAX_RECV_WIRE_MSG_BYTES as usize
+);
+
+/// Startup validation for the runtime wire send cap
+/// (--wire-send-cap-bytes). Below the 2 MiB default, the responder
+/// budget and floor lose their deployed guarantees; above the receive
+/// cap, this node could emit frames the fleet rejects, which partitions
+/// a mixed fleet (gate F3 diagnosis 12.6).
+///
+/// # Errors
+/// Returns a message naming the violated bound.
+pub fn validate_wire_send_cap(cap: u32) -> Result<(), String> {
+    if cap < novai_p2p::MAX_WIRE_MSG_BYTES {
+        return Err(format!(
+            "--wire-send-cap-bytes {cap} is below the {} default; the send \
+             cap may only be raised, never lowered",
+            novai_p2p::MAX_WIRE_MSG_BYTES
+        ));
+    }
+    if cap > novai_p2p::MAX_RECV_WIRE_MSG_BYTES {
+        return Err(format!(
+            "--wire-send-cap-bytes {cap} exceeds the {} receive cap; a node \
+             must never send frames the fleet cannot accept",
+            novai_p2p::MAX_RECV_WIRE_MSG_BYTES
+        ));
+    }
+    Ok(())
+}
 
 /// F1 sync retry backoff: base delay, doubled per consecutive strike.
 pub const SYNC_RETRY_BASE_MS: u64 = 2_000;
@@ -662,6 +734,29 @@ impl ConsensusNode {
             .map_err(|e| format!("Broadcast failed: {e:?}"))
     }
 
+    /// The runtime wire send cap (F3). ONE stored value, held by the
+    /// PeerManager whose encoder enforces it: the proposer guard and the
+    /// responder budget read the cap through this method, so guard and
+    /// enforcement cannot diverge and a Phase B restart flips both
+    /// atomically.
+    #[must_use]
+    pub fn wire_send_cap(&self) -> u32 {
+        self.peer_manager.send_cap()
+    }
+
+    /// Set the runtime wire send cap from --wire-send-cap-bytes (startup
+    /// only: config is parsed once and SIGHUP is ignored, so a change is
+    /// a restart).
+    ///
+    /// # Errors
+    /// Rejects a cap below the 2 MiB default or above the 16 MiB receive
+    /// cap (see [`validate_wire_send_cap`]).
+    pub fn set_wire_send_cap(&self, cap: u32) -> Result<(), String> {
+        validate_wire_send_cap(cap)?;
+        self.peer_manager.set_send_cap(cap);
+        Ok(())
+    }
+
     /// Prune the QC broadcast dedup cache, removing entries below the retention window.
     ///
     /// Without pruning, this `HashSet` grows by ~100 bytes per block forever,
@@ -873,9 +968,11 @@ impl ConsensusNode {
     /// certifying QC (DB row via load_qc_at_height, qc_cache fallback
     /// for live-tail QCs not yet written as rows, None when neither).
     ///
-    /// F2: the served prefix is additionally bounded by
-    /// RESPONSE_BYTE_BUDGET, measured per encoded (block, QC) pair with a
-    /// floor of one pair; see the budget comment in the assembly loop.
+    /// F2/F3: the served prefix is additionally byte-bounded, measured
+    /// per encoded (block, QC) pair: the first three pairs (the frontier
+    /// floor) are bounded by the runtime send frame, later pairs by the
+    /// soft budget (half the runtime send cap); see the comment in the
+    /// assembly loop.
     ///
     /// Extracted from handle_block_request so tests can assert on the
     /// response without capturing a network broadcast.
@@ -896,15 +993,25 @@ impl ConsensusNode {
         // stay positionally paired. A missing QC is represented
         // faithfully as None, never skipped silently.
         //
-        // F2: the prefix is bounded by RESPONSE_BYTE_BUDGET, measured by
-        // encoding each candidate (block, QC) PAIR with the same codec the
-        // wire path uses (a hand-maintained size formula would drift). The
-        // block is held, not pushed, until its QC bytes are in the
-        // measurement: QC trailers can dominate the pair. The FIRST pair
-        // is always served (floor) so heavy regions advance one pair at a
-        // time; a single pair beyond the hard wire cap stays unservable
-        // until the F3 cap raise and fails at encode_wire_message exactly
-        // as before this change.
+        // F2: the prefix is byte-bounded, measured by encoding each
+        // candidate (block, QC) PAIR with the same codec the wire path
+        // uses (a hand-maintained size formula would drift). The block is
+        // held, not pushed, until its QC bytes are in the measurement: QC
+        // trailers can dominate the pair.
+        //
+        // F3 frontier floor (diagnosis 12.3): the first THREE pairs are
+        // exempt from the soft budget and bounded only by the send frame
+        // (payload + 2 wire bytes within the runtime send cap), because
+        // the requester restarts at committed+1 and the 3-chain rule
+        // needs committed+1..+3 in ONE response or the identical prefix
+        // re-serves forever (fixplan :122). Pair ONE stays unconditional,
+        // exactly F2's floor: a first pair beyond even the send frame is
+        // served and strands at encode until the Phase B cap flip serves
+        // it. Pairs beyond the floor are shaped by the soft budget, half
+        // the runtime send cap, which evaluates to the deployed F2 value
+        // at the Phase A default.
+        let send_cap = self.wire_send_cap() as usize;
+        let soft_budget = response_byte_budget(self.wire_send_cap());
         let mut blocks = Vec::new();
         let mut qcs: Vec<Option<QC>> = Vec::new();
         let mut response_bytes: usize = RESPONSE_HEADER_BYTES;
@@ -964,11 +1071,19 @@ impl ConsensusNode {
             };
             // Encoded pair cost in the response payload: block bytes plus
             // the has_qc flag byte plus QC bytes (encode_block_response_v2
-            // layout). Stop BEFORE the pair that would exceed the budget;
-            // the first pair is exempt (floor).
+            // layout). Stop BEFORE the pair that would exceed the limit:
+            // the send frame for floor pairs two and three, the soft
+            // budget after the floor. The first pair is unconditional.
             let pair_bytes = block_bytes + 1 + qc_bytes;
-            if !blocks.is_empty() && response_bytes + pair_bytes > RESPONSE_BYTE_BUDGET {
-                break;
+            if !blocks.is_empty() {
+                let limit = if blocks.len() < 3 {
+                    send_cap - 2
+                } else {
+                    soft_budget
+                };
+                if response_bytes + pair_bytes > limit {
+                    break;
+                }
             }
             response_bytes += pair_bytes;
             blocks.push(block);
@@ -1379,6 +1494,77 @@ impl ConsensusNode {
         state.take_abandoned_txs()
     }
 
+    /// F3 proposer guard Layer 1: the tx-byte budget for the next
+    /// proposal, derived from the runtime send cap minus the MEASURED
+    /// envelope (fixed wrapper and header bytes plus the justify QC
+    /// encoded by the real codec, never estimated), clamped to
+    /// MAX_BLOCK_SIZE. The justify QC is known before tx selection
+    /// (genesis QC at height 1, highest_qc after), so the budget
+    /// guarantees by construction that the assembled SignedProposal
+    /// encodes under the cap. At the 16 MiB Phase B cap MAX_BLOCK_SIZE
+    /// binds first and the guard is non-binding by arithmetic.
+    ///
+    /// # Errors
+    /// Returns an error if the justify QC cannot be encoded.
+    fn proposal_tx_budget(&self, state: &ConsensusState) -> Result<usize, String> {
+        let intended_height = match &state.highest_qc {
+            Some(qc) => std::cmp::max(state.height, qc.height) + 1,
+            None => state.height + 1,
+        };
+        let genesis_qc = QC {
+            height: 0,
+            round: 0,
+            block_hash: [0u8; 32],
+            votes: vec![],
+        };
+        // A missing highest_qc above height 1 fails the proposal flow
+        // with its own error after assembly; the genesis size keeps the
+        // budget computation total in the meantime.
+        let justify: &QC = if intended_height == 1 {
+            &genesis_qc
+        } else {
+            state.highest_qc.as_ref().unwrap_or(&genesis_qc)
+        };
+        let justify_bytes = novai_consensus_types::codec::encode_qc_v1(justify)
+            .map_err(|e| format!("Encode justify QC for proposal budget failed: {e:?}"))?
+            .len();
+        Ok((self.wire_send_cap() as usize)
+            .saturating_sub(PROPOSAL_ENVELOPE_FIXED_BYTES + justify_bytes)
+            .min(novai_types::MAX_BLOCK_SIZE))
+    }
+
+    /// F3 proposer guard Layer 2, the loud backstop: measure an assembled
+    /// SignedProposal against the runtime send cap BEFORE broadcast.
+    /// Layer 1 makes an over-cap envelope unreachable through tx
+    /// selection; if one is ever assembled anyway, this refuses it with
+    /// an ERROR naming the invariant instead of the silent
+    /// AlreadyProposed round stall. Returns the checked wire length
+    /// (payload + 2, the exact value the encoder compares against the
+    /// cap).
+    ///
+    /// # Errors
+    /// Returns an error when the envelope cannot encode or exceeds the
+    /// runtime send cap.
+    pub fn proposal_wire_len(&self, signed_proposal: &SignedProposal) -> Result<usize, String> {
+        let payload = novai_consensus_types::codec::encode_signed_proposal_v1(signed_proposal)
+            .map_err(|e| format!("Encode proposal for envelope check failed: {e:?}"))?;
+        let wire_len = payload.len() + 2;
+        let cap = self.wire_send_cap() as usize;
+        if wire_len > cap {
+            tracing::error!(
+                wire_len,
+                cap,
+                height = signed_proposal.proposal.block.height,
+                "F3 proposer guard invariant violated: assembled proposal \
+                 exceeds the wire send cap; refusing to broadcast"
+            );
+            return Err(format!(
+                "proposal wire length {wire_len} exceeds the send cap {cap}; not broadcasting"
+            ));
+        }
+        Ok(wire_len)
+    }
+
     /// Propose a block (leader only).
     pub fn propose_block(
         &self,
@@ -1388,8 +1574,15 @@ impl ConsensusNode {
         let mut state = self.state.lock_or_recover();
         let db = self.db.lock_or_recover();
 
+        let tx_budget = self.proposal_tx_budget(&state)?;
         let block = state
-            .propose_block(mempool, nonce_provider, &*db, &self.validator_set)
+            .propose_block_with_budget(
+                mempool,
+                nonce_provider,
+                &*db,
+                &self.validator_set,
+                tx_budget,
+            )
             .map_err(|e| format!("Propose block failed: {e:?}"))?;
 
         // CRITICAL: Cache our own proposed block so we can form QC when votes arrive
@@ -1438,6 +1631,11 @@ impl ConsensusNode {
             "Proposing block"
         );
 
+        // F3 guard Layer 2: refuse an over-cap envelope loudly instead of
+        // letting the broadcast encode fail after the proposal state is
+        // already marked.
+        self.proposal_wire_len(&signed_proposal)?;
+
         self.broadcast(NetworkMessage::SignedProposal(signed_proposal))
     }
 
@@ -1477,8 +1675,20 @@ impl ConsensusNode {
             return Ok(false);
         }
 
+        // F3 guard Layer 1: budget tx selection against the runtime send
+        // cap minus the measured envelope, so the assembled proposal
+        // always encodes and the round never stalls on an unsendable
+        // block.
+        let tx_budget = self.proposal_tx_budget(&state)?;
+
         // Try to propose - NotLeader and AlreadyProposed are expected outcomes, not errors
-        let block = match state.propose_block(mempool, nonce_provider, &*db, &self.validator_set) {
+        let block = match state.propose_block_with_budget(
+            mempool,
+            nonce_provider,
+            &*db,
+            &self.validator_set,
+            tx_budget,
+        ) {
             Ok(block) => block,
             Err(ConsensusError::NotLeader) => return Ok(false),
             Err(ConsensusError::AlreadyProposed) => return Ok(false),
@@ -1556,6 +1766,11 @@ impl ConsensusNode {
             block_hash = ?&block_hash[..4],
             "PROPOSE_DIAG: proposed block"
         );
+
+        // F3 guard Layer 2: refuse an over-cap envelope loudly instead of
+        // letting the broadcast encode fail after the self-vote and the
+        // proposal marks are already durable.
+        self.proposal_wire_len(&signed_proposal)?;
 
         self.broadcast(NetworkMessage::SignedProposal(signed_proposal))?;
         Ok(true)

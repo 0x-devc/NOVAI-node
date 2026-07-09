@@ -11,7 +11,7 @@ pub mod transport;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,10 +19,24 @@ use std::time::Duration;
 
 use novai_consensus_types::{BlockRequest, BlockResponse, SignedProposal, Timeout, Vote, QC};
 
-/// Maximum wire message size (2MB). Public so the node's sync responder
-/// derives its response byte budget from the same constant the encoder
-/// enforces (F2), keeping the two from drifting apart.
+/// Maximum wire message size on the SEND side (2MB), as the DEFAULT.
+///
+/// F3: the effective send cap is the [`PeerManager`]'s runtime value,
+/// set from `--wire-send-cap-bytes` and defaulting to this constant.
+/// Public so the node's sync responder derives its response byte budget
+/// from the same value the encoder enforces (F2), keeping the two from
+/// drifting apart.
 pub const MAX_WIRE_MSG_BYTES: u32 = 2 * 1024 * 1024;
+
+/// Maximum wire message size accepted on RECEIVE (16 MiB).
+///
+/// Raised above the send default (F3) so every node accepts the worst
+/// valid 3-full-pair sync response (12,165,932 checked wire bytes, gate
+/// F3 diagnosis 12.1) with 27.5 percent headroom, making the 3-chain
+/// frontier guarantee unconditional at full block load. Two-phase deploy,
+/// receive first: the whole fleet accepts up to this cap (Phase A) before
+/// any node is configured to send past the 2 MiB default (Phase B).
+pub const MAX_RECV_WIRE_MSG_BYTES: u32 = 16 * 1024 * 1024;
 
 /// Wire message kinds.
 #[repr(u8)]
@@ -79,11 +93,26 @@ impl From<std::io::Error> for P2PError {
     }
 }
 
-/// Encode a network message to wire format.
+/// Encode a network message to wire format under the DEFAULT send cap
+/// ([`MAX_WIRE_MSG_BYTES`]). Runtime-cap callers
+/// ([`PeerManager::broadcast`]) go through
+/// [`encode_wire_message_with_cap`].
 ///
 /// # Errors
 /// Returns error if encoding fails or message exceeds size limit.
 pub fn encode_wire_message(msg: &NetworkMessage) -> Result<Vec<u8>, P2PError> {
+    encode_wire_message_with_cap(msg, MAX_WIRE_MSG_BYTES)
+}
+
+/// Encode a network message to wire format under an explicit send cap
+/// (the runtime wire-send-cap value; F3 Phase B raises it by restart).
+///
+/// # Errors
+/// Returns error if encoding fails or message exceeds `send_cap`.
+pub fn encode_wire_message_with_cap(
+    msg: &NetworkMessage,
+    send_cap: u32,
+) -> Result<Vec<u8>, P2PError> {
     let (kind, payload) = match msg {
         NetworkMessage::SignedProposal(sp) => {
             let bytes = novai_consensus_types::codec::encode_signed_proposal_v1(sp)
@@ -119,7 +148,7 @@ pub fn encode_wire_message(msg: &NetworkMessage) -> Result<Vec<u8>, P2PError> {
 
     #[allow(clippy::cast_possible_truncation)]
     let len = (payload.len() as u32) + 2; // +2 for version + kind
-    if len > MAX_WIRE_MSG_BYTES {
+    if len > send_cap {
         return Err(P2PError::MessageTooLarge(len));
     }
 
@@ -142,7 +171,10 @@ pub fn read_wire_message(stream: &mut impl Read) -> Result<NetworkMessage, P2PEr
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf);
 
-    if len > MAX_WIRE_MSG_BYTES {
+    // F3: the receive side accepts up to MAX_RECV_WIRE_MSG_BYTES, a strict
+    // superset of every send cap the fleet can be configured with, so the
+    // two-phase cap raise never partitions a mixed fleet (receive first).
+    if len > MAX_RECV_WIRE_MSG_BYTES {
         return Err(P2PError::MessageTooLarge(len));
     }
     if len < 2 {
@@ -229,6 +261,14 @@ pub struct PeerManager {
     /// Uses `Arc<Vec<u8>>` so broadcast clones a refcount, not the full message.
     #[allow(clippy::type_complexity)]
     peer_senders: Arc<Mutex<Vec<mpsc::SyncSender<Arc<Vec<u8>>>>>>,
+    /// Runtime wire send cap (F3). Defaults to [`MAX_WIRE_MSG_BYTES`];
+    /// raised to at most [`MAX_RECV_WIRE_MSG_BYTES`] via
+    /// `--wire-send-cap-bytes` at startup (Phase B is a restart). This is
+    /// THE single stored copy of the send cap: the encoder below and the
+    /// node's proposer guard and responder budget all read it through
+    /// [`PeerManager::send_cap`], so the guard and the enforcement cannot
+    /// diverge.
+    send_cap: AtomicU32,
 }
 
 impl Default for PeerManager {
@@ -247,7 +287,20 @@ impl PeerManager {
     pub fn new() -> Self {
         Self {
             peer_senders: Arc::new(Mutex::new(Vec::new())),
+            send_cap: AtomicU32::new(MAX_WIRE_MSG_BYTES),
         }
+    }
+
+    /// The runtime wire send cap this manager encodes against.
+    #[must_use]
+    pub fn send_cap(&self) -> u32 {
+        self.send_cap.load(Ordering::Relaxed)
+    }
+
+    /// Set the runtime wire send cap (startup configuration only; the
+    /// node validates the value before calling this).
+    pub fn set_send_cap(&self, cap: u32) {
+        self.send_cap.store(cap, Ordering::Relaxed);
     }
 
     /// Add a connected peer's write half.
@@ -299,7 +352,7 @@ impl PeerManager {
     /// # Panics
     /// Panics if the mutex is poisoned.
     pub fn broadcast(&self, msg: &NetworkMessage) -> Result<(), P2PError> {
-        let wire_bytes = Arc::new(encode_wire_message(msg)?);
+        let wire_bytes = Arc::new(encode_wire_message_with_cap(msg, self.send_cap())?);
         let mut senders = self.peer_senders.lock().unwrap();
         senders.retain(|tx| match tx.try_send(Arc::clone(&wire_bytes)) {
             Ok(()) => true,

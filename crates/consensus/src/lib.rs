@@ -205,7 +205,7 @@ impl ConsensusState {
         }
     }
 
-    /// Propose a block (leader only).
+    /// Propose a block (leader only) with the full MAX_BLOCK_SIZE tx budget.
     ///
     /// # Errors
     /// Returns error if not leader or block building fails.
@@ -220,6 +220,41 @@ impl ConsensusState {
         K: novai_state::Kv,
         K::Error: std::fmt::Debug,
     {
+        self.propose_block_with_budget(
+            mempool,
+            nonce_provider,
+            state_db,
+            validator_set,
+            novai_types::MAX_BLOCK_SIZE,
+        )
+    }
+
+    /// Propose a block (leader only) with an explicit tx-byte budget.
+    ///
+    /// F3 proposer guard Layer 1: the node passes a budget derived from
+    /// the runtime wire send cap minus the measured proposal envelope
+    /// (SignedProposal wrapper + block header + justify QC + wire bytes),
+    /// so the assembled envelope always encodes under the cap instead of
+    /// dying at broadcast after `last_proposed` is irreversibly set. The
+    /// budget is clamped to MAX_BLOCK_SIZE; the verifier's block-size
+    /// rules (verify_block) are untouched, so a smaller proposer budget
+    /// is always compatible.
+    ///
+    /// # Errors
+    /// Returns error if not leader or block building fails.
+    pub fn propose_block_with_budget<K>(
+        &mut self,
+        mempool: &mut mempool::TxMempool,
+        nonce_provider: &impl mempool::NonceProvider,
+        state_db: &K,
+        validator_set: &[Address],
+        tx_byte_budget: usize,
+    ) -> Result<Block, ConsensusError>
+    where
+        K: novai_state::Kv,
+        K::Error: std::fmt::Debug,
+    {
+        let tx_budget = tx_byte_budget.min(novai_types::MAX_BLOCK_SIZE);
         // Block height should be max(committed_height, highest_qc_height) + 1
         // This ensures we don't propose conflicting blocks after a QC forms
         let next_height = match &self.highest_qc {
@@ -255,7 +290,7 @@ impl ConsensusState {
         let mut overflow = Vec::new();
         for tx in candidates.drain(..) {
             let size = novai_codec::tx_encoded_size(&tx);
-            if block_bytes + size > novai_types::MAX_BLOCK_SIZE {
+            if block_bytes + size > tx_budget {
                 overflow.push(tx);
             } else {
                 block_bytes += size;

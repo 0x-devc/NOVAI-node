@@ -832,6 +832,10 @@ fn main() {
             let mut allow_insecure_dev_keys = false;
             let mut proposal_interval_ms: u64 = 100; // Default: 100ms
             let mut _max_timeout_ms: u64 = novai_consensus::MAX_TIMEOUT_MS;
+            // F3 runtime wire send cap: 2 MiB default (Phase A); the
+            // Phase B deploy raises it to the 16 MiB receive cap by
+            // restarting with the flag. Parsed once; SIGHUP is ignored.
+            let mut wire_send_cap_bytes: u32 = novai_p2p::MAX_WIRE_MSG_BYTES;
 
             let rest: Vec<String> = args.collect();
             let mut i = 0;
@@ -886,6 +890,18 @@ fn main() {
                     }
                     "--base-timeout" => {
                         base_timeout_ms = parse_u64(rest.get(i + 1).cloned(), "--base-timeout");
+                        i += 2;
+                    }
+                    "--wire-send-cap-bytes" => {
+                        let raw = parse_u64(rest.get(i + 1).cloned(), "--wire-send-cap-bytes");
+                        wire_send_cap_bytes = u32::try_from(raw).unwrap_or_else(|_| {
+                            fatal(format!("--wire-send-cap-bytes {raw} does not fit in u32"))
+                        });
+                        if let Err(e) =
+                            novai_node::consensus_node::validate_wire_send_cap(wire_send_cap_bytes)
+                        {
+                            fatal(e);
+                        }
                         i += 2;
                     }
                     "--max-timeout" => {
@@ -1138,6 +1154,20 @@ fn main() {
                 storage,
                 ed25519_seed,
             );
+
+            // F3: apply the runtime wire send cap (validated at parse
+            // time; re-validated by the setter). The value lands on the
+            // PeerManager the encoder reads, which is the same value the
+            // proposer guard and the responder budget read.
+            if let Err(e) = node.set_wire_send_cap(wire_send_cap_bytes) {
+                fatal(e);
+            }
+            if wire_send_cap_bytes != novai_p2p::MAX_WIRE_MSG_BYTES {
+                tracing::info!(
+                    wire_send_cap_bytes,
+                    "wire send cap raised above the default (F3 Phase B)"
+                );
+            }
 
             // Set known noise keys for peer identity verification
             let has_noise_keys = !known_noise_keys.is_empty();
