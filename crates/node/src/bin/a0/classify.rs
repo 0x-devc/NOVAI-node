@@ -40,6 +40,19 @@
 //! treasury/ai (:12318-12323) are written singletons. treasury/privacy
 //! (:12230) has ZERO production usage beyond its definition and stays
 //! DefinedUnwritten.
+//!
+//! Amendment 2 (E-pipeline diagnosis finding): the by-category service
+//! descriptor index was the last execution key family missing from this table.
+//! It is SMT-committed by the same inversion proof: the create handler pushes
+//! WriteOp::Put at execution lib 10661 and the delete handler pushes
+//! WriteOp::Delete at :11028, both applied by apply_state_ops_with_smt (:10720,
+//! :11157). Its empty value is a presence marker, exactly like the oracle-anchor
+//! by_entity and by_tag scan markers. It classified as unknown until now only
+//! because no ServiceDescriptor has been created on chain yet, so the family is
+//! empty on every live dir; the first one written would have hard-failed A3
+//! (unknown key) and A5 (leaf dropped from the rebuild) on a HEALTHY node dir,
+//! blocking any snapshot export. The count is now mechanical: execution defines
+//! 22 KEY_* families and this table imports all 22.
 
 use novai_execution::{
     KEY_AI_TREASURY, KEY_MARKETPLACE_TREASURY, KEY_PREFIX_AI_CHANNELS_BY_PARTY_A,
@@ -49,6 +62,7 @@ use novai_execution::{
     KEY_PREFIX_AI_ORACLE_ANCHORS_SUMMARY, KEY_PREFIX_AI_PAYMENTS_BY_HASH,
     KEY_PREFIX_AI_PAYMENTS_BY_PAYEE, KEY_PREFIX_AI_PAYMENTS_BY_PAYER,
     KEY_PREFIX_AI_PAYMENT_CONDITIONS_BY_HASH, KEY_PREFIX_AI_PAYMENT_SPLITS_BY_HASH,
+    KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY,
     KEY_PREFIX_AI_SLAS_ACTIVE_BETWEEN, KEY_PREFIX_AI_SLAS_BY_BUYER,
     KEY_PREFIX_AI_SLAS_BY_SELLER, KEY_PREFIX_AI_VK_REGISTRY_BY_ID, KEY_PRIVACY_TREASURY,
     KEY_SLASH_TREASURY,
@@ -143,6 +157,7 @@ pub fn classify(key: &[u8]) -> Option<Class> {
         KEY_PREFIX_AI_VK_REGISTRY_BY_ID,
         KEY_PREFIX_AI_ENTITY_UPGRADES_SUMMARY,
         KEY_PREFIX_AI_ENTITY_UPGRADES_BY_ENTITY,
+        KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY,
     ] {
         if key.starts_with(p) {
             return Some(Class::SmtCommitted);
@@ -214,6 +229,7 @@ mod tests {
             b"ai/vk_registry/by_id/x",
             b"ai/entity_upgrades/summary/x",
             b"ai/entity_upgrades/by_entity/x",
+            b"ai/service_descriptors/by_category/x",
             b"treasury/ai",
             b"treasury/marketplace",
             b"treasury/slash",

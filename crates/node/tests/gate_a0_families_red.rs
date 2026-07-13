@@ -28,6 +28,7 @@ use novai_execution::{
     KEY_PREFIX_AI_ORACLE_ANCHORS_SUMMARY, KEY_PREFIX_AI_PAYMENTS_BY_HASH,
     KEY_PREFIX_AI_PAYMENTS_BY_PAYEE, KEY_PREFIX_AI_PAYMENTS_BY_PAYER,
     KEY_PREFIX_AI_PAYMENT_CONDITIONS_BY_HASH, KEY_PREFIX_AI_PAYMENT_SPLITS_BY_HASH,
+    KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY,
     KEY_PREFIX_AI_SLAS_ACTIVE_BETWEEN, KEY_PREFIX_AI_SLAS_BY_BUYER,
     KEY_PREFIX_AI_SLAS_BY_SELLER, KEY_PREFIX_AI_VK_REGISTRY_BY_ID, KEY_PRIVACY_TREASURY,
     KEY_SLASH_TREASURY,
@@ -41,9 +42,10 @@ fn fam_key(prefix: &[u8], filler: &[u8]) -> Vec<u8> {
     k
 }
 
-/// One exemplar per newly proven SMT-committed family: 17 prefixed keys plus
-/// the three written treasury singletons. by_entity and by_tag carry empty
-/// values, matching the production scan-marker shape.
+/// One exemplar per newly proven SMT-committed family: 18 prefixed keys plus
+/// the three written treasury singletons. by_entity, by_tag and the service
+/// descriptor by_category index carry empty values, matching the production
+/// scan-marker shape.
 fn family_exemplars() -> Vec<(Vec<u8>, Vec<u8>)> {
     let id = [0x66; 32];
     vec![
@@ -64,6 +66,7 @@ fn family_exemplars() -> Vec<(Vec<u8>, Vec<u8>)> {
         (fam_key(KEY_PREFIX_AI_VK_REGISTRY_BY_ID, &id), b"vk".to_vec()),
         (fam_key(KEY_PREFIX_AI_ENTITY_UPGRADES_SUMMARY, &id), b"up".to_vec()),
         (fam_key(KEY_PREFIX_AI_ENTITY_UPGRADES_BY_ENTITY, &id), vec![]),
+        (fam_key(KEY_PREFIX_AI_SERVICE_DESCRIPTORS_BY_CATEGORY, &id), vec![]),
         (KEY_AI_TREASURY.to_vec(), 7u128.to_be_bytes().to_vec()),
         (KEY_MARKETPLACE_TREASURY.to_vec(), 8u128.to_be_bytes().to_vec()),
         (KEY_SLASH_TREASURY.to_vec(), 9u128.to_be_bytes().to_vec()),
@@ -86,10 +89,10 @@ fn all_execution_families_audit_clean_and_count_as_smt_committed() {
         code, 0,
         "execution-family state must audit clean; stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    // 3 default accounts + 20 family exemplars + 1 step account = 24 leaves,
+    // 3 default accounts + 21 family exemplars + 1 step account = 25 leaves,
     // all counted in the SMT-committed class.
     assert!(
-        stdout.contains("A3 PASS smt_committed=24"),
+        stdout.contains("A3 PASS smt_committed=25"),
         "family keys must be counted as smt_committed; stdout:\n{stdout}"
     );
     assert_eq!(a0_common::parse_result_root(&stdout), hex::encode(fx.r1));
