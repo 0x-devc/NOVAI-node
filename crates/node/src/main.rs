@@ -82,41 +82,73 @@ impl InMemoryNonceProvider {
         Self::new()
     }
 
-    /// Seed nonce cache from the 100 dev-genesis accounts.
+    /// Seed the nonce cache from persisted state.
     ///
-    /// Reads current nonces directly from storage (caller holds no Mutex).
-    /// Handles both fresh start (nonce=0) and restart (nonce=N from prior
-    /// commits).
-    fn seed_dev_accounts(&self, storage: &Storage) {
-        const FUNDED_ACCOUNTS: usize = 100;
+    /// Scans every account row and every entry of the address-to-entity
+    /// reverse index so the expected view matches what execution will accept
+    /// next for every sender with on-chain history, not only the 100
+    /// dev-genesis accounts. Reads storage directly (caller holds no Mutex);
+    /// runs single-threaded at boot before RPC, gossip, and consensus start.
+    ///
+    /// Entity entries overwrite account entries at the same address:
+    /// execution resolves senders entity-first (check_ai_entity_sender) and
+    /// rejects account-only tx types from entity addresses outright, so the
+    /// entity nonce is the only nonce execution can accept there.
+    ///
+    /// Fails closed: an unreadable or malformed row is a boot error, because
+    /// silently skipping a sender would re-create the admitted-but-never-
+    /// proposable strand this seeding removes.
+    fn seed_from_state(&self, storage: &Storage) -> Result<(usize, usize), String> {
+        let account_rows = storage
+            .scan_prefix(novai_state::KEY_PREFIX_ACCOUNTS)
+            .map_err(|e| format!("account scan failed: {e}"))?;
+        let mut account_nonces = Vec::with_capacity(account_rows.len());
+        for (key, value) in &account_rows {
+            let addr: Address = key[novai_state::KEY_PREFIX_ACCOUNTS.len()..]
+                .try_into()
+                .map_err(|_| format!("malformed account key ({} bytes)", key.len()))?;
+            let account = novai_state::decode_account_v1(value)
+                .map_err(|e| format!("undecodable account row for {:02x?}: {e:?}", &addr[..4]))?;
+            account_nonces.push((addr, account.nonce));
+        }
+
+        let index_rows = storage
+            .scan_prefix(novai_state::KEY_PREFIX_AI_ENTITY_BY_ADDR)
+            .map_err(|e| format!("entity index scan failed: {e}"))?;
+        let mut entity_nonces = Vec::with_capacity(index_rows.len());
+        for (key, value) in &index_rows {
+            let addr: Address = key[novai_state::KEY_PREFIX_AI_ENTITY_BY_ADDR.len()..]
+                .try_into()
+                .map_err(|_| format!("malformed entity index key ({} bytes)", key.len()))?;
+            let entity_id: [u8; 32] = value.as_slice().try_into().map_err(|_| {
+                format!(
+                    "malformed entity id for {:02x?} ({} bytes)",
+                    &addr[..4],
+                    value.len()
+                )
+            })?;
+            let entity = novai_execution::read_ai_entity(storage, &entity_id)
+                .map_err(|e| format!("entity read failed for {:02x?}: {e:?}", &addr[..4]))?
+                .ok_or_else(|| format!("dangling entity index for {:02x?}", &addr[..4]))?;
+            entity_nonces.push((addr, entity.nonce));
+        }
+
+        let accounts = account_nonces.len();
+        let entity_signers = entity_nonces.len();
         let mut map = self
             .expected
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for index in 0..FUNDED_ACCOUNTS {
-            // Same key derivation as apply_dev_genesis / SenderAccount::from_index
-            let seed_byte = (index % 256) as u8;
-            let mut seed = [seed_byte; 32];
-            let index_bytes = index.to_le_bytes();
-            for (j, &b) in index_bytes.iter().enumerate() {
-                seed[j] ^= b;
-            }
-            let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
-            let addr = address_from_pubkey(&sk.verifying_key());
-
-            let nonce = match storage.get(&account_key(&addr)) {
-                Ok(Some(bytes)) => novai_state::decode_account_v1(&bytes)
-                    .map(|a| a.nonce)
-                    .unwrap_or(0),
-                _ => 0,
-            };
+        // Accounts first, then entities, so an entity entry wins at a
+        // shared address.
+        for (addr, nonce) in account_nonces {
             map.insert(addr, nonce);
         }
-        tracing::info!(
-            accounts = FUNDED_ACCOUNTS,
-            sample_nonce = map.values().next().copied().unwrap_or(0),
-            "Nonce provider seeded"
-        );
+        for (addr, nonce) in entity_nonces {
+            map.insert(addr, nonce);
+        }
+        tracing::info!(accounts, entity_signers, "Nonce provider seeded from state");
+        Ok((accounts, entity_signers))
     }
 
     /// Set a specific expected nonce (used by CLI commands).
@@ -1200,7 +1232,9 @@ fn main() {
                     .db
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                nonce_provider.seed_dev_accounts(&db_guard);
+                if let Err(e) = nonce_provider.seed_from_state(&db_guard) {
+                    fatal(format!("nonce seed-from-state failed: {e}"));
+                }
             }
 
             // Shared blockchain index for block explorer RPC endpoints
@@ -2166,6 +2200,328 @@ mod tests {
             commit_metrics.total_txs_committed.load(Ordering::Relaxed),
             5,
             "total_txs_committed should accumulate across multiple commits",
+        );
+    }
+}
+
+#[cfg(test)]
+mod seed_from_state_tests {
+    use super::*;
+    use novai_crypto::sign_tx_v1;
+    use novai_state::MemKv;
+
+    fn put_account(storage: &mut Storage, addr: &Address, balance: u128, nonce: u64) {
+        storage
+            .put(
+                &account_key(addr),
+                &encode_account_v1(&AccountStateV1 { balance, nonce }),
+            )
+            .expect("put account");
+    }
+
+    /// Write an AI entity row plus the address-to-entity reverse index,
+    /// the exact rows execution resolves senders through. The code hash is
+    /// derived from the pubkey so every entity gets a distinct id.
+    fn put_entity(storage: &mut Storage, pubkey: [u8; 32], nonce: u64) -> Address {
+        let mut entity = novai_ai_entities::AiEntity::new_with_pubkey(
+            pubkey,
+            [0x01u8; 32],
+            novai_ai_entities::AutonomyMode::Gated,
+            novai_ai_entities::Capabilities::gated(),
+            pubkey,
+            1,
+        );
+        entity.nonce = nonce;
+        let addr = novai_crypto::address_from_pubkey_bytes(&pubkey);
+        let ops = vec![
+            novai_execution::write_ai_entity_op(&entity),
+            WriteOp::Put(
+                novai_state::ai_entity_by_address_key(&addr),
+                entity.id.to_vec(),
+            ),
+        ];
+        storage.apply_batch(&ops).expect("write entity");
+        addr
+    }
+
+    fn signed_tx(sk: &ed25519_dalek::SigningKey, nonce: u64) -> TxV1 {
+        let pk = sk.verifying_key();
+        let mut tx = build_tx(
+            address_from_pubkey(&pk),
+            pk.to_bytes(),
+            nonce,
+            1_000,
+            String::new(),
+        );
+        sign_tx_v1(sk, &mut tx).expect("sign");
+        tx
+    }
+
+    /// The live strand, killed: a non-dev account with on-chain history must
+    /// be proposable at its state nonce after a restart. Under dev-range
+    /// seeding this fails mechanically: the tx is admitted (nonce >=
+    /// expected 0) but drain_ready needs equality, so it is never selected,
+    /// ages out at the purge sweep, and each resubmission repeats the cycle.
+    #[test]
+    fn restart_seeds_non_dev_account_and_tx_at_state_nonce_is_proposable() {
+        let (sk, pk) = generate_keypair();
+        let addr = address_from_pubkey(&pk);
+        let mut storage = Storage::Memory(MemKv::new());
+        put_account(&mut storage, &addr, 1_000_000, 45);
+
+        let provider = InMemoryNonceProvider::new();
+        provider.seed_from_state(&storage).expect("seed");
+
+        let tx = signed_tx(&sk, 45);
+        let id = txid_v1(&tx).expect("txid");
+        let mut mp = TxMempool::new(1, 1000);
+        mp.insert(tx, &provider)
+            .expect("admission accepts nonce >= expected");
+        let drained = mp.drain_ready(10, &provider);
+        assert!(
+            drained.iter().any(|t| txid_v1(t).expect("txid") == id),
+            "tx at the on-chain nonce must be proposable after restart, not admitted-and-stranded",
+        );
+        assert_eq!(provider.expected_nonce(&addr), 45);
+    }
+
+    /// Entity signers restart the same way: the expected view must equal the
+    /// persisted entity nonce, which is the minimum execution accepts.
+    #[test]
+    fn restart_seeds_entity_signer_and_tx_at_entity_nonce_is_proposable() {
+        let (sk, pk) = generate_keypair();
+        let mut storage = Storage::Memory(MemKv::new());
+        let addr = put_entity(&mut storage, pk.to_bytes(), 1_982);
+        assert_eq!(addr, address_from_pubkey(&pk), "index addr matches signer");
+
+        let provider = InMemoryNonceProvider::new();
+        provider.seed_from_state(&storage).expect("seed");
+
+        let tx = signed_tx(&sk, 1_982);
+        let id = txid_v1(&tx).expect("txid");
+        let mut mp = TxMempool::new(1, 1000);
+        mp.insert(tx, &provider).expect("admitted");
+        let drained = mp.drain_ready(10, &provider);
+        assert!(
+            drained.iter().any(|t| txid_v1(t).expect("txid") == id),
+            "entity-signed tx at entity.nonce must be proposable after restart",
+        );
+        assert_eq!(provider.expected_nonce(&addr), 1_982);
+    }
+
+    /// A type-8 registration keys the entity index on the creator address,
+    /// so one address can hold both an account row and an entity index
+    /// entry. Execution resolves senders entity-first and denies
+    /// account-only tx types from entity addresses, so entity.nonce is the
+    /// only nonce execution can accept there; the seed must agree.
+    #[test]
+    fn entity_nonce_overrides_account_nonce_at_the_same_address() {
+        let (_sk, pk) = generate_keypair();
+        let mut storage = Storage::Memory(MemKv::new());
+        let addr = put_entity(&mut storage, pk.to_bytes(), 7);
+        put_account(&mut storage, &addr, 500, 3);
+
+        let provider = InMemoryNonceProvider::new();
+        provider.seed_from_state(&storage).expect("seed");
+        assert_eq!(
+            provider.expected_nonce(&addr),
+            7,
+            "entity nonce must win over the account row at the same address",
+        );
+    }
+
+    /// Fresh genesis parity: an empty state seeds cleanly and a first tx at
+    /// nonce 0 is admitted and proposable through the map-miss fallback,
+    /// identical to the dev-range behavior on an empty DB.
+    #[test]
+    fn empty_state_seeds_cleanly_and_nonce_zero_flows() {
+        let (sk, pk) = generate_keypair();
+        let addr = address_from_pubkey(&pk);
+        let storage = Storage::Memory(MemKv::new());
+
+        let provider = InMemoryNonceProvider::new();
+        provider.seed_from_state(&storage).expect("seed on empty state");
+        assert_eq!(provider.expected_nonce(&addr), 0);
+
+        let tx = signed_tx(&sk, 0);
+        let id = txid_v1(&tx).expect("txid");
+        let mut mp = TxMempool::new(1, 1000);
+        mp.insert(tx, &provider).expect("admitted");
+        let drained = mp.drain_ready(10, &provider);
+        assert!(drained.iter().any(|t| txid_v1(t).expect("txid") == id));
+    }
+
+    /// The seed source is the persisted nonce, which is exactly what
+    /// execution will accept next: a committed-but-failed tx does not
+    /// advance it (every failure return precedes the atomic batch write),
+    /// and a successful tx advances it by one.
+    #[test]
+    fn seed_equals_what_execution_accepts_after_failed_and_successful_commits() {
+        let (sk, pk) = generate_keypair();
+        let addr = address_from_pubkey(&pk);
+        let recipient = [0x77u8; 32];
+        let mut storage = Storage::Memory(MemKv::new());
+        put_account(&mut storage, &addr, 500, 0);
+        put_account(
+            &mut storage,
+            &recipient,
+            novai_execution::MIN_ACCOUNT_BALANCE,
+            0,
+        );
+
+        let payload = novai_execution::encode_transfer_payload_v1(
+            &novai_execution::TransferPayloadV1 {
+                to: recipient,
+                amount: 1_000,
+            },
+        );
+        let mut failing = build_tx(addr, pk.to_bytes(), 0, 1_000, String::new());
+        failing.payload = payload.to_vec();
+        sign_tx_v1(&sk, &mut failing).expect("sign");
+        assert!(
+            novai_execution::dispatch_tx(&mut storage, &failing, 1).is_err(),
+            "balance 500 cannot cover amount 1000 plus fee 1000",
+        );
+
+        let provider = InMemoryNonceProvider::new();
+        provider.seed_from_state(&storage).expect("seed");
+        assert_eq!(
+            provider.expected_nonce(&addr),
+            0,
+            "failed execution must not advance the seeded nonce",
+        );
+
+        put_account(&mut storage, &addr, 1_000_000, 0);
+        let mut ok_tx = build_tx(addr, pk.to_bytes(), 0, 1_000, String::new());
+        ok_tx.payload = payload.to_vec();
+        sign_tx_v1(&sk, &mut ok_tx).expect("sign");
+        novai_execution::dispatch_tx(&mut storage, &ok_tx, 2).expect("transfer executes");
+
+        let reseeded = InMemoryNonceProvider::new();
+        reseeded.seed_from_state(&storage).expect("seed");
+        assert_eq!(
+            reseeded.expected_nonce(&addr),
+            1,
+            "successful execution advances the seeded nonce to state nonce 1",
+        );
+    }
+
+    /// The dev band needs no special casing: a dev-derived account with
+    /// history is seeded from its state row like any other account.
+    #[test]
+    fn dev_derived_account_is_seeded_from_its_state_row() {
+        let index: usize = 3;
+        let seed_byte = (index % 256) as u8;
+        let mut seed = [seed_byte; 32];
+        let index_bytes = index.to_le_bytes();
+        for (j, &b) in index_bytes.iter().enumerate() {
+            seed[j] ^= b;
+        }
+        let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let addr = address_from_pubkey(&sk.verifying_key());
+
+        let mut storage = Storage::Memory(MemKv::new());
+        put_account(&mut storage, &addr, 10_000, 42);
+
+        let provider = InMemoryNonceProvider::new();
+        provider.seed_from_state(&storage).expect("seed");
+        assert_eq!(provider.expected_nonce(&addr), 42);
+    }
+
+    /// The production backend end to end: a RocksDB-backed seed over a
+    /// synthetic 50k-account, 100-entity state, with correctness probes.
+    /// Prints the scan wall time for the boot-latency record.
+    #[test]
+    fn rocksdb_seed_covers_synthetic_state_at_scale() {
+        let dir = std::env::temp_dir().join(format!(
+            "novai-seed-scale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let kv = RocksKv::open(&dir).expect("open rocksdb");
+        let mut storage = Storage::Rocks(kv);
+
+        for i in 0u64..50_000 {
+            let mut addr = [0u8; 32];
+            addr[..8].copy_from_slice(&i.to_be_bytes());
+            addr[31] = 0xA5;
+            put_account(&mut storage, &addr, 1_000, i);
+        }
+        let mut entity_addrs = Vec::with_capacity(100);
+        for e in 0u64..100 {
+            let mut pubkey = [0u8; 32];
+            pubkey[..8].copy_from_slice(&e.to_be_bytes());
+            pubkey[31] = 0x5A;
+            entity_addrs.push(put_entity(&mut storage, pubkey, 1_000 + e));
+        }
+
+        let started = std::time::Instant::now();
+        let provider = InMemoryNonceProvider::new();
+        let (accounts, entity_signers) = provider.seed_from_state(&storage).expect("seed");
+        let elapsed = started.elapsed();
+        eprintln!(
+            "seed_from_state: {accounts} accounts + {entity_signers} entity signers in {elapsed:?}"
+        );
+
+        for probe in [0u64, 1, 24_999, 49_999] {
+            let mut addr = [0u8; 32];
+            addr[..8].copy_from_slice(&probe.to_be_bytes());
+            addr[31] = 0xA5;
+            assert_eq!(provider.expected_nonce(&addr), probe);
+        }
+        for (e, addr) in [(0usize, entity_addrs[0]), (99, entity_addrs[99])] {
+            assert_eq!(provider.expected_nonce(&addr), 1_000 + e as u64);
+        }
+        assert_eq!(accounts, 50_000);
+        assert_eq!(entity_signers, 100);
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Fail closed: malformed rows under the scanned prefixes abort the
+    /// boot seed instead of silently skipping a sender. A skipped sender
+    /// would re-create the admitted-but-never-proposable strand.
+    #[test]
+    fn malformed_rows_fail_the_seed_loudly() {
+        let mut storage = Storage::Memory(MemKv::new());
+        storage.put(b"accounts/short", &[0u8]).expect("put");
+        assert!(
+            InMemoryNonceProvider::new().seed_from_state(&storage).is_err(),
+            "truncated account key must fail the seed",
+        );
+
+        let mut storage = Storage::Memory(MemKv::new());
+        storage
+            .put(&account_key(&[0x11u8; 32]), &[1, 2, 3])
+            .expect("put");
+        assert!(
+            InMemoryNonceProvider::new().seed_from_state(&storage).is_err(),
+            "undecodable account value must fail the seed",
+        );
+
+        let mut storage = Storage::Memory(MemKv::new());
+        storage
+            .put(&novai_state::ai_entity_by_address_key(&[0x22u8; 32]), &[9, 9])
+            .expect("put");
+        assert!(
+            InMemoryNonceProvider::new().seed_from_state(&storage).is_err(),
+            "non-32-byte entity id in the index must fail the seed",
+        );
+
+        let mut storage = Storage::Memory(MemKv::new());
+        storage
+            .put(
+                &novai_state::ai_entity_by_address_key(&[0x33u8; 32]),
+                &[0x44u8; 32],
+            )
+            .expect("put");
+        assert!(
+            InMemoryNonceProvider::new().seed_from_state(&storage).is_err(),
+            "dangling entity index must fail the seed",
         );
     }
 }
