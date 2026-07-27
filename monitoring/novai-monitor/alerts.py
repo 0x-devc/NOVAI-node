@@ -64,6 +64,21 @@ HOST_DISK_CRIT_PCT = 10.0
 HOST_DISK_WARN_PCT = 20.0
 HOST_MEM_WARN_PCT = 10.0
 
+# Commit-stall dual trigger (incident WEDGE-20260718: commits froze while
+# consensus certified 818,258 heights over five days, and nothing paged).
+# The gap threshold is a quarter of the node's COMMIT_WINDOW (1024, see
+# crates/consensus/src/lib.rs), so the page lands with headroom before the
+# commit-window rule parks the fleet. The healthy commit-to-frontier gap
+# under the 3-chain rule is 2 to 3 blocks REGARDLESS of block rate, so the
+# gap trigger never false-fires as throughput grows. A fixed block-count
+# threshold alone gives shrinking wall-clock warning as block rate rises
+# (256 blocks is about 64 seconds at 4 blocks/s but about 10 seconds at 25
+# blocks/s), so the 30 second clock is what keeps the warning wall-clock
+# stable as the chain speeds up. test_commit_stall.py pins both values and
+# the quarter-of-window relation.
+COMMIT_GAP_RUNAWAY_BLOCKS = 256
+COMMIT_STALL_SECS = 30.0
+
 HistoryPoint = Tuple[float, Dict[str, float]]
 History = List[HistoryPoint]
 
@@ -208,6 +223,39 @@ def eval_proposer_skipping_txs(snap, prev, history, now) -> EvalResult:
     return EvalResult(False, f"tx_rate={tx_rate:.2f}/min mempool_size={int(mempool)}")
 
 
+def eval_commit_stall(snap, prev, history, now) -> EvalResult:
+    """
+    Dual trigger, fires on EITHER condition:
+
+    - gap trigger: novai_consensus_commit_gap above COMMIT_GAP_RUNAWAY_BLOCKS.
+      Catches a runaway frontier (consensus certifying ahead of a stalled
+      committed cursor) with headroom before the node-side commit-window
+      rule parks the fleet at gap 1024.
+    - time trigger: novai_seconds_since_last_commit above COMMIT_STALL_SECS.
+      Catches a silent commit stall at any block rate; the node measures
+      the age itself, so a monitor restart does not reset the clock.
+
+    Either metric alone is decidable (the trigger whose metric is absent
+    simply contributes nothing); with both metrics absent this is
+    insufficient_data, never a page, per the file invariant that a missing
+    metric is missing, not zero.
+    """
+    gap = _get(snap, "novai_consensus_commit_gap")
+    secs = _get(snap, "novai_seconds_since_last_commit")
+    if gap is None and secs is None:
+        return EvalResult(False, "insufficient_data")
+    gap_fires = gap is not None and gap > COMMIT_GAP_RUNAWAY_BLOCKS
+    time_fires = secs is not None and secs > COMMIT_STALL_SECS
+    parts = []
+    if gap is not None:
+        note = f" (above {COMMIT_GAP_RUNAWAY_BLOCKS})" if gap_fires else ""
+        parts.append(f"gap={int(gap)}{note}")
+    if secs is not None:
+        note = f" (above {int(COMMIT_STALL_SECS)}s)" if time_fires else ""
+        parts.append(f"secs_since_commit={int(secs)}{note}")
+    return EvalResult(gap_fires or time_fires, " ".join(parts))
+
+
 Evaluator = Callable[[Dict[str, float], Optional[Dict[str, float]], History, float], EvalResult]
 
 
@@ -241,6 +289,13 @@ NODE_ALERTS: List[Tuple[AlertSpec, Evaluator]] = [
     (AlertSpec("proposer_skipping_txs", "WARN", 120.0,
                "Proposer producing empty blocks while mempool has txs",
                None), eval_proposer_skipping_txs),
+    # WEDGE-20260718: pages on a runaway frontier OR a silent commit stall.
+    # The 30 s debounce window stacks on the node-side 30 s clock, so the
+    # time trigger pages about a minute after commits freeze; the gap
+    # trigger pages within the same debounce of the gap crossing 256.
+    (AlertSpec("commit_stall", "CRITICAL", 30.0,
+               "Commit stall: frontier gap or commit age beyond bounds (dual trigger)",
+               "EMERGENCY_FREEZE.md"), eval_commit_stall),
 ]
 
 

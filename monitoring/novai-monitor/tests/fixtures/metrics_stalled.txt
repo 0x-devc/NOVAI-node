@@ -1,6 +1,15 @@
 # HELP novai_committed_height Height of last committed block
 # TYPE novai_committed_height gauge
 novai_committed_height 184231
+# HELP novai_highest_qc_height Height certified by the highest QC (consensus frontier)
+# TYPE novai_highest_qc_height gauge
+novai_highest_qc_height 184631
+# HELP novai_consensus_commit_gap Consensus frontier minus committed height (healthy: 2 to 3 at any block rate)
+# TYPE novai_consensus_commit_gap gauge
+novai_consensus_commit_gap 400
+# HELP novai_seconds_since_last_commit Seconds since the committed height last advanced
+# TYPE novai_seconds_since_last_commit gauge
+novai_seconds_since_last_commit 300
 # HELP novai_current_round Current consensus round
 # TYPE novai_current_round gauge
 novai_current_round 25

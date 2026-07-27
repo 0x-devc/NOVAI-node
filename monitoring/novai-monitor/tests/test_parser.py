@@ -28,8 +28,10 @@ def test_parser_healthy_extracts_all_named_metrics():
 
 def test_parser_skips_help_and_type_comments():
     snap = parse_prometheus_text(_load("metrics_healthy.txt"))
-    # 11 metrics in the healthy fixture, no extras for comment lines.
-    assert len(snap) == 11
+    # 14 metrics in the healthy fixture (11 plus the WEDGE-20260718 trio:
+    # highest_qc_height, commit gap, seconds since last commit), and no
+    # extras for comment lines.
+    assert len(snap) == 14
 
 
 def test_parser_handles_blank_lines_and_malformed_input():

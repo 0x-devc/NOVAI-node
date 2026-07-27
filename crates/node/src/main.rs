@@ -1509,14 +1509,27 @@ fn main() {
                 let mempool = Arc::clone(&mempool);
                 let observer_metrics = Arc::clone(&observer_metrics);
                 let commit_metrics = Arc::clone(&commit_metrics);
+                // WEDGE-20260718: commit age clock for the
+                // novai_seconds_since_last_commit gauge, owned by the
+                // collector so the consensus path stays untouched.
+                let commit_clock = Mutex::new(metrics::CommitClock::new());
                 move || {
                     // Acquire state lock once for all state fields
-                    let (committed_height, current_round, view_changes_total) = {
+                    let (committed_height, current_round, view_changes_total, highest_qc_height) = {
                         let s = state.lock_or_recover();
-                        (s.committed_height, s.round, s.view_changes_total)
+                        (
+                            s.committed_height,
+                            s.round,
+                            s.view_changes_total,
+                            s.highest_qc.as_ref().map_or(0, |q| q.height),
+                        )
                     };
+                    let seconds_since_last_commit =
+                        commit_clock.lock_or_recover().observe(committed_height);
                     metrics::MetricsSnapshot {
                         committed_height,
+                        highest_qc_height,
+                        seconds_since_last_commit,
                         current_round,
                         peer_count: peer_manager.peer_count() as u64,
                         mempool_size: mempool.lock_or_recover().len() as u64,

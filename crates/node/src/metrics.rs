@@ -13,12 +13,22 @@
 
 use std::net::SocketAddr;
 use std::thread;
+use std::time::Instant;
 use tiny_http::{Response, Server, StatusCode};
 
 /// Point-in-time snapshot of node metrics.
 pub struct MetricsSnapshot {
     /// Height of last committed block.
     pub committed_height: u64,
+    /// Height certified by this node's highest QC (the consensus
+    /// frontier). WEDGE-20260718: the frontier ran 818,258 heights above
+    /// the committed floor with no metric making it visible; this gauge
+    /// plus the derived gap is that visibility.
+    pub highest_qc_height: u64,
+    /// Seconds since this node's metrics collector last observed the
+    /// committed height advance (see `CommitClock`). The rate-independent
+    /// half of the monitor's commit_stall dual-trigger alarm.
+    pub seconds_since_last_commit: u64,
     /// Current consensus round.
     pub current_round: u64,
     /// Number of connected peers.
@@ -55,6 +65,18 @@ impl MetricsSnapshot {
             r#"# HELP novai_committed_height Height of last committed block
 # TYPE novai_committed_height gauge
 novai_committed_height {}
+
+# HELP novai_highest_qc_height Height certified by the highest QC (consensus frontier)
+# TYPE novai_highest_qc_height gauge
+novai_highest_qc_height {}
+
+# HELP novai_consensus_commit_gap Consensus frontier minus committed height (healthy: 2 to 3 at any block rate)
+# TYPE novai_consensus_commit_gap gauge
+novai_consensus_commit_gap {}
+
+# HELP novai_seconds_since_last_commit Seconds since the committed height last advanced
+# TYPE novai_seconds_since_last_commit gauge
+novai_seconds_since_last_commit {}
 
 # HELP novai_current_round Current consensus round
 # TYPE novai_current_round gauge
@@ -97,6 +119,12 @@ novai_anomaly_signals_published {}
 novai_anomaly_last_confidence {}
 "#,
             self.committed_height,
+            self.highest_qc_height,
+            // Saturating: a fresh node (no QC yet) reports frontier 0 with a
+            // positive committed height after recovery; the gap is 0, never
+            // an underflow.
+            self.highest_qc_height.saturating_sub(self.committed_height),
+            self.seconds_since_last_commit,
             self.current_round,
             self.peer_count,
             self.mempool_size,
@@ -108,6 +136,62 @@ novai_anomaly_last_confidence {}
             self.anomaly_signals_published,
             self.anomaly_last_confidence,
         )
+    }
+}
+
+/// Wall-clock age tracker for the committed height, feeding the
+/// `novai_seconds_since_last_commit` gauge (WEDGE-20260718, the
+/// rate-independent half of the monitor's commit_stall dual-trigger
+/// alarm).
+///
+/// Scrape driven: the metrics collector calls `observe` with the current
+/// committed height on every scrape; the clock stamps each advance and
+/// reports how long the height has been flat. The clock starts at
+/// construction (process boot), so a node that never commits reports a
+/// growing age from boot, which is exactly the alarm-worthy condition. A
+/// node restart resets the clock, giving a restarted node its 30 second
+/// grace before the time trigger can page again.
+pub struct CommitClock {
+    last_height: u64,
+    last_advance: Instant,
+}
+
+impl CommitClock {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    /// `new` with an explicit boot instant, so tests are deterministic.
+    fn new_at(boot: Instant) -> Self {
+        Self {
+            last_height: 0,
+            last_advance: boot,
+        }
+    }
+
+    /// Record the currently observed committed height and return how many
+    /// whole seconds it has been since the height last advanced.
+    pub fn observe(&mut self, committed_height: u64) -> u64 {
+        self.observe_at(committed_height, Instant::now())
+    }
+
+    /// `observe` with an explicit clock, so tests are deterministic. A
+    /// height that does not advance (or regresses, which cannot happen
+    /// from a monotone committed cursor) leaves the stamp untouched: the
+    /// age keeps growing, the conservative reading for an alarm input.
+    fn observe_at(&mut self, committed_height: u64, now: Instant) -> u64 {
+        if committed_height > self.last_height {
+            self.last_height = committed_height;
+            self.last_advance = now;
+        }
+        now.duration_since(self.last_advance).as_secs()
+    }
+}
+
+impl Default for CommitClock {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -171,6 +255,8 @@ mod tests {
     fn test_prometheus_format() {
         let snapshot = MetricsSnapshot {
             committed_height: 42,
+            highest_qc_height: 44,
+            seconds_since_last_commit: 1,
             current_round: 3,
             peer_count: 4,
             mempool_size: 127,
@@ -187,6 +273,11 @@ mod tests {
 
         // Check that all metrics are present
         assert!(output.contains("novai_committed_height 42"));
+        assert!(output.contains("novai_highest_qc_height 44"));
+        // The gap is derived inside the renderer from the two heights, so
+        // the exposed pair can never disagree with the exposed gap.
+        assert!(output.contains("novai_consensus_commit_gap 2"));
+        assert!(output.contains("novai_seconds_since_last_commit 1"));
         assert!(output.contains("novai_current_round 3"));
         assert!(output.contains("novai_peer_count 4"));
         assert!(output.contains("novai_mempool_size 127"));
@@ -214,6 +305,8 @@ mod tests {
     fn test_zero_values() {
         let snapshot = MetricsSnapshot {
             committed_height: 0,
+            highest_qc_height: 0,
+            seconds_since_last_commit: 0,
             current_round: 0,
             peer_count: 0,
             mempool_size: 0,
@@ -228,10 +321,89 @@ mod tests {
 
         let output = snapshot.to_prometheus();
         assert!(output.contains("novai_committed_height 0"));
+        assert!(output.contains("novai_highest_qc_height 0"));
+        assert!(output.contains("novai_consensus_commit_gap 0"));
+        assert!(output.contains("novai_seconds_since_last_commit 0"));
         assert!(output.contains("novai_peer_count 0"));
         assert!(output.contains("novai_block_tx_count 0"));
         assert!(output.contains("novai_copilot_observations_total 0"));
         assert!(output.contains("novai_anomaly_signals_total 0"));
         assert!(output.contains("novai_anomaly_last_confidence 0"));
+    }
+
+    #[test]
+    fn test_commit_gap_saturates_at_zero() {
+        // A recovered node has its committed height before its first QC
+        // adoption lands in a snapshot; the gap must clamp to 0, never
+        // wrap.
+        let snapshot = MetricsSnapshot {
+            committed_height: 500,
+            highest_qc_height: 0,
+            seconds_since_last_commit: 0,
+            current_round: 0,
+            peer_count: 0,
+            mempool_size: 0,
+            view_changes_total: 0,
+            block_tx_count: 0,
+            total_txs_committed: 0,
+            copilot_observations_total: 0,
+            anomaly_signals_total: 0,
+            anomaly_signals_published: 0,
+            anomaly_last_confidence: 0,
+        };
+        let output = snapshot.to_prometheus();
+        assert!(output.contains("novai_consensus_commit_gap 0"));
+    }
+
+    #[test]
+    fn test_commit_clock_ages_while_flat_and_resets_on_advance() {
+        use std::time::Duration;
+
+        let t0 = Instant::now();
+        let mut clock = CommitClock::new_at(t0);
+
+        // First observation stamps the height; age reads 0.
+        assert_eq!(clock.observe_at(100, t0), 0);
+        // The height stays flat: the age grows with the wall clock. At 31
+        // seconds the monitor's time trigger (30 s) would fire.
+        assert_eq!(clock.observe_at(100, t0 + Duration::from_secs(10)), 10);
+        assert_eq!(clock.observe_at(100, t0 + Duration::from_secs(31)), 31);
+        // A committed advance resets the age.
+        assert_eq!(clock.observe_at(101, t0 + Duration::from_secs(32)), 0);
+        assert_eq!(clock.observe_at(101, t0 + Duration::from_secs(35)), 3);
+    }
+
+    #[test]
+    fn test_commit_clock_healthy_cadence_stays_near_zero_at_any_rate() {
+        use std::time::Duration;
+
+        // A healthy chain commits continuously at any block rate, so every
+        // scrape observes a fresh advance and the age never accumulates.
+        // One scrape every 5 seconds, heights advancing by the per-interval
+        // block count for rates from 1 to 1000 blocks/s.
+        for rate in [1u64, 4, 25, 100, 1000] {
+            let t0 = Instant::now();
+            let mut clock = CommitClock::new_at(t0);
+            let mut height = 1_000_000u64;
+            for scrape in 1..=12u64 {
+                height += rate * 5;
+                let age = clock.observe_at(height, t0 + Duration::from_secs(scrape * 5));
+                assert_eq!(
+                    age, 0,
+                    "healthy cadence at {rate} blocks/s must keep the commit age at zero"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_commit_clock_starts_at_boot_for_a_never_committing_node() {
+        use std::time::Duration;
+
+        // A node that boots and never commits reports a growing age from
+        // boot: stalled-from-boot is alarm-worthy, not a blind spot.
+        let t0 = Instant::now();
+        let mut clock = CommitClock::new_at(t0);
+        assert_eq!(clock.observe_at(0, t0 + Duration::from_secs(45)), 45);
     }
 }
