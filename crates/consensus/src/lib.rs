@@ -51,6 +51,17 @@ pub const CACHE_RETAIN_DEPTH: u64 = 5;
 /// The 3-chain commit rule only requires the last 3 blocks; this depth
 /// gives headroom for catch-up sync while bounding disk and compaction
 /// cost. Late-joining nodes outside this window must use chunked sync.
+///
+/// LOAD-BEARING FOR DISASTER RECOVERY (WEDGE-20260718): the deletion
+/// floor is measured from COMMITTED height and the deletes ride the
+/// atomic commit batch (`persist_commit_atomic` step 6). Because of that
+/// coupling, the 20260718 commit freeze froze pruning with it, and the
+/// committed window plus the floor QC row survived five days of frontier
+/// runaway, which is what made offline recovery possible. Any future
+/// refactor that decouples pruning from the commit batch (a background
+/// GC, a startup sweeper, an off-thread retention task) or measures the
+/// floor from the consensus/QC clock MUST carry a commit-stall halt with
+/// it. tests/gate_prune_commit_coupling.rs pins both properties.
 pub const PRUNE_RETAIN_BLOCKS: u64 = 50_000;
 
 /// Commit-window rule (incident WEDGE-20260718): the maximum number of
@@ -2148,6 +2159,15 @@ impl ConsensusState {
         // new committed height. This keeps RocksDB size bounded regardless
         // of chain height. Deletions are part of the atomic batch, so
         // pruning is crash-safe (either commit + prune both apply, or neither).
+        //
+        // LOAD-BEARING FOR DISASTER RECOVERY (WEDGE-20260718): this is the
+        // ONLY deleter of the two consensus row families in the workspace,
+        // its floor is the COMMITTED clock, and it cannot run without a
+        // commit because it IS a clause of the commit write. That coupling
+        // preserved the committed window through the incident's five-day
+        // commit freeze. Do not move these deletes out of this batch and do
+        // not measure the floor from the QC/consensus height;
+        // tests/gate_prune_commit_coupling.rs fails on either change.
         if new_committed_height > PRUNE_RETAIN_BLOCKS {
             let prune_below = new_committed_height - PRUNE_RETAIN_BLOCKS;
             // Delete block and QC for each newly-prunable height.
