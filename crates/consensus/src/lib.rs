@@ -53,6 +53,37 @@ pub const CACHE_RETAIN_DEPTH: u64 = 5;
 /// cost. Late-joining nodes outside this window must use chunked sync.
 pub const PRUNE_RETAIN_BLOCKS: u64 = 50_000;
 
+/// Commit-window rule (incident WEDGE-20260718): the maximum number of
+/// heights this node will propose or vote ABOVE its own committed height.
+///
+/// In the 20260718 incident a host resource event froze commits while
+/// consensus kept certifying new heights for five days: the frontier ended
+/// 818,258 heights above the committed floor, the durable vote marks were
+/// poisoned all the way up, the fleet left its own retention arithmetic,
+/// and recovery required fleet-wide offline surgery. Nothing bounded the
+/// climb. This constant is that bound.
+///
+/// Sizing: the healthy pipeline depth under the 3-chain rule is 2 to 3
+/// heights, and catch-up sync commits as it goes, so the window slides and
+/// never throttles a healthy or syncing fleet. 1024 gives two orders of
+/// magnitude of headroom over the healthy depth (and two 500-block sync
+/// chunks) while staying far inside PRUNE_RETAIN_BLOCKS (50,000), so a
+/// parked frontier is always within every peer's retention window and a
+/// parked node recovers by plain restart plus sync. At the fleet's
+/// measured cadence (about 4 blocks/s) a fleet-wide commit freeze parks
+/// consensus in about four minutes instead of climbing for days.
+///
+/// Enforcement points: `propose_block_with_budget` (refuse to build),
+/// `verify_block` (refuse to vote), `note_self_vote` (backstop: no self
+/// vote above the bound can ever be recorded), and the node's proposer
+/// intent check. QC ADOPTION is deliberately NOT gated: a quorum
+/// certificate is proof the fleet accepted those votes, and refusing to
+/// adopt it would strand a behind node without a sync target. The fleet
+/// property comes from every correct node refusing to CAST votes above its
+/// own bound: with n=4 and quorum 3, two correct parked nodes make
+/// certifying past committed + COMMIT_WINDOW impossible.
+pub const COMMIT_WINDOW: u64 = 1_024;
+
 /// Calculate timeout duration for a given round using the default base timeout.
 ///
 /// Uses exponential backoff: `min(BASE_TIMEOUT_MS * 2^round, MAX_TIMEOUT_MS)`
@@ -125,6 +156,16 @@ pub enum ConsensusError {
     NotLeader,
     /// Already proposed for this height/round.
     AlreadyProposed,
+    /// Commit-window rule (WEDGE-20260718): the intended height is more
+    /// than COMMIT_WINDOW heights above the committed height. Commits have
+    /// stalled and the frontier is parked; proposing and self-voting are
+    /// refused until commits advance.
+    CommitWindowExceeded {
+        /// The refused proposal or vote height.
+        height: u64,
+        /// This node's committed height at refusal time.
+        committed_height: u64,
+    },
 }
 
 /// Consensus state for a single node.
@@ -261,6 +302,17 @@ impl ConsensusState {
             Some(qc) => std::cmp::max(self.height, qc.height) + 1,
             None => self.height + 1,
         };
+
+        // Commit-window rule (WEDGE-20260718): refuse to build a block more
+        // than COMMIT_WINDOW heights above committed. Checked before every
+        // side effect (mempool drain, last_proposed) so a parked leader
+        // ticks quietly and loses nothing.
+        if !self.within_commit_window(next_height) {
+            return Err(ConsensusError::CommitWindowExceeded {
+                height: next_height,
+                committed_height: self.committed_height,
+            });
+        }
 
         // Check if already proposed for this height/round
         let proposed_key = (next_height, self.round);
@@ -434,6 +486,19 @@ impl ConsensusState {
             )));
         }
 
+        // Commit-window rule (WEDGE-20260718): refuse to vote for a block
+        // more than COMMIT_WINDOW heights above our committed height. While
+        // commits stall the frontier parks at committed + COMMIT_WINDOW
+        // instead of climbing unbounded; a legitimately behind node
+        // re-admits the frontier as its own sync commits slide the window
+        // forward. Sync itself never passes through here.
+        if !self.within_commit_window(block.height) {
+            return Err(ConsensusError::InvalidBlock(format!(
+                "commit window: refusing to vote for block at height {} while committed height is {} (bound = committed + {})",
+                block.height, self.committed_height, COMMIT_WINDOW
+            )));
+        }
+
         // Check parent hash matches highest QC
         let expected_parent = if let Some(ref qc) = self.highest_qc {
             qc.block_hash
@@ -507,6 +572,16 @@ impl ConsensusState {
         Ok(())
     }
 
+    /// Commit-window rule (WEDGE-20260718): may this node extend the
+    /// frontier at `height`? True iff `height` is no more than
+    /// COMMIT_WINDOW heights above this node's committed height. Gates
+    /// proposing and self-voting only; QC adoption and sync are
+    /// deliberately ungated (see the COMMIT_WINDOW doc).
+    #[must_use]
+    pub fn within_commit_window(&self, height: u64) -> bool {
+        height <= self.committed_height.saturating_add(COMMIT_WINDOW)
+    }
+
     /// gate 9: may this node cast a vote at `(height, round)`? Only if it is
     /// strictly ahead of the highest view already durably voted. `None` means
     /// this node has never voted, so the first vote is allowed. The strict
@@ -537,6 +612,19 @@ impl ConsensusState {
     /// # Errors
     /// Returns `InvalidVote` if this node already voted at this view or higher.
     pub fn note_self_vote(&mut self, height: u64, round: u64) -> Result<(), ConsensusError> {
+        // Commit-window backstop (WEDGE-20260718): every self vote passes
+        // through here (the leader via add_vote, the follower via the node
+        // vote path), so refusing above the bound makes "no own vote above
+        // committed + COMMIT_WINDOW" an engine invariant no caller can
+        // bypass. Refuses WITHOUT recording, like the gate 9 refusal below,
+        // so the durable mark stays within the window and a stalled fleet
+        // stays restart recoverable.
+        if !self.within_commit_window(height) {
+            return Err(ConsensusError::CommitWindowExceeded {
+                height,
+                committed_height: self.committed_height,
+            });
+        }
         if !self.may_vote(height, round) {
             return Err(ConsensusError::InvalidVote(
                 "durable vote guard: already voted at this (height, round) or higher".to_string(),

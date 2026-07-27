@@ -348,6 +348,10 @@ pub struct ConsensusNode {
     pub pending_sync_request: Arc<Mutex<Option<PendingSyncRequest>>>,
     /// F1 sync retry gate state (strikes and backoff bookkeeping).
     pub sync_retry: Arc<Mutex<SyncRetryState>>,
+    /// Commit-window rule: the last (height, round) view the proposer
+    /// intent check warned about, so a parked fleet logs one warning per
+    /// view instead of two hundred per second on the 5 ms propose cadence.
+    commit_window_warned_view: Arc<Mutex<Option<(u64, u64)>>>,
     /// Configurable base timeout in milliseconds (default: BASE_TIMEOUT_MS = 1000).
     /// Server environments may need higher values (e.g., 3000) to avoid spurious timeouts.
     pub base_timeout_ms: u64,
@@ -460,6 +464,7 @@ impl ConsensusNode {
             last_timeout_time: Arc::new(Mutex::new(None)),
             pending_sync_request: Arc::new(Mutex::new(None)),
             sync_retry: Arc::new(Mutex::new(SyncRetryState::default())),
+            commit_window_warned_view: Arc::new(Mutex::new(None)),
             base_timeout_ms,
             encryption_key,
             known_noise_keys,
@@ -1666,6 +1671,32 @@ impl ConsensusNode {
             Some(qc) => std::cmp::max(state.height, qc.height) + 1,
             None => state.height + 1,
         };
+
+        // Commit-window rule (WEDGE-20260718): refuse to propose more than
+        // COMMIT_WINDOW heights above committed. While commits stall this
+        // parks the proposer (rounds keep churning via timeouts, nothing new
+        // is certified), so the frontier and the durable vote marks stay a
+        // bounded, restart-recoverable distance above the floor. Checked
+        // before the gate 9 skip below so a wedge-shaped restart logs the
+        // true story (parked frontier), not a vote-replay symptom. Warned
+        // once per view: the propose tick fires every 5 ms but the parked
+        // view only changes on a round advance.
+        if !state.within_commit_window(intended_height) {
+            let view = (intended_height, state.round);
+            let mut warned = self.commit_window_warned_view.lock_or_recover();
+            if *warned != Some(view) {
+                *warned = Some(view);
+                tracing::warn!(
+                    height = intended_height,
+                    round = state.round,
+                    committed_height = state.committed_height,
+                    window = novai_consensus::COMMIT_WINDOW,
+                    "commit window: not proposing; frontier is parked at the bound while commits stall"
+                );
+            }
+            return Ok(false);
+        }
+
         if !state.may_vote(intended_height, state.round) {
             tracing::warn!(
                 height = intended_height,
@@ -1692,6 +1723,10 @@ impl ConsensusNode {
             Ok(block) => block,
             Err(ConsensusError::NotLeader) => return Ok(false),
             Err(ConsensusError::AlreadyProposed) => return Ok(false),
+            // Commit-window belt: the intent check above already refused and
+            // warned; the engine-level refusal (reachable by any other
+            // caller) stays a quiet skip here too.
+            Err(ConsensusError::CommitWindowExceeded { .. }) => return Ok(false),
             Err(e) => return Err(format!("Propose block failed: {e:?}")),
         };
 
