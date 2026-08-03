@@ -230,6 +230,24 @@ pub struct ConsensusState {
     /// twice at one view. Keyed by (height, round), not height, so a legitimate
     /// higher-round re-proposal after a view change is still admitted.
     pub voted_view: Option<(u64, u64)>,
+    /// Speculative execution results for uncommitted (pending) blocks, keyed by
+    /// block hash (gate wedge-276272). The propose and vote paths use these to
+    /// resolve a parent state view without re-executing ancestors on every call.
+    /// Populated on verified execution, evicted at commit. Empty until the
+    /// execute-before-vote paths are wired, so it is inert until then.
+    pub pending_exec: HashMap<[u8; 32], PendingExec>,
+}
+
+/// Speculative execution result for one uncommitted (pending) block. Keyed by
+/// block hash in [`ConsensusState::pending_exec`]. `write_set` is dropped to
+/// `None` for entries beyond the newest few pending heights (a memory bound);
+/// those are recomputed on demand from the stored blocks, so the entry is always
+/// reconstructable. `post_root` is retained for every entry.
+#[derive(Debug, Clone)]
+pub struct PendingExec {
+    pub height: u64,
+    pub post_root: [u8; 32],
+    pub write_set: Option<std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
 }
 
 impl ConsensusState {
@@ -254,6 +272,7 @@ impl ConsensusState {
             last_proposed_block_hash: None,
             locked_qc: None,
             voted_view: None,
+            pending_exec: HashMap::new(),
         }
     }
 
@@ -374,16 +393,20 @@ impl ConsensusState {
             [0u8; 32] // Genesis parent
         };
 
-        // Read current state root from DB
-        let state_root = if let Some(bytes) = state_db
-            .get(novai_state::KEY_SMT_ROOT)
-            .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
-        {
-            novai_state::decode_smt_root_v1(&bytes)
-                .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
-        } else {
-            novai_execution::empty_smt_root() // canonical empty SMT root, matches execution and genesis
+        // Execute the drained txs against the resolved parent post-state in a
+        // non-persisting overlay and stamp the POST-execution root (gate
+        // wedge-276272): the header state_root now means post-state(this height).
+        // If the parent state is unresolvable (its body not yet available), skip
+        // quietly like NotLeader and let the missing-block sync fire; a leader that
+        // cannot resolve its parent could only have proposed a stale root anyway.
+        let exec = {
+            let parent_view = self
+                .resolve_parent_state(parent_hash, next_height - 1, state_db)
+                .map_err(|_| ConsensusError::NotLeader)?;
+            novai_execution::execute_block_to_root(&parent_view, &txs, next_height)
+                .map_err(|e| ConsensusError::StateError(format!("propose execute: {e:?}")))?
         };
+        let state_root = exec.post_root;
 
         // Build block
         let block = Block {
@@ -403,6 +426,10 @@ impl ConsensusState {
         self.last_proposed = Some((block.height, block.round));
         self.last_proposed_txs = block.txs.clone();
         self.last_proposed_block_hash = Some(block_hash);
+
+        // Cache this block's speculative execution so our next proposals and the
+        // followers' votes can resolve it as a parent (gate wedge-276272).
+        self.note_pending_exec(block_hash, block.height, exec.post_root, exec.write_set);
 
         Ok(block)
     }
@@ -442,11 +469,22 @@ impl ConsensusState {
         std::mem::take(&mut self.last_proposed_txs)
     }
 
-    /// Verify a proposed block.
+    /// Verify a proposed block and return its speculative execution result.
+    ///
+    /// The header `state_root` is compared against the POST-execution root computed
+    /// over the resolved parent state (gate wedge-276272); signatures are verified
+    /// before execution. A refusal returns `Err` and records nothing (the caller's
+    /// gate-9 and persist steps run only on `Ok`). The returned `BlockExecution`
+    /// lets the caller cache the pending state without re-executing.
     ///
     /// # Errors
-    /// Returns error if block is invalid.
-    pub fn verify_block<K>(&self, block: &Block, state_db: &K) -> Result<(), ConsensusError>
+    /// Returns error if the block is invalid, the parent is unresolvable, or the
+    /// computed post-root does not match the header.
+    pub fn verify_block_execute<K>(
+        &self,
+        block: &Block,
+        state_db: &K,
+    ) -> Result<novai_execution::BlockExecution, ConsensusError>
     where
         K: novai_state::Kv,
         K::Error: std::fmt::Debug,
@@ -538,24 +576,9 @@ impl ConsensusState {
             }
         }
 
-        // Verify state root matches current state
-        let current_root = if let Some(bytes) = state_db
-            .get(novai_state::KEY_SMT_ROOT)
-            .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
-        {
-            novai_state::decode_smt_root_v1(&bytes)
-                .map_err(|e| ConsensusError::StateError(format!("{e:?}")))?
-        } else {
-            novai_execution::empty_smt_root()
-        };
-
-        if block.state_root != current_root {
-            return Err(ConsensusError::InvalidBlock(
-                "State root mismatch".to_string(),
-            ));
-        }
-
-        // Verify all transaction signatures
+        // Verify all transaction signatures BEFORE execution: execution must never
+        // run on unauthenticated payloads (gate wedge-276272 moves signatures ahead
+        // of the root/execution step, which today's one memcmp made harmless).
         for tx in &block.txs {
             // 1. Verify address matches pubkey
             let pubkey = novai_crypto::pubkey_from_bytes(&tx.pubkey)
@@ -580,7 +603,38 @@ impl ConsensusState {
             }
         }
 
-        Ok(())
+        // Execute against the resolved parent post-state and compare the header
+        // state_root to the computed POST-execution root (gate wedge-276272). A
+        // mismatch or an unresolvable parent refuses the block WITHOUT recording.
+        let parent_view = self
+            .resolve_parent_state(block.parent_hash, block.height - 1, state_db)
+            .map_err(|e| {
+                ConsensusError::InvalidBlock(format!("parent state unresolvable: {e:?}"))
+            })?;
+        let exec = novai_execution::execute_block_to_root(&parent_view, &block.txs, block.height)
+            .map_err(|e| ConsensusError::StateError(format!("verify execute: {e:?}")))?;
+        if block.state_root != exec.post_root {
+            return Err(ConsensusError::InvalidBlock(format!(
+                "state root mismatch: header {:02x?} computed {:02x?}",
+                &block.state_root[..8],
+                &exec.post_root[..8]
+            )));
+        }
+
+        Ok(exec)
+    }
+
+    /// Verify a proposed block, discarding the execution result. Thin wrapper over
+    /// `verify_block_execute` for callers that need only validity.
+    ///
+    /// # Errors
+    /// Returns error if the block is invalid (see `verify_block_execute`).
+    pub fn verify_block<K>(&self, block: &Block, state_db: &K) -> Result<(), ConsensusError>
+    where
+        K: novai_state::Kv,
+        K::Error: std::fmt::Debug,
+    {
+        self.verify_block_execute(block, state_db).map(|_| ())
     }
 
     /// Commit-window rule (WEDGE-20260718): may this node extend the
@@ -1428,6 +1482,240 @@ impl ConsensusState {
         Ok(())
     }
 
+    /// Number of pending write sets kept in memory. Deeper ancestors are
+    /// recomputed on demand from the stored blocks (see `resolve_parent_state`),
+    /// so this bounds memory only, never correctness.
+    const PENDING_WRITE_SET_KEEP: usize = 8;
+
+    /// Record a block's speculative execution (gate wedge-276272). Called on
+    /// verified execution in the propose and vote paths; execution validity is
+    /// independent of vote eligibility, so this runs even if gate 9 then refuses
+    /// the vote. Post roots are kept for every entry; write sets are bounded.
+    pub fn note_pending_exec(
+        &mut self,
+        block_hash: [u8; 32],
+        height: u64,
+        post_root: [u8; 32],
+        write_set: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    ) {
+        self.pending_exec.insert(
+            block_hash,
+            PendingExec {
+                height,
+                post_root,
+                write_set: Some(write_set),
+            },
+        );
+        self.enforce_pending_write_set_bound();
+    }
+
+    /// Keep write sets for only the newest `PENDING_WRITE_SET_KEEP` pending
+    /// heights; drop older ones to post-root-only (recomputed on demand). This
+    /// bounds memory in the degraded regime where commits stall while votes
+    /// continue; the healthy pipeline depth (2 to 3) is always within the bound.
+    fn enforce_pending_write_set_bound(&mut self) {
+        let mut heights: Vec<u64> = self
+            .pending_exec
+            .values()
+            .filter(|pe| pe.write_set.is_some())
+            .map(|pe| pe.height)
+            .collect();
+        if heights.len() <= Self::PENDING_WRITE_SET_KEEP {
+            return;
+        }
+        heights.sort_unstable();
+        let cutoff = heights[heights.len() - Self::PENDING_WRITE_SET_KEEP];
+        for pe in self.pending_exec.values_mut() {
+            if pe.height < cutoff {
+                pe.write_set = None;
+            }
+        }
+    }
+
+    /// Drop pending-exec entries at or below the committed height (committed
+    /// blocks and abandoned siblings of committed heights). Called from
+    /// `apply_commits`, so it fires at every commit site.
+    pub fn evict_pending_exec(&mut self) {
+        let committed = self.committed_height;
+        self.pending_exec.retain(|_, pe| pe.height > committed);
+    }
+
+    /// Read the committed SMT root the way the propose and vote paths do (an
+    /// absent root defaults to the canonical empty root).
+    fn read_committed_smt_root<K>(db: &K) -> Result<[u8; 32], ConsensusError>
+    where
+        K: novai_state::Kv,
+        K::Error: std::fmt::Debug,
+    {
+        match db.get(novai_state::KEY_SMT_ROOT) {
+            Ok(Some(bytes)) => novai_state::decode_smt_root_v1(&bytes)
+                .map_err(|e| ConsensusError::StateError(format!("decode smt root: {e:?}"))),
+            Ok(None) => Ok(novai_execution::empty_smt_root()),
+            Err(e) => Err(ConsensusError::StateError(format!("read smt root: {e:?}"))),
+        }
+    }
+
+    /// Recompute one block's write set by re-executing it over the committed DB
+    /// plus the write sets already merged for its ancestors. When a cached post
+    /// root is known, the recomputed root must match it (a determinism guard).
+    fn recompute_pending_write_set<K>(
+        db: &K,
+        merged: &std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+        block: &Block,
+        expected_post_root: Option<[u8; 32]>,
+    ) -> Result<std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>, ConsensusError>
+    where
+        K: novai_state::Kv,
+        K::Error: std::fmt::Debug,
+    {
+        let view = novai_execution::BlockOverlay::with_write_set(db, merged.clone());
+        let exec = novai_execution::execute_block_to_root(&view, &block.txs, block.height)
+            .map_err(|e| {
+                ConsensusError::StateError(format!("resolve_parent_state recompute failed: {e:?}"))
+            })?;
+        if let Some(expected) = expected_post_root {
+            if exec.post_root != expected {
+                return Err(ConsensusError::StateError(format!(
+                    "CONSENSUS SAFETY HALT: recomputed post root {:02x?} != cached post root \
+                     {:02x?} at height {}",
+                    &exec.post_root[..8],
+                    &expected[..8],
+                    block.height
+                )));
+            }
+        }
+        Ok(exec.write_set)
+    }
+
+    /// Resolve a `Kv` view of the POST-execution state of the parent block
+    /// (`parent_hash` at `parent_height`), for executing a child block at propose
+    /// or vote time (gate wedge-276272). The view layers the pending ancestors'
+    /// write sets over the committed database, reconstructing post-state(parent)
+    /// without persisting anything.
+    ///
+    /// Ancestors are walked by hash with a DB fallback by height that verifies
+    /// the hash, exactly as the commit chain walk does, so a restarted node with
+    /// an empty in-memory cache rebuilds from the stored blocks. Write sets come
+    /// from `pending_exec` when present and are recomputed by re-execution
+    /// otherwise.
+    ///
+    /// Two base self-consistency checks make a locally-diverged node refuse
+    /// rather than build on bad state: the walk must terminate exactly at the
+    /// committed tip (self-consistency 1), and the local SMT root must equal the
+    /// committed tip's header state root (self-consistency 2, the post-state
+    /// convention). Either failure is local divergence and returns an error in
+    /// the same class as the catch-up commit halt.
+    ///
+    /// # Errors
+    /// Returns an error if an ancestor is missing or mis-hashed, if the walk does
+    /// not reach the committed tip, or if the local root has diverged.
+    pub fn resolve_parent_state<'a, K>(
+        &self,
+        parent_hash: [u8; 32],
+        parent_height: u64,
+        db: &'a K,
+    ) -> Result<novai_execution::BlockOverlay<'a, K>, ConsensusError>
+    where
+        K: novai_state::Kv,
+        K::Error: std::fmt::Debug,
+    {
+        let committed = self.committed_height;
+        if parent_height < committed {
+            return Err(ConsensusError::StateError(format!(
+                "resolve_parent_state: parent height {parent_height} below committed {committed}"
+            )));
+        }
+
+        let committed_tip_hash = if committed == 0 {
+            [0u8; 32]
+        } else {
+            let tip = Self::load_block(db, committed)?.ok_or_else(|| {
+                ConsensusError::StateError(format!("committed tip block {committed} missing"))
+            })?;
+            novai_consensus_types::block_hash(&tip)
+        };
+
+        // Walk parent -> committed frontier, newest first, by hash with a DB
+        // fallback by height that verifies the hash (mirrors the commit walk).
+        let mut chain: Vec<Block> = Vec::new();
+        let mut current_hash = parent_hash;
+        for h in (committed + 1..=parent_height).rev() {
+            let block = if let Some(b) = self.block_by_hash.get(&current_hash) {
+                Block::clone(b)
+            } else {
+                let loaded = Self::load_block(db, h)?.ok_or_else(|| {
+                    ConsensusError::StateError(format!(
+                        "resolve_parent_state: missing block at height {h}"
+                    ))
+                })?;
+                if novai_consensus_types::block_hash(&loaded) != current_hash {
+                    return Err(ConsensusError::StateError(format!(
+                        "resolve_parent_state: DB block at height {h} has the wrong hash for the parent chain"
+                    )));
+                }
+                loaded
+            };
+            if block.height != h {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "resolve_parent_state: chain height mismatch: expected {h}, got {}",
+                    block.height
+                )));
+            }
+            current_hash = block.parent_hash;
+            chain.push(block);
+        }
+
+        // Self-consistency 1: the walk must connect to the committed tip.
+        if current_hash != committed_tip_hash {
+            return Err(ConsensusError::StateError(
+                "CONSENSUS SAFETY HALT: parent chain does not connect to the committed tip \
+                 (local divergence); refusing to build on it"
+                    .to_string(),
+            ));
+        }
+
+        // Self-consistency 2: the local executed root must equal the committed
+        // tip's header state root (post-state convention). A mismatch is local
+        // divergence; refuse in the same class as the commit halt.
+        if committed > 0 {
+            let tip = Self::load_block(db, committed)?.ok_or_else(|| {
+                ConsensusError::StateError(format!("committed tip block {committed} missing"))
+            })?;
+            let local_root = Self::read_committed_smt_root(db)?;
+            if local_root != tip.state_root {
+                return Err(ConsensusError::StateError(format!(
+                    "CONSENSUS SAFETY HALT: local executed root {:02x?} diverged from committed \
+                     tip header {:02x?} at height {committed}; refusing to build on it",
+                    &local_root[..8],
+                    &tip.state_root[..8]
+                )));
+            }
+        }
+
+        // Execute the ancestors forward (oldest first), layering write sets.
+        chain.reverse();
+        let mut merged: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+            std::collections::BTreeMap::new();
+        for block in &chain {
+            let bh = novai_consensus_types::block_hash(block);
+            let wset = match self.pending_exec.get(&bh) {
+                Some(PendingExec {
+                    write_set: Some(ws),
+                    ..
+                }) => ws.clone(),
+                Some(PendingExec { post_root, .. }) => {
+                    Self::recompute_pending_write_set(db, &merged, block, Some(*post_root))?
+                }
+                None => Self::recompute_pending_write_set(db, &merged, block, None)?,
+            };
+            for (k, v) in wset {
+                merged.insert(k, v);
+            }
+        }
+
+        Ok(novai_execution::BlockOverlay::with_write_set(db, merged))
+    }
+
     /// 535004 Layer 4 safety predicate. Returns whether it is safe to adopt
     /// `candidate` as `highest_qc`, or to vote a block that extends it, given
     /// this node's lock. Safe iff: this node is not locked yet (no QC adopted),
@@ -1780,6 +2068,10 @@ impl ConsensusState {
 
             // Evict old blocks from in-memory caches to bound memory usage.
             self.prune_old_blocks();
+
+            // Drop speculative pending-exec entries at or below the new committed
+            // height (gate wedge-276272). Inert until the vote path populates it.
+            self.evict_pending_exec();
         }
 
         Ok(())
@@ -2595,6 +2887,7 @@ impl ConsensusState {
             last_proposed_block_hash: None,
             locked_qc,
             voted_view,
+            pending_exec: HashMap::new(),
         })
     }
 }
@@ -4211,6 +4504,14 @@ mod tests {
         assert_ne!(h_b1, h_b1p, "branches must conflict at height 1");
 
         let mut v0 = ConsensusState::new(v0_addr);
+        // gate wedge-276272: verify_block now resolves the parent post-state, which
+        // needs the ancestor bodies cached. Committed is 0 and every branch block is
+        // empty, so their post-roots are the convention-invariant empty root; the
+        // 535004 lock property under test is unchanged, this only supplies the bodies
+        // the resolve walk reads.
+        for b in [&b1, &b2, &b3, &b1p, &b2p, &b3p] {
+            v0.cache_block(b.clone()).expect("cache branch block for resolve");
+        }
 
         // Height 1: V0 votes BOTH bottom blocks. No QC exists yet, so V0 is not
         // committed to any branch and verify_block accepts both.

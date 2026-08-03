@@ -7,10 +7,11 @@
 //! semantics the node produces: per-write atomic batches of flat puts, SMT
 //! node puts, and the `smt/root` record.
 //!
-//! Fixture shape mirrors the verified identity from the F4 diagnosis:
-//! `header(H).state_root` is the PRE-state of H, so `block_t` carries `r0`
-//! (the root before block T's effect) and `block_t1` carries `r1` (the root
-//! the audited copy stores).
+//! Fixture shape follows the post-state convention (gate wedge-276272):
+//! `header(H).state_root` is the POST-state of H, so `block_t` (height T) carries
+//! `r1` (post-state(T), the root the audited copy stores), and `block_t1` carries
+//! `r1` too (post-state(T+1) == post-state(T) for the empty successor). `r0`
+//! (pre-state, post-state(T-1)) is retained for the off-by-one trap fixture.
 
 #![allow(dead_code)]
 
@@ -239,25 +240,29 @@ pub fn build_fixture(tag: &str, spec: FixtureSpec) -> Fixture {
         apply_state_chunked(&mut db, &spec.pre_state)
     };
 
-    let block_t = Block {
-        height: spec.t,
-        round: 0,
-        parent_hash: [0x55; 32],
-        state_root: r0,
-        txs: vec![],
-    };
-
+    // Post-state convention (gate wedge-276272): the header at height T carries
+    // post-state(T). Apply block-T's effect FIRST, producing r1, then stamp r1
+    // into block_t. r0 (pre-state, post-state(T-1)) is retained for tests that
+    // build the OLD-convention off-by-one header explicitly.
     let r1 = if spec.oneshot {
         apply_state_oneshot(&mut db, &spec.step_state)
     } else {
         apply_state_chunked(&mut db, &spec.step_state)
     };
 
+    let block_t = Block {
+        height: spec.t,
+        round: 0,
+        parent_hash: [0x55; 32],
+        state_root: r1, // post-state(T)
+        txs: vec![],
+    };
+
     let block_t1 = Block {
         height: spec.t + 1,
         round: 0,
         parent_hash: hash_block_v1(&block_t).expect("hash block t"),
-        state_root: r1,
+        state_root: r1, // post-state(T+1) == post-state(T) for the empty successor
         txs: vec![],
     };
 

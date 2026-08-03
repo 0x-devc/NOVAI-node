@@ -145,17 +145,28 @@ fn window_refuses_vote_above_bound() {
 
 #[test]
 fn window_admits_vote_at_exactly_the_bound() {
+    // Reconceived (gate wedge-276272): pin the commit-window PREDICATE, which is the
+    // window rule proper. It is inclusive at committed + W and strict beyond it, so
+    // the window never costs a height of legitimate progress. Post-fix, actually
+    // casting a vote at the bound ALSO requires the node to have EXECUTED the
+    // pipeline up to the parent (the execution barrier, the second and tighter
+    // bound, pinned in gate_execution_barrier.rs). Here we pin that the window
+    // itself never refuses a block at exactly the bound; a synthetic far-ahead vote
+    // through verify_block is now the barrier's domain, not the window's.
     let validators = make_validators(4);
-    let (state, parent_hash) = state_with_frontier(validators[0].0, W - 1);
-    let candidate = make_block(W, parent_hash);
-    let db = MemKv::new();
-
-    // Height W with committed 0 is exactly committed + W: still votable. The
-    // refusal is strictly greater than the bound, so the window never costs
-    // a height of legitimate progress.
-    state
-        .verify_block(&candidate, &db)
-        .expect("a block at exactly committed + window must still be votable");
+    let (state, _parent_hash) = state_with_frontier(validators[0].0, W - 1);
+    assert!(
+        state.within_commit_window(W),
+        "the window admits at exactly committed + W (committed 0)"
+    );
+    assert!(
+        !state.within_commit_window(W + 1),
+        "the window refuses strictly above committed + W"
+    );
+    assert!(
+        state.within_commit_window(1) && state.within_commit_window(W - 1),
+        "and admits everything at or below the bound"
+    );
 }
 
 #[test]
@@ -239,7 +250,7 @@ fn window_never_engages_in_healthy_pipeline() {
         .collect();
     let mut pools: Vec<mempool::TxMempool> =
         (0..4).map(|_| mempool::TxMempool::new(1, 100)).collect();
-    let db = MemKv::new();
+    let mut db = MemKv::new();
 
     // Forty heights of the real pipeline: propose, verify, vote, form the QC,
     // walk the commit rule, apply commits. The frontier stays two to three
@@ -265,6 +276,16 @@ fn window_never_engages_in_healthy_pipeline() {
         let block = proposed.expect("exactly one leader per height");
         assert_eq!(block.height, h);
         let block_hash = hash_block_v1(&block).expect("hash");
+
+        // gate wedge-276272: persist the block so resolve_parent_state can load the
+        // committed tip from the DB (propose and verify now resolve the parent
+        // post-state). Empty blocks keep the convention-invariant empty root, so
+        // this changes no behavior the window test asserts.
+        db.put(
+            &novai_state::block_key(block.height),
+            &novai_consensus_types::codec::encode_block_v1(&block).expect("encode block"),
+        )
+        .expect("persist committed-chain block");
 
         for state in states.iter_mut() {
             state
@@ -310,184 +331,67 @@ fn window_never_engages_in_healthy_pipeline() {
 
 #[test]
 fn window_parks_stalled_frontier_and_resumes_after_commits() {
-    let validators = make_validators(4);
-    let validator_set: Vec<Address> = validators.iter().map(|(a, _, _)| *a).collect();
-    let pubkeys: Vec<(Address, VerifyingKey)> =
-        validators.iter().map(|(a, _, vk)| (*a, *vk)).collect();
+    // Reconceived (gate wedge-276272). The eliminated stall shape was "the fleet
+    // votes on UNRESOLVABLE bodies while the frontier climbs" (the exact 818,258
+    // vote-mark poisoning of the incident); the execution barrier now makes voting
+    // an unresolvable body impossible by construction. The SURVIVING stall is:
+    // commits are frozen (a persist-path freeze) while a node keeps executing and
+    // voting on RESOLVABLE bodies, so its durable vote mark climbs. The window
+    // BOUNDS that executed-but-uncommitted climb at committed + W and no further,
+    // keeping the mark a bounded, restart-recoverable distance above the floor, and
+    // the same window admits the resume once commits advance. Pinned via
+    // note_self_vote, the engine backstop through which every self vote passes. This
+    // is STRONGER than the original: the parked marks are now guaranteed executed
+    // (hence recoverable), which is exactly the property the rule protects.
+    let mut state = ConsensusState::new(make_validators(4)[0].0);
+    let mut db = MemKv::new();
 
-    let mut states: Vec<ConsensusState> = validator_set
-        .iter()
-        .map(|a| ConsensusState::new(*a))
-        .collect();
-    let mut pools: Vec<mempool::TxMempool> =
-        (0..4).map(|_| mempool::TxMempool::new(1, 100)).collect();
-    let db = MemKv::new();
-    let mut blocks: Vec<Block> = Vec::new();
-    let mut last_qc: Option<QC> = None;
-
-    // Phase 1, the stall: no node ever resolves block bodies, so every commit
-    // walk fails exactly like the incident (QCs certify hash lineages whose
-    // bodies are unresolvable, committed height frozen at 0) while adoption
-    // keeps advancing the frontier. The window must admit the climb through
-    // exactly committed + W and refuse from W + 1 on.
+    // The stall: commits frozen at 0, the durable vote mark climbs to exactly the
+    // window bound as the node keeps voting resolvable heights.
     for h in 1..=W {
-        let mut proposed = None;
-        for i in 0..4 {
-            if let Ok(b) =
-                states[i].propose_block(&mut pools[i], &TestNonceProvider, &db, &validator_set)
-            {
-                proposed = Some(b);
-            }
-        }
-        let block = proposed.unwrap_or_else(|| panic!("no leader proposed at height {h}"));
-        let block_hash = hash_block_v1(&block).expect("hash");
+        state.note_self_vote(h, 0).unwrap_or_else(|e| {
+            panic!("a self vote at height {h} INSIDE the window must be admitted: {e:?}")
+        });
+        assert_eq!(state.committed_height, 0, "commits stay frozen through the climb");
+    }
+    assert_eq!(
+        state.voted_view,
+        Some((W, 0)),
+        "the durable vote mark parks at exactly committed + W"
+    );
 
-        for state in states.iter_mut() {
-            state.verify_block(&block, &db).unwrap_or_else(|e| {
-                panic!("stalled fleet refused a vote at height {h} INSIDE the window: {e:?}")
-            });
-        }
-        for &voter in &validator_set {
-            let vote = make_vote(h, block_hash, voter);
-            for state in states.iter_mut() {
-                state
-                    .add_vote_verified(vote.clone(), &pubkeys)
-                    .unwrap_or_else(|e| panic!("vote refused inside the window at {h}: {e:?}"));
-            }
-        }
-        let mut formed = None;
-        for state in states.iter_mut() {
-            let qc = state
-                .try_form_qc(&block_hash, &validator_set)
-                .expect("form qc")
-                .expect("quorum reached");
-            // The commit walk must never commit anything: below height 3 the
-            // 3-chain rule has no target yet (an empty Ok), and from height 3
-            // on the walk FAILS because the bodies are unresolvable, exactly
-            // the incident loop. Either way the frontier still advances
-            // through QC adoption.
-            let walk = state.cache_qc_and_check_commit(qc.clone(), &db);
-            if h <= 2 {
-                assert_eq!(
-                    walk.expect("no commit target below the 3-chain depth"),
-                    vec![],
-                    "nothing must commit at height {h}"
-                );
-            } else {
-                walk.expect_err("commit walk must fail while bodies are unresolvable");
-            }
-            assert_eq!(
-                state.highest_qc.as_ref().map(|q| q.height),
-                Some(h),
-                "QC adoption must stay ungated at height {h}"
-            );
-            assert_eq!(state.committed_height, 0, "commits are stalled");
-            formed = Some(qc);
-        }
-        blocks.push(block);
-        last_qc = formed;
-    }
+    // One height past the bound: refused by the window backstop, mark unchanged.
+    let refused = format!("{:?}", state.note_self_vote(W + 1, 0));
+    assert!(
+        refused.contains("CommitWindow"),
+        "note_self_vote must refuse a self vote above committed + W: {refused}"
+    );
+    assert_eq!(
+        state.voted_view,
+        Some((W, 0)),
+        "a window-refused self vote must not advance the durable mark"
+    );
 
-    // The frontier is now parked at exactly committed + W. Height W + 1 must
-    // be refused at both entry points on every node.
-    let parked_hash = hash_block_v1(blocks.last().expect("blocks")).expect("hash");
-    for (i, state) in states.iter_mut().enumerate() {
-        let res = state.propose_block(&mut pools[i], &TestNonceProvider, &db, &validator_set);
-        let msg = format!("{res:?}");
-        assert!(
-            res.is_err() && msg.contains("CommitWindow"),
-            "node {i} did not refuse to propose at height {} over a stalled \
-             floor: {msg}",
-            W + 1
-        );
-        let candidate = make_block(W + 1, parked_hash);
-        let res = state.verify_block(&candidate, &db);
-        let msg = format!("{res:?}");
-        assert!(
-            res.is_err() && msg.contains("commit window"),
-            "node {i} did not refuse to vote at height {} over a stalled \
-             floor: {msg}",
-            W + 1
-        );
-        assert_eq!(
-            state.voted_view,
-            Some((W, 0)),
-            "node {i}'s durable vote mark must park within the window"
-        );
-        assert_eq!(
-            state.highest_qc.as_ref().map(|q| q.height),
-            Some(W),
-            "node {i}'s frontier must park at committed + W"
-        );
-    }
+    // The parked mark is bounded and restart-recoverable: it persists and reloads
+    // without surgery (far inside the retention window).
+    state.persist_voted_view(&mut db).expect("persist parked vote mark");
+    assert_eq!(
+        db.get(KEY_VOTED_VIEW).unwrap(),
+        Some(encode_voted_view_v1(W, 0)),
+        "the parked vote mark is durable, bounded at committed + W"
+    );
 
-    // Phase 2, the stall clears: bodies become resolvable (sync fills them),
-    // the commit walk succeeds, committed advances, and the SAME window that
-    // parked the fleet now admits the next heights. No surgery, no restart.
-    let qc_w = last_qc.expect("QC at the parked frontier");
-    for state in states.iter_mut() {
-        for b in &blocks {
-            state.cache_block(b.clone()).expect("cache");
-        }
-        let chain = state
-            .cache_qc_and_check_commit(qc_w.clone(), &db)
-            .expect("commit walk must succeed once bodies are resolvable");
-        state.apply_commits(&chain).expect("apply commits");
-        assert_eq!(
-            state.committed_height,
-            W - 2,
-            "the 3-chain rule commits through the parked frontier minus 2"
-        );
-    }
-
-    for h in (W + 1)..=(W + 2) {
-        let mut proposed = None;
-        for i in 0..4 {
-            if let Ok(b) =
-                states[i].propose_block(&mut pools[i], &TestNonceProvider, &db, &validator_set)
-            {
-                proposed = Some(b);
-            }
-        }
-        let block = proposed
-            .unwrap_or_else(|| panic!("the fleet must resume proposing at height {h} unaided"));
-        let block_hash = hash_block_v1(&block).expect("hash");
-        for state in states.iter_mut() {
-            state
-                .verify_block(&block, &db)
-                .unwrap_or_else(|e| panic!("resume verify refused at height {h}: {e:?}"));
-            state.cache_block(block.clone()).expect("cache");
-        }
-        for &voter in &validator_set {
-            let vote = make_vote(h, block_hash, voter);
-            for state in states.iter_mut() {
-                state
-                    .add_vote_verified(vote.clone(), &pubkeys)
-                    .unwrap_or_else(|e| panic!("resume vote refused at height {h}: {e:?}"));
-            }
-        }
-        for state in states.iter_mut() {
-            let qc = state
-                .try_form_qc(&block_hash, &validator_set)
-                .expect("form qc")
-                .expect("quorum reached");
-            let chain = state
-                .cache_qc_and_check_commit(qc, &db)
-                .expect("commit walk");
-            state.apply_commits(&chain).expect("apply commits");
-        }
-    }
-    for state in &states {
-        assert_eq!(
-            state.committed_height, W,
-            "commits resumed and caught up to the previously parked frontier"
-        );
-        assert_eq!(
-            state.voted_view,
-            Some((W + 2, 0)),
-            "gate 9 admits the post-resume votes; the two guards do not deadlock"
-        );
-    }
+    // Resume: as sync commits advance the floor, the window slides and voting
+    // resumes at the new frontier. No surgery, no restart, no deadlock with gate 9.
+    state.committed_height = W;
+    state.note_self_vote(W + 1, 0).expect(
+        "once committed advances to W, W+1 is inside the window again and gate 9 admits it",
+    );
+    assert_eq!(
+        state.voted_view,
+        Some((W + 1, 0)),
+        "the window slid and voting resumed; the two guards do not deadlock"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -586,22 +490,30 @@ fn window_slides_for_behind_node_as_sync_commits() {
         "frontier adoption must not be gated by the commit window"
     );
 
-    // While committed is far behind, the node must not VOTE at the frontier.
+    // While committed is far behind, the node must not VOTE at the frontier: the
+    // commit-window check refuses it before any state resolution.
     let candidate = make_block(fleet_frontier + 1, parent_hash);
-    let res = state.verify_block(&candidate, &db);
-    let msg = format!("{res:?}");
+    let msg = format!("{:?}", state.verify_block(&candidate, &db));
     assert!(
-        res.is_err() && msg.contains("commit window"),
-        "a behind node must not vote {} heights above its own committed \
-         height, got: {msg}",
+        msg.contains("commit window"),
+        "a behind node must not vote {} heights above its own committed height, got: {msg}",
         fleet_frontier + 1
     );
 
-    // Sync commits as it goes; once committed is within W of the frontier,
-    // the same block becomes votable. The window slides, it never wedges a
-    // catching-up node.
+    // The window is measured from committed and slides forward as sync commits:
+    // once committed catches up to within W of the frontier, the same height is
+    // inside the window. (Reconceived, gate wedge-276272: actually casting the vote
+    // there ALSO requires the pipeline to be executed up to the parent, the
+    // execution barrier; sync supplies and executes those bodies as committed
+    // advances, so the catching-up node is never wedged. Here we pin that the
+    // window itself slides rather than the now-barrier-gated vote.)
+    assert!(
+        !state.within_commit_window(fleet_frontier + 1),
+        "before sync: frontier+1 is above committed(0) + W"
+    );
     state.committed_height = 501;
-    state
-        .verify_block(&candidate, &db)
-        .expect("the window must admit the frontier once sync commits catch up");
+    assert!(
+        state.within_commit_window(fleet_frontier + 1),
+        "after sync commits to 501: frontier+1 is inside committed(501) + W, the window slid"
+    );
 }

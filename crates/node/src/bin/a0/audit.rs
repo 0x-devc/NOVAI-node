@@ -337,34 +337,49 @@ pub fn run(db_path: &str, expected_height: Option<u64>) -> Result<bool, String> 
                     Err(e) => r.fail("A6", &format!("qc verification failed: {e:?}")),
                 }
                 let block_t1 = &chain[0];
-                match rebuilt {
-                    Some(root) if block_t1.state_root == root => {
-                        r.pass("A7", &format!("header({}).state_root={}", t + 1, hex::encode(root)));
-                    }
-                    Some(root) => r.fail(
-                        "A7",
-                        &format!(
-                            "header({}).state_root={} rebuilt={} (lag-1 identity violated)",
-                            t + 1,
-                            hex::encode(block_t1.state_root),
-                            hex::encode(root)
-                        ),
-                    ),
-                    None => r.skip("A7", "no rebuilt root"),
-                }
+                // A7 (gate wedge-276272, lag-0): under the post-state convention the
+                // header at the AUDITED height T carries post-state(T) == rebuilt.
+                // (Was lag-1: the successor header(T+1) carried post-state(T).) A8
+                // still anchors the successor to block(T).
                 match ConsensusState::load_block(&db, t) {
-                    Ok(Some(block_t)) => match hash_block_v1(&block_t) {
-                        Ok(h) if block_t1.parent_hash == h => {
-                            r.pass("A8", &format!("block({}) anchors block({})", t, t + 1));
+                    Ok(Some(block_t)) => {
+                        match rebuilt {
+                            Some(root) if block_t.state_root == root => {
+                                r.pass(
+                                    "A7",
+                                    &format!("header({}).state_root={}", t, hex::encode(root)),
+                                );
+                            }
+                            Some(root) => r.fail(
+                                "A7",
+                                &format!(
+                                    "header({}).state_root={} rebuilt={} (lag-0 identity violated)",
+                                    t,
+                                    hex::encode(block_t.state_root),
+                                    hex::encode(root)
+                                ),
+                            ),
+                            None => r.skip("A7", "no rebuilt root"),
                         }
-                        Ok(_) => r.fail(
-                            "A8",
-                            &format!("block({}) does not anchor block({})", t, t + 1),
-                        ),
-                        Err(e) => r.fail("A8", &format!("hash block {t}: {e:?}")),
-                    },
-                    Ok(None) => r.fail("A8", &format!("block row {t} absent")),
-                    Err(e) => r.fail("A8", &format!("load block {t}: {e:?}")),
+                        match hash_block_v1(&block_t) {
+                            Ok(h) if block_t1.parent_hash == h => {
+                                r.pass("A8", &format!("block({}) anchors block({})", t, t + 1));
+                            }
+                            Ok(_) => r.fail(
+                                "A8",
+                                &format!("block({}) does not anchor block({})", t, t + 1),
+                            ),
+                            Err(e) => r.fail("A8", &format!("hash block {t}: {e:?}")),
+                        }
+                    }
+                    Ok(None) => {
+                        r.skip("A7", "no block at audited height");
+                        r.fail("A8", &format!("block row {t} absent"));
+                    }
+                    Err(e) => {
+                        r.skip("A7", "load block failed");
+                        r.fail("A8", &format!("load block {t}: {e:?}"));
+                    }
                 }
             }
             EvidenceOutcome::Broken(why) => {

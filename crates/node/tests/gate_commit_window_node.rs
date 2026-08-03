@@ -16,7 +16,7 @@
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use novai_consensus_types::codec::{
-    encode_proposal_v1_unsigned, encode_vote_v1_unsigned, encode_voted_view_v1, hash_block_v1,
+    encode_proposal_v1_unsigned, encode_vote_v1_unsigned, hash_block_v1,
 };
 use novai_consensus_types::{Block, Proposal, SignedProposal, Vote, QC};
 use novai_crypto::{address_from_pubkey, sign_bytes};
@@ -181,10 +181,15 @@ fn follower_refuses_vote_above_commit_window() {
 }
 
 #[test]
-fn follower_votes_at_exactly_the_window_bound() {
+fn follower_at_bound_refused_by_execution_barrier() {
+    // Reconceived (gate wedge-276272): at exactly committed + W the commit WINDOW
+    // admits (the block is within the window), but the follower has not executed the
+    // pipeline up to the parent, so the EXECUTION BARRIER refuses the vote and no
+    // durable mark advances. This is the correct two-bound composition at the
+    // boundary: the window is inclusive, the barrier is the second and tighter gate.
+    // Adoption stays ungated, so the follower still tracks the frontier it cannot
+    // vote past.
     let validators = make_validators(4);
-    // The leader for a block at W is index (W - 1) % 4 = 3; validator 1 is
-    // again a follower.
     let node = make_node(&validators, 1);
 
     let parent = make_block(W - 1, [0xAA; 32]);
@@ -193,19 +198,32 @@ fn follower_votes_at_exactly_the_window_bound() {
     let candidate = make_block(W, parent_hash);
     let signed = signed_proposal(candidate, justify, &validators);
 
-    node.handle_proposal(signed)
-        .expect("a block at exactly committed + window must still be votable");
+    let err = node.handle_proposal(signed).expect_err(
+        "the execution barrier must refuse a vote whose parent the node has not executed",
+    );
+    assert!(
+        !err.contains("commit window"),
+        "the refusal is the execution barrier, not the window (the block is AT the bound): {err}"
+    );
 
     {
         let state = node.state.lock().unwrap();
-        assert_eq!(state.voted_view, Some((W, 0)));
+        assert_eq!(
+            state.voted_view, None,
+            "a barrier-refused vote leaves no durable in-memory mark"
+        );
+        assert_eq!(
+            state.highest_qc.as_ref().map(|q| q.height),
+            Some(W - 1),
+            "adoption stays ungated: the follower tracks the frontier QC it cannot vote past"
+        );
     }
     {
         let db = node.db.lock().unwrap();
         assert_eq!(
             db.get(KEY_VOTED_VIEW).unwrap(),
-            Some(encode_voted_view_v1(W, 0)),
-            "the boundary vote is a real vote: durably marked before broadcast"
+            None,
+            "no durable vote mark on disk for a barrier-refused vote"
         );
     }
 }
@@ -271,10 +289,13 @@ fn leader_refuses_to_propose_above_commit_window() {
 }
 
 #[test]
-fn leader_proposes_at_exactly_the_window_bound() {
+fn leader_at_bound_parked_by_execution_barrier() {
+    // Reconceived (gate wedge-276272): at exactly committed + W the commit window
+    // admits proposing, but the leader has not executed the pipeline to the parent,
+    // so the EXECUTION BARRIER makes propose a quiet skip (resolve maps to the same
+    // NotLeader-shaped skip), with no self-vote and no durable mark. The window is
+    // inclusive; the barrier is the tighter gate.
     let validators = make_validators(4);
-    // With the frontier at W - 1 the intended height is exactly W, and the
-    // leader is index (W - 1 + 0) % 4 = 3.
     let node = make_node(&validators, 3);
 
     let parent = make_block(W - 1, [0xAA; 32]);
@@ -294,17 +315,15 @@ fn leader_proposes_at_exactly_the_window_bound() {
     let mut pool = mempool::TxMempool::new(1, 100);
     let proposed = node
         .try_propose_block(&mut pool, &TestNonceProvider)
-        .expect("proposing at the bound must succeed");
+        .expect("the barrier refusal is a quiet skip, never an error");
     assert!(
-        proposed,
-        "a block at exactly committed + window is still proposable; the \
-         window must not cost a height of legitimate progress"
+        !proposed,
+        "the leader cannot propose at the bound without an executed parent; the barrier parks it"
     );
 
     let state = node.state.lock().unwrap();
     assert_eq!(
-        state.voted_view,
-        Some((W, 0)),
-        "the boundary proposal self-vote is a real vote with a durable mark"
+        state.voted_view, None,
+        "a barrier-parked leader casts no self-vote and leaves no durable mark"
     );
 }

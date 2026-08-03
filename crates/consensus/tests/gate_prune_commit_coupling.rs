@@ -205,8 +205,6 @@ fn no_commit_drive_never_deletes_consensus_rows() {
         .iter()
         .map(|a| ConsensusState::new(*a))
         .collect();
-    let mut pools: Vec<mempool::TxMempool> =
-        (0..4).map(|_| mempool::TxMempool::new(1, 100)).collect();
     let mut dbs: Vec<RecordingKv> = (0..4).map(|_| RecordingKv::new()).collect();
 
     struct NP;
@@ -220,42 +218,32 @@ fn no_commit_drive_never_deletes_consensus_rows() {
     // every commit walk fails) while the frontier climbs to the
     // commit-window park, with the node-shaped persists (highest QC and
     // vote mark) running against the recorded stores every height.
+    // Reconceived (gate wedge-276272): post-fix a node cannot vote an UNRESOLVABLE
+    // body, so the eliminated "vote on unresolvable data" climb is impossible. The
+    // surviving stall a behind node sees: it ADOPTS the fleet frontier (ungated)
+    // and advances its durable marks while commits stall (bodies not yet synced).
+    // Each height adopts the fleet's QC (the commit walk finds no bodies and commits
+    // nothing) and advances the durable vote mark via the engine backstop, running
+    // the node-shaped cursor persists every height, committed frozen at 0.
     for h in 1..=1024u64 {
-        let mut proposed = None;
-        for i in 0..4 {
-            if let Ok(b) = states[i].propose_block(&mut pools[i], &NP, &dbs[i], &validator_set) {
-                proposed = Some(b);
-            }
-        }
-        let block = proposed.unwrap_or_else(|| panic!("no leader proposed at height {h}"));
-        let block_hash = hash_block_v1(&block).expect("hash");
-
+        let frontier = Block {
+            height: h,
+            round: 0,
+            parent_hash: [0xCC; 32],
+            state_root: [0u8; 32],
+            txs: vec![],
+        };
+        let fqc = QC {
+            height: h,
+            round: 0,
+            block_hash: hash_block_v1(&frontier).expect("hash"),
+            votes: vec![],
+        };
         for (state, db) in states.iter_mut().zip(dbs.iter_mut()) {
+            let _ = state.cache_qc_and_check_commit(fqc.clone(), db);
             state
-                .verify_block(&block, db)
-                .unwrap_or_else(|e| panic!("vote refused inside the window at {h}: {e:?}"));
-        }
-        for &voter in &validator_set {
-            let vote = make_vote(h, block_hash, voter);
-            for state in states.iter_mut() {
-                state
-                    .add_vote_verified(vote.clone(), &pubkeys)
-                    .unwrap_or_else(|e| panic!("vote add failed at {h}: {e:?}"));
-            }
-        }
-        for (state, db) in states.iter_mut().zip(dbs.iter_mut()) {
-            let qc = state
-                .try_form_qc(&block_hash, &validator_set)
-                .expect("form qc")
-                .expect("quorum reached");
-            if h > 2 {
-                state
-                    .cache_qc_and_check_commit(qc, db)
-                    .expect_err("commit walk must fail while bodies are unresolvable");
-            } else {
-                // Below the 3-chain depth there is no commit target yet.
-                assert_eq!(state.cache_qc_and_check_commit(qc, db).unwrap(), vec![]);
-            }
+                .note_self_vote(h, 0)
+                .unwrap_or_else(|e| panic!("self-vote inside the window at {h}: {e:?}"));
             state.persist_highest_qc(db).expect("persist hqc");
             state.persist_voted_view(db).expect("persist voted view");
             assert_eq!(state.committed_height, 0, "commits are stalled");

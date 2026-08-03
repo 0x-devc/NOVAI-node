@@ -24,7 +24,7 @@
 //! today and must keep passing after the fix.
 
 use ed25519_dalek::SigningKey;
-use novai_consensus_types::{Block, Vote, QC};
+use novai_consensus_types::{block_hash, Block, BlockResponse, Vote, QC};
 use novai_crypto::address_from_pubkey;
 use novai_node::consensus_node::ConsensusNode;
 use novai_state::Kv;
@@ -96,50 +96,67 @@ fn two_validator_node() -> (ConsensusNode, SigningKey, Address) {
     (node, sk_a, addr_a)
 }
 
-/// Cache a genesis-rooted 3-block chain (heights 1, 2, 3) whose only correct
-/// pre-state that matters is block 1's (`empty_smt_root()`), and return the QC
-/// for height 3. Delivering that QC drives the 3-chain rule to commit exactly
-/// height 1 (`commit_target = qc_height - 2 = 1`).
-fn cache_three_block_chain(node: &ConsensusNode, sk_a: &SigningKey, addr_a: Address) -> QC {
+/// Establish a committed base at height 1: block1 (empty post-state root)
+/// persisted as the committed tip with `KEY_SMT_ROOT` set to match its header,
+/// `committed_height` = 1, then cache the pending chain 2,3,4 and return the QC for
+/// height 4. Delivering that QC drives the 3-chain rule to commit exactly height 2
+/// (`commit_target = qc_height - 2 = 2`), whose PARENT is the committed tip block1.
+/// The lag-0 parent-header pre-commit check (gate wedge-276272) then compares
+/// block1's post-state header against the local root.
+fn committed_at_1_plus_pending(node: &ConsensusNode, sk_a: &SigningKey, addr_a: Address) -> QC {
     let empty = novai_execution::empty_smt_root();
     let block1 = Block {
         height: 1,
         round: 0,
         parent_hash: [0u8; 32],
-        state_root: empty, // correct pre-state of height 1 (genesis empty root)
+        state_root: empty, // post-state(1) == committed root (empty chain)
         txs: vec![],
     };
+    {
+        let mut db = node.db.lock().unwrap();
+        db.put(
+            &novai_state::block_key(1),
+            &novai_consensus_types::codec::encode_block_v1(&block1).unwrap(),
+        )
+        .unwrap();
+        db.put(
+            novai_state::KEY_SMT_ROOT,
+            &novai_state::encode_smt_root_v1(&empty),
+        )
+        .unwrap();
+    }
     let block2 = next_block(&block1, empty);
     let block3 = next_block(&block2, empty);
-    let qc3 = certifying_qc(sk_a, addr_a, &block3);
+    let block4 = next_block(&block3, empty);
+    let qc4 = certifying_qc(sk_a, addr_a, &block4);
     {
         let mut state = node.state.lock().unwrap();
+        state.committed_height = 1;
         state.cache_block(block1).unwrap();
         state.cache_block(block2).unwrap();
         state.cache_block(block3).unwrap();
+        state.cache_block(block4).unwrap();
     }
-    qc3
+    qc4
 }
 
-/// RED today, GREEN after the fix.
-///
-/// The node's persisted `KEY_SMT_ROOT` is drifted to a value that does not match
-/// the pre-state that block 1's header declares. Today the catch-up commit path
-/// has no root check, so it advances committed state silently. The fix must make
-/// the commit HALT (no advance, safety error) instead.
+/// The catch-up commit must HALT when the local root has diverged from the
+/// committed TIP's post-state header (the lag-0 parent-header check, gate
+/// wedge-276272). Migrated from the pre-flip form (which compared to_commit[0]'s
+/// own header); both assertions, halt-on-divergence and the no-false-halt twin,
+/// are preserved.
 #[test]
 fn catchup_commit_halts_on_stateroot_divergence() {
     let (node, sk_a, addr_a) = two_validator_node();
-    let qc3 = cache_three_block_chain(&node, &sk_a, addr_a);
+    let qc4 = committed_at_1_plus_pending(&node, &sk_a, addr_a);
 
-    // Inject the divergence: overwrite the local root with a value that is not
-    // block 1's declared pre-state. This stands in for node2's already-drifted
-    // executed state without reproducing the (separate, still-open) root cause.
+    // Inject the divergence: overwrite the local root so it no longer matches the
+    // committed tip header (block1's post-state root).
     let drift = [0x99u8; 32];
     assert_ne!(
         drift,
         novai_execution::empty_smt_root(),
-        "the injected drift root must differ from block 1's pre-state, or the test is vacuous"
+        "the injected drift must differ from the committed tip's post-state root, or it is vacuous"
     );
     {
         let mut db = node.db.lock().unwrap();
@@ -151,52 +168,113 @@ fn catchup_commit_halts_on_stateroot_divergence() {
     }
 
     let committed_before = node.state.lock().unwrap().committed_height;
-    assert_eq!(committed_before, 0, "precondition: fresh node at committed_height 0");
+    assert_eq!(committed_before, 1, "precondition: committed at the tip (height 1)");
 
-    // Drive the QC-driven catch-up commit (the unchecked path node2 was on).
-    let result = node.handle_qc(qc3);
-
+    let result = node.handle_qc(qc4);
     let committed_after = node.state.lock().unwrap().committed_height;
 
-    // Required post-fix behavior: the catch-up commit must detect that its
-    // current root does not match the committed block's declared pre-state and
-    // HALT, leaving committed_height unchanged.
     assert_eq!(
-        committed_after, 0,
-        "SILENT DIVERGENCE: catch-up commit advanced committed_height 0 -> {committed_after} \
-         while current_root (injected drift) != to_commit[0].state_root (block 1 pre-state). \
-         The catch-up commit path must HALT on a pre-state mismatch, not advance. result={result:?}"
+        committed_after, 1,
+        "SILENT DIVERGENCE: the catch-up commit of height 2 advanced committed_height 1 -> \
+         {committed_after} while the committed tip header (block1) no longer matches the local \
+         root. It must HALT, not advance. result={result:?}"
     );
     assert!(
         result.is_err(),
-        "catch-up commit must return a safety error on a state-root pre-state mismatch; \
-         got Ok (silent commit)"
+        "the catch-up commit must return a safety error on a committed-tip divergence; got Ok"
+    );
+    let msg = format!("{result:?}");
+    assert!(
+        msg.contains("CONSENSUS SAFETY HALT: catch-up commit state root mismatch"),
+        "the halt must be the catch-up commit halt; got: {msg}"
     );
 }
 
-/// Liveness guard and harness soundness proof: with a matching root the same
-/// setup must still commit height 1. A correct-but-behind node must never be
-/// false-halted. Passes today and must keep passing after the fix.
+/// Liveness guard / no-false-halt: with the local root matching the committed tip
+/// header, the same catch-up commit must proceed (committed advances to 2). A
+/// correct-but-behind node must never be false-halted.
 #[test]
 fn catchup_commit_proceeds_when_stateroot_matches() {
     let (node, sk_a, addr_a) = two_validator_node();
-    let qc3 = cache_three_block_chain(&node, &sk_a, addr_a);
+    let qc4 = committed_at_1_plus_pending(&node, &sk_a, addr_a);
+    // No drift: KEY_SMT_ROOT already equals block1's post-state root (empty).
 
-    // No drift: the fresh node has no KEY_SMT_ROOT, which defaults to
-    // empty_smt_root() (the F3 canonical empty root), matching block 1's
-    // pre-state. This is the genesis catch-up scenario.
     let committed_before = node.state.lock().unwrap().committed_height;
-    assert_eq!(committed_before, 0, "precondition: fresh node at committed_height 0");
+    assert_eq!(committed_before, 1, "precondition: committed at the tip (height 1)");
 
-    let result = node.handle_qc(qc3);
-
+    let result = node.handle_qc(qc4);
     let committed_after = node.state.lock().unwrap().committed_height;
+
     assert!(
         result.is_ok(),
-        "correct-root catch-up must succeed (no false halt); got {result:?}"
+        "a correct-root catch-up must succeed (no false halt); got {result:?}"
     );
     assert_eq!(
-        committed_after, 1,
-        "correct-root catch-up must advance committed_height to 1 (3-chain commit of height 1)"
+        committed_after, 2,
+        "correct-root catch-up must commit height 2 (3-chain commit at commit_target 2)"
+    );
+}
+
+/// Site 4 guard (gate wedge-276272): the sync C-01 check is a LOCAL self-check
+/// under the post-state convention: the committed tip's header must equal the local
+/// root. If the local root has drifted from the committed tip header, sync must
+/// reject (local divergence), regardless of the incoming block's own root. The
+/// incoming block here carries the DRIFTED root, so the old first-synced-block
+/// comparison would pass; only the local-tip self-check catches it.
+#[test]
+fn sync_rejects_when_local_tip_header_diverges_from_local_root() {
+    let (node, sk_a, addr_a) = two_validator_node();
+    let empty = novai_execution::empty_smt_root();
+    let block1 = Block {
+        height: 1,
+        round: 0,
+        parent_hash: [0u8; 32],
+        state_root: empty, // committed tip header (post-state)
+        txs: vec![],
+    };
+    let drift = [0x99u8; 32];
+    {
+        let mut db = node.db.lock().unwrap();
+        db.put(
+            &novai_state::block_key(1),
+            &novai_consensus_types::codec::encode_block_v1(&block1).unwrap(),
+        )
+        .unwrap();
+        // Local root drifted away from the committed tip header.
+        db.put(
+            novai_state::KEY_SMT_ROOT,
+            &novai_state::encode_smt_root_v1(&drift),
+        )
+        .unwrap();
+    }
+    {
+        let mut state = node.state.lock().unwrap();
+        state.committed_height = 1;
+        state.cache_block(block1.clone()).unwrap();
+    }
+
+    // A sync response at height 2 that connects to the committed tip, whose OWN root
+    // equals the drifted local root (so the old blocks[0] comparison would pass).
+    let block2 = Block {
+        height: 2,
+        round: 0,
+        parent_hash: block_hash(&block1),
+        state_root: drift,
+        txs: vec![],
+    };
+    let response = BlockResponse {
+        responder: addr_a,
+        request_start: 2,
+        request_end: 2,
+        blocks: vec![block2.clone()],
+        qcs: vec![Some(certifying_qc(&sk_a, addr_a, &block2))],
+    };
+
+    let err = node.handle_block_response(response).expect_err(
+        "sync must reject when the local committed-tip header diverges from the local root",
+    );
+    assert!(
+        err.contains("local committed-tip header"),
+        "the rejection must be the local-tip self-check (site 4), got: {err}"
     );
 }

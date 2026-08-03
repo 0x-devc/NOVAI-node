@@ -92,20 +92,20 @@ fn t4_dropped_leaf_fails_a5() {
 
 #[test]
 fn t5_off_by_one_trap_fails_a7() {
-    // Craft a copy where header(T) carries the POST-state root r1 (the wrong
-    // convention) and header(T+1) carries r0. An implementation that compares
-    // the rebuilt root against header(T) would pass this copy; the correct
-    // identity check against header(T+1) must fail it.
+    // Craft a copy where header(T) carries the PRE-state root r0 (the OLD
+    // convention, post-state(T-1)) instead of post-state(T). An implementation that
+    // still compared against the successor header(T+1) would miss it; the lag-0
+    // identity check against header(T) must fail it (gate wedge-276272).
     let fx = build_fixture("t5_trap", FixtureSpec::default());
     {
         let mut db = fx.reopen();
         let block_t_trap = Block {
-            state_root: fx.r1,
+            state_root: fx.r0, // WRONG under the post-state convention: post-state(T-1)
             ..fx.block_t.clone()
         };
         let block_t1_trap = Block {
             parent_hash: hash_block_v1(&block_t_trap).expect("hash trap t"),
-            state_root: fx.r0,
+            state_root: fx.r1, // correct post-state(T+1) == post-state(T) for the empty successor
             ..fx.block_t1.clone()
         };
         db.put(

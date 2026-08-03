@@ -762,6 +762,23 @@ fn replay_unexecuted_blocks(storage: &mut Storage) -> u64 {
                 );
             }
         }
+
+        // Post-execution divergence check (gate wedge-276272): the replayed root
+        // must equal the block's post-state header, or boot execution has diverged.
+        let replayed_root = match storage.get(novai_state::KEY_SMT_ROOT) {
+            Ok(Some(bytes)) => novai_state::decode_smt_root_v1(&bytes)
+                .unwrap_or_else(|_| novai_execution::empty_smt_root()),
+            _ => novai_execution::empty_smt_root(),
+        };
+        if replayed_root != block.state_root {
+            fatal(format!(
+                "REPLAY FAILED: post-execution state root mismatch at height {height} \
+                 (executed={:02x?}, header={:02x?}). Local execution diverged from the committed \
+                 header. Wipe the data dir and resync from peers.",
+                &replayed_root[..8],
+                &block.state_root[..8],
+            ));
+        }
     }
 
     if let Err(e) = storage.put(KEY_EXECUTED_HEIGHT, &committed_height.to_be_bytes()) {

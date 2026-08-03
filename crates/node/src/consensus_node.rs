@@ -504,7 +504,7 @@ impl ConsensusNode {
     /// Called after `persist_commit_atomic` + `apply_commits` with the DB
     /// lock still held. Execution writes to different key namespaces than
     /// consensus persistence (no overlap), so this is safe.
-    fn execute_committed_blocks(&self, db: &mut Storage, blocks: &[Block]) {
+    fn execute_committed_blocks(&self, db: &mut Storage, blocks: &[Block]) -> Result<(), String> {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
         for block in blocks {
             let hash = novai_consensus_types::codec::hash_block_v1(block).ok();
@@ -526,8 +526,33 @@ impl ConsensusNode {
             tracing::info!(block_count, total_txs, "Committed blocks with transactions");
         }
         if let Some(ref cb) = self.commit_callback {
-            cb.on_commit(db, blocks);
+            for block in blocks {
+                cb.on_commit(db, std::slice::from_ref(block));
+                // Post-execution divergence check (gate wedge-276272): after
+                // executing a committed block, the persisted root must equal that
+                // block's post-state header. A mismatch is local divergence; halt.
+                // This is the lag-0 companion to the pre-commit check and extends
+                // coverage to the sync-path commits and boot replay.
+                let current_root = match db.get(novai_state::KEY_SMT_ROOT) {
+                    Ok(Some(bytes)) => novai_state::decode_smt_root_v1(&bytes)
+                        .map_err(|e| format!("Failed to decode SMT root: {e:?}"))?,
+                    Ok(None) => novai_execution::empty_smt_root(),
+                    Err(e) => return Err(format!("Failed to read SMT root: {e:?}")),
+                };
+                if current_root != block.state_root {
+                    return Err(format!(
+                        "CONSENSUS SAFETY HALT: post-execution state root mismatch at height {} \
+                         (executed={}, header={}). Local execution diverged from the committed \
+                         header; refusing to advance. Reseed from a good snapshot or wipe the data \
+                         dir and resync from peers.",
+                        block.height,
+                        hex::encode(&current_root[..8]),
+                        hex::encode(&block.state_root[..8]),
+                    ));
+                }
+            }
         }
+        Ok(())
     }
 
     /// Pre-execution state-root guard for the QC-driven catch-up commit path.
@@ -538,38 +563,55 @@ impl ConsensusNode {
     /// the QC / 3-chain catch-up path is never voted on locally, so it never hit
     /// that check; this restores the same comparison on that path.
     ///
-    /// A block header's `state_root` is the PRE-state of that block
-    /// (`post-state(N-1)`), and `to_commit[0]` is at `committed_height + 1`, so a
-    /// correct-but-behind node always satisfies
-    /// `to_commit[0].state_root == current_root` (the same invariant
-    /// `verify_block` and C-01 already enforce). A mismatch means the local
-    /// executed state has diverged from the committed chain; returning an error
-    /// halts the commit. The caller propagates it exactly as it already
-    /// propagates the `apply_commits` safety error, so the node stops committing
-    /// without advancing state and stays up for operator reseed. Absent root
-    /// defaults to `empty_smt_root()` to match execution, genesis, `verify_block`
-    /// and C-01.
+    /// A block header's `state_root` is the POST-state of that block
+    /// (`post-state(N)`, gate wedge-276272), so the committed TIP (the parent of
+    /// `to_commit[0]`, at `committed_height`) carries `post-state(committed)`, which
+    /// a correct-but-behind node's local root equals. This checks that identity
+    /// before applying `to_commit` on top; a mismatch means the local executed
+    /// state has diverged from the committed chain, and returning an error halts
+    /// the commit. The caller propagates it exactly as it already propagates the
+    /// `apply_commits` safety error, so the node stops committing without advancing
+    /// state and stays up for operator reseed. Absent root defaults to
+    /// `empty_smt_root()` to match execution and genesis. Skipped at genesis
+    /// (`committed_height == 0`), which has no committed tip to compare.
     fn verify_pre_commit_state_root(db: &Storage, to_commit: &[Block]) -> Result<(), String> {
         if to_commit.is_empty() {
             return Ok(());
         }
         let first = &to_commit[0];
+        // Post-state convention (gate wedge-276272): the committed tip's header
+        // carries post-state(committed) == KEY_SMT_ROOT. Compare the PARENT of
+        // to_commit[0] (the current committed tip) against the local root, BEFORE
+        // applying anything on top of it. Skip at genesis (nothing committed yet).
+        let tip_height = first.height - 1;
+        if tip_height == 0 {
+            return Ok(());
+        }
+        let tip = match ConsensusState::load_block(db, tip_height) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                return Err(format!(
+                    "CONSENSUS SAFETY HALT: catch-up commit committed-tip block {tip_height} missing"
+                ))
+            }
+            Err(e) => return Err(format!("Failed to load committed tip {tip_height}: {e:?}")),
+        };
         let current_root = match db.get(novai_state::KEY_SMT_ROOT) {
             Ok(Some(bytes)) => novai_state::decode_smt_root_v1(&bytes)
                 .map_err(|e| format!("Failed to decode SMT root: {e:?}"))?,
             Ok(None) => novai_execution::empty_smt_root(), // canonical empty root (matches execution/genesis)
             Err(e) => return Err(format!("Failed to read SMT root: {e:?}")),
         };
-        if first.state_root != current_root {
+        if tip.state_root != current_root {
             return Err(format!(
                 "CONSENSUS SAFETY HALT: catch-up commit state root mismatch at height {} \
                  (local={}, expected={}). Local executed state has diverged from the committed \
                  chain; refusing to commit (this height is the detection point, the divergence \
                  origin may be earlier). Reseed from a good snapshot or wipe the data dir and \
                  resync from peers.",
-                first.height,
+                tip_height,
                 hex::encode(&current_root[..8]),
-                hex::encode(&first.state_root[..8]),
+                hex::encode(&tip.state_root[..8]),
             ));
         }
         Ok(())
@@ -1269,34 +1311,48 @@ impl ConsensusNode {
             }
         }
 
-        // C-01 FIX: Verify synced blocks' state_root against our committed state.
-        // The first synced block's state_root must match the current SMT root in
-        // our DB. This prevents a malicious peer from injecting blocks with valid
-        // parent hashes but fabricated state roots from a different chain.
-        {
+        // C-01 (gate wedge-276272): local self-check. Under the post-state
+        // convention the committed tip's header carries post-state(committed) ==
+        // KEY_SMT_ROOT, so verify local consistency before applying synced blocks on
+        // top. The synced blocks themselves are validated by the anchor (parent
+        // linkage) above and by the post-execution check at commit; this replaces
+        // the old first-synced-block comparison, which is meaningless once the
+        // header carries a different height's post-state. Skip at genesis.
+        if committed_height > 0 {
             let current_root = if let Ok(Some(bytes)) = db.get(novai_state::KEY_SMT_ROOT) {
                 novai_state::decode_smt_root_v1(&bytes)
                     .map_err(|e| format!("Failed to decode SMT root: {e:?}"))?
             } else {
                 novai_execution::empty_smt_root() // canonical empty SMT root, matches execution and genesis
             };
-
-            if blocks[0].state_root != current_root {
+            let tip_root = match ConsensusState::load_block(&*db, committed_height) {
+                Ok(Some(b)) => b.state_root,
+                Ok(None) => {
+                    return Err(format!(
+                        "Sync rejected: local committed-tip block {committed_height} missing"
+                    ))
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Sync rejected: load committed tip {committed_height}: {e:?}"
+                    ))
+                }
+            };
+            if tip_root != current_root {
                 return Err(format!(
-                    "Sync rejected: state root mismatch at height {} \
-                     (local={}, peer={}). Peer may be on a different chain.",
-                    blocks[0].height,
+                    "Sync rejected: local committed-tip header {} does not match local root {} \
+                     at height {} (local divergence).",
+                    hex::encode(&tip_root[..8]),
                     hex::encode(&current_root[..8]),
-                    hex::encode(&blocks[0].state_root[..8]),
+                    committed_height,
                 ));
             }
 
             tracing::debug!(
                 count = blocks.len(),
                 start = blocks[0].height,
-                end = blocks.last().unwrap().height,
-                state_root = %hex::encode(&current_root[..8]),
-                "Synced blocks passed state root verification"
+                committed_height,
+                "Synced blocks passed local committed-tip self-check"
             );
         }
 
@@ -1393,7 +1449,7 @@ impl ConsensusNode {
                     state
                         .apply_commits(&to_commit)
                         .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during sync: {e:?}"))?;
-                    self.execute_committed_blocks(&mut db, &to_commit);
+                    self.execute_committed_blocks(&mut db, &to_commit)?;
                     tracing::info!(
                         committed_height = new_committed_height,
                         count = to_commit.len(),
@@ -1434,7 +1490,7 @@ impl ConsensusNode {
                     state
                         .apply_commits(&to_commit)
                         .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during sync: {e:?}"))?;
-                    self.execute_committed_blocks(&mut db, &to_commit);
+                    self.execute_committed_blocks(&mut db, &to_commit)?;
                     tracing::info!(
                         committed_height = new_committed_height,
                         count = to_commit.len(),
@@ -1940,7 +1996,7 @@ impl ConsensusNode {
                         state.apply_commits(&to_commit).map_err(|e| {
                             format!("CONSENSUS SAFETY VIOLATION during QC catch-up: {e:?}")
                         })?;
-                        self.execute_committed_blocks(&mut db, &to_commit);
+                        self.execute_committed_blocks(&mut db, &to_commit)?;
                         committed_height_for_prune = Some(new_committed_height);
                         tracing::debug!(
                             committed_height = new_committed_height,
@@ -2017,17 +2073,20 @@ impl ConsensusNode {
                 return Ok(());
             }
 
-            if let Err(e) = state.verify_block(block, &*db) {
-                tracing::debug!(
-                    height = block.height,
-                    round = block.round,
-                    tx_count = block.txs.len(),
-                    proposer = ?&signed_proposal.proposer[..4],
-                    error = %format!("{:?}", e),
-                    "VERIFY_DIAG: block verification FAILED"
-                );
-                return Err(format!("Block verification failed: {e:?}"));
-            }
+            let exec = match state.verify_block_execute(block, &*db) {
+                Ok(exec) => exec,
+                Err(e) => {
+                    tracing::debug!(
+                        height = block.height,
+                        round = block.round,
+                        tx_count = block.txs.len(),
+                        proposer = ?&signed_proposal.proposer[..4],
+                        error = %format!("{:?}", e),
+                        "VERIFY_DIAG: block verification FAILED"
+                    );
+                    return Err(format!("Block verification failed: {e:?}"));
+                }
+            };
 
             let recv_block_hash = novai_consensus_types::codec::hash_block_v1(block)
                 .map_err(|e| format!("Hash block failed: {e:?}"))?;
@@ -2046,6 +2105,12 @@ impl ConsensusNode {
             state
                 .cache_block(block.clone())
                 .map_err(|e| format!("Cache block failed: {e:?}"))?;
+
+            // Cache the block's speculative execution so a restarted node can
+            // rebuild its pending chain and later proposals resolve this parent
+            // (gate wedge-276272). Runs on verified execution regardless of whether
+            // gate 9 then refuses the vote below.
+            state.note_pending_exec(recv_block_hash, block.height, exec.post_root, exec.write_set);
 
             // Persist block to DB so the commit chain walk DB fallback can
             // recover it after in-memory cache eviction. Only write if no
@@ -2282,7 +2347,7 @@ impl ConsensusNode {
             drop(state);
 
             if !committed_blocks.is_empty() {
-                self.execute_committed_blocks(&mut db, &committed_blocks);
+                self.execute_committed_blocks(&mut db, &committed_blocks)?;
             }
             drop(db);
 
@@ -2398,7 +2463,7 @@ impl ConsensusNode {
         drop(state);
 
         if !committed_blocks.is_empty() {
-            self.execute_committed_blocks(&mut db, &committed_blocks);
+            self.execute_committed_blocks(&mut db, &committed_blocks)?;
         }
         drop(db);
 
