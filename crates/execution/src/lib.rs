@@ -6572,6 +6572,204 @@ pub fn append_smt_ops_for_state_ops<K: Kv>(
     Ok(new_root)
 }
 
+// ============================================================================
+// NON-PERSISTING BLOCK EXECUTION (gate wedge-276272, Stage A of the
+// execute-before-vote fix; also accelerate Tier 1 U2 plus the core of U3)
+// ============================================================================
+
+/// A read-through, non-persisting overlay over a parent state view.
+///
+/// `get`/`scan_prefix` consult the overlay's own pending map first, then the
+/// parent view; `apply_batch` records ops into the pending map instead of any
+/// database, so nothing is ever persisted. The pending map is an indexed ordered
+/// map (`BTreeMap`), NOT a linear-scan Vec: a block-scoped overlay through a
+/// linear scan is quadratic across a block (roughly three billion key compares at
+/// 100 tx, slower than the persisting path). Exact-key lookups are O(log n) and
+/// ordered iteration keeps scans deterministic.
+///
+/// `None` in the pending map is a tombstone: a delete that hides the parent view.
+pub struct BlockOverlay<'a, V: Kv> {
+    view: &'a V,
+    pending: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+}
+
+impl<'a, V: Kv> BlockOverlay<'a, V> {
+    #[must_use]
+    pub fn new(view: &'a V) -> Self {
+        Self {
+            view,
+            pending: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Construct an overlay pre-loaded with a write set (key to `Some(value)` for
+    /// a put, `None` for a delete tombstone). Used to present an ancestor-layered
+    /// parent state as a `Kv` for the next block's execution.
+    #[must_use]
+    pub fn with_write_set(
+        view: &'a V,
+        write_set: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    ) -> Self {
+        Self {
+            view,
+            pending: write_set,
+        }
+    }
+
+    /// Consume the overlay, returning its buffered write set: key to
+    /// `Some(value)` for a put, `None` for a delete. Sorted by key.
+    #[must_use]
+    pub fn into_write_set(self) -> std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> {
+        self.pending
+    }
+}
+
+impl<V: Kv> Kv for BlockOverlay<'_, V> {
+    type Error = V::Error;
+
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        match self.pending.get(key) {
+            Some(Some(v)) => Ok(Some(v.clone())),
+            Some(None) => Ok(None), // tombstone hides the parent view
+            None => self.view.get(key),
+        }
+    }
+
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
+        self.pending.insert(key.to_vec(), Some(value.to_vec()));
+        Ok(())
+    }
+
+    fn delete(&mut self, key: &[u8]) -> Result<(), Self::Error> {
+        self.pending.insert(key.to_vec(), None);
+        Ok(())
+    }
+
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+        // Start from the parent view's matching rows, then layer the pending
+        // overlay: puts override, tombstones remove. A BTreeMap keeps the merge
+        // sorted and deterministic (consensus-critical), matching every backend's
+        // scan order.
+        let mut merged: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        for (k, v) in self.view.scan_prefix(prefix)? {
+            merged.insert(k, v);
+        }
+        for (k, val) in self.pending.range(prefix.to_vec()..) {
+            if !k.starts_with(prefix) {
+                break; // ordered map: no later key can match this prefix
+            }
+            match val {
+                Some(v) => {
+                    merged.insert(k.clone(), v.clone());
+                }
+                None => {
+                    merged.remove(k);
+                }
+            }
+        }
+        Ok(merged.into_iter().collect())
+    }
+}
+
+impl<V: Kv> KvBatch for BlockOverlay<'_, V> {
+    fn apply_batch(&mut self, ops: &[WriteOp]) -> Result<(), Self::Error> {
+        for op in ops {
+            match op {
+                WriteOp::Put(k, v) => {
+                    self.pending.insert(k.clone(), Some(v.clone()));
+                }
+                WriteOp::Delete(k) => {
+                    self.pending.insert(k.clone(), None);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether a transaction applied or was skipped root-neutrally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxOutcome {
+    Applied,
+    Skipped,
+}
+
+/// The result of executing a block against a parent state view without
+/// persisting: the post-execution SMT root, the buffered write set, and the
+/// per-tx outcomes.
+pub struct BlockExecution {
+    pub post_root: Hash32,
+    pub write_set: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub outcomes: Vec<TxOutcome>,
+}
+
+impl BlockExecution {
+    /// The write set as an ordered list of `WriteOp` (sorted by key), ready to
+    /// apply to a database to reproduce the block's effect.
+    #[must_use]
+    pub fn write_ops(&self) -> Vec<WriteOp> {
+        self.write_set
+            .iter()
+            .map(|(k, v)| match v {
+                Some(val) => WriteOp::Put(k.clone(), val.clone()),
+                None => WriteOp::Delete(k.clone()),
+            })
+            .collect()
+    }
+}
+
+/// Execute a block's transactions against `parent_view` in a non-persisting
+/// read-through overlay, returning the post-execution SMT root, the buffered
+/// write set, and the per-tx outcomes. Nothing is persisted; `KEY_SMT_ROOT` in
+/// any real database is untouched.
+///
+/// Per-tx granularity is preserved: each tx runs its own `dispatch_tx`, its own
+/// SMT session, its own buffered batch, exactly the commit-path shape, only the
+/// backend differs. Vote-time and commit-time execution are therefore the same
+/// code path over two backends, which is the determinism basis. Failed txs are
+/// skipped root-neutrally, mirroring `on_commit`.
+///
+/// Empty-block fast path: `txs.is_empty()` returns the parent root directly, no
+/// overlay and no session, so the empty-stream cost stays byte-identical.
+///
+/// # Errors
+/// Returns `ExecError` only on a parent-view read failure (an environment fault);
+/// per-tx execution failures are recorded as `TxOutcome::Skipped`, not returned.
+pub fn execute_block_to_root<V: Kv>(
+    parent_view: &V,
+    txs: &[TxV1],
+    height: u64,
+) -> Result<BlockExecution, ExecError<V::Error>> {
+    if txs.is_empty() {
+        return Ok(BlockExecution {
+            post_root: read_smt_root_or_default(parent_view)?,
+            write_set: std::collections::BTreeMap::new(),
+            outcomes: Vec::new(),
+        });
+    }
+
+    let mut overlay = BlockOverlay::new(parent_view);
+    let mut outcomes = Vec::with_capacity(txs.len());
+    for tx in txs {
+        // A failed tx returns Err before writing (handlers validate first, then
+        // apply atomically), so it contributes nothing to the overlay, exactly as
+        // on_commit skips it. Determinism holds because every skip decision is a
+        // pure function of the state rows the overlay serves read-through.
+        match dispatch_tx(&mut overlay, tx, height) {
+            Ok(()) => outcomes.push(TxOutcome::Applied),
+            Err(_) => outcomes.push(TxOutcome::Skipped),
+        }
+    }
+
+    let post_root = read_smt_root_or_default(&overlay)?;
+    Ok(BlockExecution {
+        post_root,
+        write_set: overlay.into_write_set(),
+        outcomes,
+    })
+}
+
 /// Apply `state_ops` to the DB inside a single atomic batch that also
 /// authenticates them in the state SMT.
 ///
