@@ -268,8 +268,19 @@ impl Storage {
 ///
 /// Implementations execute transactions against the state DB and update the
 /// nonce provider. The DB lock is already held by the caller.
+/// Post-persist execution seam, per committed block (gate ACCEL Stage B).
+/// `cached` carries the block's vote-time execution when the commit site took
+/// it from `pending_exec`; `None` means the callback re-executes once in the
+/// overlay. Errors propagate on the same channel as the post-execution
+/// divergence halt: the commit batch is already durable, the node freezes
+/// fail-closed, and replay self-heals on restart.
 pub trait CommitCallback: Send + Sync {
-    fn on_commit(&self, db: &mut Storage, blocks: &[Block]);
+    fn on_commit(
+        &self,
+        db: &mut Storage,
+        block: &Block,
+        cached: Option<crate::exec_apply::CachedExec>,
+    ) -> Result<(), String>;
 }
 
 /// Cache for tracking which QCs have been broadcasted (to avoid duplicates).
@@ -504,7 +515,21 @@ impl ConsensusNode {
     /// Called after `persist_commit_atomic` + `apply_commits` with the DB
     /// lock still held. Execution writes to different key namespaces than
     /// consensus persistence (no overlap), so this is safe.
-    fn execute_committed_blocks(&self, db: &mut Storage, blocks: &[Block]) -> Result<(), String> {
+    ///
+    /// `cached` (gate ACCEL Stage B) carries each block's vote-time execution
+    /// taken by the commit site via `take_pending_execs`, positionally zipped
+    /// with `blocks`. Before a cached entry is used, the parent binding is
+    /// checked here: the current `KEY_SMT_ROOT` must equal the parent's
+    /// header `state_root` (the committed tip for the first block of the
+    /// batch, the previous batch block otherwise). A failed or unavailable
+    /// binding degrades the entry to a re-execution cache miss; cached bytes
+    /// are never applied blind.
+    fn execute_committed_blocks(
+        &self,
+        db: &mut Storage,
+        blocks: &[Block],
+        cached: Vec<Option<novai_consensus::PendingExec>>,
+    ) -> Result<(), String> {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
         for block in blocks {
             let hash = novai_consensus_types::codec::hash_block_v1(block).ok();
@@ -526,8 +551,40 @@ impl ConsensusNode {
             tracing::info!(block_count, total_txs, "Committed blocks with transactions");
         }
         if let Some(ref cb) = self.commit_callback {
-            for block in blocks {
-                cb.on_commit(db, std::slice::from_ref(block));
+            let mut cached = cached.into_iter();
+            for (i, block) in blocks.iter().enumerate() {
+                let mut cached_exec = cached
+                    .next()
+                    .flatten()
+                    .and_then(crate::exec_apply::CachedExec::from_pending);
+
+                // Pre-apply parent binding for the cached path (gate ACCEL
+                // Stage B): the write set was computed over post-state(parent),
+                // so the database must sit at exactly that state before the
+                // cached bytes may be applied. Anything else falls back to
+                // re-execution, which the existing checks then judge.
+                if cached_exec.is_some() {
+                    let parent_root = Self::parent_header_root(db, blocks, i);
+                    let current_root = match db.get(novai_state::KEY_SMT_ROOT) {
+                        Ok(Some(bytes)) => novai_state::decode_smt_root_v1(&bytes).ok(),
+                        Ok(None) => Some(novai_execution::empty_smt_root()),
+                        Err(_) => None,
+                    };
+                    let bound = match (parent_root, current_root) {
+                        (Some(p), Some(c)) => p == c,
+                        _ => false,
+                    };
+                    if !bound {
+                        tracing::warn!(
+                            height = block.height,
+                            "cached execution parent binding failed or unavailable; \
+                             falling back to re-execution"
+                        );
+                        cached_exec = None;
+                    }
+                }
+
+                cb.on_commit(db, block, cached_exec)?;
                 // Post-execution divergence check (gate wedge-276272): after
                 // executing a committed block, the persisted root must equal that
                 // block's post-state header. A mismatch is local divergence; halt.
@@ -553,6 +610,26 @@ impl ConsensusNode {
             }
         }
         Ok(())
+    }
+
+    /// The parent's header `state_root` for `blocks[i]` (gate ACCEL Stage B):
+    /// the previous block in the batch, or the committed tip loaded from the
+    /// DB for the batch's first block. `None` when no comparable parent
+    /// header exists (a height-1 block, whose parent is genesis and never
+    /// persisted, or a missing tip), in which case the caller treats the
+    /// cached entry as a miss rather than applying it unchecked.
+    fn parent_header_root(db: &Storage, blocks: &[Block], i: usize) -> Option<[u8; 32]> {
+        if i > 0 {
+            return Some(blocks[i - 1].state_root);
+        }
+        let tip_height = blocks[i].height.checked_sub(1)?;
+        if tip_height == 0 {
+            return None;
+        }
+        match ConsensusState::load_block(db, tip_height) {
+            Ok(Some(tip)) => Some(tip.state_root),
+            _ => None,
+        }
     }
 
     /// Pre-execution state-root guard for the QC-driven catch-up commit path.
@@ -1437,6 +1514,10 @@ impl ConsensusNode {
             match state.cache_qc_and_check_commit(hqc.clone(), &*db) {
                 Ok(to_commit) if !to_commit.is_empty() => {
                     let new_committed_height = to_commit.last().unwrap().height;
+                    // Take any vote-time executions before apply_commits
+                    // evicts them (gate ACCEL Stage B; usually all misses on
+                    // the sync path, which then re-executes per block).
+                    let cached = state.take_pending_execs(&to_commit);
                     state
                         .persist_commit_atomic(
                             &mut *db,
@@ -1449,7 +1530,7 @@ impl ConsensusNode {
                     state
                         .apply_commits(&to_commit)
                         .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during sync: {e:?}"))?;
-                    self.execute_committed_blocks(&mut db, &to_commit)?;
+                    self.execute_committed_blocks(&mut db, &to_commit, cached)?;
                     tracing::info!(
                         committed_height = new_committed_height,
                         count = to_commit.len(),
@@ -1478,6 +1559,10 @@ impl ConsensusNode {
             match state.cache_qc_and_check_commit(tqc.clone(), &*db) {
                 Ok(to_commit) if !to_commit.is_empty() => {
                     let new_committed_height = to_commit.last().unwrap().height;
+                    // Take any vote-time executions before apply_commits
+                    // evicts them (gate ACCEL Stage B; usually all misses on
+                    // the sync path, which then re-executes per block).
+                    let cached = state.take_pending_execs(&to_commit);
                     state
                         .persist_commit_atomic(
                             &mut *db,
@@ -1490,7 +1575,7 @@ impl ConsensusNode {
                     state
                         .apply_commits(&to_commit)
                         .map_err(|e| format!("CONSENSUS SAFETY VIOLATION during sync: {e:?}"))?;
-                    self.execute_committed_blocks(&mut db, &to_commit)?;
+                    self.execute_committed_blocks(&mut db, &to_commit, cached)?;
                     tracing::info!(
                         committed_height = new_committed_height,
                         count = to_commit.len(),
@@ -1984,6 +2069,9 @@ impl ConsensusNode {
                     Ok(to_commit) if !to_commit.is_empty() => {
                         let new_committed_height = to_commit.last().unwrap().height;
                         Self::verify_pre_commit_state_root(&*db, &to_commit)?;
+                        // Take the vote-time executions before apply_commits
+                        // evicts them (gate ACCEL Stage B).
+                        let cached = state.take_pending_execs(&to_commit);
                         state
                             .persist_commit_atomic(
                                 &mut *db,
@@ -1996,7 +2084,7 @@ impl ConsensusNode {
                         state.apply_commits(&to_commit).map_err(|e| {
                             format!("CONSENSUS SAFETY VIOLATION during QC catch-up: {e:?}")
                         })?;
-                        self.execute_committed_blocks(&mut db, &to_commit)?;
+                        self.execute_committed_blocks(&mut db, &to_commit, cached)?;
                         committed_height_for_prune = Some(new_committed_height);
                         tracing::debug!(
                             committed_height = new_committed_height,
@@ -2295,11 +2383,17 @@ impl ConsensusNode {
             // Lock order: state (already held) → db
             let mut vote_committed_height: Option<u64> = None;
             let mut committed_blocks: Vec<novai_consensus_types::Block> = Vec::new();
+            let mut committed_cached: Vec<Option<novai_consensus::PendingExec>> = Vec::new();
             let mut db = self.db.lock_or_recover();
             match state.cache_qc_and_check_commit(qc.clone(), &*db) {
                 Ok(to_commit) if !to_commit.is_empty() => {
                     let new_committed_height = to_commit.last().unwrap().height;
                     Self::verify_pre_commit_state_root(&*db, &to_commit)?;
+                    // Take the vote-time executions before apply_commits
+                    // evicts them; the state lock drops before execution at
+                    // this site, so this is the last safe moment (gate ACCEL
+                    // Stage B).
+                    committed_cached = state.take_pending_execs(&to_commit);
                     state
                         .persist_commit_atomic(
                             &mut *db,
@@ -2353,7 +2447,7 @@ impl ConsensusNode {
             drop(state);
 
             if !committed_blocks.is_empty() {
-                self.execute_committed_blocks(&mut db, &committed_blocks)?;
+                self.execute_committed_blocks(&mut db, &committed_blocks, committed_cached)?;
             }
             drop(db);
 
@@ -2408,10 +2502,15 @@ impl ConsensusNode {
         let mut committed = false;
         let mut qc_committed_height: Option<u64> = None;
         let mut committed_blocks: Vec<novai_consensus_types::Block> = Vec::new();
+        let mut committed_cached: Vec<Option<novai_consensus::PendingExec>> = Vec::new();
         match state.cache_qc_and_check_commit(qc.clone(), &*db) {
             Ok(to_commit) if !to_commit.is_empty() => {
                 let new_committed_height = to_commit.last().unwrap().height;
                 Self::verify_pre_commit_state_root(&*db, &to_commit)?;
+                // Take the vote-time executions before apply_commits evicts
+                // them; the state lock drops before execution at this site
+                // (gate ACCEL Stage B).
+                committed_cached = state.take_pending_execs(&to_commit);
                 state
                     .persist_commit_atomic(&mut *db, &to_commit, &qc, new_committed_height, None)
                     .map_err(|e| format!("Atomic persist failed: {e:?}"))?;
@@ -2469,7 +2568,7 @@ impl ConsensusNode {
         drop(state);
 
         if !committed_blocks.is_empty() {
-            self.execute_committed_blocks(&mut db, &committed_blocks)?;
+            self.execute_committed_blocks(&mut db, &committed_blocks, committed_cached)?;
         }
         drop(db);
 

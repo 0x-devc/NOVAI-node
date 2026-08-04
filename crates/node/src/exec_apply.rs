@@ -5,7 +5,41 @@
 //! 2.4). The commit callback and boot replay both route through it, so the
 //! commit-path and replay-path write shapes cannot drift.
 
+use novai_consensus::PendingExec;
+use novai_consensus_types::Block;
+use novai_execution::TxOutcome;
 use novai_state::{KvBatch, WriteOp, KEY_EXECUTED_HEIGHT};
+
+/// A block's vote-time execution handed to the commit callback (gate ACCEL
+/// Stage B): the cached write set flattened to apply-ready sorted ops, plus
+/// the per-tx outcomes for log parity. Produced from a `PendingExec` the
+/// commit site took via `ConsensusState::take_pending_execs`.
+pub struct CachedExec {
+    pub write_ops: Vec<WriteOp>,
+    pub outcomes: Vec<TxOutcome>,
+}
+
+impl CachedExec {
+    /// Flatten a taken `PendingExec` into apply-ready ops. `BTreeMap`
+    /// iteration is sorted, so the op order matches
+    /// `BlockExecution::write_ops` exactly. Returns `None` when the write set
+    /// was not retained; the caller treats that as a re-execution cache miss.
+    #[must_use]
+    pub fn from_pending(pe: PendingExec) -> Option<Self> {
+        let ws = pe.write_set?;
+        let write_ops = ws
+            .into_iter()
+            .map(|(k, v)| match v {
+                Some(val) => WriteOp::Put(k, val),
+                None => WriteOp::Delete(k),
+            })
+            .collect();
+        Some(Self {
+            write_ops,
+            outcomes: pe.outcomes,
+        })
+    }
+}
 
 /// Apply one committed block's execution output as ONE atomic write batch: the
 /// block's write-set ops (rows, SMT node records, and the final `KEY_SMT_ROOT`
@@ -44,4 +78,58 @@ where
     ));
     db.apply_batch(&ops)
         .map_err(|e| format!("Block execution batch failed at height {block_height}: {e:?}"))
+}
+
+/// Resolve a committed block's execution and apply it as one batch: the
+/// production commit core (gate ACCEL Stage B). A cached hit applies the
+/// vote-time write set as-is (its binding to this block and to the current
+/// parent state was verified by the caller: `take_pending_execs` checked the
+/// hash, the header-bound post root, and the write-set checksum, and
+/// `execute_committed_blocks` checked the parent binding). A miss re-executes
+/// the block once in the non-persisting overlay over the committed database
+/// and REFUSES BEFORE APPLYING if the computed post root does not match the
+/// committed header, leaving state untouched (strictly earlier than the
+/// apply-then-detect shape this replaces; the outer lag-0 post-execution
+/// check in `execute_committed_blocks` remains as the unchanged second belt).
+///
+/// Returns the per-tx outcomes for the caller's logging and side effects.
+///
+/// # Errors
+/// Returns the CONSENSUS SAFETY HALT error on a miss-path root mismatch, or
+/// a formatted error if re-execution or the batch write fails.
+pub fn resolve_and_apply_block<K: KvBatch>(
+    db: &mut K,
+    block: &Block,
+    cached: Option<CachedExec>,
+) -> Result<Vec<TxOutcome>, String>
+where
+    K::Error: std::fmt::Debug,
+{
+    let (write_ops, outcomes) = match cached {
+        Some(c) => (c.write_ops, c.outcomes),
+        None => {
+            let exec = novai_execution::execute_block_to_root(&*db, &block.txs, block.height)
+                .map_err(|e| {
+                    format!(
+                        "Commit re-execution failed at height {}: {e:?}",
+                        block.height
+                    )
+                })?;
+            if exec.post_root != block.state_root {
+                return Err(format!(
+                    "CONSENSUS SAFETY HALT: pre-apply state root mismatch at height {} \
+                     (computed={}, header={}). Local execution diverged from the committed \
+                     header; refusing to apply. Reseed from a good snapshot or wipe the data \
+                     dir and resync from peers.",
+                    block.height,
+                    hex::encode(&exec.post_root[..8]),
+                    hex::encode(&block.state_root[..8]),
+                ));
+            }
+            let write_ops = exec.write_ops();
+            (write_ops, exec.outcomes)
+        }
+    };
+    apply_block_execution(db, block.height, write_ops)?;
+    Ok(outcomes)
 }

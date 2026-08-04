@@ -198,31 +198,43 @@ struct ExecutionCommitCallback {
 }
 
 impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
-    fn on_commit(&self, db: &mut Storage, blocks: &[novai_consensus_types::Block]) {
-        let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
-        tracing::debug!(block_count = blocks.len(), total_txs, "on_commit executing");
+    fn on_commit(
+        &self,
+        db: &mut Storage,
+        block: &novai_consensus_types::Block,
+        cached: Option<novai_node::exec_apply::CachedExec>,
+    ) -> Result<(), String> {
+        let total_txs: usize = block.txs.len();
+        let cached_hit = cached.is_some();
+        tracing::debug!(
+            height = block.height,
+            total_txs,
+            cached_hit,
+            "on_commit executing"
+        );
 
-        for block in blocks {
-            for tx in &block.txs {
-                match novai_execution::dispatch_tx(db, tx, block.height) {
-                    Ok(()) => {
-                        tracing::debug!(
-                            height = block.height,
-                            from = ?&tx.from[..4],
-                            nonce = tx.nonce,
-                            "Executed tx"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            height = block.height,
-                            from = ?&tx.from[..4],
-                            nonce = tx.nonce,
-                            ?e,
-                            "Tx execution failed (committed, skipping)"
-                        );
-                    }
-                }
+        // Resolve, bind, apply (gate ACCEL Stage B): the block's state change
+        // lands as ONE atomic batch (rows, SMT nodes, root, executed cursor)
+        // through the single choke point. A cached hit applies the vote-time
+        // write set; a miss re-executes once in the overlay and refuses
+        // BEFORE applying if the computed root does not match the header.
+        let outcomes = novai_node::exec_apply::resolve_and_apply_block(db, block, cached)?;
+
+        // Per-tx outcome logs, at the per-tx executor's levels.
+        for (tx, outcome) in block.txs.iter().zip(outcomes.iter()) {
+            match outcome {
+                novai_execution::TxOutcome::Applied => tracing::debug!(
+                    height = block.height,
+                    from = ?&tx.from[..4],
+                    nonce = tx.nonce,
+                    "Executed tx"
+                ),
+                novai_execution::TxOutcome::Skipped => tracing::warn!(
+                    height = block.height,
+                    from = ?&tx.from[..4],
+                    nonce = tx.nonce,
+                    "Tx execution skipped root-neutrally (committed)"
+                ),
             }
         }
 
@@ -237,12 +249,10 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                 .expected
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for block in blocks {
-                for tx in &block.txs {
-                    let entry = map.entry(tx.from).or_insert(tx.nonce);
-                    if tx.nonce >= *entry {
-                        *entry = tx.nonce + 1;
-                    }
+            for tx in &block.txs {
+                let entry = map.entry(tx.from).or_insert(tx.nonce);
+                if tx.nonce >= *entry {
+                    *entry = tx.nonce + 1;
                 }
             }
         }
@@ -260,11 +270,9 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                 .pending_mempool_removals
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for block in blocks {
-                for tx in &block.txs {
-                    if let Ok(id) = txid_v1(tx) {
-                        pending.push(id);
-                    }
+            for tx in &block.txs {
+                if let Ok(id) = txid_v1(tx) {
+                    pending.push(id);
                 }
             }
         }
@@ -274,11 +282,9 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
         // a monotonic counter across all commits. Relaxed ordering: the
         // /metrics reader does not synchronize with consensus state, so a
         // briefly-stale scrape is acceptable.
-        if let Some(last) = blocks.last() {
-            self.commit_metrics
-                .block_tx_count
-                .store(last.txs.len() as u64, Ordering::Relaxed);
-        }
+        self.commit_metrics
+            .block_tx_count
+            .store(block.txs.len() as u64, Ordering::Relaxed);
         self.commit_metrics
             .total_txs_committed
             .fetch_add(total_txs as u64, Ordering::Relaxed);
@@ -296,19 +302,17 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
         // (2.5M blocks × ~120 bytes/entry = 300MB without cap).
         const MAX_INDEX_ENTRIES: usize = 100_000;
         if let Ok(mut idx) = self.blockchain_index.lock() {
-            for block in blocks {
-                // Index block hash
-                if let Ok(hash) = novai_consensus_types::codec::hash_block_v1(block) {
-                    idx.block_hashes.insert(hash, block.height);
-                }
-                // Index transaction receipts
-                for (tx_index, tx) in block.txs.iter().enumerate() {
-                    if let Ok(txid) = novai_codec::txid_v1(tx) {
-                        idx.tx_receipts.insert(txid, (block.height, tx_index));
-                    }
-                }
-                idx.committed_height = block.height;
+            // Index block hash
+            if let Ok(hash) = novai_consensus_types::codec::hash_block_v1(block) {
+                idx.block_hashes.insert(hash, block.height);
             }
+            // Index transaction receipts
+            for (tx_index, tx) in block.txs.iter().enumerate() {
+                if let Ok(txid) = novai_codec::txid_v1(tx) {
+                    idx.tx_receipts.insert(txid, (block.height, tx_index));
+                }
+            }
+            idx.committed_height = block.height;
 
             // Evict old entries when index exceeds cap
             if idx.block_hashes.len() > MAX_INDEX_ENTRIES {
@@ -320,65 +324,59 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
             }
         }
 
-        // CRASH-SAFE COMMIT/EXECUTE: advance executed_height after every tx
-        // in every block has been dispatched. On startup, if executed_height
-        // is behind committed_height, the missing blocks are replayed before
-        // the node rejoins consensus. Without this cursor, a crash between
-        // persist_commit_atomic (which advances committed_height) and the end
-        // of dispatch_tx leaves account/SMT state behind committed state
+        // CRASH-SAFE COMMIT/EXECUTE: the executed_height cursor rides the
+        // block's atomic execution batch inside resolve_and_apply_block (gate
+        // ACCEL Stage B), so rows, SMT nodes, root, and cursor move together
+        // or not at all. On startup, if executed_height is behind
+        // committed_height, the missing blocks are replayed before the node
+        // rejoins consensus. Without this cursor, a crash between
+        // persist_commit_atomic (which advances committed_height) and the
+        // execution batch leaves account/SMT state behind committed state
         // forever, producing permanent state-root divergence.
-        if let Some(last_block) = blocks.last() {
-            if let Err(e) = db.put(KEY_EXECUTED_HEIGHT, &last_block.height.to_be_bytes()) {
-                tracing::error!(
-                    height = last_block.height,
-                    error = %e,
-                    "Failed to persist executed_height — replay-on-startup may re-execute"
-                );
-            }
 
-            // Force compaction over the pruned block/QC range every COMPACT_INTERVAL
-            // heights. persist_commit_atomic writes Delete tombstones for blocks and
-            // QCs older than PRUNE_RETAIN_BLOCKS, but RocksDB only frees the
-            // underlying SST bytes when a compaction visits the range. Without this,
-            // disk usage grows far beyond the retention window (observed: 6.3GB per
-            // node at 4M blocks, expected ~88MB).
-            const COMPACT_INTERVAL: u64 = 5_000;
-            const SAFETY_MARGIN: u64 = 100; // never compact too close to the live tail
-            if last_block.height % COMPACT_INTERVAL == 0
-                && last_block.height > novai_consensus::PRUNE_RETAIN_BLOCKS + SAFETY_MARGIN
-            {
-                let prune_below =
-                    last_block.height - novai_consensus::PRUNE_RETAIN_BLOCKS - SAFETY_MARGIN;
-                let block_start = block_key(0);
-                let block_end = block_key(prune_below);
-                let qc_start = qc_key(0);
-                let qc_end = qc_key(prune_below);
-                // Bug 1 latent concern B (docs/gate3-bug1-diagnosis.md Risk 2):
-                // synchronously flush the default-CF memtable to L0 BEFORE the
-                // compaction runs. RocksDB's WAL fsync is bandwidth-triggered
-                // (set_bytes_per_sync / set_wal_bytes_per_sync at
-                // crates/state/src/rocksdb_kv.rs), so without this flush a
-                // crash between the executor's apply_batch and the next
-                // bandwidth-triggered fsync could lose ops still resident in
-                // the memtable, and the subsequent compaction would not see
-                // them either. A flush failure here is logged but not fatal;
-                // the compaction can still proceed over whatever is durable.
-                if let Err(e) = db.flush_default() {
-                    tracing::warn!(
-                        height = last_block.height,
-                        error = %e,
-                        "Pre-compaction flush failed; proceeding with compaction anyway"
-                    );
-                }
-                db.compact_range_default(Some(&block_start), Some(&block_end));
-                db.compact_range_default(Some(&qc_start), Some(&qc_end));
-                tracing::info!(
-                    height = last_block.height,
-                    prune_below,
-                    "Forced compaction on pruned block/QC range"
+        // Force compaction over the pruned block/QC range every COMPACT_INTERVAL
+        // heights. persist_commit_atomic writes Delete tombstones for blocks and
+        // QCs older than PRUNE_RETAIN_BLOCKS, but RocksDB only frees the
+        // underlying SST bytes when a compaction visits the range. Without this,
+        // disk usage grows far beyond the retention window (observed: 6.3GB per
+        // node at 4M blocks, expected ~88MB).
+        const COMPACT_INTERVAL: u64 = 5_000;
+        const SAFETY_MARGIN: u64 = 100; // never compact too close to the live tail
+        if block.height % COMPACT_INTERVAL == 0
+            && block.height > novai_consensus::PRUNE_RETAIN_BLOCKS + SAFETY_MARGIN
+        {
+            let prune_below = block.height - novai_consensus::PRUNE_RETAIN_BLOCKS - SAFETY_MARGIN;
+            let block_start = block_key(0);
+            let block_end = block_key(prune_below);
+            let qc_start = qc_key(0);
+            let qc_end = qc_key(prune_below);
+            // Bug 1 latent concern B (docs/gate3-bug1-diagnosis.md Risk 2):
+            // synchronously flush the default-CF memtable to L0 BEFORE the
+            // compaction runs. RocksDB's WAL fsync is bandwidth-triggered
+            // (set_bytes_per_sync / set_wal_bytes_per_sync at
+            // crates/state/src/rocksdb_kv.rs), so without this flush a
+            // crash between the executor's apply_batch and the next
+            // bandwidth-triggered fsync could lose ops still resident in
+            // the memtable, and the subsequent compaction would not see
+            // them either. A flush failure here is logged but not fatal;
+            // the compaction can still proceed over whatever is durable.
+            if let Err(e) = db.flush_default() {
+                tracing::warn!(
+                    height = block.height,
+                    error = %e,
+                    "Pre-compaction flush failed; proceeding with compaction anyway"
                 );
             }
+            db.compact_range_default(Some(&block_start), Some(&block_end));
+            db.compact_range_default(Some(&qc_start), Some(&qc_end));
+            tracing::info!(
+                height = block.height,
+                prune_below,
+                "Forced compaction on pruned block/QC range"
+            );
         }
+
+        Ok(())
     }
 }
 
@@ -2096,15 +2094,22 @@ mod tests {
             height: 1,
             round: 0,
             parent_hash: [0u8; 32],
-            state_root: [0u8; 32],
+            // Post-state header (gate ACCEL Stage B): every tx fails against
+            // the empty state and is skipped root-neutrally, so the block's
+            // post-state is the empty root. A fake root would now (correctly)
+            // refuse before applying.
+            state_root: novai_execution::empty_smt_root(),
             txs: vec![t1.clone(), t2.clone()],
         };
 
-        // dispatch_tx may fail per-tx (no account state, no balance), but
-        // the queue-append and nonce-advance blocks run unconditionally, which
-        // is what we're verifying.
+        // Txs may fail per-tx (no account state, no balance), but for a
+        // committed block the queue-append and nonce-advance side effects
+        // still run (a consensus-committed tx permanently occupies its nonce
+        // slot), which is what we're verifying.
         let mut storage = Storage::Memory(MemKv::new());
-        callback.on_commit(&mut storage, &[block]);
+        callback
+            .on_commit(&mut storage, &block, None)
+            .expect("on_commit");
 
         // First half of the deferred path: queue must hold the two committed
         // txids in commit order, and the existing nonce-advance must still work.
@@ -2187,12 +2192,16 @@ mod tests {
             height: 1,
             round: 0,
             parent_hash: [0u8; 32],
-            state_root: [0u8; 32],
+            // Post-state header: all txs skip against the empty state, so the
+            // post-state is the empty root (gate ACCEL Stage B).
+            state_root: novai_execution::empty_smt_root(),
             txs: vec![t1, t2],
         };
 
         let mut storage = Storage::Memory(MemKv::new());
-        callback.on_commit(&mut storage, &[block_a]);
+        callback
+            .on_commit(&mut storage, &block_a, None)
+            .expect("on_commit block_a");
 
         assert_eq!(
             commit_metrics.block_tx_count.load(Ordering::Relaxed),
@@ -2216,10 +2225,14 @@ mod tests {
             height: 2,
             round: 0,
             parent_hash: [0u8; 32],
-            state_root: [0u8; 32],
+            // Post-state header: all txs skip against the empty state, so the
+            // post-state is the empty root (gate ACCEL Stage B).
+            state_root: novai_execution::empty_smt_root(),
             txs: vec![t3, t4, t5],
         };
-        callback.on_commit(&mut storage, &[block_b]);
+        callback
+            .on_commit(&mut storage, &block_b, None)
+            .expect("on_commit block_b");
 
         assert_eq!(
             commit_metrics.block_tx_count.load(Ordering::Relaxed),

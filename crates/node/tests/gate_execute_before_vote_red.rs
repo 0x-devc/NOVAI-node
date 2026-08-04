@@ -65,13 +65,20 @@ const SENDER_BALANCE: u128 = 1_000_000;
 struct TestExec;
 
 impl CommitCallback for TestExec {
-    fn on_commit(&self, db: &mut Storage, blocks: &[Block]) {
-        for block in blocks {
-            for tx in &block.txs {
-                // Failed txs are skipped root-neutrally, exactly like on_commit.
-                let _ = dispatch_tx(db, tx, block.height);
-            }
+    // Stage B mechanical adaptation: per-block signature with the cached
+    // vote-time execution. This pin keeps its per-tx dispatch body (and
+    // ignores the cache) so its Stage A assertions are byte-identical.
+    fn on_commit(
+        &self,
+        db: &mut Storage,
+        block: &Block,
+        _cached: Option<novai_node::exec_apply::CachedExec>,
+    ) -> Result<(), String> {
+        for tx in &block.txs {
+            // Failed txs are skipped root-neutrally, exactly like on_commit.
+            let _ = dispatch_tx(db, tx, block.height);
         }
+        Ok(())
     }
 }
 
