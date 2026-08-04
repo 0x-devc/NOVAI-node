@@ -2110,7 +2110,13 @@ impl ConsensusNode {
             // rebuild its pending chain and later proposals resolve this parent
             // (gate wedge-276272). Runs on verified execution regardless of whether
             // gate 9 then refuses the vote below.
-            state.note_pending_exec(recv_block_hash, block.height, exec.post_root, exec.write_set);
+            state.note_pending_exec(
+                recv_block_hash,
+                block.height,
+                exec.post_root,
+                exec.write_set,
+                exec.outcomes,
+            );
 
             // Persist block to DB so the commit chain walk DB fallback can
             // recover it after in-memory cache eviction. Only write if no

@@ -243,11 +243,43 @@ pub struct ConsensusState {
 /// `None` for entries beyond the newest few pending heights (a memory bound);
 /// those are recomputed on demand from the stored blocks, so the entry is always
 /// reconstructable. `post_root` is retained for every entry.
+///
+/// Stage B (gate ACCEL): `outcomes` carries the per-tx applied/skipped record
+/// so the commit path keeps log parity without re-deriving it, and
+/// `write_set_checksum` is a blake3 digest of the write set recorded at cache
+/// time and re-verified at take time, so a corrupted entry degrades to a
+/// re-execution cache miss instead of being applied.
 #[derive(Debug, Clone)]
 pub struct PendingExec {
     pub height: u64,
     pub post_root: [u8; 32],
     pub write_set: Option<std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+    pub outcomes: Vec<novai_execution::TxOutcome>,
+    pub write_set_checksum: [u8; 32],
+}
+
+/// Deterministic blake3 digest of a pending write set: length-prefixed key,
+/// then a put/delete tag, then the length-prefixed value for puts. BTreeMap
+/// iteration is sorted, so the digest is a pure function of the set's content.
+fn pending_write_set_checksum(
+    write_set: &std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    for (key, value) in write_set {
+        hasher.update(&(key.len() as u64).to_le_bytes());
+        hasher.update(key);
+        match value {
+            Some(v) => {
+                hasher.update(&[1]);
+                hasher.update(&(v.len() as u64).to_le_bytes());
+                hasher.update(v);
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+    }
+    *hasher.finalize().as_bytes()
 }
 
 impl ConsensusState {
@@ -429,7 +461,13 @@ impl ConsensusState {
 
         // Cache this block's speculative execution so our next proposals and the
         // followers' votes can resolve it as a parent (gate wedge-276272).
-        self.note_pending_exec(block_hash, block.height, exec.post_root, exec.write_set);
+        self.note_pending_exec(
+            block_hash,
+            block.height,
+            exec.post_root,
+            exec.write_set,
+            exec.outcomes,
+        );
 
         Ok(block)
     }
@@ -1491,19 +1529,25 @@ impl ConsensusState {
     /// verified execution in the propose and vote paths; execution validity is
     /// independent of vote eligibility, so this runs even if gate 9 then refuses
     /// the vote. Post roots are kept for every entry; write sets are bounded.
+    /// The write-set checksum is recorded here and re-verified when the commit
+    /// path takes the entry (gate ACCEL Stage B).
     pub fn note_pending_exec(
         &mut self,
         block_hash: [u8; 32],
         height: u64,
         post_root: [u8; 32],
         write_set: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+        outcomes: Vec<novai_execution::TxOutcome>,
     ) {
+        let write_set_checksum = pending_write_set_checksum(&write_set);
         self.pending_exec.insert(
             block_hash,
             PendingExec {
                 height,
                 post_root,
                 write_set: Some(write_set),
+                outcomes,
+                write_set_checksum,
             },
         );
         self.enforce_pending_write_set_bound();
@@ -1538,6 +1582,54 @@ impl ConsensusState {
     pub fn evict_pending_exec(&mut self) {
         let committed = self.committed_height;
         self.pending_exec.retain(|_, pe| pe.height > committed);
+    }
+
+    /// Remove and return the cached speculative execution for each block about
+    /// to be committed (gate ACCEL Stage B). Called at every commit site while
+    /// the state lock is held, BEFORE `apply_commits` evicts the entries, so
+    /// the commit path can apply the vote-time write set as one batch instead
+    /// of re-executing.
+    ///
+    /// A block's entry is returned only when every binding holds: an entry
+    /// exists under the block's hash, its write set is still retained (the
+    /// memory bound drops old ones to post-root-only), its cached post root
+    /// equals the block's header state root, and the write-set checksum
+    /// recorded at cache time still verifies. Anything else is a cache miss
+    /// (`None`): the commit path falls back to one re-execution, so
+    /// correctness never depends on this cache. A post-root mismatch warns
+    /// loudly (both populate paths bind root to header, so it indicates a
+    /// logic bug upstream); a checksum mismatch removes the corrupt entry so
+    /// nothing can reuse it. Unmatched entries stay for `evict_pending_exec`.
+    pub fn take_pending_execs(&mut self, blocks: &[Block]) -> Vec<Option<PendingExec>> {
+        blocks
+            .iter()
+            .map(|block| {
+                let bh = novai_consensus_types::block_hash(block);
+                let entry = self.pending_exec.get(&bh)?;
+                let Some(ws) = entry.write_set.as_ref() else {
+                    // Memory bound dropped the write set: a normal miss.
+                    return None;
+                };
+                if entry.post_root != block.state_root {
+                    tracing::warn!(
+                        height = block.height,
+                        "pending-exec post root does not match the committed header; \
+                         falling back to re-execution"
+                    );
+                    return None;
+                }
+                if pending_write_set_checksum(ws) != entry.write_set_checksum {
+                    tracing::warn!(
+                        height = block.height,
+                        "pending-exec write-set checksum mismatch; dropping the corrupt \
+                         entry and falling back to re-execution"
+                    );
+                    self.pending_exec.remove(&bh);
+                    return None;
+                }
+                self.pending_exec.remove(&bh)
+            })
+            .collect()
     }
 
     /// Read the committed SMT root the way the propose and vote paths do (an

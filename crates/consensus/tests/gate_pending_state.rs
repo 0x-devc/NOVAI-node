@@ -158,7 +158,13 @@ fn build_pipeline(n: u64) -> Pipeline {
         scratch.apply_batch(&exec.write_ops()).unwrap();
         state.cache_block(block.clone()).unwrap();
         persist_block(&mut db, &block);
-        state.note_pending_exec(block_hash(&block), height, exec.post_root, exec.write_set);
+        state.note_pending_exec(
+            block_hash(&block),
+            height,
+            exec.post_root,
+            exec.write_set,
+            exec.outcomes,
+        );
         roots.push(exec.post_root);
         parent_hash = block_hash(&block);
         pending.push(block);
@@ -235,6 +241,7 @@ fn abandoned_sibling_ignored_then_evicted() {
         p.h0 + 1,
         sib_exec.post_root,
         sib_exec.write_set,
+        sib_exec.outcomes,
     );
     let sib_hash = block_hash(&sibling);
     let p0_hash = block_hash(&p.pending[0]);
