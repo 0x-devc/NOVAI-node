@@ -730,57 +730,8 @@ fn replay_unexecuted_blocks(storage: &mut Storage) -> u64 {
         "REPLAY: executed_height behind committed_height — replaying missing blocks"
     );
 
-    let start_height = executed_height + 1;
-    for height in start_height..=committed_height {
-        let block = match novai_consensus::ConsensusState::load_block(&*storage, height) {
-            Ok(Some(b)) => b,
-            Ok(None) => {
-                fatal(format!(
-                    "REPLAY FAILED: block at height {height} missing from disk \
-                     (committed_height={committed_height}, executed_height={executed_height}). \
-                     This usually means the DB was wiped while committed_height was retained. \
-                     Wipe the data dir and resync from peers."
-                ));
-            }
-            Err(e) => {
-                fatal(format!(
-                    "REPLAY FAILED: load_block({height}) returned error: {e:?}"
-                ));
-            }
-        };
-
-        for tx in &block.txs {
-            if let Err(e) = novai_execution::dispatch_tx(storage, tx, height) {
-                tracing::debug!(
-                    height,
-                    from = ?&tx.from[..4],
-                    nonce = tx.nonce,
-                    ?e,
-                    "REPLAY: tx skipped (likely already applied)"
-                );
-            }
-        }
-
-        // Post-execution divergence check (gate wedge-276272): the replayed root
-        // must equal the block's post-state header, or boot execution has diverged.
-        let replayed_root = match storage.get(novai_state::KEY_SMT_ROOT) {
-            Ok(Some(bytes)) => novai_state::decode_smt_root_v1(&bytes)
-                .unwrap_or_else(|_| novai_execution::empty_smt_root()),
-            _ => novai_execution::empty_smt_root(),
-        };
-        if replayed_root != block.state_root {
-            fatal(format!(
-                "REPLAY FAILED: post-execution state root mismatch at height {height} \
-                 (executed={:02x?}, header={:02x?}). Local execution diverged from the committed \
-                 header. Wipe the data dir and resync from peers.",
-                &replayed_root[..8],
-                &block.state_root[..8],
-            ));
-        }
-    }
-
-    if let Err(e) = storage.put(KEY_EXECUTED_HEIGHT, &committed_height.to_be_bytes()) {
-        fatal(format!("REPLAY FAILED: persist executed_height: {e}"));
+    if let Err(msg) = replay_range(storage, executed_height, committed_height) {
+        fatal(msg);
     }
 
     tracing::info!(
@@ -790,6 +741,75 @@ fn replay_unexecuted_blocks(storage: &mut Storage) -> u64 {
     );
 
     committed_height
+}
+
+/// Replay blocks `(executed_height + 1)..=committed_height` through the Stage
+/// B applier: re-execute each block in the non-persisting overlay over
+/// current state, REFUSE BEFORE APPLYING on a header mismatch, then land
+/// rows, SMT nodes, root, and the executed cursor for that height as ONE
+/// atomic batch (per-block cursor granularity, strictly finer than the old
+/// end-of-loop cursor put). A block already applied by an earlier run
+/// re-executes with every tx skipping on nonce checks, yielding an empty
+/// write set and an unchanged root that equals the header, so the replay
+/// stays idempotent.
+///
+/// Any error is a `REPLAY FAILED` message the caller escalates to `fatal`;
+/// nothing is applied for a block whose replayed root does not match its
+/// post-state header, so the failure path leaves state untouched.
+fn replay_range(
+    storage: &mut Storage,
+    executed_height: u64,
+    committed_height: u64,
+) -> Result<(), String> {
+    for height in (executed_height + 1)..=committed_height {
+        let block = match novai_consensus::ConsensusState::load_block(&*storage, height) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                return Err(format!(
+                    "REPLAY FAILED: block at height {height} missing from disk \
+                     (committed_height={committed_height}, executed_height={executed_height}). \
+                     This usually means the DB was wiped while committed_height was retained. \
+                     Wipe the data dir and resync from peers."
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "REPLAY FAILED: load_block({height}) returned error: {e:?}"
+                ));
+            }
+        };
+
+        let exec = novai_execution::execute_block_to_root(&*storage, &block.txs, height)
+            .map_err(|e| format!("REPLAY FAILED: re-execution at height {height}: {e:?}"))?;
+        for (tx, outcome) in block.txs.iter().zip(exec.outcomes.iter()) {
+            if *outcome == novai_execution::TxOutcome::Skipped {
+                tracing::debug!(
+                    height,
+                    from = ?&tx.from[..4],
+                    nonce = tx.nonce,
+                    "REPLAY: tx skipped (likely already applied)"
+                );
+            }
+        }
+
+        // Pre-apply refusal (gate wedge-276272 check, moved ahead of the
+        // apply by gate ACCEL Stage B): the replayed root must equal the
+        // block's post-state header BEFORE anything lands, or boot execution
+        // has diverged and nothing may be applied.
+        if exec.post_root != block.state_root {
+            return Err(format!(
+                "REPLAY FAILED: post-execution state root mismatch at height {height} \
+                 (executed={:02x?}, header={:02x?}). Local execution diverged from the committed \
+                 header. Wipe the data dir and resync from peers.",
+                &exec.post_root[..8],
+                &block.state_root[..8],
+            ));
+        }
+
+        novai_node::exec_apply::apply_block_execution(storage, height, exec.write_ops())
+            .map_err(|e| format!("REPLAY FAILED: {e}"))?;
+    }
+    Ok(())
 }
 
 fn main() {
@@ -2243,6 +2263,243 @@ mod tests {
             commit_metrics.total_txs_committed.load(Ordering::Relaxed),
             5,
             "total_txs_committed should accumulate across multiple commits",
+        );
+    }
+
+    fn read_root_of(storage: &Storage) -> [u8; 32] {
+        match storage.get(novai_state::KEY_SMT_ROOT).expect("get root") {
+            Some(b) => novai_state::decode_smt_root_v1(&b).expect("decode root"),
+            None => novai_execution::empty_smt_root(),
+        }
+    }
+
+    fn read_cursor_of(storage: &Storage) -> Option<u64> {
+        storage
+            .get(KEY_EXECUTED_HEIGHT)
+            .expect("get cursor")
+            .map(|b| {
+                let mut a = [0u8; 8];
+                a.copy_from_slice(&b);
+                u64::from_be_bytes(a)
+            })
+    }
+
+    const C_SENDER: Address = [0x11; 32];
+    const C_RECIPIENT: Address = [0x22; 32];
+
+    /// Shared Stage B crash-window fixture: a funded store where the empty
+    /// H=1 is fully executed (cursor 1) and the tx-bearing H=2 has its COMMIT
+    /// batch durable (the real `persist_commit_atomic`: both block records
+    /// plus the committed height, one atomic batch) while its EXECUTION batch
+    /// deliberately never ran, the simulated crash between the two writes.
+    /// Returns the storage, H=2, its pre-computed execution, and the pre-block
+    /// root R0.
+    fn stageb_crash_window_fixture() -> (
+        Storage,
+        Block,
+        novai_execution::BlockExecution,
+        [u8; 32],
+    ) {
+        let mut storage = Storage::Memory(MemKv::new());
+
+        // Fund through the canonical SMT path so KEY_SMT_ROOT matches the rows.
+        for (k, v) in [
+            (
+                account_key(&C_SENDER),
+                encode_account_v1(&AccountStateV1 {
+                    balance: 1_000_000,
+                    nonce: 0,
+                })
+                .to_vec(),
+            ),
+            (
+                account_key(&C_RECIPIENT),
+                encode_account_v1(&AccountStateV1 {
+                    balance: 10_000,
+                    nonce: 0,
+                })
+                .to_vec(),
+            ),
+            (
+                novai_state::KEY_FEE_POOL.to_vec(),
+                novai_state::encode_fee_pool_v1(&novai_state::FeePoolV1 { balance: 0 }).to_vec(),
+            ),
+        ] {
+            let ops = vec![novai_state::WriteOp::Put(k, v)];
+            let mut all = ops.clone();
+            novai_execution::append_smt_ops_for_state_ops(&storage, &ops, &mut all)
+                .expect("append smt ops");
+            storage.apply_batch(&all).expect("seed batch");
+        }
+        let r0 = read_root_of(&storage);
+
+        // H=1: empty, fully executed through the applier (cursor 1).
+        let block1 = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: r0,
+            txs: vec![],
+        };
+        novai_node::exec_apply::apply_block_execution(&mut storage, 1, Vec::new())
+            .expect("execute H=1");
+
+        // H=2: one transfer, header stamped from the computed post-state.
+        // Execution never verifies signatures, so a dummy pubkey is correct.
+        let tx = TxV1 {
+            version: TxVersion::V1,
+            from: C_SENDER,
+            pubkey: C_SENDER,
+            nonce: 0,
+            fee: 1_000,
+            payload: novai_execution::encode_transfer_payload_v1(
+                &novai_execution::TransferPayloadV1 {
+                    to: C_RECIPIENT,
+                    amount: 5_000,
+                },
+            )
+            .to_vec(),
+            sig: [0u8; 64],
+        };
+        let exec2 = novai_execution::execute_block_to_root(&storage, std::slice::from_ref(&tx), 2)
+            .expect("execute H=2");
+        assert!(
+            exec2
+                .outcomes
+                .iter()
+                .all(|o| *o == novai_execution::TxOutcome::Applied),
+            "the transfer must apply (non-vacuous fixture)"
+        );
+        assert_ne!(exec2.post_root, r0, "the transfer must move the root");
+        let block2 = Block {
+            height: 2,
+            round: 0,
+            parent_hash: novai_consensus_types::block_hash(&block1),
+            state_root: exec2.post_root,
+            txs: vec![tx],
+        };
+
+        // The COMMIT batch, via the real persist_commit_atomic. The execution
+        // batch for H=2 deliberately does NOT run (the crash).
+        let cs = novai_consensus::ConsensusState::new([0u8; 32]);
+        let qc2 = novai_consensus_types::QC {
+            height: 2,
+            round: 0,
+            block_hash: novai_consensus_types::block_hash(&block2),
+            votes: vec![],
+        };
+        cs.persist_commit_atomic(&mut storage, &[block1, block2.clone()], &qc2, 2, None)
+            .expect("commit batch");
+
+        (storage, block2, exec2, r0)
+    }
+
+    /// Stage B arm c1: the inter-batch crash window is owned by replay. A
+    /// node that crashed after the commit batch but before the execution
+    /// batch boots with committed ahead of executed; replay re-executes the
+    /// missing block through the applier and lands rows, nodes, root, and
+    /// cursor as one batch.
+    #[test]
+    fn stageb_replay_closes_the_inter_batch_crash_window() {
+        let (mut storage, block2, _exec2, r0) = stageb_crash_window_fixture();
+
+        // The crash state: committed 2, executed 1, H=2's state absent.
+        assert_eq!(read_cursor_of(&storage), Some(1), "crash state: cursor behind");
+        assert_eq!(read_root_of(&storage), r0, "crash state: root pre-block");
+
+        replay_range(&mut storage, 1, 2).expect("replay must complete the window");
+
+        let root = read_root_of(&storage);
+        assert_eq!(
+            root, block2.state_root,
+            "the replayed root equals the post-state header"
+        );
+        assert_ne!(root, r0, "the transfer landed (non-vacuous)");
+        assert_eq!(
+            read_cursor_of(&storage),
+            Some(2),
+            "the cursor advanced to the replayed height inside the batch"
+        );
+        let recipient_row = storage
+            .get(&account_key(&C_RECIPIENT))
+            .unwrap()
+            .expect("recipient row");
+        assert_eq!(
+            recipient_row,
+            encode_account_v1(&AccountStateV1 {
+                balance: 15_000,
+                nonce: 0,
+            })
+            .to_vec(),
+            "the recipient was credited by the replayed transfer"
+        );
+    }
+
+    /// Stage B arm c2: the forbidden rows-without-root split is detected and
+    /// halts BEFORE applying anything further, never completing silently.
+    /// This is the accel-C silent-divergence scenario (rows land, root record
+    /// stale, replay skips the already-applied txs) made loud: the skipped
+    /// re-execution reproduces the stale root, the pre-apply refusal fires,
+    /// and state is left exactly as the poison left it.
+    #[test]
+    fn stageb_replay_halts_on_rows_without_root_split() {
+        let (mut storage, _block2, exec2, r0) = stageb_crash_window_fixture();
+
+        // Hand-poison the forbidden split: H=2's rows and SMT nodes land, the
+        // KEY_SMT_ROOT record does NOT, the cursor stays behind. The real
+        // applier cannot produce this state (one batch); a two-batch applier
+        // bug plus a crash between the batches would.
+        let all_ops = exec2.write_ops();
+        let poison: Vec<novai_state::WriteOp> = all_ops
+            .iter()
+            .filter(|op| {
+                !matches!(op, novai_state::WriteOp::Put(k, _)
+                    if k.as_slice() == novai_state::KEY_SMT_ROOT)
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            poison.len(),
+            all_ops.len() - 1,
+            "exactly the root record op is withheld"
+        );
+        storage.apply_batch(&poison).expect("apply poison");
+
+        // Poison sanity: rows advanced while the root record is stale.
+        let sender_row = storage
+            .get(&account_key(&C_SENDER))
+            .unwrap()
+            .expect("sender row");
+        assert_eq!(
+            sender_row,
+            encode_account_v1(&AccountStateV1 {
+                balance: 1_000_000 - 5_000 - 1_000,
+                nonce: 1,
+            })
+            .to_vec(),
+            "sender rows advanced (the poison landed)"
+        );
+        assert_eq!(read_root_of(&storage), r0, "root record left stale (the split)");
+        assert_eq!(read_cursor_of(&storage), Some(1), "cursor behind (the split)");
+
+        // Replay must refuse loudly before applying anything further.
+        let err = replay_range(&mut storage, 1, 2)
+            .expect_err("rows-without-root must halt replay, never complete silently");
+        assert!(
+            err.contains("REPLAY FAILED: post-execution state root mismatch at height 2"),
+            "the halt must be the root-mismatch refusal; got: {err}"
+        );
+
+        // Fail-closed: nothing further landed on the refused path.
+        assert_eq!(
+            read_cursor_of(&storage),
+            Some(1),
+            "cursor untouched by the refused replay"
+        );
+        assert_eq!(
+            read_root_of(&storage),
+            r0,
+            "root record untouched by the refused replay"
         );
     }
 }
