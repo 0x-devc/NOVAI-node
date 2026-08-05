@@ -30,7 +30,7 @@ use novai_execution::{
     append_smt_ops_for_state_ops, dispatch_tx, encode_transfer_payload_v1, execute_block_to_root,
     TransferPayloadV1, TxOutcome,
 };
-use novai_node::exec_apply::apply_block_execution;
+use novai_node::exec_apply::{apply_block_execution, resolve_and_apply_block};
 use novai_state::{
     account_key, encode_account_v1, encode_fee_pool_v1, encode_smt_root_v1, AccountStateV1,
     FeePoolV1, Kv, KvBatch, MemKv, WriteOp, KEY_EXECUTED_HEIGHT, KEY_FEE_POOL,
@@ -255,6 +255,52 @@ fn stageb_applier_one_batch_exact_content() {
             "row op missing from the batch for key {key:?}"
         );
     }
+}
+
+/// The miss-path pre-apply refusal: a committed block whose header does not
+/// match the re-executed post root must halt BEFORE anything is applied,
+/// leaving rows, root record, and cursor untouched. Pins
+/// `resolve_and_apply_block`'s refusal directly (mutation m3 of the Stage B
+/// checklist proves this test fails when the refusal is skipped).
+#[test]
+fn stageb_miss_path_refuses_corrupted_header_before_applying() {
+    let mut db = seeded_state();
+    let txs = block_txs();
+    let pre_rows = {
+        let mut rows = db.scan_prefix(b"").unwrap();
+        rows.extend(db.scan_prefix(b"nnpx/").unwrap());
+        rows.sort();
+        rows
+    };
+
+    // A committed block carrying a CORRUPTED header root (not the post-state
+    // of its txs, not the pre-state either).
+    let block = novai_consensus_types::Block {
+        height: HEIGHT,
+        round: 0,
+        parent_hash: [0u8; 32],
+        state_root: [0xAA; 32],
+        txs,
+    };
+
+    let err = resolve_and_apply_block(&mut db, &block, None)
+        .expect_err("a corrupted header must refuse on the miss path");
+    assert!(
+        err.contains("CONSENSUS SAFETY HALT: pre-apply state root mismatch"),
+        "the refusal must be the pre-apply halt; got: {err}"
+    );
+
+    // Nothing was applied: the store is byte-identical to before the call.
+    let post_rows = {
+        let mut rows = db.scan_prefix(b"").unwrap();
+        rows.extend(db.scan_prefix(b"nnpx/").unwrap());
+        rows.sort();
+        rows
+    };
+    assert_eq!(
+        pre_rows, post_rows,
+        "the refused apply must leave the store byte-identical (no rows, no root, no cursor)"
+    );
 }
 
 /// Arm b2, empty-block form: an empty write set yields a cursor-only batch,
