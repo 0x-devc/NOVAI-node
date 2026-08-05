@@ -18,7 +18,6 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct SenderAccount {
     /// Deterministic index used to derive this account.
-    #[allow(dead_code)]
     pub index: usize,
     /// Ed25519 signing key.
     pub signing_key: SigningKey,
@@ -146,8 +145,7 @@ impl SenderPool {
             .cloned()
     }
 
-    /// Get all accounts (for reporting).
-    #[allow(dead_code)]
+    /// Get all accounts (startup nonce resync, reporting).
     pub fn all_accounts(&self) -> &[Arc<SenderAccount>] {
         &self.accounts
     }
@@ -195,6 +193,16 @@ mod tests {
 
         acc.rollback_nonce(); // 2 -> 1
         assert_eq!(acc.current_nonce(), 1);
+    }
+
+    #[test]
+    fn reset_nonce_then_claim_starts_at_value() {
+        let acc = SenderAccount::from_index(0);
+        assert_eq!(acc.current_nonce(), 0);
+
+        acc.reset_nonce(272);
+        assert_eq!(acc.claim_nonce(), 272);
+        assert_eq!(acc.claim_nonce(), 273);
     }
 
     #[test]

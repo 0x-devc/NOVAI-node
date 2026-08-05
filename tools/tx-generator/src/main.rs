@@ -107,6 +107,19 @@ async fn main() -> Result<()> {
     let sender_pool = Arc::new(sender::SenderPool::new(args.senders));
     info!("Initialized {} sender accounts", sender_pool.len());
 
+    // 1b. Resync every sender to its current on-chain nonce BEFORE any
+    // load begins. Sender accounts are deterministic and long-lived, so
+    // after prior runs their chain nonces are far above the 0 the pool
+    // starts with; without this, every tx is rejected NonceTooLow.
+    // Fails loud: no load starts if any sender's nonce is unknown.
+    let resync_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("Failed to create HTTP client for startup nonce resync")?;
+    submitter::resync_sender_nonces(&resync_client, &args.endpoint, &sender_pool)
+        .await
+        .context("startup nonce resync failed; not starting load with unknown nonces")?;
+
     // 2. Create channels (carries unsigned TxTemplates, not signed TxV1)
     let channel_capacity = (args.tps * 2) as usize;
     let (tx_sender, tx_receiver) = mpsc::channel(channel_capacity);

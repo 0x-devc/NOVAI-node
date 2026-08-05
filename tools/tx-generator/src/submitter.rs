@@ -670,6 +670,141 @@ struct GetNonceResponse {
     nonce: u64,
 }
 
+/// Response from novai_getBalance. Only the nonce field is consumed here;
+/// the balance field is ignored by serde.
+#[derive(serde::Deserialize)]
+struct GetBalanceNonceResponse {
+    nonce: u64,
+}
+
+/// Maximum query attempts per sender during the startup nonce resync.
+const STARTUP_RESYNC_MAX_ATTEMPTS: u32 = 5;
+
+/// Backoff between startup resync attempts (covers HTTP 429 from the
+/// node's per-IP RPC rate limit and transient network errors).
+const STARTUP_RESYNC_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Resync every sender in the pool to its current on-chain nonce.
+///
+/// Called once at startup, after the pool is built and before any load
+/// begins. Sender accounts are deterministic and long-lived, so after a
+/// prior run their on-chain nonces are far above 0; without this resync
+/// the generator submits nonce 0 and the node rejects every tx with
+/// NonceTooLow (-32010).
+///
+/// Fails loud: if any sender's nonce cannot be determined after bounded
+/// retries, the whole resync errors and the generator must not start.
+/// Never silently submits a wrong nonce.
+pub async fn resync_sender_nonces(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    pool: &SenderPool,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let mut min_nonce = u64::MAX;
+    let mut max_nonce = 0u64;
+
+    for account in pool.all_accounts() {
+        let nonce = query_startup_nonce(http_client, endpoint, &account.address)
+            .await
+            .with_context(|| {
+                format!(
+                    "startup nonce resync failed for sender {} (address {}); \
+                     refusing to start load with unknown nonces",
+                    account.index,
+                    hex::encode(account.address)
+                )
+            })?;
+        account.reset_nonce(nonce);
+        info!(
+            sender = account.index,
+            nonce, "sender resynced to on-chain nonce"
+        );
+        min_nonce = min_nonce.min(nonce);
+        max_nonce = max_nonce.max(nonce);
+    }
+
+    info!(
+        senders = pool.len(),
+        min_nonce, max_nonce, "startup nonce resync complete"
+    );
+    Ok(())
+}
+
+/// Query one sender's on-chain nonce with bounded retries.
+///
+/// Retries transient failures (network errors, HTTP 429 from the per-IP
+/// RPC rate limit) up to STARTUP_RESYNC_MAX_ATTEMPTS, then gives up so
+/// the caller fails loud.
+async fn query_startup_nonce(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    address: &Address,
+) -> anyhow::Result<u64> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match query_balance_nonce_once(http_client, endpoint, address).await {
+            Ok(nonce) => return Ok(nonce),
+            Err(e) if attempt >= STARTUP_RESYNC_MAX_ATTEMPTS => {
+                return Err(e.context(format!("nonce query failed after {attempt} attempts")));
+            }
+            Err(e) => {
+                warn!(attempt, error = %e, "startup nonce query failed, retrying");
+                tokio::time::sleep(STARTUP_RESYNC_BACKOFF).await;
+            }
+        }
+    }
+}
+
+/// Single novai_getBalance round trip, returning only the nonce.
+///
+/// Mirrors the prefund tool's query_balance_nonce
+/// (bin/prefund_senders.rs): same method, same params shape. Used for
+/// startup resync instead of novai_getNonce because novai_getBalance is
+/// the call verified working against the live chain.
+async fn query_balance_nonce_once(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    address: &Address,
+) -> anyhow::Result<u64> {
+    use anyhow::{anyhow, bail};
+
+    let rpc_request = RpcRequest {
+        jsonrpc: "2.0",
+        method: "novai_getBalance",
+        params: serde_json::json!({ "address": hex::encode(address) }),
+        id: 1,
+    };
+
+    let response = http_client
+        .post(endpoint)
+        .json(&rpc_request)
+        .send()
+        .await
+        .map_err(|e| anyhow!("network error: {e}"))?;
+
+    let status = response.status().as_u16();
+    if status == 429 {
+        bail!("rate limited (HTTP 429)");
+    }
+
+    let rpc_response: RpcResponse<GetBalanceNonceResponse> = response
+        .json()
+        .await
+        .map_err(|e| anyhow!("parse error (HTTP {status}): {e}"))?;
+
+    if let Some(err) = rpc_response.error {
+        bail!("RPC error {}: {}", err.code, err.message);
+    }
+
+    rpc_response
+        .result
+        .map(|r| r.nonce)
+        .ok_or_else(|| anyhow!("missing result field"))
+}
+
 /// Check if error is a validation error (should not retry).
 fn is_validation_error(error: &SubmitError) -> bool {
     match error {
@@ -1165,6 +1300,98 @@ mod tests {
                 "expected SubmitResult::Failed after SenderLimitExceeded exhaustion, got {other:?}"
             ),
         }
+    }
+
+    // ============================================================
+    // Startup nonce resync tests.
+    //
+    // The bug these pin: sender accounts are deterministic and
+    // long-lived, so their on-chain nonces are far above 0 after any
+    // prior run (measured live: ~272), but SenderAccount::from_index
+    // always starts at nonce 0. Startup must resync every sender to
+    // the chain's nonce via novai_getBalance before load begins.
+    // ============================================================
+
+    #[tokio::test]
+    async fn startup_resync_initializes_sender_to_chain_nonce() {
+        use crate::sender::SenderPool;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":{"balance":"998000000","nonce":272},"id":1}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let pool = SenderPool::new(1);
+        let client = reqwest::Client::new();
+
+        resync_sender_nonces(&client, &server.url(), &pool)
+            .await
+            .expect("resync must succeed when the RPC answers");
+
+        let sender = pool.get_sender(0).unwrap();
+        assert_eq!(
+            sender.claim_nonce(),
+            272,
+            "first claimed nonce must be the on-chain nonce, not 0"
+        );
+        assert_eq!(
+            sender.claim_nonce(),
+            273,
+            "nonces continue from the resynced value"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_resync_keeps_fresh_sender_at_zero() {
+        use crate::sender::SenderPool;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":{"balance":"0","nonce":0},"id":1}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let pool = SenderPool::new(1);
+        let client = reqwest::Client::new();
+
+        resync_sender_nonces(&client, &server.url(), &pool)
+            .await
+            .expect("resync must succeed for a fresh account");
+
+        let sender = pool.get_sender(0).unwrap();
+        assert_eq!(sender.claim_nonce(), 0, "fresh account stays at nonce 0");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_resync_fails_loud_when_query_fails() {
+        use crate::sender::SenderPool;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .with_body("internal error")
+            .expect_at_least(STARTUP_RESYNC_MAX_ATTEMPTS as usize)
+            .create_async()
+            .await;
+
+        let pool = SenderPool::new(1);
+        let client = reqwest::Client::new();
+
+        let result = resync_sender_nonces(&client, &server.url(), &pool).await;
+        assert!(
+            result.is_err(),
+            "resync must fail loud (not silently keep nonce 0) when the nonce query fails"
+        );
     }
 
     #[tokio::test(start_paused = true)]
