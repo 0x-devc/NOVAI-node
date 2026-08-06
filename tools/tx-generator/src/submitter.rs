@@ -15,7 +15,7 @@
 
 use crate::generator::TxTemplate;
 use crate::metrics::MetricEvent;
-use crate::sender::SenderPool;
+use crate::sender::{SenderAccount, SenderPool};
 use novai_codec::{encode_tx_v1_signed, txid_v1};
 use novai_crypto::sign_tx_v1;
 use novai_types::{Address, TxId, TxV1, TxVersion};
@@ -234,6 +234,10 @@ impl Submitter {
                 let mut stats = WorkerStats::default();
                 // Track consecutive NonceTooLow rejections per sender for nonce reset
                 let mut consecutive_nonce_errors: HashMap<Address, u32> = HashMap::new();
+                // Last resync attempt per sender, so a failed query that leaves
+                // the streak armed cannot turn every subsequent rejection into
+                // another query against an already-degraded endpoint.
+                let mut last_resync_attempt: HashMap<Address, Instant> = HashMap::new();
 
                 loop {
                     tokio::select! {
@@ -288,31 +292,49 @@ impl Submitter {
                                         let count = consecutive_nonce_errors
                                             .entry(sender_address)
                                             .or_insert(0);
-                                        *count += 1;
+                                        // Saturating: the streak now stays armed across a
+                                        // failed resync, so against a permanently dead
+                                        // endpoint it would otherwise climb without bound.
+                                        *count = count.saturating_add(1);
                                         if *count >= NONCE_RESET_THRESHOLD {
-                                            if let Some(sender) =
-                                                sender_pool.find_by_address(&sender_address)
+                                            let now = Instant::now();
+                                            let due = match last_resync_attempt
+                                                .get(&sender_address)
                                             {
-                                                let old_nonce = sender.current_nonce();
-                                                let chain_nonce = query_chain_nonce(
-                                                    &http_client,
-                                                    &endpoint,
-                                                    &sender_address,
-                                                )
-                                                .await;
-                                                let new_nonce = chain_nonce.unwrap_or(0);
-                                                sender.reset_nonce(new_nonce);
-                                                info!(
-                                                    worker_id,
-                                                    sender = ?&sender_address[..4],
-                                                    old_nonce,
-                                                    new_nonce,
-                                                    from_chain = chain_nonce.is_some(),
-                                                    "Nonce reset after {} NonceTooLow errors",
-                                                    NONCE_RESET_THRESHOLD
-                                                );
+                                                Some(at) => {
+                                                    now.duration_since(*at) >= RESYNC_MIN_INTERVAL
+                                                }
+                                                None => true,
+                                            };
+                                            match sender_pool.find_by_address(&sender_address) {
+                                                Some(sender) if due => {
+                                                    last_resync_attempt
+                                                        .insert(sender_address, now);
+                                                    if resync_one_sender(
+                                                        &http_client,
+                                                        &endpoint,
+                                                        &sender,
+                                                    )
+                                                    .await
+                                                    {
+                                                        // Corrected from a value read off the
+                                                        // chain: the streak has been answered.
+                                                        *count = 0;
+                                                    }
+                                                    // Query failed: leave the streak armed so
+                                                    // the next rejection past the cooldown
+                                                    // retries, and leave the nonce untouched.
+                                                }
+                                                Some(_) => {
+                                                    // Inside the cooldown. Leave the streak
+                                                    // armed and wait.
+                                                }
+                                                None => {
+                                                    // Sender is not in this pool, nothing to
+                                                    // correct.
+                                                    *count = 0;
+                                                }
                                             }
-                                            *count = 0;
                                         }
                                     } else {
                                         // Non-nonce rejection: clear nonce error streak
@@ -632,15 +654,24 @@ async fn submit_once(
     Ok(txid)
 }
 
-/// Query the chain's expected nonce for an address via RPC.
+/// Single novai_getNonce round trip.
 ///
-/// Returns `Some(nonce)` on success, `None` if the RPC call fails
-/// (in which case the caller falls back to 0).
-async fn query_chain_nonce(
+/// novai_getNonce returns the node's `expected_nonce` (rpc.rs
+/// `handle_get_nonce` into `InMemoryNonceProvider`), which is the exact value
+/// `TxMempool::insert` compares against at admission, so it is the right
+/// answer to "what nonce will the node accept next". novai_getBalance returns
+/// the committed account row instead, which can lag whenever a transaction
+/// commits but execution skips it. Neither counts pooled transactions.
+///
+/// Every failure is surfaced as an error rather than collapsed into a
+/// default. The caller must never write a nonce it did not read.
+async fn query_nonce_once(
     http_client: &reqwest::Client,
     endpoint: &str,
     address: &Address,
-) -> Option<u64> {
+) -> anyhow::Result<u64> {
+    use anyhow::{anyhow, bail};
+
     let rpc_request = RpcRequest {
         jsonrpc: "2.0",
         method: "novai_getNonce",
@@ -653,15 +684,94 @@ async fn query_chain_nonce(
         .json(&rpc_request)
         .send()
         .await
-        .ok()?;
+        .map_err(|e| anyhow!("network error: {e}"))?;
 
-    let rpc_response: RpcResponse<GetNonceResponse> = response.json().await.ok()?;
-
-    if rpc_response.error.is_some() {
-        return None;
+    let status = response.status().as_u16();
+    if status == 429 {
+        bail!("rate limited (HTTP 429)");
     }
 
-    rpc_response.result.map(|r| r.nonce)
+    let rpc_response: RpcResponse<GetNonceResponse> = response
+        .json()
+        .await
+        .map_err(|e| anyhow!("parse error (HTTP {status}): {e}"))?;
+
+    if let Some(err) = rpc_response.error {
+        bail!("RPC error {}: {}", err.code, err.message);
+    }
+
+    rpc_response
+        .result
+        .map(|r| r.nonce)
+        .ok_or_else(|| anyhow!("RPC response carried neither result nor error"))
+}
+
+/// Query one sender's chain nonce with bounded retries.
+///
+/// Retries transient failures (network errors, HTTP 429 from the node's
+/// per-IP RPC rate limit, malformed bodies). The rate limit is the one that
+/// matters: the mid-run resync fires precisely when the transport is under
+/// pressure, which is exactly when a single-shot query is most likely to be
+/// rate limited, so a resync that treats 429 as fatal fails hardest at the
+/// moment it is needed most.
+async fn query_nonce_retrying(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    address: &Address,
+) -> anyhow::Result<u64> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match query_nonce_once(http_client, endpoint, address).await {
+            Ok(nonce) => return Ok(nonce),
+            Err(e) if attempt >= NONCE_QUERY_MAX_ATTEMPTS => {
+                return Err(e.context(format!("nonce query failed after {attempt} attempts")));
+            }
+            Err(e) => {
+                warn!(attempt, error = %e, "nonce query failed, retrying");
+                tokio::time::sleep(NONCE_QUERY_BACKOFF).await;
+            }
+        }
+    }
+}
+
+/// Resync one sender's local nonce to the chain's expected nonce.
+///
+/// Returns true when the local nonce was corrected from a value that was
+/// actually read from the chain, false when the chain nonce could not be
+/// determined.
+async fn resync_one_sender(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    sender: &SenderAccount,
+) -> bool {
+    let old_nonce = sender.current_nonce();
+    match query_nonce_retrying(http_client, endpoint, &sender.address).await {
+        Ok(chain_nonce) => {
+            sender.reset_nonce(chain_nonce);
+            info!(
+                sender = ?&sender.address[..4],
+                old_nonce,
+                new_nonce = chain_nonce,
+                "sender resynced to chain nonce"
+            );
+            true
+        }
+        Err(e) => {
+            // Never write a nonce that was not read from the chain. Leaving
+            // the local value alone keeps the sender submitting at its
+            // current nonce, which stays recoverable; writing a guess does
+            // not, because nonce 0 against a live chain is rejected as
+            // NonceTooLow forever and every rejection burns another nonce.
+            warn!(
+                sender = ?&sender.address[..4],
+                old_nonce,
+                error = %e,
+                "nonce resync query failed, local nonce left unchanged"
+            );
+            false
+        }
+    }
 }
 
 /// Response from novai_getNonce.
@@ -670,19 +780,20 @@ struct GetNonceResponse {
     nonce: u64,
 }
 
-/// Response from novai_getBalance. Only the nonce field is consumed here;
-/// the balance field is ignored by serde.
-#[derive(serde::Deserialize)]
-struct GetBalanceNonceResponse {
-    nonce: u64,
-}
+/// Maximum attempts per sender for any chain nonce query, startup or mid run.
+const NONCE_QUERY_MAX_ATTEMPTS: u32 = 5;
 
-/// Maximum query attempts per sender during the startup nonce resync.
-const STARTUP_RESYNC_MAX_ATTEMPTS: u32 = 5;
+/// Backoff between nonce query attempts (covers HTTP 429 from the node's
+/// per-IP RPC rate limit and transient network errors).
+const NONCE_QUERY_BACKOFF: Duration = Duration::from_millis(250);
 
-/// Backoff between startup resync attempts (covers HTTP 429 from the
-/// node's per-IP RPC rate limit and transient network errors).
-const STARTUP_RESYNC_BACKOFF: Duration = Duration::from_millis(250);
+/// Minimum interval between mid-run resync attempts for one sender.
+///
+/// The streak counter stays armed after a failed query so the next rejection
+/// retries it, which without a floor would turn a degraded endpoint into a
+/// query storm from every worker at once. This is the "do not resync into a
+/// degraded transport" rule.
+const RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Resync every sender in the pool to its current on-chain nonce.
 ///
@@ -706,7 +817,7 @@ pub async fn resync_sender_nonces(
     let mut max_nonce = 0u64;
 
     for account in pool.all_accounts() {
-        let nonce = query_startup_nonce(http_client, endpoint, &account.address)
+        let nonce = query_nonce_retrying(http_client, endpoint, &account.address)
             .await
             .with_context(|| {
                 format!(
@@ -730,79 +841,6 @@ pub async fn resync_sender_nonces(
         min_nonce, max_nonce, "startup nonce resync complete"
     );
     Ok(())
-}
-
-/// Query one sender's on-chain nonce with bounded retries.
-///
-/// Retries transient failures (network errors, HTTP 429 from the per-IP
-/// RPC rate limit) up to STARTUP_RESYNC_MAX_ATTEMPTS, then gives up so
-/// the caller fails loud.
-async fn query_startup_nonce(
-    http_client: &reqwest::Client,
-    endpoint: &str,
-    address: &Address,
-) -> anyhow::Result<u64> {
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        match query_balance_nonce_once(http_client, endpoint, address).await {
-            Ok(nonce) => return Ok(nonce),
-            Err(e) if attempt >= STARTUP_RESYNC_MAX_ATTEMPTS => {
-                return Err(e.context(format!("nonce query failed after {attempt} attempts")));
-            }
-            Err(e) => {
-                warn!(attempt, error = %e, "startup nonce query failed, retrying");
-                tokio::time::sleep(STARTUP_RESYNC_BACKOFF).await;
-            }
-        }
-    }
-}
-
-/// Single novai_getBalance round trip, returning only the nonce.
-///
-/// Mirrors the prefund tool's query_balance_nonce
-/// (bin/prefund_senders.rs): same method, same params shape. Used for
-/// startup resync instead of novai_getNonce because novai_getBalance is
-/// the call verified working against the live chain.
-async fn query_balance_nonce_once(
-    http_client: &reqwest::Client,
-    endpoint: &str,
-    address: &Address,
-) -> anyhow::Result<u64> {
-    use anyhow::{anyhow, bail};
-
-    let rpc_request = RpcRequest {
-        jsonrpc: "2.0",
-        method: "novai_getBalance",
-        params: serde_json::json!({ "address": hex::encode(address) }),
-        id: 1,
-    };
-
-    let response = http_client
-        .post(endpoint)
-        .json(&rpc_request)
-        .send()
-        .await
-        .map_err(|e| anyhow!("network error: {e}"))?;
-
-    let status = response.status().as_u16();
-    if status == 429 {
-        bail!("rate limited (HTTP 429)");
-    }
-
-    let rpc_response: RpcResponse<GetBalanceNonceResponse> = response
-        .json()
-        .await
-        .map_err(|e| anyhow!("parse error (HTTP {status}): {e}"))?;
-
-    if let Some(err) = rpc_response.error {
-        bail!("RPC error {}: {}", err.code, err.message);
-    }
-
-    rpc_response
-        .result
-        .map(|r| r.nonce)
-        .ok_or_else(|| anyhow!("missing result field"))
 }
 
 /// Check if error is a validation error (should not retry).
@@ -1380,7 +1418,7 @@ mod tests {
             .mock("POST", "/")
             .with_status(500)
             .with_body("internal error")
-            .expect_at_least(STARTUP_RESYNC_MAX_ATTEMPTS as usize)
+            .expect_at_least(NONCE_QUERY_MAX_ATTEMPTS as usize)
             .create_async()
             .await;
 
@@ -1392,6 +1430,122 @@ mod tests {
             result.is_err(),
             "resync must fail loud (not silently keep nonce 0) when the nonce query fails"
         );
+    }
+
+    // ============================================================
+    // Gate SOAK phase 1 (B1, B2): the mid-run nonce resync must never
+    // write a nonce it did not read from the chain, and must treat a
+    // rate limit as transient rather than fatal.
+    //
+    // Pre-fix, resync_one_sender did `chain_nonce.unwrap_or(0)` on a
+    // single-shot query with no 429 guard, so one rate-limited round
+    // trip reset a live sender to nonce 0 and every subsequent tx from
+    // that sender was rejected NonceTooLow forever. That is the
+    // poisoning path that takes the devnet down overnight.
+    // ============================================================
+
+    /// One failure shape: the sender's local nonce must survive it intact.
+    async fn assert_local_nonce_survives(status: usize, body: &str, label: &str) {
+        use crate::sender::SenderAccount;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(status)
+            .with_body(body)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let sender = SenderAccount::from_index(0);
+        sender.reset_nonce(300);
+
+        let corrected =
+            resync_one_sender(&reqwest::Client::new(), &server.url(), &sender).await;
+
+        assert!(
+            !corrected,
+            "{label}: resync must report no correction when the chain nonce is unknown"
+        );
+        assert_eq!(
+            sender.current_nonce(),
+            300,
+            "{label}: local nonce must be left untouched when the query fails, never reset to 0"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resync_never_writes_a_nonce_it_did_not_read() {
+        assert_local_nonce_survives(429, "Too Many Requests", "http 429").await;
+        assert_local_nonce_survives(500, "internal error", "http 500").await;
+        assert_local_nonce_survives(200, "not json at all", "malformed body").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resync_retries_through_a_rate_limit_then_succeeds() {
+        use crate::sender::SenderAccount;
+
+        let mut server = mockito::Server::new_async().await;
+        let _rate_limited = server
+            .mock("POST", "/")
+            .with_status(429)
+            .with_body("Too Many Requests")
+            .expect(1)
+            .create_async()
+            .await;
+        let _ok = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":{"nonce":412},"id":1}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let sender = SenderAccount::from_index(0);
+        sender.reset_nonce(7);
+
+        let corrected =
+            resync_one_sender(&reqwest::Client::new(), &server.url(), &sender).await;
+
+        assert!(
+            corrected,
+            "a 429 is transient and must be retried, not treated as a hard failure"
+        );
+        assert_eq!(
+            sender.current_nonce(),
+            412,
+            "after the retry succeeds the sender must hold the chain nonce"
+        );
+    }
+
+    /// D3: startup and mid-run must both read the value admission actually
+    /// gates on, which is novai_getNonce (rpc.rs:2090 -> expected_nonce),
+    /// not novai_getBalance's committed account row.
+    #[tokio::test(start_paused = true)]
+    async fn startup_resync_queries_novai_get_nonce() {
+        use crate::sender::SenderPool;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "method": "novai_getNonce"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":{"nonce":272},"id":1}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let pool = SenderPool::new(1);
+
+        resync_sender_nonces(&reqwest::Client::new(), &server.url(), &pool)
+            .await
+            .expect("startup resync must succeed against a novai_getNonce endpoint");
+
+        assert_eq!(pool.get_sender(0).unwrap().current_nonce(), 272);
     }
 
     #[tokio::test(start_paused = true)]
