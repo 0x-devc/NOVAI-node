@@ -2038,12 +2038,25 @@ fn handle_submit_tx(
             // rejection types without leaking internal debug details (H-06).
             // Codes: -32001 = MempoolFull, -32010 = NonceTooLow,
             //        -32011 = FeeTooLow, -32012 = SenderLimitExceeded,
-            //        -32013 = other validation error
+            //        -32013 = other validation error, -32014 = NonceTooHigh
             let (code, message) = match e {
                 mempool::TxMempoolError::MempoolFull { .. } => (-32001, "MempoolFull".to_string()),
                 mempool::TxMempoolError::NonceTooLow { expected, got } => (
                     -32010,
                     format!("NonceTooLow: expected {expected}, got {got}"),
+                ),
+                // Gate SOAK A5. Distinct from NonceTooLow because the client
+                // response is different: too low means the transaction is
+                // dead and the client must resync; too high means it is
+                // simply early and the same transaction succeeds once the
+                // sender's earlier nonces commit.
+                mempool::TxMempoolError::NonceTooHigh {
+                    expected,
+                    got,
+                    horizon,
+                } => (
+                    -32014,
+                    format!("NonceTooHigh: expected {expected}, got {got}, horizon {horizon}"),
                 ),
                 mempool::TxMempoolError::FeeTooLow { min_fee, got } => {
                     (-32011, format!("FeeTooLow: minimum {min_fee}, got {got}"))

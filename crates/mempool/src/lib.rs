@@ -128,6 +128,15 @@ pub enum TxMempoolError {
         expected: u64,
         got: u64,
     },
+    /// Gate SOAK A5: the nonce is further ahead than this sender could ever
+    /// use, given that it may hold at most `MAX_PENDING_PER_SENDER` pending
+    /// transactions. Retryable: it becomes admissible once the sender's
+    /// expected nonce advances to within the window.
+    NonceTooHigh {
+        expected: u64,
+        got: u64,
+        horizon: u64,
+    },
     InvalidSignature,
     InvalidPublicKey,
     AddressMismatch,
@@ -211,6 +220,53 @@ impl TxMempool {
         self.by_sender
             .get(from)
             .map_or(0, |by_nonce| by_nonce.values().map(Vec::len).sum())
+    }
+
+    /// May an incoming transaction at `nonce` displace one of this sender's
+    /// own pooled transactions, given the sender is at its slot cap?
+    ///
+    /// Two conditions, and both are load bearing.
+    ///
+    /// `nonce < max_pending_nonce` is what makes the swap safe. For one
+    /// sender, inclusion is exact-nonce ascending, so of any two of its
+    /// transactions the lower nonce is included strictly first: reaching the
+    /// higher one requires `expected` to pass the lower one on the way.
+    /// Trading the highest pooled nonce for a lower one therefore never
+    /// costs an inclusion.
+    ///
+    /// `!contains_key(nonce)` is what stops the swap being a net loss. Only
+    /// one transaction per nonce can ever be included, so a second
+    /// transaction at a nonce the sender already holds cannot add an
+    /// inclusion. Admitting one by evicting the top of a contiguous run would
+    /// shorten the reachable run to buy nothing. With this condition,
+    /// displacement can never shorten the run: if the run were full and
+    /// contiguous, every nonce from `expected` up to the maximum is already
+    /// held, so no admissible incoming nonce is both lower than the maximum
+    /// and absent, and displacement simply does not apply.
+    fn displacement_applies(&self, from: &Address, nonce: u64) -> bool {
+        let Some(by_nonce) = self.by_sender.get(from) else {
+            return false;
+        };
+        let Some(&max_nonce) = by_nonce.keys().next_back() else {
+            return false;
+        };
+        nonce < max_nonce && !by_nonce.contains_key(&nonce)
+    }
+
+    /// Evict this sender's highest-nonce pooled transaction, the one furthest
+    /// from being includable. Among rivals sharing that nonce it drops the
+    /// lowest fee, tie-broken by the highest txid so the choice is
+    /// deterministic within a node.
+    fn displace_highest_nonce(&mut self, from: &Address) -> Option<TxV1> {
+        let victim = {
+            let by_nonce = self.by_sender.get(from)?;
+            let (_, ids) = by_nonce.iter().next_back()?;
+            ids.iter().copied().min_by_key(|id| {
+                let fee = self.by_id.get(id).map_or(0, |t| t.fee);
+                (fee, std::cmp::Reverse(*id))
+            })?
+        };
+        self.remove_internal(&victim)
     }
 
     /// The one place a transaction is added to the pool.
@@ -334,9 +390,44 @@ impl TxMempool {
             });
         }
 
-        // H-08: Per-sender admission control (before expensive sig verification)
+        // Gate SOAK A5: the nonce horizon. A sender may hold at most
+        // MAX_PENDING_PER_SENDER transactions, so its admissible nonces are
+        // exactly the same number of values, `[expected, expected + 16)`.
+        // Window and slot cap are deliberately the same sixteen: neither rule
+        // shadows the other.
+        //
+        // This DEFERS, it does not refuse. Reaching nonce n requires
+        // `expected` to climb to n, and expected is monotone, so it passes
+        // through n-15 first and the window is open for the whole stretch
+        // during which this transaction is one of the sender's sixteen
+        // nearest-to-includable nonces. A transaction refused here is
+        // admitted unchanged once expected advances into range.
+        //
+        // What it buys: before this, a nonce a billion ahead was ACCEPTED,
+        // occupied a slot, could never be selected, and told the client
+        // nothing was wrong. That silent acceptance is what let a runaway
+        // client fill every slot with transactions the chain could not use.
+        let horizon = expected.saturating_add(MAX_PENDING_PER_SENDER as u64);
+        if tx.nonce >= horizon {
+            return Err(TxMempoolError::NonceTooHigh {
+                expected,
+                got: tx.nonce,
+                horizon,
+            });
+        }
+
+        // H-08 per-sender admission control, as a CHEAP PRE-REJECT only.
+        //
+        // This runs before signature verification, as it always has, so
+        // hammering a capped sender still costs no verification. It only ever
+        // REJECTS. The displacement that can evict is further down, after the
+        // signature is checked, because sender addresses are public and an
+        // eviction reachable by an unverified transaction would let anyone
+        // destroy a chosen victim's queue for free.
         let sender_count = self.pending_count(&tx.from);
-        if sender_count >= MAX_PENDING_PER_SENDER {
+        if sender_count >= MAX_PENDING_PER_SENDER
+            && !self.displacement_applies(&tx.from, tx.nonce)
+        {
             return Err(TxMempoolError::SenderLimitExceeded {
                 address: tx.from,
                 count: sender_count,
@@ -379,6 +470,26 @@ impl TxMempool {
         // dedupe
         if self.by_id.contains_key(&id) {
             return Err(TxMempoolError::Duplicate);
+        }
+
+        // Gate SOAK A4: displacement. THE SIGNATURE IS VERIFIED BY THIS POINT
+        // AND THAT ORDERING IS A SECURITY REQUIREMENT, NOT A STYLE CHOICE.
+        // Sender addresses are public. If this ran at the pre-reject above,
+        // anyone could take a victim's address, submit garbage at a nonce the
+        // victim does not hold, and knock the victim's highest-nonce
+        // transaction out of the pool for free, over and over.
+        //
+        // The pre-reject already refused every case where displacement cannot
+        // apply, and nothing mutates in between (the pool is behind one mutex
+        // and `insert` holds `&mut self` throughout), so reaching here at the
+        // cap means the swap is exactly the one `displacement_applies`
+        // sanctioned.
+        if self.pending_count(&tx.from) >= MAX_PENDING_PER_SENDER {
+            debug_assert!(
+                self.displacement_applies(&tx.from, tx.nonce),
+                "displacement must only fire where the pre-reject allowed it"
+            );
+            self.displace_highest_nonce(&tx.from);
         }
 
         self.insert_internal(id, tx);
