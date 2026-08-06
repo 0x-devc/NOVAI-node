@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 /// H-08: Maximum pending transactions from a single sender during insertion.
 /// Prevents one address from monopolizing mempool capacity.
@@ -174,12 +173,17 @@ pub struct TxMempool {
     /// Fast-path flag: true when threat_scores map is known to be empty.
     /// Avoids Mutex lock in `drain_ready()` when no spam has been detected.
     threat_scores_empty: Arc<AtomicBool>,
-    /// Insertion timestamps for stale transaction eviction.
-    /// Txs older than a configurable max age are purged to free capacity
-    /// (prevents future-nonce txs from permanently filling the mempool).
-    insertion_times: HashMap<TxId, Instant>,
-    /// H-08: Per-sender pending transaction count for admission control.
-    by_sender_count: HashMap<Address, usize>,
+    /// Per-sender nonce index: sender to (nonce to the txids at that nonce).
+    ///
+    /// The inner `Vec` exists because two transactions from one sender may
+    /// legitimately share a nonce (different payloads hash to different
+    /// txids), and both are admissible today.
+    ///
+    /// This replaces the old `by_sender_count` scalar. The per-sender count
+    /// is now DERIVED from this index (`pending_count`) rather than tracked
+    /// alongside it, so the count cannot drift from the contents. That drift
+    /// is exactly the H-08 bug pinned at the bottom of this file.
+    by_sender: HashMap<Address, BTreeMap<u64, Vec<TxId>>>,
 }
 
 impl TxMempool {
@@ -192,9 +196,61 @@ impl TxMempool {
             dynamic_fee_floor: Arc::new(AtomicU64::new(0)),
             threat_scores: Arc::new(Mutex::new(BTreeMap::new())),
             threat_scores_empty: Arc::new(AtomicBool::new(true)),
-            insertion_times: HashMap::new(),
-            by_sender_count: HashMap::new(),
+            by_sender: HashMap::new(),
         }
+    }
+
+    /// Number of transactions this sender currently has pooled.
+    ///
+    /// Derived from the per-sender index rather than tracked separately, so
+    /// it is correct by construction after every mutation. Bounded work: a
+    /// sender is admission-capped at `MAX_PENDING_PER_SENDER` distinct
+    /// entries, and the only path that exceeds that (`reinsert_unchecked`)
+    /// is bounded by one drained batch.
+    pub fn pending_count(&self, from: &Address) -> usize {
+        self.by_sender
+            .get(from)
+            .map_or(0, |by_nonce| by_nonce.values().map(Vec::len).sum())
+    }
+
+    /// The one place a transaction is added to the pool.
+    ///
+    /// Keeps `by_id`, `total_bytes` and the per-sender index in step.
+    /// Callers do the policy; this does the bookkeeping.
+    fn insert_internal(&mut self, id: TxId, tx: TxV1) {
+        self.total_bytes += novai_codec::tx_encoded_size(&tx);
+        self.by_sender
+            .entry(tx.from)
+            .or_default()
+            .entry(tx.nonce)
+            .or_default()
+            .push(id);
+        self.by_id.insert(id, tx);
+    }
+
+    /// The one place a transaction leaves the pool.
+    ///
+    /// Every removal path routes through here so the four pieces of state
+    /// that must agree cannot drift apart. Before this existed the same
+    /// bookkeeping was hand-rolled in four places, and the copy in `remove`
+    /// was missing the per-sender decrement, which stranded senders on
+    /// followers forever with `SenderLimitExceeded` (regression test at the
+    /// bottom of this file).
+    fn remove_internal(&mut self, id: &TxId) -> Option<TxV1> {
+        let tx = self.by_id.remove(id)?;
+        self.total_bytes -= novai_codec::tx_encoded_size(&tx);
+        if let Some(by_nonce) = self.by_sender.get_mut(&tx.from) {
+            if let Some(ids) = by_nonce.get_mut(&tx.nonce) {
+                ids.retain(|existing| existing != id);
+                if ids.is_empty() {
+                    by_nonce.remove(&tx.nonce);
+                }
+            }
+            if by_nonce.is_empty() {
+                self.by_sender.remove(&tx.from);
+            }
+        }
+        Some(tx)
     }
 
     /// Returns the shared dynamic fee floor atomic.
@@ -242,25 +298,14 @@ impl TxMempool {
         self.by_id.get(id)
     }
 
+    /// Remove a transaction by id.
+    ///
+    /// The per-sender slot is reclaimed by `remove_internal`. Without that
+    /// the propose-loop deferred drain leaks the sender's slot, and any node
+    /// that does not also run `drain_ready` (that is, every non-leader)
+    /// eventually rejects the same sender forever with `SenderLimitExceeded`.
     pub fn remove(&mut self, id: &TxId) -> Option<TxV1> {
-        let tx = self.by_id.remove(id)?;
-        self.total_bytes -= novai_codec::tx_encoded_size(&tx);
-        // H-08: decrement per-sender count so the slot is reclaimed.
-        // The three other internal eviction paths (drain_ready stale-evict
-        // at lines 371-382, drain_ready selection at 411-424, purge_stale
-        // at 468-480) all do this; without it the propose-loop deferred
-        // drain at crates/node/src/main.rs:1675-1683 leaks the counter,
-        // and any node that does not also run drain_ready (i.e. every
-        // non-leader) eventually rejects the same sender forever with
-        // SenderLimitExceeded.
-        if let Some(c) = self.by_sender_count.get_mut(&tx.from) {
-            *c = c.saturating_sub(1);
-            if *c == 0 {
-                self.by_sender_count.remove(&tx.from);
-            }
-        }
-        self.insertion_times.remove(id);
-        Some(tx)
+        self.remove_internal(id)
     }
 
     /// Insert a TxV1 after enforcing Week 2 policy rules.
@@ -290,7 +335,7 @@ impl TxMempool {
         }
 
         // H-08: Per-sender admission control (before expensive sig verification)
-        let sender_count = self.by_sender_count.get(&tx.from).copied().unwrap_or(0);
+        let sender_count = self.pending_count(&tx.from);
         if sender_count >= MAX_PENDING_PER_SENDER {
             return Err(TxMempoolError::SenderLimitExceeded {
                 address: tx.from,
@@ -336,11 +381,58 @@ impl TxMempool {
             return Err(TxMempoolError::Duplicate);
         }
 
-        self.total_bytes += size;
-        self.insertion_times.insert(id, Instant::now());
-        *self.by_sender_count.entry(tx.from).or_insert(0) += 1;
-        self.by_id.insert(id, tx);
+        self.insert_internal(id, tx);
         Ok(id)
+    }
+
+    /// Evict every transaction from `from` whose nonce is strictly below
+    /// `expected`, the chain's expected nonce for that sender. Returns the
+    /// number evicted.
+    ///
+    /// This is the ONLY eviction predicate in the mempool that fires without
+    /// an incoming transaction to justify it, so it is deliberately the
+    /// narrowest one that is provably safe.
+    ///
+    /// # Why `nonce < expected` is provably dead
+    ///
+    /// Inclusion requires `tx.nonce == expected_nonce(from)` at some future
+    /// drain (see `drain_ready`, which collects candidates only on exact
+    /// equality). `expected_nonce` is monotonically non-decreasing: the node
+    /// advances it only in the commit callback, once per committed
+    /// transaction, and commits are final under the 3-chain rule, so nothing
+    /// ever lowers it. Given `expected > nonce` already holds, the equality
+    /// `expected == nonce` can never hold again, so the transaction can
+    /// never be selected into any future block. Evicting it removes nothing
+    /// the chain could have used.
+    ///
+    /// # Why the boundary stops exactly there
+    ///
+    /// `nonce == expected` is READY and is the next thing that will drain.
+    /// `nonce > expected` is either WAITING (its predecessors are pooled, so
+    /// it drains as they commit) or GAPPED (a predecessor is missing). GAPPED
+    /// is NOT provably dead: the missing predecessor may be in flight, may be
+    /// retried by its client, or may simply be arriving out of order, and the
+    /// moment it commits the gapped transaction becomes includable. Evicting
+    /// on that classification alone would destroy transactions the chain
+    /// would otherwise have accepted, so this function must never do it.
+    ///
+    /// The boundary is enforced structurally by the half-open range
+    /// `..expected` over the per-sender nonce index, not by a comparison
+    /// that could drift. Widening it to `..=expected` would evict READY;
+    /// widening it to `..` would evict everything.
+    pub fn evict_dead_past(&mut self, from: &Address, expected: u64) -> usize {
+        let dead: Vec<TxId> = match self.by_sender.get(from) {
+            Some(by_nonce) => by_nonce
+                .range(..expected)
+                .flat_map(|(_, ids)| ids.iter().copied())
+                .collect(),
+            None => return 0,
+        };
+
+        for id in &dead {
+            self.remove_internal(id);
+        }
+        dead.len()
     }
 
     /// Drain up to `max` ready transactions under fee-priority + fairness.
@@ -383,16 +475,7 @@ impl TxMempool {
 
         // Remove stale txs (frees per-sender slots for fresh txs)
         for id in &stale_ids {
-            if let Some(tx) = self.by_id.remove(id) {
-                self.total_bytes -= novai_codec::tx_encoded_size(&tx);
-                self.insertion_times.remove(id);
-                if let Some(c) = self.by_sender_count.get_mut(&tx.from) {
-                    *c = c.saturating_sub(1);
-                    if *c == 0 {
-                        self.by_sender_count.remove(&tx.from);
-                    }
-                }
-            }
+            self.remove_internal(id);
         }
 
         // Sort: effective_fee DESC, then raw_fee DESC, then txid ASC (deterministic).
@@ -423,16 +506,7 @@ impl TxMempool {
         }
 
         for id in selected_ids {
-            if let Some(tx) = self.by_id.remove(&id) {
-                self.total_bytes -= novai_codec::tx_encoded_size(&tx);
-                self.insertion_times.remove(&id);
-                // H-08: Decrement per-sender count
-                if let Some(c) = self.by_sender_count.get_mut(&tx.from) {
-                    *c = c.saturating_sub(1);
-                    if *c == 0 {
-                        self.by_sender_count.remove(&tx.from);
-                    }
-                }
+            if let Some(tx) = self.remove_internal(&id) {
                 out.push(tx);
             }
         }
@@ -453,48 +527,34 @@ impl TxMempool {
             return Err(TxMempoolError::Duplicate);
         }
 
-        let size = novai_codec::tx_encoded_size(&tx);
-        self.total_bytes += size;
-        self.insertion_times.insert(id, Instant::now());
-        *self.by_sender_count.entry(tx.from).or_insert(0) += 1;
-        self.by_id.insert(id, tx);
+        self.insert_internal(id, tx);
         Ok(id)
     }
 
-    /// Purge transactions that have been in the mempool longer than `max_age`.
-    ///
-    /// This prevents future-nonce transactions from permanently filling the
-    /// mempool. When the tx-generator's nonce desyncs from the chain, it can
-    /// leave orphan transactions (nonce > expected) that `drain_ready()` will
-    /// never select. Without eviction these consume capacity forever.
-    ///
-    /// Returns the number of transactions purged.
-    pub fn purge_stale(&mut self, max_age: std::time::Duration) -> usize {
-        let now = Instant::now();
-        let stale_ids: Vec<TxId> = self
-            .insertion_times
-            .iter()
-            .filter(|(_, &inserted_at)| now.duration_since(inserted_at) >= max_age)
-            .map(|(&id, _)| id)
-            .collect();
-
-        let count = stale_ids.len();
-        for id in stale_ids {
-            if let Some(tx) = self.by_id.remove(&id) {
-                self.total_bytes -= novai_codec::tx_encoded_size(&tx);
-                // H-08: Decrement per-sender count
-                if let Some(c) = self.by_sender_count.get_mut(&tx.from) {
-                    *c = c.saturating_sub(1);
-                    if *c == 0 {
-                        self.by_sender_count.remove(&tx.from);
-                    }
-                }
-            }
-            self.insertion_times.remove(&id);
-        }
-
-        count
-    }
+    // Gate SOAK A3: `purge_stale(max_age)` used to live here, wired to a 30
+    // second timer in the node with a 120 second age. It is DELETED, not
+    // scoped, and nothing replaces it.
+    //
+    // It evicted on age alone, with no regard to whether a transaction was
+    // still includable. That destroyed healthy WAITING transactions along
+    // with dead ones, and during any commit stall longer than the age it
+    // wiped the entire pool including the READY transaction the chain was
+    // about to take. A mempool that empties itself on a timer cannot hold a
+    // deep backlog, which is the property the soak needs.
+    //
+    // Nothing is lost by removing it, because age was never the right
+    // signal: a transaction becomes provably dead at exactly one moment, the
+    // commit that advances its sender's expected nonce past it, and
+    // `evict_dead_past` now fires at that moment on every node. The dead are
+    // reclaimed sooner than the old timer managed, and the living are never
+    // touched.
+    //
+    // Consequence accepted deliberately: a sender whose client disappears
+    // while holding GAPPED transactions keeps its slots until the node
+    // restarts. That is bounded and cannot exhaust memory (16 per sender,
+    // plus the 64 MiB byte cap, both hard rejections at admission). The
+    // principled reclaim, if it is ever needed, is eviction triggered by
+    // capacity pressure, never by a clock.
 }
 
 #[cfg(test)]
@@ -1082,17 +1142,20 @@ mod tests {
     /// Regression test for the follower-mempool-eviction leak observed on
     /// the production host 2026-06-04 (price-oracle entity 0a110df8).
     ///
-    /// `TxMempool::remove` clears `by_id`, decrements `total_bytes`, and
-    /// drops `insertion_times`, but the original implementation did not
-    /// decrement `by_sender_count`. The propose-loop deferred-removal
-    /// drain (crates/node/src/main.rs:1675-1683) is the only production
-    /// caller of `remove`, and it runs on every node every tick. On the
-    /// proposer the leak was masked because `drain_ready` also runs and
-    /// decrements the counter via its stale-evict (lines 371-382) or
-    /// selection (lines 411-424) paths. On followers, which never call
-    /// `drain_ready`, the per-sender counter rose monotonically until it
-    /// hit `MAX_PENDING_PER_SENDER = 16` and that sender was rejected
-    /// with `SenderLimitExceeded` forever.
+    /// `TxMempool::remove` cleared `by_id` and decremented `total_bytes` but
+    /// did not decrement the then-separate `by_sender_count` scalar. The
+    /// propose-loop deferred-removal drain is the only production caller of
+    /// `remove`, and it runs on every node every tick. On the proposer the
+    /// leak was masked because `drain_ready` also runs and reclaimed the slot
+    /// via its stale-evict or selection paths. On followers, which never call
+    /// `drain_ready`, the per-sender counter rose monotonically until it hit
+    /// `MAX_PENDING_PER_SENDER = 16` and that sender was rejected with
+    /// `SenderLimitExceeded` forever.
+    ///
+    /// Gate SOAK A1 removed the class of bug rather than the instance: the
+    /// per-sender count is now DERIVED from the nonce index by
+    /// `pending_count`, and every removal routes through one `remove_internal`
+    /// helper, so a count and its contents can no longer disagree.
     ///
     /// This test runs more than `MAX_PENDING_PER_SENDER` insert/remove
     /// cycles for a single sender. Pre-fix the insert at cycle 16 panics
@@ -1120,7 +1183,7 @@ mod tests {
         }
 
         assert_eq!(
-            mp.by_sender_count.get(&from).copied().unwrap_or(0),
+            mp.pending_count(&from),
             0,
             "per-sender counter must be zero after equal insert/remove cycles"
         );

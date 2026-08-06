@@ -19,7 +19,7 @@ use novai_state::{
     WriteOp, KEY_COMMITTED_HEIGHT, KEY_EXECUTED_HEIGHT,
 };
 use novai_types::{Address, TxId, TxV1, TxVersion};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -190,7 +190,7 @@ struct ExecutionCommitCallback {
     /// threads holding the db lock, while the propose loop holds the mempool
     /// lock and acquires the db lock inside try_propose_block. Taking the
     /// mempool lock here would close an AB-BA cycle.
-    pending_mempool_removals: Arc<Mutex<Vec<TxId>>>,
+    pending_mempool_removals: Arc<Mutex<Vec<(TxId, Address)>>>,
     /// Shared with the /metrics collect closure so on_commit can publish
     /// novai_block_tx_count and novai_total_txs_committed without going
     /// through the consensus state lock.
@@ -260,11 +260,20 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
         // Queue committed txs for deferred mempool removal. The propose loop
         // drains this at the top of each tick (~100 ms typical). Even in the
         // gap before drain runs, drain_ready's stale-evict path at
-        // crates/mempool/src/lib.rs:360-382 prevents reselection because the
+        // crates/mempool/src/lib.rs prevents reselection because the
         // nonce-advance block above has already moved expected past every
         // committed tx's nonce. The append is done under a tiny critical
         // section that does not hold any other lock, so it cannot participate
         // in the propose loop's mempool->state->db ordering.
+        //
+        // Gate SOAK A2: each entry now carries the sender alongside the txid.
+        // The nonce-advance block above just moved this sender's expected
+        // nonce, which is the only moment a pooled transaction can BECOME
+        // dead-past, so the drain side uses the sender to run the dead-past
+        // eviction at exactly that moment. This is deliberately a wider
+        // element in the SAME queue rather than a second queue: it adds no
+        // lock, no allocation beyond the tuple, and no write of any kind to
+        // the commit path.
         {
             let mut pending = self
                 .pending_mempool_removals
@@ -272,7 +281,7 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for tx in &block.txs {
                 if let Ok(id) = txid_v1(tx) {
-                    pending.push(id);
+                    pending.push((id, tx.from));
                 }
             }
         }
@@ -1284,7 +1293,8 @@ fn main() {
             // Deferred queue for committed txids. on_commit cannot remove from
             // the mempool inline (AB-BA with the propose loop's mempool->db
             // ordering), so it appends here and the propose loop drains.
-            let pending_mempool_removals: Arc<Mutex<Vec<TxId>>> = Arc::new(Mutex::new(Vec::new()));
+            let pending_mempool_removals: Arc<Mutex<Vec<(TxId, Address)>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
             // Shared atomic accumulators for the Prometheus commit metrics.
             // on_commit publishes the per-commit values; the /metrics collect
@@ -1725,7 +1735,6 @@ fn main() {
             let mut last_sync_check = std::time::Instant::now();
             let mut last_sync_trigger = std::time::Instant::now();
             let mut last_resource_log = std::time::Instant::now();
-            let mut last_mempool_purge = std::time::Instant::now();
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     tracing::info!("Shutting down gracefully...");
@@ -1821,16 +1830,15 @@ fn main() {
                     drop(state);
                 }
 
-                // Purge stale mempool transactions every 30 seconds.
-                // Prevents future-nonce orphans from permanently filling capacity.
-                if last_mempool_purge.elapsed() >= Duration::from_secs(30) {
-                    last_mempool_purge = std::time::Instant::now();
-                    let mut mp = mempool.lock_or_recover();
-                    let purged = mp.purge_stale(Duration::from_secs(120));
-                    if purged > 0 {
-                        tracing::info!(purged, "Purged stale transactions from mempool");
-                    }
-                }
+                // Gate SOAK A3: the 30 second / 120 second age purge that used
+                // to run here is gone. Eviction is event driven now: a
+                // transaction becomes provably dead at the commit that
+                // advances its sender's expected nonce past it, and the
+                // deferred-removal drain below evicts it at exactly that
+                // moment on every node. No clock participates in any eviction
+                // decision, so a deep backlog of transactions that are still
+                // waiting their turn survives indefinitely, including through
+                // a commit stall.
 
                 // Propose every proposal_interval_ms (must be less than BASE_TIMEOUT_MS for consensus to work)
                 if last_proposal_attempt.elapsed() >= Duration::from_millis(proposal_interval_ms) {
@@ -1848,8 +1856,36 @@ fn main() {
                         let mut pending = pending_mempool_removals.lock_or_recover();
                         if !pending.is_empty() {
                             let mut mp = mempool.lock_or_recover();
-                            for txid in pending.drain(..) {
+                            let mut touched: BTreeSet<Address> = BTreeSet::new();
+                            for (txid, from) in pending.drain(..) {
                                 mp.remove(&txid);
+                                touched.insert(from);
+                            }
+                            // Gate SOAK A2: the commit that produced these
+                            // removals also advanced each sender's expected
+                            // nonce, which is the only event that can turn a
+                            // pooled transaction into a dead-past one. Sweep
+                            // exactly those senders, now, on EVERY node.
+                            //
+                            // Before this, the only paths that reclaimed a
+                            // dead-past slot were the leader's drain_ready
+                            // (which never runs on a follower) and the age
+                            // purge. A transaction whose txid never committed
+                            // (a same-nonce loser, say) is unreachable by the
+                            // removal queue above, so on a follower it held
+                            // its sender's slot indefinitely.
+                            //
+                            // Lock order is mempool then nonce map, which is
+                            // the order already taken by the abandoned-tx
+                            // recovery immediately below and by drain_ready
+                            // inside try_propose_block.
+                            let mut evicted = 0usize;
+                            for from in touched {
+                                evicted += mp
+                                    .evict_dead_past(&from, nonce_provider.expected_nonce(&from));
+                            }
+                            if evicted > 0 {
+                                tracing::debug!(evicted, "Evicted dead-past txs after commit");
                             }
                         }
                     }
@@ -2074,7 +2110,8 @@ mod tests {
     fn on_commit_queues_committed_txs_and_drain_removes_them() {
         let nonce_provider = Arc::new(InMemoryNonceProvider::new());
         let blockchain_index = Arc::new(Mutex::new(rpc::BlockchainIndex::new()));
-        let pending_mempool_removals: Arc<Mutex<Vec<TxId>>> = Arc::new(Mutex::new(Vec::new()));
+        let pending_mempool_removals: Arc<Mutex<Vec<(TxId, Address)>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let callback = ExecutionCommitCallback {
             nonce_provider: Arc::clone(&nonce_provider),
             blockchain_index: Arc::clone(&blockchain_index),
@@ -2142,8 +2179,13 @@ mod tests {
                 2,
                 "queue should hold exactly the two committed txids"
             );
-            assert_eq!(pending[0], id1, "queue order must match block tx order");
-            assert_eq!(pending[1], id2, "queue order must match block tx order");
+            assert_eq!(pending[0].0, id1, "queue order must match block tx order");
+            assert_eq!(pending[1].0, id2, "queue order must match block tx order");
+            // Gate SOAK A2: each entry carries its sender so the drain side
+            // can run the dead-past sweep for exactly the senders whose
+            // expected nonce just moved. Same queue, same lock, wider element.
+            assert_eq!(pending[0].1, from, "queue entry must carry the sender");
+            assert_eq!(pending[1].1, from, "queue entry must carry the sender");
         }
         assert_eq!(
             nonce_provider.expected_nonce(&from),
@@ -2159,8 +2201,13 @@ mod tests {
             let mut mp = mempool
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for txid in pending.drain(..) {
+            let mut touched: BTreeSet<Address> = BTreeSet::new();
+            for (txid, sender) in pending.drain(..) {
                 mp.remove(&txid);
+                touched.insert(sender);
+            }
+            for sender in touched {
+                mp.evict_dead_past(&sender, nonce_provider.expected_nonce(&sender));
             }
         }
 
@@ -2190,7 +2237,8 @@ mod tests {
     fn on_commit_updates_commit_metrics_block_tx_count_and_total() {
         let nonce_provider = Arc::new(InMemoryNonceProvider::new());
         let blockchain_index = Arc::new(Mutex::new(rpc::BlockchainIndex::new()));
-        let pending_mempool_removals: Arc<Mutex<Vec<TxId>>> = Arc::new(Mutex::new(Vec::new()));
+        let pending_mempool_removals: Arc<Mutex<Vec<(TxId, Address)>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let commit_metrics = Arc::new(CommitMetrics::default());
         let callback = ExecutionCommitCallback {
             nonce_provider: Arc::clone(&nonce_provider),

@@ -179,8 +179,14 @@ mod tests {
             .any(|p| matches!(p.kind, SpamPatternKind::HighTxRate { .. }));
         assert!(has_high_rate, "Should detect high tx rate");
 
-        // Purge mempool to clear per-sender count (H-08 limits to 16 pending per sender)
-        mempool.purge_stale(std::time::Duration::ZERO);
+        // Clear the per-sender count so the sender has a free slot (H-08 caps
+        // it at 16 pending). Gate SOAK A3 removed the age purge that used to
+        // be used here; the production path that reclaims these slots is the
+        // dead-past eviction, and it applies exactly: the loop above advanced
+        // the nonce provider past every transaction it accepted, so all of
+        // them are now below expected and provably dead.
+        let expected_now = nonce_provider.expected_nonce(&spammy_address);
+        mempool.evict_dead_past(&spammy_address, expected_now);
 
         // STEP 3: Sender submits ANOTHER valid transaction AFTER being flagged
         let post_flag_nonce = nonce_provider.expected_nonce(&spammy_address);
