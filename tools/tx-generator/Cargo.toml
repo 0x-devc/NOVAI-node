@@ -42,6 +42,9 @@ hex = "0.4"
 novai-types = { path = "../../crates/types" }
 novai-crypto = { path = "../../crates/crypto" }
 novai-codec = { path = "../../crates/codec" }
+# For MAX_PENDING_PER_SENDER. Imported rather than mirrored: the generator's
+# idea of the node's per-sender slot cap must never drift from the node's.
+mempool = { path = "../../crates/mempool" }
 
 [dev-dependencies]
 # HTTP mock server for integration tests that exercise worker recovery

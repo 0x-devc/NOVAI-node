@@ -33,11 +33,14 @@ use novai_crypto::{address_from_pubkey, sign_tx_v1};
 use novai_types::{Address, TxV1, TxVersion};
 use std::time::Duration;
 
-/// Per-sender pending-tx cap enforced by the node mempool
-/// (`mempool::MAX_PENDING_PER_SENDER`, crates/mempool/src/lib.rs:9). The
-/// in-flight window MUST stay strictly below this, or the node rejects with
-/// `SenderLimitExceeded` (-32012, crates/node/src/rpc.rs:2051-2053).
-const NODE_MAX_PENDING_PER_SENDER: u64 = 16;
+/// Per-sender pending-tx cap enforced by the node mempool. The in-flight
+/// window MUST stay strictly below this, or the node rejects with
+/// `SenderLimitExceeded` (-32012).
+///
+/// Imported from the mempool crate rather than mirrored as a literal: this
+/// used to be a hand-copied 16, which is a silent drift hazard the moment the
+/// node's cap changes.
+const NODE_MAX_PENDING_PER_SENDER: u64 = mempool::MAX_PENDING_PER_SENDER as u64;
 
 /// Minimum balance a brand-new recipient account must receive
 /// (`MIN_ACCOUNT_BALANCE`, crates/execution/src/lib.rs:12124). New-account

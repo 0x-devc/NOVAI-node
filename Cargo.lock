@@ -3071,6 +3071,7 @@ dependencies = [
  "ed25519-dalek",
  "hdrhistogram",
  "hex",
+ "mempool",
  "mockito",
  "novai-codec",
  "novai-crypto",

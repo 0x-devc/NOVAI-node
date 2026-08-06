@@ -12,7 +12,22 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use novai_crypto::address_from_pubkey;
 use novai_types::Address;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Per-sender recovery bookkeeping, shared across every worker.
+///
+/// Both fields live under one lock deliberately. They are read and written
+/// together when deciding whether to resync, and splitting them would let the
+/// streak and the cooldown disagree about whether a resync is in order.
+#[derive(Debug, Default)]
+struct SenderHealth {
+    /// Consecutive submissions that told us this sender's nonce is wrong.
+    /// Cleared only by an accepted submission.
+    nonce_error_streak: u32,
+    /// When any worker last began a chain nonce query for this sender.
+    last_resync: Option<Instant>,
+}
 
 /// A sender account with signing capability and nonce tracking.
 #[derive(Debug)]
@@ -27,6 +42,11 @@ pub struct SenderAccount {
     pub address: Address,
     /// Current nonce (atomically updated).
     nonce: AtomicU64,
+    /// Recovery bookkeeping. Lives on the account rather than in a per-worker
+    /// map so that N workers share one view of one sender: otherwise each
+    /// worker counts its own streak, needing N times as many rejections to
+    /// react, and N workers can each fire their own resync at once.
+    health: Mutex<SenderHealth>,
 }
 
 impl SenderAccount {
@@ -55,6 +75,65 @@ impl SenderAccount {
             verifying_key,
             address,
             nonce: AtomicU64::new(0),
+            health: Mutex::new(SenderHealth::default()),
+        }
+    }
+
+    fn health(&self) -> std::sync::MutexGuard<'_, SenderHealth> {
+        self.health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// An accepted submission: this sender's nonce is demonstrably right.
+    pub fn record_accepted(&self) {
+        self.health().nonce_error_streak = 0;
+    }
+
+    /// A rejection that says our nonce state is wrong (too low, too high, or
+    /// the per-sender slot cap). These are the only rejections that should
+    /// push a sender toward a resync.
+    pub fn record_nonce_error(&self) {
+        let mut h = self.health();
+        h.nonce_error_streak = h.nonce_error_streak.saturating_add(1);
+    }
+
+    /// A rejection that says nothing about our nonce (fee floor, malformed,
+    /// duplicate, transport).
+    ///
+    /// Deliberately does NOT clear the streak. It used to, and an interleaved
+    /// fee-floor or duplicate rejection could then push recovery out
+    /// indefinitely by wiping the evidence just before the threshold.
+    pub fn record_unrelated_rejection(&self) {}
+
+    /// The sender was corrected from a value read off the chain, so whatever
+    /// the streak was counting has been answered.
+    pub fn record_resynced(&self) {
+        self.health().nonce_error_streak = 0;
+    }
+
+    pub fn nonce_error_streak(&self) -> u32 {
+        self.health().nonce_error_streak
+    }
+
+    /// Claim the right to resync this sender, at most once per
+    /// `min_interval` across all workers. Returns true to exactly one caller
+    /// per window.
+    ///
+    /// The test and the set happen in one critical section, which is the
+    /// whole point: several workers routinely notice the same sick sender in
+    /// the same instant, and the resync fires precisely when the endpoint is
+    /// already struggling, so letting each of them fire its own query is the
+    /// worst available response.
+    pub fn try_begin_resync(&self, min_interval: Duration) -> bool {
+        let mut h = self.health();
+        let now = Instant::now();
+        match h.last_resync {
+            Some(previous) if now.duration_since(previous) < min_interval => false,
+            _ => {
+                h.last_resync = Some(now);
+                true
+            }
         }
     }
 

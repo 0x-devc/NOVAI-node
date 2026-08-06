@@ -19,7 +19,6 @@ use crate::sender::{SenderAccount, SenderPool};
 use novai_codec::{encode_tx_v1_signed, txid_v1};
 use novai_crypto::sign_tx_v1;
 use novai_types::{Address, TxId, TxV1, TxVersion};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -232,12 +231,11 @@ impl Submitter {
 
             let handle = tokio::spawn(async move {
                 let mut stats = WorkerStats::default();
-                // Track consecutive NonceTooLow rejections per sender for nonce reset
-                let mut consecutive_nonce_errors: HashMap<Address, u32> = HashMap::new();
-                // Last resync attempt per sender, so a failed query that leaves
-                // the streak armed cannot turn every subsequent rejection into
-                // another query against an already-degraded endpoint.
-                let mut last_resync_attempt: HashMap<Address, Instant> = HashMap::new();
+                // Per-sender streak and cooldown now live on the SenderAccount
+                // so every worker shares one view of one sender. They used to
+                // be per-worker maps here, which meant N workers each needed
+                // the full threshold before reacting, and all N could then
+                // resync the same sender at once.
 
                 loop {
                     tokio::select! {
@@ -280,69 +278,47 @@ impl Submitter {
                             match result {
                                 SubmitResult::Accepted { .. } => {
                                     stats.accepted_count += 1;
-                                    // Clear nonce error streak on success
-                                    consecutive_nonce_errors.remove(&sender_address);
+                                    if let Some(sender) =
+                                        sender_pool.find_by_address(&sender_address)
+                                    {
+                                        sender.record_accepted();
+                                    }
                                 }
                                 SubmitResult::Rejected { ref reason } => {
                                     stats.rejected_count += 1;
                                     // Track NonceTooLow for nonce reset.
                                     // Uses code-based detection (not string matching)
                                     // since H-06 sanitized error messages.
-                                    if reason.starts_with("NonceTooLow") {
-                                        let count = consecutive_nonce_errors
-                                            .entry(sender_address)
-                                            .or_insert(0);
-                                        // Saturating: the streak now stays armed across a
-                                        // failed resync, so against a permanently dead
-                                        // endpoint it would otherwise climb without bound.
-                                        *count = count.saturating_add(1);
-                                        if *count >= NONCE_RESET_THRESHOLD {
-                                            let now = Instant::now();
-                                            let due = match last_resync_attempt
-                                                .get(&sender_address)
-                                            {
-                                                Some(at) => {
-                                                    now.duration_since(*at) >= RESYNC_MIN_INTERVAL
-                                                }
-                                                None => true,
-                                            };
-                                            match sender_pool.find_by_address(&sender_address) {
-                                                Some(sender) if due => {
-                                                    last_resync_attempt
-                                                        .insert(sender_address, now);
-                                                    if resync_one_sender(
-                                                        &http_client,
-                                                        &endpoint,
-                                                        &sender,
-                                                    )
-                                                    .await
-                                                    {
-                                                        // Corrected from a value read off the
-                                                        // chain: the streak has been answered.
-                                                        *count = 0;
-                                                    }
-                                                    // Query failed: leave the streak armed so
-                                                    // the next rejection past the cooldown
-                                                    // retries, and leave the nonce untouched.
-                                                }
-                                                Some(_) => {
-                                                    // Inside the cooldown. Leave the streak
-                                                    // armed and wait.
-                                                }
-                                                None => {
-                                                    // Sender is not in this pool, nothing to
-                                                    // correct.
-                                                    *count = 0;
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        // Non-nonce rejection: clear nonce error streak
-                                        consecutive_nonce_errors.remove(&sender_address);
+                                    if let Some(sender) =
+                                        sender_pool.find_by_address(&sender_address)
+                                    {
+                                        maybe_resync_after(
+                                            &http_client,
+                                            &endpoint,
+                                            &sender,
+                                            reason,
+                                        )
+                                        .await;
                                     }
                                 }
-                                SubmitResult::Failed { .. } => {
+                                SubmitResult::Failed { ref error } => {
                                     stats.failed_count += 1;
+                                    // SenderLimitExceeded arrives here rather than as a
+                                    // rejection, because the submit path retries it and
+                                    // then gives up. Its own source calls the result a
+                                    // permanent nonce gap for the sender, which is
+                                    // exactly a nonce-state problem worth resyncing.
+                                    if let Some(sender) =
+                                        sender_pool.find_by_address(&sender_address)
+                                    {
+                                        maybe_resync_after(
+                                            &http_client,
+                                            &endpoint,
+                                            &sender,
+                                            error,
+                                        )
+                                        .await;
+                                    }
                                 }
                             }
 
@@ -473,6 +449,18 @@ async fn submit_with_retry(
 
                 tokio::time::sleep(Duration::from_secs(MEMPOOL_FULL_BACKOFF_SECS)).await;
                 continue;
+            }
+            Err(SubmitError::NonceTooHigh(msg)) => {
+                // Same shape as NonceTooLow: retrying the identical nonce
+                // cannot help, and the worker's resync path is what fixes it.
+                let latency = start_time.elapsed();
+                let reason = format!("NonceTooHigh: {msg}");
+                let _ = metric_tx.send(MetricEvent::Rejected {
+                    txid,
+                    reason: reason.clone(),
+                    latency,
+                });
+                return SubmitResult::Rejected { reason };
             }
             Err(SubmitError::NonceTooLow(msg)) => {
                 // NonceTooLow is a rejection — return immediately so the
@@ -629,6 +617,10 @@ async fn submit_once(
             -32001 => return Err(SubmitError::MempoolFull(error.message)),
             -32010 => return Err(SubmitError::NonceTooLow(error.message)),
             -32012 => return Err(SubmitError::SenderLimitExceeded(error.message)),
+            // Gate SOAK A5. Before the node grew a nonce horizon this case
+            // did not exist: a runaway nonce was ACCEPTED and the generator
+            // had no way to learn it had desynced.
+            -32014 => return Err(SubmitError::NonceTooHigh(error.message)),
             _ => return Err(SubmitError::Rpc(error.code, error.message)),
         }
     }
@@ -735,6 +727,161 @@ async fn query_nonce_retrying(
     }
 }
 
+/// Does this rejection reason say our nonce state is wrong?
+///
+/// Only these three do. Everything else (fee floor, malformed, duplicate,
+/// transport) says something about the transaction or the network and must
+/// not push a sender toward a resync, nor clear the evidence that one is
+/// needed.
+///
+/// `NonceTooHigh` is here because of the A5 horizon. Before it existed the
+/// node silently ACCEPTED a runaway nonce, so the ahead-desync produced no
+/// rejection to count and the only recovery trigger in the generator could
+/// never fire for it. That signal is what this branch consumes.
+fn is_nonce_state_error(reason: &str) -> bool {
+    reason.starts_with("NonceTooLow")
+        || reason.starts_with("NonceTooHigh")
+        || reason.starts_with("SenderLimitExceeded")
+}
+
+/// Update a sender's health after a failed submission and, if it has told us
+/// often enough that its nonce is wrong, resync it once per cooldown.
+///
+/// The streak and the cooldown both live on the account, so all workers share
+/// one view of one sender: the threshold means what it says regardless of
+/// worker count, and only one worker per cooldown queries the chain.
+async fn maybe_resync_after(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    sender: &SenderAccount,
+    reason: &str,
+) {
+    if !is_nonce_state_error(reason) {
+        sender.record_unrelated_rejection();
+        return;
+    }
+
+    sender.record_nonce_error();
+    if sender.nonce_error_streak() < NONCE_RESET_THRESHOLD {
+        return;
+    }
+    if !sender.try_begin_resync(RESYNC_MIN_INTERVAL) {
+        // Another worker is already on it, or we tried too recently. Leave
+        // the streak armed so the next rejection past the cooldown retries.
+        return;
+    }
+
+    // resync_one_sender clears the streak itself on success and leaves both
+    // the streak and the nonce untouched on failure.
+    resync_one_sender(http_client, endpoint, sender).await;
+}
+
+/// How the local nonce sits relative to the chain's expected nonce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drift {
+    /// Local is below the chain. Every submission is refused NonceTooLow and
+    /// burns another nonce. Correct upward.
+    Behind,
+    /// Local leads the chain by no more than the node's per-sender slot cap.
+    /// This is what a working sender looks like: the lead IS its in-flight
+    /// depth. Leave it alone. An over-eager sweep that "corrected" this would
+    /// rewind past live submissions and be worse than no sweep at all.
+    Healthy,
+    /// Local leads by more than the sender could possibly have pending. Those
+    /// nonces were burned on rejections and can never be used, and with the
+    /// A5 horizon every further submission is refused NonceTooHigh. Correct
+    /// downward to chain truth.
+    TooFarAhead,
+}
+
+/// Classify a sender's local nonce against chain truth.
+///
+/// The upper boundary is the node's own per-sender slot cap, imported rather
+/// than mirrored: a sender may hold at most that many pending transactions,
+/// so a lead of at most that much is exactly the legitimate in-flight window
+/// and anything beyond it is nonces that were burned and can never commit.
+///
+/// The `Healthy` band is `[chain, chain + MAX_PENDING_PER_SENDER]`. Both ends
+/// are deliberate: equal means nothing in flight, and a full cap of lead
+/// means every slot is in flight, which is a saturated but perfectly working
+/// sender.
+pub fn classify_drift(local: u64, chain: u64) -> Drift {
+    if local < chain {
+        Drift::Behind
+    } else if local > chain.saturating_add(mempool::MAX_PENDING_PER_SENDER as u64) {
+        Drift::TooFarAhead
+    } else {
+        Drift::Healthy
+    }
+}
+
+/// One reconciliation pass over every sender in the pool. Returns how many
+/// senders were corrected.
+///
+/// This is the part that makes the generator self healing rather than
+/// reactively patched. The reactive path needs a run of rejections to notice
+/// anything, and until the node grew a nonce horizon the dangerous direction
+/// (running ahead) produced no rejection at all, so a sender could sit wrong
+/// forever. A fixed sweep notices either direction without needing the chain
+/// to complain first.
+///
+/// It also removes the need to solve nonce burning properly. Every rejected
+/// submission burns a nonce (the claim is optimistic and there is no safe
+/// rollback while workers claim concurrently), so local drift is structural
+/// over a long run. Rather than serialising per sender, the sweep simply
+/// corrects the drift on a fixed cadence.
+///
+/// `pace` is slept between senders so a large pool trickles its queries out
+/// instead of bursting them into the node's per-IP rate limit.
+pub async fn reconcile_sender_nonces(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    pool: &SenderPool,
+    pace: Duration,
+) -> usize {
+    let mut corrected = 0usize;
+
+    for account in pool.all_accounts() {
+        let chain = match query_nonce_retrying(http_client, endpoint, &account.address).await {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                // Same rule as the reactive path: never write a nonce we did
+                // not read.
+                warn!(
+                    sender = account.index,
+                    error = %e,
+                    "reconciliation query failed, sender left unchanged"
+                );
+                if !pace.is_zero() {
+                    tokio::time::sleep(pace).await;
+                }
+                continue;
+            }
+        };
+
+        let local = account.current_nonce();
+        let drift = classify_drift(local, chain);
+        if drift != Drift::Healthy {
+            account.reset_nonce(chain);
+            account.record_resynced();
+            corrected += 1;
+            info!(
+                sender = account.index,
+                local, chain, ?drift, "reconciled sender to chain nonce"
+            );
+        }
+
+        if !pace.is_zero() {
+            tokio::time::sleep(pace).await;
+        }
+    }
+
+    if corrected > 0 {
+        info!(corrected, senders = pool.len(), "reconciliation sweep corrected senders");
+    }
+    corrected
+}
+
 /// Resync one sender's local nonce to the chain's expected nonce.
 ///
 /// Returns true when the local nonce was corrected from a value that was
@@ -749,6 +896,7 @@ async fn resync_one_sender(
     match query_nonce_retrying(http_client, endpoint, &sender.address).await {
         Ok(chain_nonce) => {
             sender.reset_nonce(chain_nonce);
+            sender.record_resynced();
             info!(
                 sender = ?&sender.address[..4],
                 old_nonce,
@@ -877,6 +1025,10 @@ enum SubmitError {
     MempoolFull(String),
     /// Nonce too low — sender needs nonce resync.
     NonceTooLow(String),
+    /// Nonce further ahead than the node will buffer (-32014). Gate SOAK A5
+    /// made this loud; before the horizon existed the node silently ACCEPTED
+    /// a runaway nonce, so this desync direction produced no signal at all.
+    NonceTooHigh(String),
     /// Per-sender mempool limit exceeded — backoff and retry.
     SenderLimitExceeded(String),
     /// HTTP 429 rate limited — retry with backoff.
@@ -892,6 +1044,7 @@ impl std::fmt::Display for SubmitError {
             SubmitError::Rpc(code, msg) => write!(f, "RPC error {code}: {msg}"),
             SubmitError::MempoolFull(msg) => write!(f, "Mempool full: {msg}"),
             SubmitError::NonceTooLow(msg) => write!(f, "Nonce too low: {msg}"),
+            SubmitError::NonceTooHigh(msg) => write!(f, "Nonce too high: {msg}"),
             SubmitError::SenderLimitExceeded(msg) => write!(f, "Sender limit exceeded: {msg}"),
             SubmitError::RateLimited => write!(f, "Rate limited (HTTP 429)"),
         }
@@ -1546,6 +1699,97 @@ mod tests {
             .expect("startup resync must succeed against a novai_getNonce endpoint");
 
         assert_eq!(pool.get_sender(0).unwrap().current_nonce(), 272);
+    }
+
+    // ============================================================
+    // Gate SOAK phase 4: the generator consumes the A5 signal.
+    //
+    // Before the node grew a nonce horizon, running AHEAD of the chain
+    // produced no rejection at all: the node ACCEPTED the transaction,
+    // it sat in the pool permanently unreachable, and the generator's
+    // only recovery trigger counted rejections that never arrived. A5
+    // turned that into a loud -32014. These pin that the generator now
+    // acts on it, and only on it.
+    // ============================================================
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_of_nonce_too_high_drives_a_resync() {
+        use crate::sender::SenderAccount;
+
+        let mut server = mockito::Server::new_async().await;
+        let _nonce = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":{"nonce":300},"id":1}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let sender = SenderAccount::from_index(0);
+        sender.reset_nonce(900); // far ahead, every submission is -32014
+        let client = reqwest::Client::new();
+        let reason = "NonceTooHigh: expected 300, got 900, horizon 316";
+
+        for _ in 0..NONCE_RESET_THRESHOLD {
+            maybe_resync_after(&client, &server.url(), &sender, reason).await;
+        }
+
+        assert_eq!(
+            sender.current_nonce(),
+            300,
+            "a run of NonceTooHigh must drive the sender back to chain truth"
+        );
+        assert_eq!(sender.nonce_error_streak(), 0, "the streak is answered");
+    }
+
+    /// Link one of the chain: the node's -32014 decodes to NonceTooHigh
+    /// rather than falling into the generic validation bucket, where it would
+    /// be dropped silently like a malformed transaction.
+    #[test]
+    fn rpc_code_32014_decodes_to_nonce_too_high() {
+        let response: RpcResponse<SubmitTxResponse> = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","error":{"code":-32014,"message":"NonceTooHigh: expected 300, got 900, horizon 316"},"id":1}"#,
+        )
+        .expect("parses");
+        let err = response.error.expect("has an error");
+        assert_eq!(err.code, -32014);
+        // The classifier that turns this code into a nonce-state signal.
+        assert!(
+            is_nonce_state_error(&format!("NonceTooHigh: {}", err.message)),
+            "-32014 must be recognised as a nonce-state error, not generic validation"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejection_unrelated_to_the_nonce_never_drives_a_resync() {
+        use crate::sender::SenderAccount;
+
+        let mut server = mockito::Server::new_async().await;
+        let _nonce = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":{"nonce":300},"id":1}"#)
+            .expect(0) // must never be queried
+            .create_async()
+            .await;
+
+        let sender = SenderAccount::from_index(1);
+        sender.reset_nonce(900);
+        let client = reqwest::Client::new();
+
+        for _ in 0..(NONCE_RESET_THRESHOLD * 3) {
+            maybe_resync_after(&client, &server.url(), &sender, "FeeTooLow: minimum 10, got 1")
+                .await;
+        }
+
+        assert_eq!(
+            sender.current_nonce(),
+            900,
+            "a fee-floor rejection says nothing about the nonce and must not move it"
+        );
+        assert_eq!(sender.nonce_error_streak(), 0);
     }
 
     #[tokio::test(start_paused = true)]

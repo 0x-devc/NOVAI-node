@@ -77,6 +77,20 @@ struct Args {
     /// Disable the chain progress monitor (pause only on MempoolFull).
     #[arg(long)]
     no_stall_monitor: bool,
+
+    /// Period of the sender nonce reconciliation sweep, in seconds.
+    ///
+    /// Every sender's local nonce is compared against chain truth and
+    /// corrected if it has drifted. Nonces are burned by every rejection and
+    /// there is no safe rollback while workers claim concurrently, so drift
+    /// is structural over a long run; this is what keeps a `--continuous`
+    /// run healthy for days without operator action.
+    #[arg(long, default_value_t = 60)]
+    resync_interval_secs: u64,
+
+    /// Disable the periodic nonce reconciliation sweep.
+    #[arg(long)]
+    no_resync_sweep: bool,
 }
 
 #[tokio::main]
@@ -168,6 +182,41 @@ async fn main() -> Result<()> {
         Some(monitor.start())
     };
 
+    // 5c. Start the periodic nonce reconciliation sweep. The reactive path
+    // in the workers only fires after a run of rejections, and until the node
+    // grew a nonce horizon the ahead-desync produced no rejection at all, so
+    // a sender could sit wrong indefinitely. This sweep notices either
+    // direction without waiting for the chain to complain.
+    let resync_handle = if args.no_resync_sweep {
+        info!("Nonce reconciliation sweep disabled (--no-resync-sweep)");
+        None
+    } else {
+        let interval = Duration::from_secs(args.resync_interval_secs.max(1));
+        let endpoint = args.endpoint.clone();
+        let pool = Arc::clone(&sender_pool);
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .context("failed to build reconciliation HTTP client")?;
+        // Spread each sweep's queries across its own period so a large pool
+        // trickles rather than bursting into the node's per-IP rate limit.
+        let pace = interval / (pool.len().max(1) as u32);
+        info!(
+            interval_secs = args.resync_interval_secs,
+            senders = pool.len(),
+            pace_ms = pace.as_millis() as u64,
+            "Started nonce reconciliation sweep"
+        );
+        Some(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                submitter::reconcile_sender_nonces(&client, &endpoint, &pool, pace).await;
+            }
+        }))
+    };
+
     // 6. Start generator (produces unsigned templates)
     let generator_config = generator::GeneratorConfig {
         target_tps: args.tps,
@@ -234,6 +283,11 @@ async fn main() -> Result<()> {
 
     // Stop chain monitor
     if let Some(handle) = chain_monitor_handle {
+        handle.abort();
+    }
+
+    // Stop the nonce reconciliation sweep
+    if let Some(handle) = resync_handle {
         handle.abort();
     }
 
@@ -331,6 +385,8 @@ mod tests {
             stall_threshold_secs: 30,
             stall_poll_interval_secs: 5,
             no_stall_monitor: false,
+            resync_interval_secs: 60,
+            no_resync_sweep: false,
         };
         assert!(validate_args(&args).is_ok());
     }
@@ -352,6 +408,8 @@ mod tests {
             stall_threshold_secs: 30,
             stall_poll_interval_secs: 5,
             no_stall_monitor: false,
+            resync_interval_secs: 60,
+            no_resync_sweep: false,
         };
         assert!(validate_args(&args).is_err());
     }
@@ -373,6 +431,8 @@ mod tests {
             stall_threshold_secs: 30,
             stall_poll_interval_secs: 5,
             no_stall_monitor: false,
+            resync_interval_secs: 60,
+            no_resync_sweep: false,
         };
         assert!(validate_args(&args).is_err());
     }
