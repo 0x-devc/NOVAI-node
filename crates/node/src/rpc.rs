@@ -2034,6 +2034,8 @@ fn handle_submit_tx(
                 "RPC tx rejected"
             );
             drop(mempool_guard);
+            // Gate SOAK C2: count the rejection by reason.
+            crate::metrics::pool_metrics::record_rejection(&e);
             // Map mempool errors to distinct codes so clients can distinguish
             // rejection types without leaking internal debug details (H-06).
             // Codes: -32001 = MempoolFull, -32010 = NonceTooLow,

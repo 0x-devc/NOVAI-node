@@ -64,9 +64,10 @@ struct Args {
     #[arg(long)]
     continuous: bool,
 
-    /// Chain stall threshold in seconds. If chain height does not advance
-    /// for this duration, engage the generator pause (complements the
-    /// MempoolFull-driven pause).
+    /// Chain stall threshold in seconds. If the chain height does not
+    /// advance for this duration the monitor logs a stall warning. Advisory
+    /// only: it does not pause the generator. (It once did; the pause path
+    /// was removed and this help text was left behind.)
     #[arg(long, default_value_t = 30)]
     stall_threshold_secs: u64,
 
@@ -91,6 +92,15 @@ struct Args {
     /// Disable the periodic nonce reconciliation sweep.
     #[arg(long)]
     no_resync_sweep: bool,
+
+    /// Window in seconds over which the adaptive throttle judges the
+    /// rejection rate before adjusting the offered rate.
+    #[arg(long, default_value_t = 10)]
+    throttle_window_secs: u64,
+
+    /// Disable the adaptive throttle (always offer at full rate).
+    #[arg(long)]
+    no_throttle: bool,
 }
 
 #[tokio::main]
@@ -159,11 +169,21 @@ async fn main() -> Result<()> {
         track_confirmations: args.track_confirmations,
         ..Default::default()
     };
-    let submitter = submitter::Submitter::new(
+    let throttle = if args.no_throttle {
+        info!("Adaptive throttle disabled (--no-throttle)");
+        None
+    } else {
+        Some(Arc::new(tx_generator::throttle::Throttle::new()))
+    };
+
+    let mut submitter = submitter::Submitter::new(
         submitter_config,
         Arc::clone(&sender_pool),
         Arc::clone(&paused),
     );
+    if let Some(t) = &throttle {
+        submitter = submitter.with_throttle(Arc::clone(t));
+    }
     let submitter_handle = submitter.start(tx_receiver, metric_tx);
     info!("Started {} submitter workers", args.workers);
 
@@ -217,6 +237,36 @@ async fn main() -> Result<()> {
         }))
     };
 
+    // 5d. Fold each window of submission outcomes into a throttle level.
+    // Hysteresis in the controller keeps a steady rejection rate from
+    // flapping the offered rate, and the level is capped so the generator
+    // slows but never stops.
+    let throttle_handle = throttle.as_ref().map(|t| {
+        let t = Arc::clone(t);
+        let window = Duration::from_secs(args.throttle_window_secs.max(1));
+        info!(
+            window_secs = args.throttle_window_secs,
+            "Started adaptive throttle"
+        );
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(window);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut previous = 0u32;
+            loop {
+                ticker.tick().await;
+                let level = t.sample();
+                if level != previous {
+                    info!(
+                        level,
+                        multiplier = t.delay_multiplier(),
+                        "Adaptive throttle changed"
+                    );
+                    previous = level;
+                }
+            }
+        })
+    });
+
     // 6. Start generator (produces unsigned templates)
     let generator_config = generator::GeneratorConfig {
         target_tps: args.tps,
@@ -228,7 +278,10 @@ async fn main() -> Result<()> {
             Some(Duration::from_secs(args.duration))
         },
     };
-    let generator = generator::Generator::new(generator_config, sender_pool, paused);
+    let mut generator = generator::Generator::new(generator_config, sender_pool, paused);
+    if let Some(t) = &throttle {
+        generator = generator.with_throttle(Arc::clone(t));
+    }
     let generator_handle = generator.start(tx_sender);
     info!("Started transaction generator");
 
@@ -288,6 +341,11 @@ async fn main() -> Result<()> {
 
     // Stop the nonce reconciliation sweep
     if let Some(handle) = resync_handle {
+        handle.abort();
+    }
+
+    // Stop the adaptive throttle sampler
+    if let Some(handle) = throttle_handle {
         handle.abort();
     }
 
@@ -387,6 +445,8 @@ mod tests {
             no_stall_monitor: false,
             resync_interval_secs: 60,
             no_resync_sweep: false,
+            throttle_window_secs: 10,
+            no_throttle: false,
         };
         assert!(validate_args(&args).is_ok());
     }
@@ -410,6 +470,8 @@ mod tests {
             no_stall_monitor: false,
             resync_interval_secs: 60,
             no_resync_sweep: false,
+            throttle_window_secs: 10,
+            no_throttle: false,
         };
         assert!(validate_args(&args).is_err());
     }
@@ -433,6 +495,8 @@ mod tests {
             no_stall_monitor: false,
             resync_interval_secs: 60,
             no_resync_sweep: false,
+            throttle_window_secs: 10,
+            no_throttle: false,
         };
         assert!(validate_args(&args).is_err());
     }

@@ -9,3 +9,4 @@ pub mod generator;
 pub mod metrics;
 pub mod sender;
 pub mod submitter;
+pub mod throttle;

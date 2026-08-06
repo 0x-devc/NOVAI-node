@@ -157,6 +157,28 @@ pub enum TxMempoolError {
     },
 }
 
+/// Pool contents split by how close each transaction is to being included.
+///
+/// The names match the classification the eviction rules are built on, so a
+/// dashboard and the code speak the same language.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PoolCensus {
+    /// Below the chain's expected nonce. Provably dead; should be transient,
+    /// since the commit that creates them also evicts them.
+    pub dead_past: usize,
+    /// Exactly at the expected nonce: includable in the next block.
+    pub ready: usize,
+    /// In the reachable run above the expected nonce. Healthy backlog. A deep
+    /// one is correct and must never be treated as a fault.
+    pub waiting: usize,
+    /// Unreachable from the current pool contents. A large and persistent
+    /// count here is the signature of a desynced client, and is the thing
+    /// worth alarming on.
+    pub gapped: usize,
+    /// Distinct senders holding at least one pooled transaction.
+    pub senders: usize,
+}
+
 /// A mempool specifically for canonical TxV1.
 ///
 /// Policy (Week 2):
@@ -544,6 +566,65 @@ impl TxMempool {
             self.remove_internal(id);
         }
         dead.len()
+    }
+
+    /// A read-only classification of the whole pool.
+    ///
+    /// `novai_mempool_size` alone cannot tell a healthy deep backlog from a
+    /// jam: it counts both. These four counts are the distinction, and they
+    /// are what lets the monitor stop guessing.
+    ///
+    /// Read only by construction. It evicts nothing, and no eviction decision
+    /// anywhere consults it. Eviction is event driven (commit, admission);
+    /// this is observation, and the two deliberately do not share a path.
+    pub fn census(&self, nonce_provider: &impl NonceProvider) -> PoolCensus {
+        let mut c = PoolCensus {
+            senders: self.by_sender.len(),
+            ..PoolCensus::default()
+        };
+
+        for (from, by_nonce) in &self.by_sender {
+            let expected = nonce_provider.expected_nonce(from);
+
+            // The reachable run, STRICTLY rooted at expected. If the sender
+            // has nothing at expected, nothing it holds is reachable and the
+            // run is empty.
+            //
+            // Note the deliberate asymmetry with the eviction rules, which
+            // grant a one-nonce grace when expected is absent because it may
+            // be in flight. Eviction and observation want opposite errors:
+            // eviction must never destroy a transaction that is still alive,
+            // so it errs toward keeping; observation must never hide a jam,
+            // so it errs toward reporting. Granting the grace here would
+            // classify a client that never sent `expected` (the jam this gate
+            // exists to surface) as a healthy backlog, which is precisely the
+            // blindness the census was added to remove.
+            //
+            // The cost is that a leader briefly reads its own drained head as
+            // a gap. That is a sub-second transient, and the alarms built on
+            // this carry a persistence window measured in minutes, so time is
+            // what separates the transient from the jam. See the pins.
+            let mut cursor = expected;
+            while by_nonce.contains_key(&cursor) {
+                cursor = cursor.saturating_add(1);
+            }
+            let run_start = expected;
+            let run_end = cursor; // exclusive
+
+            for (&nonce, ids) in by_nonce {
+                let n = ids.len();
+                if nonce < expected {
+                    c.dead_past += n;
+                } else if nonce == expected {
+                    c.ready += n;
+                } else if nonce >= run_start && nonce < run_end {
+                    c.waiting += n;
+                } else {
+                    c.gapped += n;
+                }
+            }
+        }
+        c
     }
 
     /// Drain up to `max` ready transactions under fee-priority + fairness.

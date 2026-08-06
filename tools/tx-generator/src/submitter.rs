@@ -174,6 +174,9 @@ pub struct Submitter {
     http_client: reqwest::Client,
     sender_pool: Arc<SenderPool>,
     paused: Arc<AtomicBool>,
+    /// Optional adaptive throttle. Workers record every outcome into it; the
+    /// generator reads the resulting level to pace itself.
+    throttle: Option<Arc<crate::throttle::Throttle>>,
 }
 
 impl Submitter {
@@ -196,7 +199,15 @@ impl Submitter {
             http_client,
             sender_pool,
             paused,
+            throttle: None,
         }
+    }
+
+    /// Attach the adaptive throttle shared with the generator.
+    #[must_use]
+    pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
+        self.throttle = Some(throttle);
+        self
     }
 
     /// Start the worker pool consuming from the transaction template channel.
@@ -228,6 +239,7 @@ impl Submitter {
             let tx_receiver = Arc::clone(&tx_receiver);
             let sender_pool = Arc::clone(&self.sender_pool);
             let paused = Arc::clone(&self.paused);
+            let throttle = self.throttle.clone();
 
             let handle = tokio::spawn(async move {
                 let mut stats = WorkerStats::default();
@@ -278,6 +290,9 @@ impl Submitter {
                             match result {
                                 SubmitResult::Accepted { .. } => {
                                     stats.accepted_count += 1;
+                                    if let Some(t) = &throttle {
+                                        t.record_accepted();
+                                    }
                                     if let Some(sender) =
                                         sender_pool.find_by_address(&sender_address)
                                     {
@@ -286,6 +301,9 @@ impl Submitter {
                                 }
                                 SubmitResult::Rejected { ref reason } => {
                                     stats.rejected_count += 1;
+                                    if let Some(t) = &throttle {
+                                        t.record_rejected();
+                                    }
                                     // Track NonceTooLow for nonce reset.
                                     // Uses code-based detection (not string matching)
                                     // since H-06 sanitized error messages.
@@ -303,6 +321,9 @@ impl Submitter {
                                 }
                                 SubmitResult::Failed { ref error } => {
                                     stats.failed_count += 1;
+                                    if let Some(t) = &throttle {
+                                        t.record_rejected();
+                                    }
                                     // SenderLimitExceeded arrives here rather than as a
                                     // rejection, because the submit path retries it and
                                     // then gives up. Its own source calls the result a
@@ -724,6 +745,22 @@ async fn query_nonce_retrying(
                 tokio::time::sleep(NONCE_QUERY_BACKOFF).await;
             }
         }
+    }
+}
+
+/// Did this poll observe genuine chain progress?
+///
+/// Only a height strictly above the last one counts. Everything else leaves
+/// the stall clock running, including a response that carries no height at
+/// all: that used to reset the clock, which meant an endpoint answering
+/// without a height kept the monitor permanently quiet.
+pub fn poll_is_progress(result: &Result<Option<u64>, String>, last_height: Option<u64>) -> bool {
+    match result {
+        Ok(Some(h)) => match last_height {
+            Some(previous) => *h > previous,
+            None => true,
+        },
+        Ok(None) | Err(_) => false,
     }
 }
 
@@ -1163,10 +1200,29 @@ impl ChainMonitor {
                     }
                 }
                 Ok(None) => {
-                    last_advance = Instant::now();
+                    // Gate SOAK B7: an answer carrying no height is NOT
+                    // progress. Resetting the clock here is how the monitor
+                    // stayed quiet through an endpoint that responded but
+                    // reported nothing.
+                    if !stalled && last_advance.elapsed() >= self.stall_threshold {
+                        warn!(
+                            elapsed_ms = last_advance.elapsed().as_millis() as u64,
+                            "Chain stalled: endpoint returns no height (advisory)"
+                        );
+                        stalled = true;
+                    }
                 }
                 Err(e) => {
-                    debug!("Chain monitor RPC error: {}", e);
+                    // Visible at warn, not debug: a dead endpoint used to be
+                    // invisible in normal logs while the monitor sat silent.
+                    warn!(error = %e, "Chain monitor RPC error");
+                    if !stalled && last_advance.elapsed() >= self.stall_threshold {
+                        warn!(
+                            elapsed_ms = last_advance.elapsed().as_millis() as u64,
+                            "Chain stalled: endpoint unreachable (advisory)"
+                        );
+                        stalled = true;
+                    }
                 }
             }
         }

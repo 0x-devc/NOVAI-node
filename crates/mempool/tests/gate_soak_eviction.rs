@@ -296,3 +296,109 @@ fn pending_count_tracks_contents_across_eviction() {
     }
     assert_eq!(mp.pending_count(&from), mempool::MAX_PENDING_PER_SENDER);
 }
+
+// ===========================================================================
+// Gate SOAK phase 5 (C1): the read-only census that gives the monitor the
+// distinction novai_mempool_size cannot make.
+// ===========================================================================
+
+/// The census separates a healthy deep backlog from a jam. Both look
+/// identical to a pool-size gauge, which is why no threshold on that gauge
+/// can be right in both directions.
+#[test]
+fn census_separates_a_healthy_backlog_from_a_jam() {
+    let (sk_h, vk_h) = keypair(21);
+    let (sk_j, vk_j) = keypair(22);
+    let healthy = address_from_pubkey(&vk_h);
+    let jammed = address_from_pubkey(&vk_j);
+    let e: u64 = 50;
+
+    let mut mp = TxMempool::new(1, 1000);
+    let mut np = Nonces::default();
+    np.set(healthy, e);
+    np.set(jammed, e);
+
+    // A healthy sender: a full contiguous run from expected.
+    for n in e..(e + 8) {
+        admit(&mut mp, &mut np, signed(&sk_h, &vk_h, n, b"ok"));
+    }
+    // A jammed sender: nothing at expected, so none of it is reachable.
+    for n in (e + 1)..(e + 9) {
+        admit(&mut mp, &mut np, signed(&sk_j, &vk_j, n, b"jam"));
+    }
+
+    let c = mp.census(&np);
+    assert_eq!(mp.len(), 16, "the pool-size gauge sees one number for both");
+    assert_eq!(c.senders, 2);
+    assert_eq!(c.ready, 1, "only the healthy sender has a next-block tx");
+    assert_eq!(c.waiting, 7, "the rest of the healthy run");
+    assert_eq!(c.gapped, 8, "the whole jammed sender is unreachable");
+    assert_eq!(c.dead_past, 0);
+}
+
+/// THE ASYMMETRY, PINNED. Observation is strict where eviction is lenient.
+///
+/// Eviction grants a one-nonce grace when `expected` is missing, because it
+/// may be in flight and destroying a live transaction is unacceptable. The
+/// census must NOT grant it: a client that never sent `expected` is exactly
+/// the jam this gate exists to surface, and a grace would report its whole
+/// stuck queue as healthy backlog.
+///
+/// The price is that a leader reads its own just-drained head as a gap for
+/// the sub-second window before commit. Time is what separates that from a
+/// real jam, and the alarms built on this gauge carry a persistence window of
+/// minutes, so the transient never reaches an operator.
+#[test]
+fn census_is_strict_where_eviction_is_lenient() {
+    let (sk, vk) = keypair(23);
+    let from = address_from_pubkey(&vk);
+    let e: u64 = 50;
+
+    let mut mp = TxMempool::new(1, 1000);
+    let mut np = Nonces::default();
+    np.set(from, e);
+    for n in e..(e + 5) {
+        admit(&mut mp, &mut np, signed(&sk, &vk, n, b"run"));
+    }
+    assert_eq!(mp.census(&np).waiting, 4, "a whole run is healthy backlog");
+
+    // The leader drains the head. Expected does not advance until commit.
+    assert_eq!(mp.drain_ready(10, &np).len(), 1);
+
+    let c = mp.census(&np);
+    assert_eq!(c.ready, 0, "the head is in flight");
+    assert_eq!(
+        c.gapped, 4,
+        "the census reports the hole honestly rather than papering over it"
+    );
+    assert_eq!(c.waiting, 0);
+
+    // Eviction, given the same state, destroys nothing: the grace lives
+    // there, where being wrong costs a live transaction.
+    assert_eq!(mp.evict_dead_past(&from, e), 0);
+    assert_eq!(mp.pending_count(&from), 4, "nothing was evicted");
+}
+
+/// The census never mutates the pool. It is observation, and eviction must
+/// not be reachable through it.
+#[test]
+fn census_is_read_only() {
+    let (sk, vk) = keypair(24);
+    let from = address_from_pubkey(&vk);
+    let mut mp = TxMempool::new(1, 1000);
+    let mut np = Nonces::default();
+
+    for n in [1u64, 2, 7] {
+        admit(&mut mp, &mut np, signed(&sk, &vk, n, b"x"));
+    }
+    np.set(from, 5); // makes 1 and 2 dead-past, 7 gapped
+
+    let before_len = mp.len();
+    let before_bytes = mp.total_bytes();
+    let c = mp.census(&np);
+    assert_eq!(c.dead_past, 2);
+    assert_eq!(c.gapped, 1);
+    assert_eq!(mp.len(), before_len, "census must not evict");
+    assert_eq!(mp.total_bytes(), before_bytes, "census must not touch bytes");
+    assert_eq!(mp.pending_count(&from), 3);
+}

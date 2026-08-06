@@ -42,7 +42,13 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 ANOMALY_CONFIDENCE_BYTE_HIGH = 204
 
 MEMPOOL_EMPTY_VALUE = 0
-MEMPOOL_BACKLOG_THRESHOLD = 1000
+# Gate SOAK C3: threshold on UNREACHABLE depth, not total depth. A healthy
+# pool sits near zero here whatever its backlog, so the margin is large.
+MEMPOOL_GAPPED_THRESHOLD = 1000
+
+# Gate SOAK C4: sustained admission rejections that say a client's nonce
+# state is wrong. Per minute, summed across the three reasons.
+GENERATOR_DESYNC_PER_MIN = 30.0
 
 VIEW_CHANGE_SPIKE_PER_MIN = 6.0
 VIEW_CHANGE_ELEVATED_PER_MIN = 2.0
@@ -148,13 +154,26 @@ def eval_mempool_empty(snap, prev, history, now) -> EvalResult:
     return EvalResult(False, f"mempool_size={int(size)}")
 
 
-def eval_mempool_backlog(snap, prev, history, now) -> EvalResult:
-    size = _get(snap, "novai_mempool_size")
-    if size is None:
+def eval_mempool_gapped_high(snap, prev, history, now) -> EvalResult:
+    """
+    Gate SOAK C3. This alarm used to watch total pool depth, which fires on
+    a deep HEALTHY backlog: transactions waiting their turn behind a sender's
+    in-flight one are correct, and a soak is expected to carry many of them.
+    A threshold on total depth is wrong in both directions, because the gauge
+    lumps healthy backlog together with a jam.
+
+    It now watches the GAPPED count: transactions unreachable from their
+    sender's expected nonce. A healthy pool has near zero of these, so the
+    alarm has enormous margin, and a large persistent count is the signature
+    of a desynced client, which makes this a leading indicator of the failure
+    rather than a complaint about success.
+    """
+    gapped = _get(snap, "novai_mempool_gapped")
+    if gapped is None:
         return EvalResult(False, "insufficient_data")
-    if size > MEMPOOL_BACKLOG_THRESHOLD:
-        return EvalResult(True, f"mempool_size={int(size)} (above {MEMPOOL_BACKLOG_THRESHOLD})")
-    return EvalResult(False, f"mempool_size={int(size)}")
+    if gapped > MEMPOOL_GAPPED_THRESHOLD:
+        return EvalResult(True, f"gapped={int(gapped)} (above {MEMPOOL_GAPPED_THRESHOLD})")
+    return EvalResult(False, f"gapped={int(gapped)}")
 
 
 def eval_view_change_spike(snap, prev, history, now) -> EvalResult:
@@ -212,15 +231,55 @@ def eval_proposer_skipping_txs(snap, prev, history, now) -> EvalResult:
     blocks (committed_height advancing covered by other alerts) but not
     including queued transactions.
     """
-    mempool = _get(snap, "novai_mempool_size")
-    if mempool is None or mempool <= 0:
-        return EvalResult(False, f"mempool_size={int(mempool) if mempool is not None else 0}")
+    # Gate SOAK C3: gate on READY depth, not total depth. A pool holding
+    # only unreachable transactions is not being "skipped": the proposer is
+    # correctly producing empty blocks because it has nothing it may include.
+    # Firing there would blame the proposer for a client-side desync, which
+    # the gapped alarm above names properly.
+    ready = _get(snap, "novai_mempool_ready")
+    if ready is None:
+        # Fall back to total depth on a node that predates the ready gauge,
+        # which preserves the old behaviour rather than going silent.
+        ready = _get(snap, "novai_mempool_size")
+    if ready is None or ready <= 0:
+        return EvalResult(False, f"ready={int(ready) if ready is not None else 0}")
+    mempool = ready
     tx_rate = compute_counter_rate_per_minute(history, "novai_total_txs_committed", 120.0, now)
     if tx_rate is None:
         return EvalResult(False, "insufficient_data")
     if tx_rate <= 0.0:
         return EvalResult(True, f"tx_rate=0/min mempool_size={int(mempool)}")
     return EvalResult(False, f"tx_rate={tx_rate:.2f}/min mempool_size={int(mempool)}")
+
+
+def eval_generator_desync(snap, prev, history, now) -> EvalResult:
+    """
+    Gate SOAK C4. Sustained admission rejections whose reason is the client's
+    nonce state: too low, too high, or the per-sender slot cap.
+
+    This pages on the CAUSE. Every other symptom of a desynced load client
+    (empty blocks, a pool that will not drain, throughput at zero) is
+    downstream of it, and each of those has an innocent explanation too. A
+    run of nonce-state rejections does not.
+    """
+    total = 0.0
+    seen = False
+    for name in (
+        "novai_mempool_rejects_nonce_too_low",
+        "novai_mempool_rejects_nonce_too_high",
+        "novai_mempool_rejects_sender_limit",
+    ):
+        rate = compute_counter_rate_per_minute(history, name, 300.0, now)
+        if rate is not None:
+            total += rate
+            seen = True
+    if not seen:
+        return EvalResult(False, "insufficient_data")
+    if total > GENERATOR_DESYNC_PER_MIN:
+        return EvalResult(
+            True, f"nonce_state_rejects={total:.1f}/min (above {GENERATOR_DESYNC_PER_MIN}/min)"
+        )
+    return EvalResult(False, f"nonce_state_rejects={total:.1f}/min")
 
 
 def eval_commit_stall(snap, prev, history, now) -> EvalResult:
@@ -268,20 +327,41 @@ NODE_ALERTS: List[Tuple[AlertSpec, Evaluator]] = [
     (AlertSpec("mempool_empty", "WARN", 300.0,
                "Mempool empty: tx flow regression",
                None), eval_mempool_empty),
-    (AlertSpec("mempool_backlog", "WARN", 300.0,
-               "Mempool above backlog threshold",
-               None), eval_mempool_backlog),
+    (AlertSpec("mempool_gapped_high", "WARN", 300.0,
+               "Unreachable transactions piling up (client nonce desync)",
+               None), eval_mempool_gapped_high),
+    (AlertSpec("generator_desync", "WARN", 300.0,
+               "Sustained nonce-state admission rejections",
+               None), eval_generator_desync),
     (AlertSpec("view_change_spike", "CRITICAL", 180.0,
                "View change rate spiking",
                None), eval_view_change_spike),
     (AlertSpec("view_change_elevated", "WARN", 300.0,
                "View change rate elevated",
                None), eval_view_change_elevated),
-    (AlertSpec("anomaly_published", "WARN", 0.0,
+    # Gate SOAK C5. These two were the only alarms in the stack with a zero
+    # second window, so they dispatched on the first qualifying scrape.
+    #
+    # Their upstream trigger is mempool growth: the copilot detector fires at
+    # 3x a 100 sample rolling average (detector.rs mempool_growth_threshold_pct
+    # = 300, min_mempool_baseline = 10), and confidence is
+    # ratio_pct - threshold_pct + 100, so about 4.04x the baseline clears the
+    # 204 high-confidence gate. Any load ramp from an idle baseline crosses
+    # that, which made a CRITICAL page pointing at a module-rollback playbook
+    # the routine response to load starting. It was the largest single source
+    # of alert noise on this stack.
+    #
+    # Both now require their condition to persist. anomaly_high_confidence is
+    # also demoted to WARN: a mempool growth spike is not a
+    # roll-back-the-module event, and once the gapped-depth alarm below exists
+    # the genuine desync case has an alarm that names it. The copilot detector
+    # thresholds are deliberately NOT touched here: that path publishes signals
+    # on-chain and is out of scope for a monitoring change.
+    (AlertSpec("anomaly_published", "WARN", 300.0,
                "New anomaly signal published on-chain",
                "ROLLBACK_BAD_MODULE.md"), eval_anomaly_published),
-    (AlertSpec("anomaly_high_confidence", "CRITICAL", 0.0,
-               "High-confidence anomaly detected",
+    (AlertSpec("anomaly_high_confidence", "WARN", 300.0,
+               "High-confidence anomaly sustained",
                "ROLLBACK_BAD_MODULE.md"), eval_anomaly_high_confidence),
     (AlertSpec("copilot_heartbeat_dead", "WARN", 600.0,
                "Copilot observation loop stopped",

@@ -17,6 +17,55 @@ use std::time::Instant;
 use tiny_http::{Response, Server, StatusCode};
 
 /// Point-in-time snapshot of node metrics.
+/// Gate SOAK C1/C2: process-wide admission and pool-shape counters.
+///
+/// Statics rather than threaded parameters because there is one node per
+/// process and these are pure observation: threading five counters through
+/// the RPC server signature would touch far more code than the measurement
+/// is worth.
+///
+/// The pool-shape gauges are CACHED here by a periodic pass and read
+/// lock-free at scrape time. Computing the census inside the scrape would
+/// hold the mempool mutex against admission on every poll, and that mutex is
+/// already shared by five threads (RPC, gossip, propose loop, observer,
+/// metrics).
+pub mod pool_metrics {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub static READY: AtomicU64 = AtomicU64::new(0);
+    pub static WAITING: AtomicU64 = AtomicU64::new(0);
+    pub static GAPPED: AtomicU64 = AtomicU64::new(0);
+    pub static SENDERS: AtomicU64 = AtomicU64::new(0);
+
+    pub static REJ_NONCE_TOO_LOW: AtomicU64 = AtomicU64::new(0);
+    pub static REJ_NONCE_TOO_HIGH: AtomicU64 = AtomicU64::new(0);
+    pub static REJ_SENDER_LIMIT: AtomicU64 = AtomicU64::new(0);
+    pub static REJ_FEE_TOO_LOW: AtomicU64 = AtomicU64::new(0);
+    pub static REJ_FULL: AtomicU64 = AtomicU64::new(0);
+
+    /// Publish a freshly computed census. Called by the periodic pass.
+    pub fn publish_census(c: &mempool::PoolCensus) {
+        READY.store(c.ready as u64, Ordering::Relaxed);
+        WAITING.store(c.waiting as u64, Ordering::Relaxed);
+        GAPPED.store(c.gapped as u64, Ordering::Relaxed);
+        SENDERS.store(c.senders as u64, Ordering::Relaxed);
+    }
+
+    /// Count one admission rejection by reason. Called from every admission
+    /// path, including gossip, whose rejections were previously invisible.
+    pub fn record_rejection(err: &mempool::TxMempoolError) {
+        let counter = match err {
+            mempool::TxMempoolError::NonceTooLow { .. } => &REJ_NONCE_TOO_LOW,
+            mempool::TxMempoolError::NonceTooHigh { .. } => &REJ_NONCE_TOO_HIGH,
+            mempool::TxMempoolError::SenderLimitExceeded { .. } => &REJ_SENDER_LIMIT,
+            mempool::TxMempoolError::FeeTooLow { .. } => &REJ_FEE_TOO_LOW,
+            mempool::TxMempoolError::MempoolFull { .. } => &REJ_FULL,
+            _ => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub struct MetricsSnapshot {
     /// Height of last committed block.
     pub committed_height: u64,
@@ -35,6 +84,25 @@ pub struct MetricsSnapshot {
     pub peer_count: u64,
     /// Transactions in mempool.
     pub mempool_size: u64,
+    /// Gate SOAK C1: the pool split by how close each transaction is to
+    /// inclusion. mempool_size alone cannot tell a healthy deep backlog from
+    /// a jam, because it counts both, so no threshold on it is right in both
+    /// directions. Flat unlabeled names on purpose: the monitor's parser
+    /// drops any labeled sample, so a counter vector would be silently
+    /// discarded and every alarm built on it would sit at insufficient_data.
+    pub mempool_ready: u64,
+    pub mempool_waiting: u64,
+    pub mempool_gapped: u64,
+    pub mempool_senders: u64,
+    /// Gate SOAK C2: admission rejections by reason. Nothing on the dashboard
+    /// could previously tell "the generator stopped" from "every submit is
+    /// being refused"; gossip rejections in particular were swallowed
+    /// silently.
+    pub mempool_rejects_nonce_too_low: u64,
+    pub mempool_rejects_nonce_too_high: u64,
+    pub mempool_rejects_sender_limit: u64,
+    pub mempool_rejects_fee_too_low: u64,
+    pub mempool_rejects_full: u64,
     /// Total view changes (round advances due to timeouts).
     pub view_changes_total: u64,
     /// Number of transactions in last committed block.
@@ -90,6 +158,42 @@ novai_peer_count {}
 # TYPE novai_mempool_size gauge
 novai_mempool_size {}
 
+# HELP novai_mempool_ready Pooled txs at the sender's expected nonce (includable next block)
+# TYPE novai_mempool_ready gauge
+novai_mempool_ready {}
+
+# HELP novai_mempool_waiting Pooled txs in the reachable run above expected (healthy backlog)
+# TYPE novai_mempool_waiting gauge
+novai_mempool_waiting {}
+
+# HELP novai_mempool_gapped Pooled txs unreachable from the sender's expected nonce
+# TYPE novai_mempool_gapped gauge
+novai_mempool_gapped {}
+
+# HELP novai_mempool_senders Distinct senders holding at least one pooled tx
+# TYPE novai_mempool_senders gauge
+novai_mempool_senders {}
+
+# HELP novai_mempool_rejects_nonce_too_low Admission rejections: nonce below expected
+# TYPE novai_mempool_rejects_nonce_too_low counter
+novai_mempool_rejects_nonce_too_low {}
+
+# HELP novai_mempool_rejects_nonce_too_high Admission rejections: nonce past the horizon
+# TYPE novai_mempool_rejects_nonce_too_high counter
+novai_mempool_rejects_nonce_too_high {}
+
+# HELP novai_mempool_rejects_sender_limit Admission rejections: per-sender slot cap
+# TYPE novai_mempool_rejects_sender_limit counter
+novai_mempool_rejects_sender_limit {}
+
+# HELP novai_mempool_rejects_fee_too_low Admission rejections: below the effective fee floor
+# TYPE novai_mempool_rejects_fee_too_low counter
+novai_mempool_rejects_fee_too_low {}
+
+# HELP novai_mempool_rejects_full Admission rejections: mempool byte cap
+# TYPE novai_mempool_rejects_full counter
+novai_mempool_rejects_full {}
+
 # HELP novai_consensus_view_changes_total Total view changes (round advances)
 # TYPE novai_consensus_view_changes_total counter
 novai_consensus_view_changes_total {}
@@ -128,6 +232,15 @@ novai_anomaly_last_confidence {}
             self.current_round,
             self.peer_count,
             self.mempool_size,
+            self.mempool_ready,
+            self.mempool_waiting,
+            self.mempool_gapped,
+            self.mempool_senders,
+            self.mempool_rejects_nonce_too_low,
+            self.mempool_rejects_nonce_too_high,
+            self.mempool_rejects_sender_limit,
+            self.mempool_rejects_fee_too_low,
+            self.mempool_rejects_full,
             self.view_changes_total,
             self.block_tx_count,
             self.total_txs_committed,
@@ -260,6 +373,15 @@ mod tests {
             current_round: 3,
             peer_count: 4,
             mempool_size: 127,
+            mempool_ready: 0,
+            mempool_waiting: 0,
+            mempool_gapped: 0,
+            mempool_senders: 0,
+            mempool_rejects_nonce_too_low: 0,
+            mempool_rejects_nonce_too_high: 0,
+            mempool_rejects_sender_limit: 0,
+            mempool_rejects_fee_too_low: 0,
+            mempool_rejects_full: 0,
             view_changes_total: 5,
             block_tx_count: 25,
             total_txs_committed: 1050,
@@ -310,6 +432,15 @@ mod tests {
             current_round: 0,
             peer_count: 0,
             mempool_size: 0,
+            mempool_ready: 0,
+            mempool_waiting: 0,
+            mempool_gapped: 0,
+            mempool_senders: 0,
+            mempool_rejects_nonce_too_low: 0,
+            mempool_rejects_nonce_too_high: 0,
+            mempool_rejects_sender_limit: 0,
+            mempool_rejects_fee_too_low: 0,
+            mempool_rejects_full: 0,
             view_changes_total: 0,
             block_tx_count: 0,
             total_txs_committed: 0,
@@ -343,6 +474,15 @@ mod tests {
             current_round: 0,
             peer_count: 0,
             mempool_size: 0,
+            mempool_ready: 0,
+            mempool_waiting: 0,
+            mempool_gapped: 0,
+            mempool_senders: 0,
+            mempool_rejects_nonce_too_low: 0,
+            mempool_rejects_nonce_too_high: 0,
+            mempool_rejects_sender_limit: 0,
+            mempool_rejects_fee_too_low: 0,
+            mempool_rejects_full: 0,
             view_changes_total: 0,
             block_tx_count: 0,
             total_txs_committed: 0,

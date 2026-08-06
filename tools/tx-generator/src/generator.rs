@@ -122,6 +122,9 @@ pub struct Generator {
     config: GeneratorConfig,
     sender_pool: Arc<SenderPool>,
     paused: Arc<AtomicBool>,
+    /// Optional adaptive throttle. When present the generator stretches its
+    /// interval while the node is refusing a large share of what it offers.
+    throttle: Option<Arc<crate::throttle::Throttle>>,
 }
 
 impl Generator {
@@ -138,7 +141,15 @@ impl Generator {
             config,
             sender_pool,
             paused,
+            throttle: None,
         }
+    }
+
+    /// Attach the adaptive throttle shared with the submitter workers.
+    #[must_use]
+    pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
+        self.throttle = Some(throttle);
+        self
     }
 
     /// Start generating transaction templates, sending them to the provided channel.
@@ -190,6 +201,17 @@ impl Generator {
 
             // Wait for next tick
             interval.tick().await;
+
+            // Gate SOAK B6: if the node is refusing a large share of what we
+            // offer, offering it faster only sustains the pressure. The
+            // multiplier is bounded, so this slows the generator but never
+            // stops it.
+            if let Some(throttle) = &self.throttle {
+                let extra = throttle.delay_multiplier().saturating_sub(1);
+                if extra > 0 {
+                    tokio::time::sleep(interval_duration * extra).await;
+                }
+            }
 
             // Generate template
             let template = self.generate_template();

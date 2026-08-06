@@ -1578,6 +1578,22 @@ fn main() {
                         current_round,
                         peer_count: peer_manager.peer_count() as u64,
                         mempool_size: mempool.lock_or_recover().len() as u64,
+                        // Gate SOAK C1/C2: read the cached census and the
+                        // admission counters lock-free.
+                        mempool_ready: metrics::pool_metrics::READY.load(Ordering::Relaxed),
+                        mempool_waiting: metrics::pool_metrics::WAITING.load(Ordering::Relaxed),
+                        mempool_gapped: metrics::pool_metrics::GAPPED.load(Ordering::Relaxed),
+                        mempool_senders: metrics::pool_metrics::SENDERS.load(Ordering::Relaxed),
+                        mempool_rejects_nonce_too_low: metrics::pool_metrics::REJ_NONCE_TOO_LOW
+                            .load(Ordering::Relaxed),
+                        mempool_rejects_nonce_too_high: metrics::pool_metrics::REJ_NONCE_TOO_HIGH
+                            .load(Ordering::Relaxed),
+                        mempool_rejects_sender_limit: metrics::pool_metrics::REJ_SENDER_LIMIT
+                            .load(Ordering::Relaxed),
+                        mempool_rejects_fee_too_low: metrics::pool_metrics::REJ_FEE_TOO_LOW
+                            .load(Ordering::Relaxed),
+                        mempool_rejects_full: metrics::pool_metrics::REJ_FULL
+                            .load(Ordering::Relaxed),
                         view_changes_total,
                         block_tx_count: commit_metrics.block_tx_count.load(Ordering::Relaxed),
                         total_txs_committed: commit_metrics
@@ -1735,6 +1751,7 @@ fn main() {
             let mut last_sync_check = std::time::Instant::now();
             let mut last_sync_trigger = std::time::Instant::now();
             let mut last_resource_log = std::time::Instant::now();
+            let mut last_census = std::time::Instant::now();
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     tracing::info!("Shutting down gracefully...");
@@ -1828,6 +1845,19 @@ fn main() {
                     drop(nonce_map);
                     drop(qc_bc);
                     drop(state);
+                }
+
+                // Gate SOAK C1: refresh the cached pool census every 5
+                // seconds. READ ONLY: it evicts nothing, and no eviction
+                // decision consults it. Cached here rather than computed at
+                // scrape time so the scrape never holds the pool mutex.
+                if last_census.elapsed() >= Duration::from_secs(5) {
+                    last_census = std::time::Instant::now();
+                    let census = {
+                        let mp = mempool.lock_or_recover();
+                        mp.census(&*nonce_provider)
+                    };
+                    metrics::pool_metrics::publish_census(&census);
                 }
 
                 // Gate SOAK A3: the 30 second / 120 second age purge that used

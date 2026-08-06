@@ -2824,8 +2824,12 @@ impl ConsensusNode {
             Ok(txid) => {
                 tracing::debug!(txid = %hex::encode(txid), "Gossip tx accepted");
             }
-            Err(_) => {
-                // Duplicate or nonce-invalid — expected for already-known txs
+            Err(e) => {
+                // Gate SOAK C2: gossip rejections used to be swallowed
+                // entirely, so a fleet refusing everything looked identical
+                // to a fleet receiving nothing. Still not logged per tx
+                // (far too noisy), but now counted.
+                crate::metrics::pool_metrics::record_rejection(&e);
             }
         }
         Ok(())

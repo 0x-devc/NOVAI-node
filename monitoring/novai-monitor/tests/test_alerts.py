@@ -8,7 +8,8 @@ from alerts import (
     eval_anomaly_high_confidence,
     eval_anomaly_published,
     eval_copilot_heartbeat_dead,
-    eval_mempool_backlog,
+    eval_mempool_gapped_high,
+    eval_generator_desync,
     eval_mempool_empty,
     eval_proposer_skipping_txs,
     eval_view_change_elevated,
@@ -36,9 +37,20 @@ def test_mempool_empty_clears_with_any_tx():
     assert eval_mempool_empty({"novai_mempool_size": 1.0}, None, [], 0.0).firing is False
 
 
-def test_mempool_backlog_fires_above_threshold():
-    assert eval_mempool_backlog({"novai_mempool_size": 1500.0}, None, [], 0.0).firing is True
-    assert eval_mempool_backlog({"novai_mempool_size": 999.0}, None, [], 0.0).firing is False
+def test_mempool_gapped_high_fires_above_threshold():
+    assert eval_mempool_gapped_high({"novai_mempool_gapped": 1500.0}, None, [], 0.0).firing is True
+    assert eval_mempool_gapped_high({"novai_mempool_gapped": 999.0}, None, [], 0.0).firing is False
+
+
+def test_a_deep_healthy_backlog_never_fires_the_gapped_alarm():
+    """
+    Gate SOAK C3. The point of moving this alarm off total depth. A pool
+    holding thousands of transactions that are all waiting their turn is
+    correct behaviour for a soak, and must be silent.
+    """
+    snap = {"novai_mempool_size": 50_000.0, "novai_mempool_waiting": 49_999.0,
+            "novai_mempool_ready": 1.0, "novai_mempool_gapped": 0.0}
+    assert eval_mempool_gapped_high(snap, None, [], 0.0).firing is False
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +173,68 @@ def test_proposer_skipping_txs_fires_when_mempool_nonempty_but_no_commits():
         (60.0, {"novai_total_txs_committed": 1000.0}),
         (120.0, {"novai_total_txs_committed": 1000.0}),
     ]
-    snap = {"novai_mempool_size": 50.0, "novai_total_txs_committed": 1000.0}
+    snap = {"novai_mempool_size": 50.0, "novai_mempool_ready": 50.0,
+            "novai_total_txs_committed": 1000.0}
     r = eval_proposer_skipping_txs(snap, None, history, 120.0)
     assert r.firing is True
+
+
+def test_proposer_skipping_txs_stays_quiet_when_nothing_is_ready():
+    """
+    Gate SOAK C3. A pool full of unreachable transactions is not the
+    proposer's fault: it is correctly producing empty blocks because it has
+    nothing it may include. Blaming the proposer here would page on a
+    client-side desync under a name that sends the operator to the wrong
+    subsystem; generator_desync and mempool_gapped_high name it properly.
+    """
+    history = [
+        (0.0, {"novai_total_txs_committed": 1000.0}),
+        (60.0, {"novai_total_txs_committed": 1000.0}),
+        (120.0, {"novai_total_txs_committed": 1000.0}),
+    ]
+    snap = {"novai_mempool_size": 500.0, "novai_mempool_ready": 0.0,
+            "novai_mempool_gapped": 500.0, "novai_total_txs_committed": 1000.0}
+    assert eval_proposer_skipping_txs(snap, None, history, 120.0).firing is False
+
+
+def test_proposer_skipping_txs_still_fires_on_the_real_fault():
+    """
+    THE PIN THAT MUST NOT REGRESS. Ready transactions exist and nothing is
+    committing: that is the genuine fault this alarm was added for, and the
+    C3 change must not silence it.
+    """
+    history = [
+        (0.0, {"novai_total_txs_committed": 1000.0}),
+        (60.0, {"novai_total_txs_committed": 1000.0}),
+        (120.0, {"novai_total_txs_committed": 1000.0}),
+    ]
+    snap = {"novai_mempool_size": 20.0, "novai_mempool_ready": 20.0,
+            "novai_total_txs_committed": 1000.0}
+    assert eval_proposer_skipping_txs(snap, None, history, 120.0).firing is True
+
+
+def test_generator_desync_fires_on_sustained_nonce_state_rejections():
+    history = [
+        (0.0, {"novai_mempool_rejects_nonce_too_high": 0.0}),
+        (150.0, {"novai_mempool_rejects_nonce_too_high": 500.0}),
+        (300.0, {"novai_mempool_rejects_nonce_too_high": 1000.0}),
+    ]
+    snap = {"novai_mempool_rejects_nonce_too_high": 1000.0}
+    assert eval_generator_desync(snap, None, history, 300.0).firing is True
+
+
+def test_generator_desync_quiet_on_a_healthy_chain():
+    history = [
+        (0.0, {"novai_mempool_rejects_nonce_too_low": 0.0}),
+        (150.0, {"novai_mempool_rejects_nonce_too_low": 1.0}),
+        (300.0, {"novai_mempool_rejects_nonce_too_low": 2.0}),
+    ]
+    snap = {"novai_mempool_rejects_nonce_too_low": 2.0}
+    assert eval_generator_desync(snap, None, history, 300.0).firing is False
+
+
+def test_generator_desync_is_insufficient_data_without_the_counters():
+    assert eval_generator_desync({}, None, [], 0.0).detail == "insufficient_data"
 
 
 def test_proposer_skipping_txs_quiet_when_mempool_empty():
@@ -213,7 +284,7 @@ def test_full_eval_stalled_fixture_fires_expected_alerts():
     assert "proposer_skipping_txs" not in firing_ids
     assert "anomaly_high_confidence" not in firing_ids
     assert "anomaly_published" not in firing_ids
-    assert "mempool_backlog" not in firing_ids
+    assert "mempool_gapped_high" not in firing_ids
 
 
 def test_full_eval_high_anomaly_fixture_fires_expected_alerts():
@@ -230,4 +301,58 @@ def test_full_eval_high_anomaly_fixture_fires_expected_alerts():
     # Chain is healthy in the anomaly fixture; node-local consensus alerts
     # should NOT fire.
     assert "mempool_empty" not in firing_ids
-    assert "mempool_backlog" not in firing_ids
+    assert "mempool_gapped_high" not in firing_ids
+
+
+# ---------------------------------------------------------------------------
+# Gate SOAK C5: the anomaly pair is no longer zero-debounce CRITICAL
+# ---------------------------------------------------------------------------
+
+def test_no_alert_dispatches_on_a_single_scrape():
+    """
+    anomaly_published and anomaly_high_confidence were the only two alarms in
+    the stack with a zero second window, so they paged on the first
+    qualifying scrape. Their upstream trigger is mempool growth past about
+    4x a rolling baseline, which any load ramp from idle crosses, so a
+    CRITICAL page pointing at a module-rollback playbook was the routine
+    response to load starting. That was the largest single source of noise
+    on this stack.
+
+    No alarm may dispatch on one observation now.
+    """
+    from alerts import NODE_ALERTS
+    zero_window = [spec.alert_id for spec, _ in NODE_ALERTS if spec.window_secs <= 0.0]
+    assert zero_window == [], (
+        f"these alarms page on a single scrape with no persistence "
+        f"requirement: {zero_window}"
+    )
+
+
+def test_anomaly_high_confidence_is_not_critical():
+    """
+    A mempool growth spike is not a roll-back-the-module event. The genuine
+    desync case now has alarms that name it (generator_desync,
+    mempool_gapped_high), so this one does not need to carry CRITICAL.
+    """
+    from alerts import NODE_ALERTS
+    spec = next(s for s, _ in NODE_ALERTS if s.alert_id == "anomaly_high_confidence")
+    assert spec.severity == "WARN"
+    assert spec.window_secs >= 60.0
+
+
+def test_commit_stall_is_untouched_by_this_gate():
+    """
+    commit_stall is the genuine wedge detector and the only CRITICAL in this
+    group that must survive every noise-reduction change. Pinned here so a
+    future tuning pass cannot quietly soften it.
+
+    NOTE: this pins the code, not the deployment. Whether the running monitor
+    actually has commit_stall is a separate, server-side question.
+    """
+    from alerts import NODE_ALERTS, COMMIT_GAP_RUNAWAY_BLOCKS, COMMIT_STALL_SECS
+    spec = next(s for s, _ in NODE_ALERTS if s.alert_id == "commit_stall")
+    assert spec.severity == "CRITICAL"
+    assert spec.window_secs == 30.0
+    assert spec.playbook == "EMERGENCY_FREEZE.md"
+    assert COMMIT_GAP_RUNAWAY_BLOCKS == 256
+    assert COMMIT_STALL_SECS == 30.0
