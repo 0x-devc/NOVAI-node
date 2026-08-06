@@ -4457,8 +4457,13 @@ mod tests {
         assert!(cidr.contains(ipv4("10.0.0.0")));
         assert!(cidr.contains(ipv4("10.0.0.5")));
         assert!(cidr.contains(ipv4("10.0.0.255")));
+        // Third octet differs: the /24 mask must not over-match inside its
+        // own /16.
         assert!(!cidr.contains(ipv4("10.0.1.0")));
-        assert!(!cidr.contains(ipv4("11.0.0.0")));
+        // First octet differs. RFC 5737 documentation space, reserved by the
+        // IETF for exactly this and never routable, so no real address
+        // appears in the tree.
+        assert!(!cidr.contains(ipv4("203.0.113.0")));
     }
 
     #[test]
