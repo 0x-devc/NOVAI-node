@@ -9,6 +9,7 @@ pub mod exec_apply;
 pub mod faucet_rate_limit;
 pub mod metrics;
 pub mod rpc;
+pub mod snapshot;
 
 /// Extension trait for poison-safe mutex locking (H-04).
 ///

@@ -17,8 +17,8 @@ use novai_state::{
     KEY_LOCKED_QC, KEY_SMT_ROOT, KEY_VOTED_VIEW,
 };
 
-use crate::classify::{classify, Class};
-use crate::valset::{dev_valset, name_of};
+use crate::snapshot::classify::{classify, Class};
+use crate::snapshot::valset::{dev_valset, name_of};
 
 fn read_u64(db: &RocksKv, key: &[u8]) -> Result<Option<u64>, String> {
     match db.get(key).map_err(|e| format!("db get: {e:?}"))? {

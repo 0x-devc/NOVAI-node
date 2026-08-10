@@ -28,9 +28,9 @@ use novai_state::{
     KEY_SMT_ROOT,
 };
 
-use crate::classify::{classify, Class};
-use crate::rebuild::rebuild_root;
-use crate::valset::{dev_valset, quorum};
+use crate::snapshot::classify::{classify, Class};
+use crate::snapshot::rebuild::rebuild_root;
+use crate::snapshot::valset::{dev_valset, quorum};
 
 /// Sanity bound on the highest-QC descent. The live pipeline runs two blocks
 /// ahead of the committed tip (3-chain rule); anything remotely near this

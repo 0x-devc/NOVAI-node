@@ -11,7 +11,7 @@
 use novai_execution::{append_smt_ops_for_state_ops, empty_smt_root};
 use novai_state::{decode_smt_root_v1, Kv, KvBatch, WriteOp, KEY_SMT_ROOT};
 
-use crate::store::BTreeKv;
+use crate::snapshot::store::BTreeKv;
 
 /// Rebuild the root from flat (key, value) pairs. The empty set yields the
 /// canonical empty root, matching every consensus absent-root default.

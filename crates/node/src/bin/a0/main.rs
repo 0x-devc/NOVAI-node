@@ -17,13 +17,14 @@
 //!
 //! Scope note (F4 execute gate, A0 only): no snapshot export, no install, no
 //! E-pipeline. Those are a later gate; this binary only ever reads.
+//!
+//! The audit pipeline and its support modules live in the library at
+//! `novai_node::snapshot` (gate F5 Stage 0), so the snapshot producer and
+//! installer call this exact verifier instead of growing their own. This
+//! binary is the CLI wrapper over them, and its behaviour is unchanged: same
+//! subcommands, same flags, same report lines, same exit codes.
 
-mod audit;
-mod classify;
-mod inspect;
-mod rebuild;
-mod store;
-mod valset;
+use novai_node::snapshot::{audit, inspect, valset};
 
 fn usage() -> i32 {
     eprintln!("usage: a0 <valset|inspect|audit> [--db <path>] [--height <h>]");
