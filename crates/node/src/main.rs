@@ -1554,6 +1554,11 @@ fn main() {
                 let mempool = Arc::clone(&mempool);
                 let observer_metrics = Arc::clone(&observer_metrics);
                 let commit_metrics = Arc::clone(&commit_metrics);
+                // Gate F5 Stage 1: the snapshot-sync detection phase for the
+                // novai_sync_mode gauge. Read through the retry lock the same
+                // way the other collectors read theirs, so the consensus path
+                // stays untouched.
+                let sync_retry = Arc::clone(&node.sync_retry);
                 // WEDGE-20260718: commit age clock for the
                 // novai_seconds_since_last_commit gauge, owned by the
                 // collector so the consensus path stays untouched.
@@ -1575,6 +1580,7 @@ fn main() {
                         committed_height,
                         highest_qc_height,
                         seconds_since_last_commit,
+                        sync_mode: sync_retry.lock_or_recover().snapshot_sync.gauge(),
                         current_round,
                         peer_count: peer_manager.peer_count() as u64,
                         mempool_size: mempool.lock_or_recover().len() as u64,

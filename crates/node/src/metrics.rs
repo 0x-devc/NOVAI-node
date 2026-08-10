@@ -78,6 +78,16 @@ pub struct MetricsSnapshot {
     /// committed height advance (see `CommitClock`). The rate-independent
     /// half of the monitor's commit_stall dual-trigger alarm.
     pub seconds_since_last_commit: u64,
+    /// Gate F5 Stage 1: the snapshot-sync detection phase
+    /// (`SnapshotSyncMachine::gauge`). 0 block-range sync is viable, 1 the gap
+    /// is past the fleet prune horizon and probes are coming back unserved,
+    /// 2 armed (only an installed state snapshot can recover this node);
+    /// 3 to 5 are reserved for the later fetch, verify and staged phases.
+    ///
+    /// Without this gauge an unrecoverable 346,000 block gap and a 30 second
+    /// commit hiccup both surfaced as commit_stall alone, and the operator
+    /// response to those two is completely different.
+    pub sync_mode: u64,
     /// Current consensus round.
     pub current_round: u64,
     /// Number of connected peers.
@@ -145,6 +155,10 @@ novai_consensus_commit_gap {}
 # HELP novai_seconds_since_last_commit Seconds since the committed height last advanced
 # TYPE novai_seconds_since_last_commit gauge
 novai_seconds_since_last_commit {}
+
+# HELP novai_sync_mode Snapshot-sync detection phase (0 block sync viable, 1 past the prune horizon, 2 armed, 3-5 reserved)
+# TYPE novai_sync_mode gauge
+novai_sync_mode {}
 
 # HELP novai_current_round Current consensus round
 # TYPE novai_current_round gauge
@@ -229,6 +243,7 @@ novai_anomaly_last_confidence {}
             // an underflow.
             self.highest_qc_height.saturating_sub(self.committed_height),
             self.seconds_since_last_commit,
+            self.sync_mode,
             self.current_round,
             self.peer_count,
             self.mempool_size,
@@ -370,6 +385,7 @@ mod tests {
             committed_height: 42,
             highest_qc_height: 44,
             seconds_since_last_commit: 1,
+            sync_mode: 0,
             current_round: 3,
             peer_count: 4,
             mempool_size: 127,
@@ -429,6 +445,7 @@ mod tests {
             committed_height: 0,
             highest_qc_height: 0,
             seconds_since_last_commit: 0,
+            sync_mode: 0,
             current_round: 0,
             peer_count: 0,
             mempool_size: 0,
@@ -471,6 +488,7 @@ mod tests {
             committed_height: 500,
             highest_qc_height: 0,
             seconds_since_last_commit: 0,
+            sync_mode: 0,
             current_round: 0,
             peer_count: 0,
             mempool_size: 0,

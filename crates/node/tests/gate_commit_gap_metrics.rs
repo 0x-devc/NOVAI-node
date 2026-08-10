@@ -43,6 +43,11 @@ fn snapshot() -> MetricsSnapshot {
         anomaly_last_confidence: 0,
         highest_qc_height: 6_980_083,
         seconds_since_last_commit: 1,
+        // Gate F5 Stage 1 added this field; the compiler forces the
+        // constructor to carry it, exactly as this file's RED discipline note
+        // anticipates. The gauge's own pins live in gate_f5_detection_red.rs;
+        // the assertions below are untouched.
+        sync_mode: 0,
     }
 }
 

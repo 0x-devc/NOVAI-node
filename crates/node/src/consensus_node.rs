@@ -153,6 +153,247 @@ pub fn sync_retry_due(strikes: u32, elapsed: Option<Duration>) -> bool {
     }
 }
 
+/// Gate F5 Stage 1: consecutive UNSERVED probes required before the
+/// snapshot-sync machine arms.
+///
+/// The retention arithmetic alone (the gap exceeds `PRUNE_RETAIN_BLOCKS`) is
+/// an inference about other nodes' disks. A probe that comes back unserved is
+/// a direct observation that they will not serve the range. Two of them at
+/// the 60 second probe period is a two minute arming delay on a node that has
+/// already been unrecoverable for hours, so the cost is nil, and it removes
+/// the whole class of "armed on one transient answer". Lowering this to 1
+/// removes the evidence requirement, which is the rule's entire purpose.
+pub const ARM_PROBE_FAILURES: u32 = 2;
+
+/// Gate F5 Stage 1: the behind-retention detection phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapshotSyncPhase {
+    /// Block-range sync is viable, or there is no gap at all.
+    #[default]
+    Idle,
+    /// The gap is past the fleet's prune horizon and probes are being issued,
+    /// but the evidence threshold is not met yet.
+    Arming,
+    /// `ARM_PROBE_FAILURES` consecutive probes came back unserved: block-range
+    /// sync is structurally impossible for this node, and only an installed
+    /// state snapshot can recover it. Stage 1 stops here; the fetch, verify
+    /// and install phases are later, separately gated stages.
+    Armed,
+}
+
+/// Gate F5 Stage 1: the behind-retention detection machine.
+///
+/// Pure: no clock, no lock, no I/O, so the transition rules unit-test
+/// directly, in the same spirit as [`sync_backoff_ms`] and [`sync_retry_due`].
+/// It lives inside [`SyncRetryState`] so it shares that lock: both of its
+/// drive points (the behind-retention branch of `try_request_missing_blocks`
+/// and `record_sync_strike`) already hold it, so the machine adds no lock and
+/// no new lock ordering to a node that has paid for lock cycles before.
+///
+/// The machine decides only WHICH RECOVERY MODE to run. It carries no safety
+/// weight: a snapshot is trusted because a quorum signed the header it is
+/// verified against, never because this machine decided to go and fetch one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SnapshotSyncMachine {
+    phase: SnapshotSyncPhase,
+    unserved_probes: u32,
+    /// Committed height when the machine last left `Idle`. Any advance past
+    /// this is commit progress, which proves block sync is still serving.
+    baseline_committed: u64,
+}
+
+impl SnapshotSyncMachine {
+    #[must_use]
+    pub fn phase(&self) -> SnapshotSyncPhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub fn unserved_probes(&self) -> u32 {
+        self.unserved_probes
+    }
+
+    /// The `novai_sync_mode` gauge value. 0, 1 and 2 are the Stage 1 phases;
+    /// 3, 4 and 5 are RESERVED for the fetch, verify and staged phases of the
+    /// later stages, so the gauge encoding, the dashboard and the monitor's
+    /// alarm never have to be renumbered. The monitor treats anything at or
+    /// above 1 as firing, so a later phase cannot silently go quiet.
+    #[must_use]
+    pub fn gauge(&self) -> u64 {
+        match self.phase {
+            SnapshotSyncPhase::Idle => 0,
+            SnapshotSyncPhase::Arming => 1,
+            SnapshotSyncPhase::Armed => 2,
+        }
+    }
+
+    /// Commit progress disarms, from ANY phase. Returns true if this call
+    /// disarmed. A node that is committing is a node block sync can still
+    /// serve, and it must never install a snapshot.
+    pub fn observe_commit_progress(&mut self, committed: u64) -> bool {
+        if self.phase == SnapshotSyncPhase::Idle || committed <= self.baseline_committed {
+            return false;
+        }
+        *self = Self::default();
+        true
+    }
+
+    /// This cycle observed a gap past the prune horizon. Entering the band is
+    /// not itself evidence, so the probe count starts at zero and only an
+    /// actually unserved probe advances it.
+    pub fn note_behind_retention(&mut self, committed: u64) {
+        if self.phase == SnapshotSyncPhase::Idle {
+            self.phase = SnapshotSyncPhase::Arming;
+            self.unserved_probes = 0;
+            self.baseline_committed = committed;
+        }
+    }
+
+    /// A sync cycle failed: a matching empty response or a timed-out request,
+    /// both meaning the requested range was not served. It counts as evidence
+    /// ONLY while the machine sits in `Arming`, which it can reach only
+    /// through `note_behind_retention`. That is what keeps an ordinary strike
+    /// inside the retention window from ever arming.
+    pub fn note_unserved_probe(&mut self) {
+        if self.phase != SnapshotSyncPhase::Arming {
+            return;
+        }
+        self.unserved_probes = self.unserved_probes.saturating_add(1);
+        if self.unserved_probes >= ARM_PROBE_FAILURES {
+            self.phase = SnapshotSyncPhase::Armed;
+        }
+    }
+
+    /// The gap is inside the retention window: block-range sync is viable, so
+    /// the machine has no business holding state.
+    pub fn note_within_retention(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+mod snapshot_sync_machine_tests {
+    use super::{SnapshotSyncMachine, SnapshotSyncPhase, ARM_PROBE_FAILURES};
+
+    /// Drive the machine to `Armed` from a given committed baseline.
+    fn armed_at(committed: u64) -> SnapshotSyncMachine {
+        let mut m = SnapshotSyncMachine::default();
+        m.note_behind_retention(committed);
+        for _ in 0..ARM_PROBE_FAILURES {
+            m.note_unserved_probe();
+        }
+        assert_eq!(m.phase(), SnapshotSyncPhase::Armed);
+        m
+    }
+
+    #[test]
+    fn default_is_idle_with_no_evidence() {
+        let m = SnapshotSyncMachine::default();
+        assert_eq!(m.phase(), SnapshotSyncPhase::Idle);
+        assert_eq!(m.unserved_probes(), 0);
+        assert_eq!(m.gauge(), 0);
+    }
+
+    #[test]
+    fn gauge_encodes_every_phase() {
+        let mut m = SnapshotSyncMachine::default();
+        assert_eq!(m.gauge(), 0);
+        m.note_behind_retention(0);
+        assert_eq!(m.gauge(), 1);
+        for _ in 0..ARM_PROBE_FAILURES {
+            m.note_unserved_probe();
+        }
+        assert_eq!(m.gauge(), 2);
+    }
+
+    #[test]
+    fn an_idle_machine_never_reports_a_spurious_disarm() {
+        // Without the Idle guard, every call on a node with a positive
+        // committed height would report a disarm, because the baseline of an
+        // idle machine is zero.
+        let mut m = SnapshotSyncMachine::default();
+        assert!(!m.observe_commit_progress(1_580_000));
+        assert_eq!(m.phase(), SnapshotSyncPhase::Idle);
+    }
+
+    #[test]
+    fn a_flat_committed_height_is_not_progress() {
+        let mut m = armed_at(1_580_000);
+        assert!(!m.observe_commit_progress(1_580_000), "equal is not progress");
+        assert_eq!(m.phase(), SnapshotSyncPhase::Armed);
+    }
+
+    #[test]
+    fn commit_progress_clears_phase_and_evidence() {
+        let mut m = armed_at(1_580_000);
+        assert!(m.observe_commit_progress(1_580_001));
+        assert_eq!(m.phase(), SnapshotSyncPhase::Idle);
+        assert_eq!(m.unserved_probes(), 0);
+    }
+
+    /// Direct coverage for the fail-safe reset that the call site cannot
+    /// exercise at this tree (see the note at the `note_within_retention`
+    /// call in `try_request_missing_blocks`). Without this test the fail-safe
+    /// would be uncovered code, which is how fail-safes rot.
+    #[test]
+    fn within_retention_clears_phase_and_evidence_from_armed() {
+        let mut m = armed_at(1_580_000);
+        m.note_within_retention();
+        assert_eq!(m.phase(), SnapshotSyncPhase::Idle);
+        assert_eq!(m.unserved_probes(), 0);
+        assert_eq!(m.gauge(), 0);
+    }
+
+    #[test]
+    fn re_entering_the_band_restarts_the_evidence_count() {
+        let mut m = SnapshotSyncMachine::default();
+        m.note_behind_retention(100);
+        m.note_unserved_probe();
+        assert_eq!(m.unserved_probes(), 1);
+
+        m.observe_commit_progress(101);
+        m.note_behind_retention(101);
+        assert_eq!(
+            m.unserved_probes(),
+            0,
+            "evidence must be consecutive, never a lifetime tally"
+        );
+    }
+
+    #[test]
+    fn note_behind_retention_is_idempotent_and_never_regresses_evidence() {
+        let mut m = SnapshotSyncMachine::default();
+        m.note_behind_retention(100);
+        m.note_unserved_probe();
+        // A second beyond-retention cycle before the threshold must not reset
+        // the count it has already banked, or the machine could never arm.
+        m.note_behind_retention(100);
+        assert_eq!(m.unserved_probes(), 1);
+        assert_eq!(m.phase(), SnapshotSyncPhase::Arming);
+    }
+
+    #[test]
+    fn armed_is_stable_under_further_unserved_probes() {
+        let mut m = armed_at(100);
+        let before = m.unserved_probes();
+        m.note_unserved_probe();
+        assert_eq!(m.phase(), SnapshotSyncPhase::Armed);
+        assert_eq!(
+            m.unserved_probes(),
+            before,
+            "the count must not grow without bound once armed"
+        );
+    }
+
+    #[test]
+    fn a_strike_on_an_idle_machine_is_ignored() {
+        let mut m = SnapshotSyncMachine::default();
+        m.note_unserved_probe();
+        assert_eq!(m.phase(), SnapshotSyncPhase::Idle);
+        assert_eq!(m.unserved_probes(), 0);
+    }
+}
+
 /// Sized wrapper around a shared `NonceProvider` trait object for gossip tx insertion.
 struct GossipNonceProvider(Arc<dyn mempool::NonceProvider + Send + Sync>);
 
@@ -311,6 +552,10 @@ pub struct SyncRetryState {
     pub strike_committed_height: u64,
     /// When the behind-retention condition was last escalated at ERROR.
     pub last_escalation_log: Option<Instant>,
+    /// Gate F5 Stage 1 detection machine. It lives here rather than behind its
+    /// own mutex because both of its drive points already hold this lock; see
+    /// [`SnapshotSyncMachine`].
+    pub snapshot_sync: SnapshotSyncMachine,
 }
 
 /// Outcome of `try_request_missing_blocks` (F1). `BehindRetention` is the
@@ -2667,6 +2912,25 @@ impl ConsensusNode {
         let mut retry = self.sync_retry.lock_or_recover();
         retry.strikes = retry.strikes.saturating_add(1);
         retry.strike_committed_height = committed;
+
+        // Gate F5 Stage 1: a strike IS an unserved probe, and both unserved
+        // paths (a matching empty response and a request timeout) funnel
+        // through here. It advances the snapshot-sync machine only when a
+        // beyond-retention cycle already moved it into Arming, so a strike
+        // inside the retention window can never arm.
+        let phase_before = retry.snapshot_sync.phase();
+        retry.snapshot_sync.note_unserved_probe();
+        if retry.snapshot_sync.phase() != phase_before {
+            tracing::error!(
+                committed,
+                unserved_probes = retry.snapshot_sync.unserved_probes(),
+                reason,
+                "SNAPSHOT SYNC ARMED: consecutive probes past the fleet \
+                 retention window came back unserved; block-range sync cannot \
+                 recover this node and a verified state snapshot is required"
+            );
+        }
+
         let backoff_ms = sync_backoff_ms(retry.strikes);
         if retry.strikes >= SYNC_STRIKE_WARN_THRESHOLD {
             tracing::warn!(
@@ -2706,6 +2970,16 @@ impl ConsensusNode {
     /// is structurally impossible; the node needs a snapshot import) instead
     /// of re-issuing an unservable range forever. The in-window zero-strike
     /// path issues exactly the same request as before the gate existed.
+    /// Gate F5 Stage 1: the snapshot-sync detection machine, read by value.
+    ///
+    /// The metrics collector reads this for the `novai_sync_mode` gauge, and
+    /// the gate tests read it to observe transitions. `SnapshotSyncMachine` is
+    /// `Copy`, so this never hands out the lock.
+    #[must_use]
+    pub fn snapshot_sync(&self) -> SnapshotSyncMachine {
+        self.sync_retry.lock_or_recover().snapshot_sync
+    }
+
     pub fn try_request_missing_blocks(&self) -> SyncRequestOutcome {
         let (committed, hqc_height) = {
             let state = self.state.lock_or_recover();
@@ -2714,12 +2988,27 @@ impl ConsensusNode {
             (committed, hqc_height)
         };
 
+        let mut retry = self.sync_retry.lock_or_recover();
+
+        // Gate F5 Stage 1: commit progress disarms the snapshot-sync machine
+        // from any phase, evaluated BEFORE the no-gap return so a node that
+        // catches up completely disarms too. A node that is committing is a
+        // node block-range sync can still serve, and it must never install a
+        // snapshot. The retry lock moves ahead of the no-gap return to make
+        // that reachable; it is the same lock this function already took, in
+        // the same state-then-retry order, so no ordering changes.
+        if retry.snapshot_sync.observe_commit_progress(committed) {
+            tracing::info!(
+                committed,
+                "Snapshot sync disarmed: commit progress proves block-range \
+                 sync is serving this node"
+            );
+        }
+
         // Need at least 3-chain gap to have committable blocks
         if hqc_height <= committed + 2 {
             return SyncRequestOutcome::NoGap;
         }
-
-        let mut retry = self.sync_retry.lock_or_recover();
 
         // Commit progress since the last strike proves the pipeline works
         // again; reset the gate so catch-up runs at full cadence.
@@ -2740,6 +3029,22 @@ impl ConsensusNode {
         // A served probe commits progress and resets the gate, which also
         // self-corrects near the retention boundary.
         if hqc_height - committed > novai_consensus::PRUNE_RETAIN_BLOCKS {
+            // Gate F5 Stage 1: enter the arming band. Entering is not
+            // evidence; only an unserved probe (recorded as a strike) is, so
+            // the count starts at zero here. Everything below this line is the
+            // F1 escalation and probe behaviour, unchanged.
+            let phase_before = retry.snapshot_sync.phase();
+            retry.snapshot_sync.note_behind_retention(committed);
+            if retry.snapshot_sync.phase() != phase_before {
+                tracing::warn!(
+                    committed,
+                    hqc_height,
+                    retention = novai_consensus::PRUNE_RETAIN_BLOCKS,
+                    "Snapshot sync arming: the gap is past the fleet retention \
+                     window; awaiting probe evidence that peers cannot serve it"
+                );
+            }
+
             let period = Duration::from_millis(SYNC_RETRY_MAX_MS);
             if retry
                 .last_escalation_log
@@ -2768,6 +3073,20 @@ impl ConsensusNode {
             }
             return SyncRequestOutcome::BehindRetention { probed };
         }
+
+        // Gate F5 Stage 1: inside the retention window block-range sync is
+        // viable by construction, so the machine holds no state.
+        //
+        // Honest note on this line: at this tree it is provably a no-op, and
+        // the Stage 1 mutation run proved it (removing it fails no test). The
+        // gap can only shrink back inside the window by committed advancing,
+        // because the frontier never regresses, and the commit-progress disarm
+        // above runs earlier in the SAME call, so control never reaches here
+        // with a non-Idle machine. It is kept as a fail-safe against a future
+        // change that makes the frontier non-monotonic or reorders the disarm,
+        // and it is covered directly by the unit tests on the machine rather
+        // than through this call site, so it is not uncovered code.
+        retry.snapshot_sync.note_within_retention();
 
         // Backoff gate: after failed cycles, refuse to re-issue until
         // min(2s * 2^strikes, 60s) has elapsed since the last request.

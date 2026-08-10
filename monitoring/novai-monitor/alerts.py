@@ -85,6 +85,16 @@ HOST_MEM_WARN_PCT = 10.0
 COMMIT_GAP_RUNAWAY_BLOCKS = 256
 COMMIT_STALL_SECS = 30.0
 
+# Gate F5 Stage 1. novai_sync_mode is the node's own behind-retention
+# detection phase (SnapshotSyncMachine::gauge, crates/node/src/consensus_node.rs).
+# The encoding is a cross-language contract, pinned numerically on both sides.
+# Values 3 to 5 are reserved for the later fetch, verify and staged phases, so
+# the alarm fires on anything at or above ARMING rather than on an exact match
+# and cannot go quiet when the encoding grows.
+SYNC_MODE_IDLE = 0
+SYNC_MODE_ARMING = 1
+SYNC_MODE_ARMED = 2
+
 HistoryPoint = Tuple[float, Dict[str, float]]
 History = List[HistoryPoint]
 
@@ -315,6 +325,43 @@ def eval_commit_stall(snap, prev, history, now) -> EvalResult:
     return EvalResult(gap_fires or time_fires, " ".join(parts))
 
 
+def eval_behind_retention(snap, prev, history, now) -> EvalResult:
+    """
+    Gate F5 Stage 1. Fires when this node has fallen past the fleet's prune
+    horizon, so the blocks it needs no longer exist on any peer and no amount
+    of waiting or restarting will recover it.
+
+    This is deliberately a SEPARATE alarm from commit_stall rather than another
+    trigger on it. Both fire on the unrecoverable case, and both should: the
+    gap really is enormous. But commit_stall also fires on a 30 second hiccup,
+    and the two situations have opposite responses (wait, versus install a
+    verified state snapshot). Before this alarm the operator saw one signal for
+    both.
+
+    Mode 1 is not a warning state. It means the gap already exceeds
+    PRUNE_RETAIN_BLOCKS, which is hours of lag at any cadence the fleet has
+    run, and no honest peer retains the range. The registry window is what
+    absorbs the one genuinely self-correcting case: right at the retention
+    boundary a peer whose own committed height lags slightly may still hold the
+    block, the probe gets served, and the node disarms.
+    """
+    mode = _get(snap, "novai_sync_mode")
+    if mode is None:
+        return EvalResult(False, "insufficient_data")
+    if mode >= SYNC_MODE_ARMED:
+        return EvalResult(
+            True,
+            f"sync_mode={int(mode)} armed: block sync cannot recover this "
+            f"node, a verified state snapshot must be installed",
+        )
+    if mode >= SYNC_MODE_ARMING:
+        return EvalResult(
+            True,
+            f"sync_mode={int(mode)} past the prune horizon, probes unserved",
+        )
+    return EvalResult(False, f"sync_mode={int(mode)}")
+
+
 Evaluator = Callable[[Dict[str, float], Optional[Dict[str, float]], History, float], EvalResult]
 
 
@@ -376,6 +423,17 @@ NODE_ALERTS: List[Tuple[AlertSpec, Evaluator]] = [
     (AlertSpec("commit_stall", "CRITICAL", 30.0,
                "Commit stall: frontier gap or commit age beyond bounds (dual trigger)",
                "EMERGENCY_FREEZE.md"), eval_commit_stall),
+    # Gate F5 Stage 1: the unrecoverable case, named separately from the
+    # generic stall. The 300 s window is five probe periods, long enough that
+    # the self-correcting boundary case resolves without paging and short
+    # enough that a genuinely stranded node pages well inside the hours its
+    # recovery will take. No playbook is referenced: the reseed procedure has
+    # not been drilled into one yet, and pointing at a file that does not
+    # exist is worse than naming the action in the summary.
+    (AlertSpec("behind_retention", "CRITICAL", 300.0,
+               "Node is past the fleet prune horizon: block sync cannot recover it, "
+               "a verified state snapshot must be installed",
+               None), eval_behind_retention),
 ]
 
 
