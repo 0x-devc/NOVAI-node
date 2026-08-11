@@ -1191,6 +1191,28 @@ fn main() {
                     // mistaken for chain state.
                     snapshot_work_dir = format!("{base}/snapshot-work");
 
+                    // Gate F5 Stage 3: complete a staged snapshot install
+                    // BEFORE the database is opened and before the directory
+                    // is created, single threaded. The boot path re-runs the
+                    // full audit against the exact bytes it is about to
+                    // install, merges this node's own vote and lock marks so
+                    // neither can regress, and commits with one rename. It is
+                    // idempotent under a crash at any step and never deletes
+                    // anything.
+                    match novai_node::snapshot::install::complete_install_at_boot(
+                        std::path::Path::new(&base),
+                        &db_subdir,
+                    ) {
+                        Ok(outcome) => match outcome {
+                            novai_node::snapshot::install::InstallOutcome::Nothing => {}
+                            other => tracing::warn!(?other, "Snapshot install boot path"),
+                        },
+                        // A refused rename is the one thing that must not be
+                        // papered over: it would leave the node booting from a
+                        // directory whose identity is now ambiguous.
+                        Err(e) => fatal(format!("Snapshot install failed at boot: {e}")),
+                    }
+
                     std::fs::create_dir_all(&db_path).unwrap_or_else(|e| {
                         fatal(format!("Failed to create data dir {db_path}: {e}"))
                     });

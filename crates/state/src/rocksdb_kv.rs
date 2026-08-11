@@ -210,6 +210,42 @@ impl RocksKv {
     pub fn create_checkpoint(&self, path: impl AsRef<Path>) -> Result<(), rocksdb::Error> {
         rocksdb::checkpoint::Checkpoint::new(&self.db)?.create_checkpoint(path)
     }
+
+    /// Visit every `(key, value)` under `prefix` WITHOUT materialising them.
+    ///
+    /// [`Kv::scan_prefix`] collects into a `Vec`, which is fine for the small
+    /// families the RPC reads but catastrophic for a whole-database scan: the
+    /// SMT node store has roughly 256 records per authenticated leaf and is
+    /// never garbage collected, so a real node's key set is tens of millions of
+    /// rows. Measured on this tree, collecting them costs about 277 bytes per
+    /// row, which is 1.8 GB for a live tree of 27,308 leaves and several times
+    /// that once the dead nodes are counted. A caller that only wants the
+    /// authenticated leaves would pay all of it and then discard 99 percent.
+    ///
+    /// This streams instead, so peak memory is the caller's retained subset
+    /// rather than the whole database.
+    ///
+    /// # Errors
+    /// Returns the underlying RocksDB error if iteration fails.
+    pub fn for_each_prefix<F>(&self, prefix: &[u8], mut f: F) -> Result<(), rocksdb::Error>
+    where
+        F: FnMut(&[u8], &[u8]),
+    {
+        use rocksdb::IteratorMode;
+
+        let cf = self.cf_for_key(prefix);
+        let iter = self
+            .db
+            .iterator_cf(cf, IteratorMode::From(prefix, rocksdb::Direction::Forward));
+        for item in iter {
+            let (key, value) = item?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            f(&key, &value);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "rocksdb")]

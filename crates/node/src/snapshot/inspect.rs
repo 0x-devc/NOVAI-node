@@ -113,20 +113,20 @@ pub fn run(db_path: &str) -> Result<(), String> {
     let mut operational = 0usize;
     let mut defined_unwritten = 0usize;
     let mut unknown: Vec<String> = Vec::new();
-    let mut scan = db
-        .scan_prefix(b"")
-        .map_err(|e| format!("scan default cf: {e:?}"))?;
-    scan.extend(
-        db.scan_prefix(b"nnpx/")
-            .map_err(|e| format!("scan nnpx cf: {e:?}"))?,
-    );
-    for (k, _) in scan {
-        match classify(&k) {
+    // Streamed: inspect only counts, so it must never pay to materialise a
+    // multi-gigabyte key set (see `for_each_prefix`). The printed counts are
+    // unchanged, which the inspect golden pin enforces.
+    {
+        let mut count = |k: &[u8], _v: &[u8]| match classify(k) {
             Some(Class::SmtCommitted) => smt_committed += 1,
             Some(Class::Operational) => operational += 1,
             Some(Class::DefinedUnwritten) => defined_unwritten += 1,
-            None => unknown.push(String::from_utf8_lossy(&k).into_owned()),
-        }
+            None => unknown.push(String::from_utf8_lossy(k).into_owned()),
+        };
+        db.for_each_prefix(b"", &mut count)
+            .map_err(|e| format!("scan default cf: {e:?}"))?;
+        db.for_each_prefix(b"nnpx/", &mut count)
+            .map_err(|e| format!("scan nnpx cf: {e:?}"))?;
     }
     println!(
         "class_counts smt_committed={smt_committed} operational={operational} defined_unwritten={defined_unwritten} unknown={}",

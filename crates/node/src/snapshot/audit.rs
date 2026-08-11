@@ -316,23 +316,28 @@ pub fn audit(db_path: &str, expected_height: Option<u64>) -> Result<AuditReport,
     let mut operational = 0usize;
     let mut unwritten: Vec<String> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
-    let mut scan = db
-        .scan_prefix(b"")
-        .map_err(|e| format!("scan default cf: {e:?}"))?;
-    scan.extend(
-        db.scan_prefix(b"nnpx/")
-            .map_err(|e| format!("scan nnpx cf: {e:?}"))?,
-    );
-    for (k, v) in scan {
-        match classify(&k) {
-            Some(Class::SmtCommitted) => smt_pairs.push((k, v)),
-            Some(Class::Operational) => operational += 1,
-            Some(Class::DefinedUnwritten) => {
-                unwritten.push(String::from_utf8_lossy(&k).into_owned());
-            }
-            None => unknown.push(String::from_utf8_lossy(&k).into_owned()),
+    // STREAMED, not collected. The SMT node store is roughly 256 records per
+    // authenticated leaf and is never garbage collected, so materialising the
+    // whole key set costs gigabytes on a real node and then throws almost all
+    // of it away: only the SmtCommitted pairs feed the rebuild. Measured before
+    // this change: 1.8 GB for a 27,308 leaf live tree, several times that with
+    // the dead nodes counted, against 5.9 GB free on the fleet's box. Peak
+    // memory is now the retained leaf set, which is megabytes.
+    //
+    // The counts and the classification are unchanged, so the A3 report line is
+    // byte identical to the collecting version.
+    let mut classify_into = |k: &[u8], v: &[u8]| match classify(k) {
+        Some(Class::SmtCommitted) => smt_pairs.push((k.to_vec(), v.to_vec())),
+        Some(Class::Operational) => operational += 1,
+        Some(Class::DefinedUnwritten) => {
+            unwritten.push(String::from_utf8_lossy(k).into_owned());
         }
-    }
+        None => unknown.push(String::from_utf8_lossy(k).into_owned()),
+    };
+    db.for_each_prefix(b"", &mut classify_into)
+        .map_err(|e| format!("scan default cf: {e:?}"))?;
+    db.for_each_prefix(b"nnpx/", &mut classify_into)
+        .map_err(|e| format!("scan nnpx cf: {e:?}"))?;
     if unknown.is_empty() && unwritten.is_empty() {
         r.pass(
             "A3",

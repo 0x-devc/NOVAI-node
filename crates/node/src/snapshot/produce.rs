@@ -207,34 +207,42 @@ pub fn build_bundle(checkpoint_dir: &Path) -> Result<SnapshotBundle, ProduceErro
 /// # Errors
 /// Returns [`ProduceError::UnclassifiableKey`] naming the first offending key.
 pub fn extract_leaf_set(db: &RocksKv) -> Result<FlatPairs, ProduceError> {
-    // Both column families: scan_prefix(b"") reaches only the default one,
-    // because the nnpx routing prefix does not match an empty prefix.
-    let mut scan = db
-        .scan_prefix(b"")
-        .map_err(|e| ProduceError::Io(format!("scan default cf: {e:?}")))?;
-    scan.extend(
-        db.scan_prefix(b"nnpx/")
-            .map_err(|e| ProduceError::Io(format!("scan nnpx cf: {e:?}")))?,
-    );
-
+    // Both column families: an empty prefix reaches only the default one,
+    // because the nnpx routing prefix does not match it. Streamed rather than
+    // collected, for the reason spelled out on `for_each_prefix`: the SMT node
+    // store dwarfs the leaf set and none of it is wanted here.
     let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    for (k, v) in scan {
-        match classify(&k) {
-            Some(Class::SmtCommitted) => pairs.push((k, v)),
-            Some(Class::Operational) => {}
-            Some(Class::DefinedUnwritten) => {
-                return Err(ProduceError::UnclassifiableKey {
-                    key: String::from_utf8_lossy(&k).into_owned(),
-                    class: "defined in the schema but written by no production path at this HEAD",
-                })
+    let mut refusal: Option<ProduceError> = None;
+    {
+        let mut take = |k: &[u8], v: &[u8]| {
+            if refusal.is_some() {
+                return;
             }
-            None => {
-                return Err(ProduceError::UnclassifiableKey {
-                    key: String::from_utf8_lossy(&k).into_owned(),
-                    class: "unknown to the classification table",
-                })
+            match classify(k) {
+                Some(Class::SmtCommitted) => pairs.push((k.to_vec(), v.to_vec())),
+                Some(Class::Operational) => {}
+                Some(Class::DefinedUnwritten) => {
+                    refusal = Some(ProduceError::UnclassifiableKey {
+                        key: String::from_utf8_lossy(k).into_owned(),
+                        class:
+                            "defined in the schema but written by no production path at this HEAD",
+                    });
+                }
+                None => {
+                    refusal = Some(ProduceError::UnclassifiableKey {
+                        key: String::from_utf8_lossy(k).into_owned(),
+                        class: "unknown to the classification table",
+                    });
+                }
             }
-        }
+        };
+        db.for_each_prefix(b"", &mut take)
+            .map_err(|e| ProduceError::Io(format!("scan default cf: {e:?}")))?;
+        db.for_each_prefix(b"nnpx/", &mut take)
+            .map_err(|e| ProduceError::Io(format!("scan nnpx cf: {e:?}")))?;
+    }
+    if let Some(e) = refusal {
+        return Err(e);
     }
     // Canonical order. The rebuild is order independent, but the chunk digests
     // are not, so two producers over identical state must chunk identically.
