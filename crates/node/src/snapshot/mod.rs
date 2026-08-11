@@ -19,6 +19,7 @@
 pub mod audit;
 pub mod bundle;
 pub mod classify;
+pub mod fetch;
 pub mod inspect;
 pub mod install;
 pub mod produce;
