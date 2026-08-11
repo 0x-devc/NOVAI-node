@@ -195,6 +195,12 @@ struct ExecutionCommitCallback {
     /// novai_block_tx_count and novai_total_txs_committed without going
     /// through the consensus state lock.
     commit_metrics: Arc<CommitMetrics>,
+    /// Gate F5 Stage 2: the demand-driven snapshot producer. Its commit-path
+    /// hook does at most a RocksDB checkpoint (flush plus hard links) and never
+    /// scans, audits or rebuilds; all of that runs on the background thread
+    /// against the created checkpoint. With no peer asking, the hook returns
+    /// before doing any work at all.
+    snapshot_producer: Arc<novai_node::snapshot::producer::SnapshotProducer>,
 }
 
 impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
@@ -384,6 +390,16 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
                 "Forced compaction on pruned block/QC range"
             );
         }
+
+        // Gate F5 Stage 2: the snapshot checkpoint hook. Deliberately the LAST
+        // thing on this path and deliberately tiny. It returns immediately
+        // unless a snapshot has been asked for and no fresh one is cached, and
+        // even then its only work is a RocksDB checkpoint: a memtable flush
+        // plus hard links, cost independent of database size. The audit, the
+        // key scan, the leaf extraction and the SMT rebuild all happen on the
+        // background thread against the created checkpoint, which is reachable
+        // by path alone and holds no handle to this database.
+        self.snapshot_producer.on_commit(db, block.height);
 
         Ok(())
     }
@@ -1146,6 +1162,11 @@ fn main() {
 
             let our_addr = address_from_pubkey(&our_key.verifying_key());
 
+            // Gate F5 Stage 2: where transient snapshot checkpoints live. Set
+            // beside the database directory by the rocksdb arm below; empty for
+            // the in-memory backend, which cannot checkpoint at all.
+            let mut snapshot_work_dir = String::new();
+
             // Build storage backend
             let storage = match storage_backend.as_str() {
                 "rocksdb" => {
@@ -1164,6 +1185,11 @@ fn main() {
                         format!("validator-{}", &hex::encode(our_addr)[..16])
                     };
                     let db_path = format!("{base}/{db_subdir}");
+                    // BESIDE the database directory, never inside it: a
+                    // checkpoint nested under the live database would be walked
+                    // by anything that scans the data directory and could be
+                    // mistaken for chain state.
+                    snapshot_work_dir = format!("{base}/snapshot-work");
 
                     std::fs::create_dir_all(&db_path).unwrap_or_else(|e| {
                         fatal(format!("Failed to create data dir {db_path}: {e}"))
@@ -1301,12 +1327,22 @@ fn main() {
             // closure reads on each scrape.
             let commit_metrics = Arc::new(CommitMetrics::default());
 
+            // Gate F5 Stage 2: transient checkpoints live BESIDE the database
+            // directory, never inside it, so a checkpoint can never be mistaken
+            // for chain state and RocksDB never sees a nested database.
+            let snapshot_producer = Arc::new(
+                novai_node::snapshot::producer::SnapshotProducer::new(
+                    std::path::PathBuf::from(&snapshot_work_dir),
+                ),
+            );
+
             // Wire execution commit callback
             let commit_callback = Arc::new(ExecutionCommitCallback {
                 nonce_provider: Arc::clone(&nonce_provider),
                 blockchain_index: Arc::clone(&blockchain_index),
                 pending_mempool_removals: Arc::clone(&pending_mempool_removals),
                 commit_metrics: Arc::clone(&commit_metrics),
+                snapshot_producer: Arc::clone(&snapshot_producer),
             });
             node.set_commit_callback(commit_callback);
 
@@ -1393,6 +1429,29 @@ fn main() {
 
             // Graceful shutdown flag — created early so AI service can share it
             let shutdown = Arc::new(AtomicBool::new(false));
+
+            // Gate F5 Stage 2: the off-lock snapshot production thread. It owns
+            // no handle to the database and never takes the commit lock; it
+            // only ever opens, by path, the checkpoint the commit hook created.
+            // That is what keeps the audit, the key scan and the SMT rebuild
+            // off the consensus path. Idle cost is one atomic read per 250 ms,
+            // because nothing is ever pending unless a snapshot was asked for.
+            if !snapshot_work_dir.is_empty() {
+                let producer = Arc::clone(&snapshot_producer);
+                let producer_shutdown = Arc::clone(&shutdown);
+                std::thread::Builder::new()
+                    .name("snapshot-producer".into())
+                    .spawn(move || {
+                        while !producer_shutdown.load(Ordering::Relaxed) {
+                            if producer.has_pending() {
+                                let _ = producer.run_pending_production();
+                            } else {
+                                std::thread::sleep(Duration::from_millis(250));
+                            }
+                        }
+                    })
+                    .expect("spawn snapshot producer thread");
+            }
 
             // Create copilot observer
             let observer_config = ObserverConfig::default();
@@ -1559,6 +1618,8 @@ fn main() {
                 // way the other collectors read theirs, so the consensus path
                 // stays untouched.
                 let sync_retry = Arc::clone(&node.sync_retry);
+                // Gate F5 Stage 2: snapshot production cost and cached height.
+                let producer_metrics = Arc::clone(&snapshot_producer);
                 // WEDGE-20260718: commit age clock for the
                 // novai_seconds_since_last_commit gauge, owned by the
                 // collector so the consensus path stays untouched.
@@ -1581,6 +1642,9 @@ fn main() {
                         highest_qc_height,
                         seconds_since_last_commit,
                         sync_mode: sync_retry.lock_or_recover().snapshot_sync.gauge(),
+                        snapshot_produce_seconds: producer_metrics.last_checkpoint_seconds(),
+                        snapshot_background_seconds: producer_metrics.last_background_seconds(),
+                        snapshot_height: producer_metrics.cached_height(),
                         current_round,
                         peer_count: peer_manager.peer_count() as u64,
                         mempool_size: mempool.lock_or_recover().len() as u64,
@@ -2153,6 +2217,14 @@ mod tests {
             blockchain_index: Arc::clone(&blockchain_index),
             pending_mempool_removals: Arc::clone(&pending_mempool_removals),
             commit_metrics: Arc::new(CommitMetrics::default()),
+            // Gate F5 Stage 2: a producer with no demand set, so its
+            // commit-path hook returns Skipped and these tests exercise the
+            // commit path exactly as before.
+            snapshot_producer: Arc::new(
+                novai_node::snapshot::producer::SnapshotProducer::new(
+                    std::path::PathBuf::from("unused-no-demand"),
+                ),
+            ),
         };
 
         let (sk, pk) = generate_keypair();
@@ -2281,6 +2353,14 @@ mod tests {
             blockchain_index: Arc::clone(&blockchain_index),
             pending_mempool_removals: Arc::clone(&pending_mempool_removals),
             commit_metrics: Arc::clone(&commit_metrics),
+            // Gate F5 Stage 2: a producer with no demand set, so its
+            // commit-path hook returns Skipped and these tests exercise the
+            // commit path exactly as before.
+            snapshot_producer: Arc::new(
+                novai_node::snapshot::producer::SnapshotProducer::new(
+                    std::path::PathBuf::from("unused-no-demand"),
+                ),
+            ),
         };
 
         let (sk, pk) = generate_keypair();

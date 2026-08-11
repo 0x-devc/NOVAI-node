@@ -48,6 +48,10 @@ fn snapshot() -> MetricsSnapshot {
         // anticipates. The gauge's own pins live in gate_f5_detection_red.rs;
         // the assertions below are untouched.
         sync_mode: 0,
+        // Gate F5 Stage 2 fields; same compiler-forced growth as above.
+        snapshot_produce_seconds: 0.0,
+        snapshot_background_seconds: 0.0,
+        snapshot_height: 0,
     }
 }
 

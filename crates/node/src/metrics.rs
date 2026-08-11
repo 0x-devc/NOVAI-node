@@ -88,6 +88,22 @@ pub struct MetricsSnapshot {
     /// commit hiccup both surfaced as commit_stall alone, and the operator
     /// response to those two is completely different.
     pub sync_mode: u64,
+    /// Gate F5 Stage 2: seconds spent UNDER THE DATABASE LOCK creating the last
+    /// snapshot checkpoint. This is the commit-path cost of snapshot
+    /// production and nothing else: the audit, the key scan, the leaf
+    /// extraction and the SMT rebuild all run off the lock and are counted in
+    /// `snapshot_background_seconds`.
+    ///
+    /// Split deliberately. The incident that motivated this whole gate started
+    /// with unbounded blocking work on the commit path, so the commit-path
+    /// share must be visible on its own rather than buried inside a total that
+    /// makes it look small.
+    pub snapshot_produce_seconds: f64,
+    /// Gate F5 Stage 2: seconds spent OFF the lock on the last production.
+    /// Its counterpart above is the one that can hurt consensus.
+    pub snapshot_background_seconds: f64,
+    /// Gate F5 Stage 2: height of the cached servable bundle, 0 when none.
+    pub snapshot_height: u64,
     /// Current consensus round.
     pub current_round: u64,
     /// Number of connected peers.
@@ -159,6 +175,18 @@ novai_seconds_since_last_commit {}
 # HELP novai_sync_mode Snapshot-sync detection phase (0 block sync viable, 1 past the prune horizon, 2 armed, 3-5 reserved)
 # TYPE novai_sync_mode gauge
 novai_sync_mode {}
+
+# HELP novai_snapshot_produce_seconds Seconds under the db lock for the last snapshot checkpoint (COMMIT-PATH cost only, excludes the off-lock audit, scan and rebuild)
+# TYPE novai_snapshot_produce_seconds gauge
+novai_snapshot_produce_seconds {:.6}
+
+# HELP novai_snapshot_background_seconds Seconds off the db lock for the last snapshot production (audit, scan, chunk)
+# TYPE novai_snapshot_background_seconds gauge
+novai_snapshot_background_seconds {:.6}
+
+# HELP novai_snapshot_height Height of the cached servable snapshot bundle (0 = none)
+# TYPE novai_snapshot_height gauge
+novai_snapshot_height {}
 
 # HELP novai_current_round Current consensus round
 # TYPE novai_current_round gauge
@@ -244,6 +272,9 @@ novai_anomaly_last_confidence {}
             self.highest_qc_height.saturating_sub(self.committed_height),
             self.seconds_since_last_commit,
             self.sync_mode,
+            self.snapshot_produce_seconds,
+            self.snapshot_background_seconds,
+            self.snapshot_height,
             self.current_round,
             self.peer_count,
             self.mempool_size,
@@ -386,6 +417,9 @@ mod tests {
             highest_qc_height: 44,
             seconds_since_last_commit: 1,
             sync_mode: 0,
+            snapshot_produce_seconds: 0.0,
+            snapshot_background_seconds: 0.0,
+            snapshot_height: 0,
             current_round: 3,
             peer_count: 4,
             mempool_size: 127,
@@ -446,6 +480,9 @@ mod tests {
             highest_qc_height: 0,
             seconds_since_last_commit: 0,
             sync_mode: 0,
+            snapshot_produce_seconds: 0.0,
+            snapshot_background_seconds: 0.0,
+            snapshot_height: 0,
             current_round: 0,
             peer_count: 0,
             mempool_size: 0,
@@ -489,6 +526,9 @@ mod tests {
             highest_qc_height: 0,
             seconds_since_last_commit: 0,
             sync_mode: 0,
+            snapshot_produce_seconds: 0.0,
+            snapshot_background_seconds: 0.0,
+            snapshot_height: 0,
             current_round: 0,
             peer_count: 0,
             mempool_size: 0,

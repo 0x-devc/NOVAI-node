@@ -17,8 +17,12 @@
 //! unmodified across the move.
 
 pub mod audit;
+pub mod bundle;
 pub mod classify;
 pub mod inspect;
+pub mod produce;
+pub mod producer;
 pub mod rebuild;
+pub mod stage;
 pub mod store;
 pub mod valset;

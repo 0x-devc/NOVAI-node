@@ -393,6 +393,9 @@ fn metrics_surface_exposes_sync_mode() {
         anomaly_signals_published: 0,
         anomaly_last_confidence: 0,
         sync_mode: 2,
+        snapshot_produce_seconds: 0.0,
+        snapshot_background_seconds: 0.0,
+        snapshot_height: 0,
     }
     .to_prometheus();
 

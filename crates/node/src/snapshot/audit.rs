@@ -37,6 +37,48 @@ use crate::snapshot::valset::{dev_valset, quorum};
 /// bound means the copy is not what this tool expects.
 const MAX_DESCENT: u64 = 1024;
 
+/// The audit's structured result (gate F5 Stage 2).
+///
+/// `run` below prints this and returns the verdict, byte for byte as before.
+/// The snapshot producer needs the same verdict WITHOUT the printing, plus the
+/// audited height and root, so that it can refuse to cache a bundle it has not
+/// proven. Splitting the computation from the printing is what lets both
+/// callers share one verifier instead of growing a second one.
+pub struct AuditReport {
+    /// The per-check report lines, in order, exactly as printed.
+    pub lines: Vec<String>,
+    /// True only if every check passed.
+    pub ok: bool,
+    /// The audited height, present iff A1 resolved it.
+    pub height: Option<u64>,
+    /// The rebuilt root, present iff A4 produced one.
+    pub root: Option<[u8; 32]>,
+}
+
+impl AuditReport {
+    /// The `RESULT` line, identical to what `run` prints.
+    #[must_use]
+    pub fn result_line(&self) -> String {
+        if self.ok {
+            let t = self.height.expect("ok implies height known");
+            let root = self.root.expect("ok implies rebuilt root");
+            format!("RESULT PASS height={t} root={}", hex::encode(root))
+        } else {
+            "RESULT FAIL".to_string()
+        }
+    }
+
+    /// The failing check lines, for an error message that names the reason.
+    #[must_use]
+    pub fn failures(&self) -> Vec<&str> {
+        self.lines
+            .iter()
+            .filter(|l| l.contains(" FAIL "))
+            .map(String::as_str)
+            .collect()
+    }
+}
+
 struct Report {
     lines: Vec<String>,
     ok: bool,
@@ -181,9 +223,27 @@ fn gather_evidence(db: &RocksKv, t: u64) -> Result<EvidenceOutcome, String> {
     })
 }
 
-/// Run the full audit. Ok(true) = PASS (exit 0), Ok(false) = FAIL (exit 1),
-/// Err = IO/environment error (exit 2).
+/// Run the full audit and PRINT the report. Ok(true) = PASS (exit 0),
+/// Ok(false) = FAIL (exit 1), Err = IO/environment error (exit 2).
+///
+/// This is the CLI entry point and its output is pinned byte for byte by the
+/// gate_a0_* suites and by gate_a0_inspect_golden's sibling pins. It is a thin
+/// printer over [`audit`]; all the logic lives there.
 pub fn run(db_path: &str, expected_height: Option<u64>) -> Result<bool, String> {
+    let report = audit(db_path, expected_height)?;
+    for line in &report.lines {
+        println!("{line}");
+    }
+    println!("{}", report.result_line());
+    Ok(report.ok)
+}
+
+/// Run the full audit and RETURN the report without printing anything.
+///
+/// # Errors
+/// Returns an IO/environment error string if the copy cannot be opened or
+/// read. A failed CHECK is not an error: it is a report with `ok == false`.
+pub fn audit(db_path: &str, expected_height: Option<u64>) -> Result<AuditReport, String> {
     let db = RocksKv::open(db_path).map_err(|e| format!("open db copy: {e:?}"))?;
     let mut r = Report::new();
 
@@ -395,15 +455,14 @@ pub fn run(db_path: &str, expected_height: Option<u64>) -> Result<bool, String> 
         }
     }
 
-    for line in &r.lines {
-        println!("{line}");
-    }
-    if r.ok {
-        let t = t.expect("ok implies height known");
-        let root_hex = audited_root_hex.take().expect("ok implies rebuilt root");
-        println!("RESULT PASS height={t} root={root_hex}");
-    } else {
-        println!("RESULT FAIL");
-    }
-    Ok(r.ok)
+    // `audited_root_hex` is retained so the invariant it encoded stays
+    // enforced: a PASS must carry both a height and a rebuilt root, and the
+    // report's own result_line() re-asserts it.
+    debug_assert_eq!(audited_root_hex.take().is_some(), rebuilt.is_some());
+    Ok(AuditReport {
+        lines: r.lines,
+        ok: r.ok,
+        height: t,
+        root: rebuilt,
+    })
 }

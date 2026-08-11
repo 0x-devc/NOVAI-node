@@ -28,6 +28,10 @@ tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ed25519-dalek = "=2.1.1"
+# Gate F5 Stage 2: per-chunk snapshot digests. Pinned to the same version the
+# rest of the workspace hashes with, so a digest computed here and a hash
+# computed in novai-crypto or novai-smt can never come from different code.
+blake3 = "=1.8.2"
 tiny_http = "0.12"
 hex = "0.4"
 tracing = "0.1"

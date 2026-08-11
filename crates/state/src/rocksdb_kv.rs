@@ -181,6 +181,35 @@ impl RocksKv {
             .expect("default column family must exist");
         self.db.flush_cf(cf)
     }
+
+    /// Create a consistent, independently openable copy of this database at
+    /// `path`, across BOTH column families (gate F5 Stage 2).
+    ///
+    /// This is the only way to capture a point-in-time image of a RUNNING
+    /// node. There is no single atomic filesystem boundary otherwise: a commit
+    /// is two separate write batches (the consensus batch and the execution
+    /// batch), so a plain directory copy of a live node smears across the copy
+    /// duration and can land mid-commit.
+    ///
+    /// COMMIT-PATH COST. The caller holds the database lock for the duration
+    /// of this call, so what it does matters: RocksDB flushes the memtables and
+    /// then HARD LINKS the SST files. It does not read, rewrite or copy the
+    /// data. Cost is therefore a flush plus a directory of links, independent
+    /// of database size, and emphatically NOT the full-scan and tree-rebuild
+    /// work that turns a checkpoint into a servable snapshot. That work runs
+    /// off this lock, against the created checkpoint, and cannot run here
+    /// because it needs no handle to this database at all.
+    ///
+    /// `path` must not already exist; RocksDB creates it and fails otherwise,
+    /// which is the behaviour the caller wants (never silently reuse a stale
+    /// checkpoint).
+    ///
+    /// # Errors
+    /// Returns the underlying RocksDB error if the checkpoint cannot be
+    /// created.
+    pub fn create_checkpoint(&self, path: impl AsRef<Path>) -> Result<(), rocksdb::Error> {
+        rocksdb::checkpoint::Checkpoint::new(&self.db)?.create_checkpoint(path)
+    }
 }
 
 #[cfg(feature = "rocksdb")]
