@@ -49,6 +49,19 @@ pub enum MessageKind {
     BlockRequest = 5,
     BlockResponse = 6,
     Transaction = 7,
+    // Gate F5 Stage 4. These four are why the deploy is two-phase.
+    //
+    // `from_u8` returns None for a byte it does not know, `read_wire_message`
+    // turns that into `P2PError::InvalidKind`, and the peer read loop treats any
+    // read error as fatal for that connection. So a node that SENDS one of these
+    // to a peer running an older binary DISCONNECTS that peer. Every node must
+    // therefore be able to RECEIVE these kinds before any node is configured to
+    // send them, which is what the node's `--snapshot-sync` flag gates: sending
+    // only, default off, exactly like the F3 wire-cap raise.
+    SnapshotManifestRequest = 8,
+    SnapshotManifestResponse = 9,
+    SnapshotChunkRequest = 10,
+    SnapshotChunkResponse = 11,
 }
 
 impl MessageKind {
@@ -61,10 +74,47 @@ impl MessageKind {
             5 => Some(Self::BlockRequest),
             6 => Some(Self::BlockResponse),
             7 => Some(Self::Transaction),
+            8 => Some(Self::SnapshotManifestRequest),
+            9 => Some(Self::SnapshotManifestResponse),
+            10 => Some(Self::SnapshotChunkRequest),
+            11 => Some(Self::SnapshotChunkResponse),
             _ => None,
         }
     }
 }
+
+/// The worst-case FRAMED snapshot chunk message, end to end.
+///
+/// Three parts, and the third is the one a hand formula gets wrong: the codec
+/// header (version tag, responder, height, index, payload length = 49 bytes), a
+/// payload at the wire bound, and the full frame envelope of SIX bytes. The
+/// envelope is the 4-byte length prefix plus the version and kind bytes; the
+/// "+2" that appears in the F2/F3 budget comments counts only the two bytes
+/// INSIDE the length field, because those budgets are measured against the
+/// payload. This constant measures the whole frame, so it needs all six.
+/// `gate_f5_wire_red` asserts it against the real encoder output rather than
+/// trusting the arithmetic, which is how the discrepancy was found.
+pub const MAX_SNAPSHOT_CHUNK_MSG_BYTES: usize =
+    (1 + 32 + 8 + 4 + 4) + novai_consensus_types::codec::MAX_SNAPSHOT_CHUNK_BYTES + 6;
+
+// Gate F5 Stage 4 (T4.2): the whole point of the 512 KiB chunk bound is that
+// enabling snapshot sending needs NO second fleet-wide change. Pinned at
+// compile time, the same way the F2/F3 response budget relations are pinned:
+// if the chunk bound is ever raised past the DEFAULT send cap, this stops the
+// build rather than turning Phase B into another cap-raise flag day.
+//
+// The exact arithmetic, so nobody has to recompute it: 524,288 payload bytes
+// plus a 49-byte codec header plus a 6-byte frame envelope is 524,343, against
+// a 2,097,152 default cap. That is 25.003 percent of the cap, so the margin is
+// just UNDER four times rather than at it; the header is what tips it. The
+// assertion below states the margin that is actually true rather than the one
+// that reads nicer.
+const _: () = assert!(MAX_SNAPSHOT_CHUNK_MSG_BYTES < MAX_WIRE_MSG_BYTES as usize);
+const _: () = assert!(MAX_SNAPSHOT_CHUNK_MSG_BYTES * 3 < MAX_WIRE_MSG_BYTES as usize);
+// It must also fit the receive cap with room for the frame, which it does by
+// more than an order of magnitude; stated so a future receive-cap change is
+// forced to consider snapshot chunks too.
+const _: () = assert!(MAX_SNAPSHOT_CHUNK_MSG_BYTES < MAX_RECV_WIRE_MSG_BYTES as usize);
 
 /// Network message envelope.
 #[derive(Debug, Clone)]
@@ -77,6 +127,12 @@ pub enum NetworkMessage {
     BlockResponse(BlockResponse),
     /// Raw signed transaction bytes for mempool gossip.
     Transaction(Vec<u8>),
+    /// Gate F5 Stage 4: snapshot transfer. Payloads are opaque here; the node
+    /// crate owns their meaning and their verification.
+    SnapshotManifestRequest(novai_consensus_types::SnapshotManifestRequest),
+    SnapshotManifestResponse(novai_consensus_types::SnapshotManifestResponse),
+    SnapshotChunkRequest(novai_consensus_types::SnapshotChunkRequest),
+    SnapshotChunkResponse(novai_consensus_types::SnapshotChunkResponse),
 }
 
 #[derive(Debug)]
@@ -144,6 +200,26 @@ pub fn encode_wire_message_with_cap(
             (MessageKind::BlockResponse, bytes)
         }
         NetworkMessage::Transaction(bytes) => (MessageKind::Transaction, bytes.clone()),
+        NetworkMessage::SnapshotManifestRequest(r) => {
+            let bytes = novai_consensus_types::codec::encode_snapshot_manifest_request_v1(r)
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
+            (MessageKind::SnapshotManifestRequest, bytes)
+        }
+        NetworkMessage::SnapshotManifestResponse(r) => {
+            let bytes = novai_consensus_types::codec::encode_snapshot_manifest_response_v1(r)
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
+            (MessageKind::SnapshotManifestResponse, bytes)
+        }
+        NetworkMessage::SnapshotChunkRequest(r) => {
+            let bytes = novai_consensus_types::codec::encode_snapshot_chunk_request_v1(r)
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
+            (MessageKind::SnapshotChunkRequest, bytes)
+        }
+        NetworkMessage::SnapshotChunkResponse(r) => {
+            let bytes = novai_consensus_types::codec::encode_snapshot_chunk_response_v1(r)
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
+            (MessageKind::SnapshotChunkResponse, bytes)
+        }
     };
 
     #[allow(clippy::cast_possible_truncation)]
@@ -231,6 +307,26 @@ pub fn read_wire_message(stream: &mut impl Read) -> Result<NetworkMessage, P2PEr
             Ok(NetworkMessage::BlockResponse(resp))
         }
         MessageKind::Transaction => Ok(NetworkMessage::Transaction(payload)),
+        MessageKind::SnapshotManifestRequest => {
+            let r = novai_consensus_types::codec::decode_snapshot_manifest_request_v1(&payload)
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
+            Ok(NetworkMessage::SnapshotManifestRequest(r))
+        }
+        MessageKind::SnapshotManifestResponse => {
+            let r = novai_consensus_types::codec::decode_snapshot_manifest_response_v1(&payload)
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
+            Ok(NetworkMessage::SnapshotManifestResponse(r))
+        }
+        MessageKind::SnapshotChunkRequest => {
+            let r = novai_consensus_types::codec::decode_snapshot_chunk_request_v1(&payload)
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
+            Ok(NetworkMessage::SnapshotChunkRequest(r))
+        }
+        MessageKind::SnapshotChunkResponse => {
+            let r = novai_consensus_types::codec::decode_snapshot_chunk_response_v1(&payload)
+                .map_err(|e| P2PError::Codec(format!("{e:?}")))?;
+            Ok(NetworkMessage::SnapshotChunkResponse(r))
+        }
     }
 }
 

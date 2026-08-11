@@ -3,7 +3,10 @@
 //! All encodings are deterministic and use big-endian byte order.
 //! Format versioning: each message type has a version byte prefix.
 
-use crate::{Block, BlockRequest, BlockResponse, Proposal, SignedProposal, Timeout, Vote, QC};
+use crate::{
+    Block, BlockRequest, BlockResponse, Proposal, SignedProposal, SnapshotChunkRequest,
+    SnapshotChunkResponse, SnapshotManifestRequest, SnapshotManifestResponse, Timeout, Vote, QC,
+};
 
 /// Codec errors for consensus messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -868,6 +871,178 @@ pub fn decode_voted_view_v1(bytes: &[u8]) -> Result<(u64, u64), CodecError> {
     let mut round = [0u8; 8];
     round.copy_from_slice(&bytes[9..17]);
     Ok((u64::from_be_bytes(height), u64::from_be_bytes(round)))
+}
+
+// ===========================================================================
+// Gate F5 Stage 4: snapshot transfer messages
+// ===========================================================================
+
+/// Version tag shared by the four snapshot messages.
+pub const SNAPSHOT_MSG_V1: u8 = 0x01;
+
+/// Largest snapshot chunk payload accepted on the wire.
+///
+/// Sized so a whole chunk message fits the DEFAULT 2 MiB send cap with room to
+/// spare, which is what lets snapshot sending be enabled by a runtime flag
+/// alone. Raising the wire cap is a second fleet-wide change and this constant
+/// exists so that one is never needed. The producer refuses to build a bundle
+/// containing a chunk larger than this, so the limit fails closed and loudly at
+/// production rather than silently at send time.
+pub const MAX_SNAPSHOT_CHUNK_BYTES: usize = 512 * 1024;
+
+/// Largest encoded manifest accepted on the wire.
+///
+/// A manifest carries one
+/// digest per chunk plus two blocks and up to two QCs, so it grows with the
+/// snapshot's chunk count; this bounds a hostile peer's claim.
+pub const MAX_SNAPSHOT_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+
+/// Encode a snapshot manifest request.
+///
+/// # Errors
+/// Infallible today; returns `Result` for symmetry with the other encoders.
+pub fn encode_snapshot_manifest_request_v1(
+    req: &SnapshotManifestRequest,
+) -> Result<Vec<u8>, CodecError> {
+    let mut buf = Vec::with_capacity(33);
+    buf.push(SNAPSHOT_MSG_V1);
+    buf.extend_from_slice(&req.requester);
+    Ok(buf)
+}
+
+/// # Errors
+/// Returns an error on a short buffer or an unsupported version.
+pub fn decode_snapshot_manifest_request_v1(
+    buf: &[u8],
+) -> Result<SnapshotManifestRequest, CodecError> {
+    if buf.len() != 33 {
+        return Err(CodecError::BufferTooShort);
+    }
+    let mut input = buf;
+    if read_u8(&mut input)? != SNAPSHOT_MSG_V1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+    Ok(SnapshotManifestRequest {
+        requester: read_32(&mut input)?,
+    })
+}
+
+/// # Errors
+/// Returns an error if the manifest exceeds [`MAX_SNAPSHOT_MANIFEST_BYTES`].
+pub fn encode_snapshot_manifest_response_v1(
+    resp: &SnapshotManifestResponse,
+) -> Result<Vec<u8>, CodecError> {
+    if resp.manifest.len() > MAX_SNAPSHOT_MANIFEST_BYTES {
+        return Err(CodecError::BufferTooShort);
+    }
+    let mut buf = Vec::with_capacity(37 + resp.manifest.len());
+    buf.push(SNAPSHOT_MSG_V1);
+    buf.extend_from_slice(&resp.responder);
+    // Length was bounds-checked above, so the conversion cannot truncate.
+    let len = u32::try_from(resp.manifest.len()).map_err(|_| CodecError::BufferTooShort)?;
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(&resp.manifest);
+    Ok(buf)
+}
+
+/// # Errors
+/// Returns an error on a short buffer, a wrong version, a length that exceeds
+/// the bound, or trailing bytes.
+pub fn decode_snapshot_manifest_response_v1(
+    buf: &[u8],
+) -> Result<SnapshotManifestResponse, CodecError> {
+    if buf.len() < 37 {
+        return Err(CodecError::BufferTooShort);
+    }
+    let mut input = buf;
+    if read_u8(&mut input)? != SNAPSHOT_MSG_V1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+    let responder = read_32(&mut input)?;
+    let len = read_u32_be(&mut input)? as usize;
+    if len > MAX_SNAPSHOT_MANIFEST_BYTES || input.len() != len {
+        return Err(CodecError::BufferTooShort);
+    }
+    Ok(SnapshotManifestResponse {
+        responder,
+        manifest: input.to_vec(),
+    })
+}
+
+/// # Errors
+/// Infallible today; returns `Result` for symmetry.
+pub fn encode_snapshot_chunk_request_v1(
+    req: &SnapshotChunkRequest,
+) -> Result<Vec<u8>, CodecError> {
+    let mut buf = Vec::with_capacity(45);
+    buf.push(SNAPSHOT_MSG_V1);
+    buf.extend_from_slice(&req.requester);
+    buf.extend_from_slice(&req.height.to_be_bytes());
+    buf.extend_from_slice(&req.index.to_be_bytes());
+    Ok(buf)
+}
+
+/// # Errors
+/// Returns an error on a short buffer or an unsupported version.
+pub fn decode_snapshot_chunk_request_v1(buf: &[u8]) -> Result<SnapshotChunkRequest, CodecError> {
+    if buf.len() != 45 {
+        return Err(CodecError::BufferTooShort);
+    }
+    let mut input = buf;
+    if read_u8(&mut input)? != SNAPSHOT_MSG_V1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+    Ok(SnapshotChunkRequest {
+        requester: read_32(&mut input)?,
+        height: read_u64_be(&mut input)?,
+        index: read_u32_be(&mut input)?,
+    })
+}
+
+/// # Errors
+/// Returns an error if the payload exceeds [`MAX_SNAPSHOT_CHUNK_BYTES`].
+pub fn encode_snapshot_chunk_response_v1(
+    resp: &SnapshotChunkResponse,
+) -> Result<Vec<u8>, CodecError> {
+    if resp.payload.len() > MAX_SNAPSHOT_CHUNK_BYTES {
+        return Err(CodecError::BufferTooShort);
+    }
+    let mut buf = Vec::with_capacity(49 + resp.payload.len());
+    buf.push(SNAPSHOT_MSG_V1);
+    buf.extend_from_slice(&resp.responder);
+    buf.extend_from_slice(&resp.height.to_be_bytes());
+    buf.extend_from_slice(&resp.index.to_be_bytes());
+    // Length was bounds-checked above, so the conversion cannot truncate.
+    let len = u32::try_from(resp.payload.len()).map_err(|_| CodecError::BufferTooShort)?;
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(&resp.payload);
+    Ok(buf)
+}
+
+/// # Errors
+/// Returns an error on a short buffer, a wrong version, a length beyond the
+/// bound, or trailing bytes.
+pub fn decode_snapshot_chunk_response_v1(buf: &[u8]) -> Result<SnapshotChunkResponse, CodecError> {
+    if buf.len() < 49 {
+        return Err(CodecError::BufferTooShort);
+    }
+    let mut input = buf;
+    if read_u8(&mut input)? != SNAPSHOT_MSG_V1 {
+        return Err(CodecError::UnsupportedVersion);
+    }
+    let responder = read_32(&mut input)?;
+    let height = read_u64_be(&mut input)?;
+    let index = read_u32_be(&mut input)?;
+    let len = read_u32_be(&mut input)? as usize;
+    if len > MAX_SNAPSHOT_CHUNK_BYTES || input.len() != len {
+        return Err(CodecError::BufferTooShort);
+    }
+    Ok(SnapshotChunkResponse {
+        responder,
+        height,
+        index,
+        payload: input.to_vec(),
+    })
 }
 
 #[cfg(test)]

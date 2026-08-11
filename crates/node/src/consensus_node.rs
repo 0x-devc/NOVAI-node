@@ -582,6 +582,27 @@ pub enum SyncRequestOutcome {
     BehindRetention { probed: bool },
 }
 
+/// Gate F5 Stage 4: what a snapshot send site did.
+///
+/// `Disabled` is the Phase A steady state and is deliberately NOT an error: a
+/// node that cannot send snapshot messages is a correctly configured node
+/// during the receive-first half of the deploy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotSendOutcome {
+    /// Sending is off (Phase A). Nothing was encoded and nothing left this node.
+    Disabled,
+    /// The message was handed to the broadcast path.
+    Sent,
+    /// Broadcast failed (no peers, transport error).
+    SendFailed,
+    /// This node is itself recovering, so it refuses to be a source (O7).
+    RefusedRecovering,
+    /// No producer is attached, so there is nothing to serve from.
+    NoProducer,
+    /// The requesting peer asked again too soon.
+    RateLimited,
+}
+
 // L-05: Lock contention metrics (e.g., time spent waiting on state/db mutexes)
 // are planned for future observability improvements. Currently, the H-11 fix
 // (signature verification outside lock) is the primary contention mitigation.
@@ -604,6 +625,17 @@ pub struct ConsensusNode {
     pub pending_sync_request: Arc<Mutex<Option<PendingSyncRequest>>>,
     /// F1 sync retry gate state (strikes and backoff bookkeeping).
     pub sync_retry: Arc<Mutex<SyncRetryState>>,
+    /// Gate F5 Stage 4. Default FALSE: receiving and serving are on once the
+    /// binary is deployed, SENDING waits for the flag. See
+    /// [`Self::snapshot_send_enabled`].
+    snapshot_send_enabled: std::sync::atomic::AtomicBool,
+    /// The producer this node serves cached bundles from, when attached.
+    snapshot_producer: Option<Arc<crate::snapshot::producer::SnapshotProducer>>,
+    /// Per-peer serve spacing, so one peer cannot pull the whole outbound
+    /// budget or spam a node into serving in a loop.
+    snapshot_serve: Arc<Mutex<crate::snapshot::wire::ServeLimiter>>,
+    /// Per-peer strike ladder for peers whose chunks fail the manifest digest.
+    snapshot_peers: Arc<Mutex<crate::snapshot::wire::PeerStrikes>>,
     /// Commit-window rule: the last (height, round) view the proposer
     /// intent check warned about, so a parked fleet logs one warning per
     /// view instead of two hundred per second on the 5 ms propose cadence.
@@ -720,6 +752,11 @@ impl ConsensusNode {
             last_timeout_time: Arc::new(Mutex::new(None)),
             pending_sync_request: Arc::new(Mutex::new(None)),
             sync_retry: Arc::new(Mutex::new(SyncRetryState::default())),
+            // Gate F5 Stage 4: sending starts OFF. Phase B turns it on.
+            snapshot_send_enabled: std::sync::atomic::AtomicBool::new(false),
+            snapshot_producer: None,
+            snapshot_serve: Arc::new(Mutex::new(crate::snapshot::wire::ServeLimiter::default())),
+            snapshot_peers: Arc::new(Mutex::new(crate::snapshot::wire::PeerStrikes::default())),
             commit_window_warned_view: Arc::new(Mutex::new(None)),
             base_timeout_ms,
             encryption_key,
@@ -2956,6 +2993,161 @@ impl ConsensusNode {
         self.record_sync_strike("sync request timed out");
     }
 
+    /// Gate F5 Stage 4: may this node put a snapshot message on the wire?
+    ///
+    /// Default FALSE. Receiving and serving are always on once the binary is
+    /// deployed; SENDING is what this gates, by runtime flag, exactly as
+    /// `--wire-send-cap-bytes` gates the F3 cap raise. That asymmetry is the
+    /// whole two-phase deploy: an un-upgraded peer that receives one of the new
+    /// kinds gets `InvalidKind`, which its read loop treats as fatal and
+    /// DISCONNECTS on. So no node may send until every node can receive.
+    #[must_use]
+    pub fn snapshot_send_enabled(&self) -> bool {
+        self.snapshot_send_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Enable snapshot SENDING. Phase B of the deploy, by restart.
+    pub fn set_snapshot_send_enabled(&self, enabled: bool) {
+        self.snapshot_send_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Attach the producer whose cached bundle this node serves from.
+    pub fn set_snapshot_producer(&mut self, p: Arc<crate::snapshot::producer::SnapshotProducer>) {
+        self.snapshot_producer = Some(p);
+    }
+
+    /// THE ONLY path by which a Stage 4 message reaches the wire.
+    ///
+    /// Every send site goes through here, so the Phase A guarantee is one
+    /// branch in one place rather than a discipline spread across call sites.
+    fn send_snapshot_msg(&self, msg: NetworkMessage) -> SnapshotSendOutcome {
+        if !self.snapshot_send_enabled() {
+            // Phase A: receive-capable, send-disabled. Nothing is encoded and
+            // nothing is broadcast, so no peer can see a byte it cannot decode.
+            return SnapshotSendOutcome::Disabled;
+        }
+        match self.broadcast(msg) {
+            Ok(()) => SnapshotSendOutcome::Sent,
+            Err(e) => {
+                tracing::debug!(%e, "Snapshot message broadcast failed");
+                SnapshotSendOutcome::SendFailed
+            }
+        }
+    }
+
+    /// Ask peers for a snapshot manifest.
+    pub fn request_snapshot_manifest(&self) -> SnapshotSendOutcome {
+        self.send_snapshot_msg(NetworkMessage::SnapshotManifestRequest(
+            novai_consensus_types::SnapshotManifestRequest {
+                requester: self.our_address,
+            },
+        ))
+    }
+
+    /// Ask peers for one chunk of the snapshot at `height`.
+    pub fn request_snapshot_chunk(&self, height: u64, index: u32) -> SnapshotSendOutcome {
+        self.send_snapshot_msg(NetworkMessage::SnapshotChunkRequest(
+            novai_consensus_types::SnapshotChunkRequest {
+                requester: self.our_address,
+                height,
+                index,
+            },
+        ))
+    }
+
+    /// Serve a manifest request.
+    ///
+    /// O7: a node that is ITSELF in snapshot sync refuses. It cannot both be
+    /// recovering and be a source: its own state is by definition the state it
+    /// has not yet repaired, and a bundle built from it would at best waste the
+    /// asker's retention budget.
+    pub fn handle_snapshot_manifest_request(
+        &self,
+        req: &novai_consensus_types::SnapshotManifestRequest,
+    ) -> SnapshotSendOutcome {
+        if self.snapshot_sync().phase() != SnapshotSyncPhase::Idle {
+            tracing::debug!("Refusing to serve a snapshot while recovering from one");
+            return SnapshotSendOutcome::RefusedRecovering;
+        }
+        let Some(producer) = &self.snapshot_producer else {
+            return SnapshotSendOutcome::NoProducer;
+        };
+        if !self.allow_serve(req.requester) {
+            return SnapshotSendOutcome::RateLimited;
+        }
+
+        // A manifest request is also the demand signal: a healthy node produces
+        // nothing until somebody asks. The answer to the first ask is usually
+        // "none yet", and the asker retries.
+        producer.request();
+        let manifest = producer.cached().map_or_else(Vec::new, |b| {
+            crate::snapshot::bundle::encode_manifest_v1(&b.manifest).unwrap_or_default()
+        });
+        self.send_snapshot_msg(NetworkMessage::SnapshotManifestResponse(
+            novai_consensus_types::SnapshotManifestResponse {
+                responder: self.our_address,
+                manifest,
+            },
+        ))
+    }
+
+    /// Serve a chunk request. Same recovering and rate-limit rules.
+    pub fn handle_snapshot_chunk_request(
+        &self,
+        req: &novai_consensus_types::SnapshotChunkRequest,
+    ) -> SnapshotSendOutcome {
+        if self.snapshot_sync().phase() != SnapshotSyncPhase::Idle {
+            return SnapshotSendOutcome::RefusedRecovering;
+        }
+        let Some(producer) = &self.snapshot_producer else {
+            return SnapshotSendOutcome::NoProducer;
+        };
+        if !self.allow_serve(req.requester) {
+            return SnapshotSendOutcome::RateLimited;
+        }
+        // An empty payload is the faithful "I cannot serve that": a height that
+        // is not the cached one, or an index past its end. Never a guess.
+        let payload = producer
+            .cached()
+            .filter(|b| b.manifest.height == req.height)
+            .and_then(|b| b.chunks.get(req.index as usize).cloned())
+            .unwrap_or_default();
+        self.send_snapshot_msg(NetworkMessage::SnapshotChunkResponse(
+            novai_consensus_types::SnapshotChunkResponse {
+                responder: self.our_address,
+                height: req.height,
+                index: req.index,
+                payload,
+            },
+        ))
+    }
+
+    /// Rate-limit gate, keyed on the requesting peer.
+    fn allow_serve(&self, peer: Address) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
+        self.snapshot_serve.lock_or_recover().allow(peer, now)
+    }
+
+    /// Record a peer that answered with bytes failing the manifest's digest.
+    pub fn strike_snapshot_peer(&self, peer: Address) -> u32 {
+        self.snapshot_peers.lock_or_recover().strike(peer)
+    }
+
+    /// Is this peer out of the rotation?
+    #[must_use]
+    pub fn snapshot_peer_shunned(&self, peer: &Address) -> bool {
+        self.snapshot_peers.lock_or_recover().is_shunned(peer)
+    }
+
+    /// A good answer clears the ladder, so strikes must be consecutive.
+    pub fn clear_snapshot_peer(&self, peer: &Address) {
+        self.snapshot_peers.lock_or_recover().clear(peer);
+    }
+
     /// Trigger a block sync request if committed_height is behind highest_qc.
     ///
     /// Called after "commit chain incomplete" errors to actually initiate sync
@@ -3121,6 +3313,21 @@ impl ConsensusNode {
             NetworkMessage::BlockRequest(req) => self.handle_block_request(req),
             NetworkMessage::BlockResponse(resp) => self.handle_block_response(resp),
             NetworkMessage::Transaction(bytes) => self.handle_gossip_tx(bytes),
+            // Gate F5 Stage 4. Serving is always on once the binary is
+            // deployed; whether an ANSWER leaves this node is decided inside,
+            // by the send gate. Responses are consumed by the Stage 5 fetch
+            // loop; accepting and ignoring them here is what makes Phase A a
+            // safe, complete deploy on its own.
+            NetworkMessage::SnapshotManifestRequest(req) => {
+                self.handle_snapshot_manifest_request(&req);
+                Ok(())
+            }
+            NetworkMessage::SnapshotChunkRequest(req) => {
+                self.handle_snapshot_chunk_request(&req);
+                Ok(())
+            }
+            NetworkMessage::SnapshotManifestResponse(_)
+            | NetworkMessage::SnapshotChunkResponse(_) => Ok(()),
         }
     }
 

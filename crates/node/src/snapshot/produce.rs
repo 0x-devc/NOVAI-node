@@ -53,6 +53,13 @@ pub enum ProduceError {
     UnclassifiableKey { key: String, class: &'static str },
     /// A row the certification chain needs is missing from the checkpoint.
     MissingEvidence(String),
+    /// A chunk exceeds what the wire will carry. Fails at production so the
+    /// limit is discovered once, named, rather than every time a send is tried.
+    ChunkTooLarge {
+        index: usize,
+        len: usize,
+        max: usize,
+    },
     Bundle(BundleError),
 }
 
@@ -84,6 +91,11 @@ impl std::fmt::Display for ProduceError {
             Self::MissingEvidence(e) => {
                 write!(f, "snapshot production refused: missing evidence: {e}")
             }
+            Self::ChunkTooLarge { index, len, max } => write!(
+                f,
+                "snapshot production refused: chunk {index} is {len} bytes, above the {max} \
+                 byte wire bound; a single state value is too large to transfer"
+            ),
             Self::Bundle(e) => write!(f, "snapshot production: {e}"),
         }
     }
@@ -167,6 +179,24 @@ pub fn build_bundle(checkpoint_dir: &Path) -> Result<SnapshotBundle, ProduceErro
 
     // 5. Chunk and digest.
     let chunks = chunk_pairs(&pairs);
+
+    // Gate F5 Stage 4: a chunk that cannot cross the wire must fail here,
+    // loudly and named, rather than at send time. `chunk_pairs` lets a single
+    // oversized pair travel alone rather than dropping it, which is the right
+    // call for the chunker (a dropped leaf is a wrong root); the wire bound is
+    // a separate constraint and this is where it is enforced.
+    if let Some((i, len)) = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i, c.len()))
+        .find(|&(_, len)| len > novai_consensus_types::codec::MAX_SNAPSHOT_CHUNK_BYTES)
+    {
+        return Err(ProduceError::ChunkTooLarge {
+            index: i,
+            len,
+            max: novai_consensus_types::codec::MAX_SNAPSHOT_CHUNK_BYTES,
+        });
+    }
     let chunk_digests = chunks.iter().map(|c| chunk_digest(c)).collect();
 
     let leaf_count = u32::try_from(pairs.len()).map_err(|_| {

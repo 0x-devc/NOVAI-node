@@ -93,6 +93,48 @@ pub struct BlockResponse {
     pub qcs: Vec<Option<QC>>,
 }
 
+/// Gate F5 Stage 4: ask a peer whether it has a servable snapshot.
+///
+/// The four snapshot messages carry OPAQUE payload bytes rather than structured
+/// snapshot types. The manifest's meaning (the leaf set, the certification
+/// evidence, the lag-0 identity) belongs to the node crate that verifies it;
+/// this layer only has to move bytes and bound their size. That keeps the wire
+/// ignorant of the snapshot format, so a format revision does not become a wire
+/// revision, and it mirrors how `NetworkMessage::Transaction` already carries
+/// raw signed bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotManifestRequest {
+    pub requester: Address,
+}
+
+/// A peer's answer. An EMPTY `manifest` is the faithful "I have none", not an
+/// error: a healthy node produces only on demand, so having nothing cached is
+/// the normal first answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotManifestResponse {
+    pub responder: Address,
+    pub manifest: Vec<u8>,
+}
+
+/// Ask for one chunk of the snapshot at `height`. The height is echoed so a
+/// requester can discard a chunk from a snapshot it is no longer installing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotChunkRequest {
+    pub requester: Address,
+    pub height: u64,
+    pub index: u32,
+}
+
+/// One chunk. An EMPTY `payload` is the faithful "I cannot serve that", which
+/// is what a node that has since dropped its cached bundle answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotChunkResponse {
+    pub responder: Address,
+    pub height: u64,
+    pub index: u32,
+    pub payload: Vec<u8>,
+}
+
 /// Compute the hash of a block using canonical encoding.
 ///
 /// # Panics

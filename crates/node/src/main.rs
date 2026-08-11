@@ -928,6 +928,8 @@ fn main() {
             // Phase B deploy raises it to the 16 MiB receive cap by
             // restarting with the flag. Parsed once; SIGHUP is ignored.
             let mut wire_send_cap_bytes: u32 = novai_p2p::MAX_WIRE_MSG_BYTES;
+            // Gate F5 Stage 4: sending snapshot messages is OFF unless asked.
+            let mut snapshot_send_enabled = false;
 
             let rest: Vec<String> = args.collect();
             let mut i = 0;
@@ -995,6 +997,15 @@ fn main() {
                             fatal(e);
                         }
                         i += 2;
+                    }
+                    // Gate F5 Stage 4, Phase B. Gates SENDING snapshot messages
+                    // only; receiving and serving are on as soon as the binary
+                    // is deployed. Default off, because a node that sends one of
+                    // the new wire kinds to a peer running an older binary
+                    // disconnects that peer.
+                    "--snapshot-sync" => {
+                        snapshot_send_enabled = true;
+                        i += 1;
                     }
                     "--max-timeout" => {
                         // L-04: Parsed for future use. The configurable cap function
@@ -1293,6 +1304,22 @@ fn main() {
                 );
             }
 
+            // Gate F5 Stage 4. Receiving and serving are already live; this
+            // decides only whether snapshot messages LEAVE this node. Logged
+            // either way, because "which phase is this node in" is the first
+            // question anyone asks during the two-phase deploy.
+            node.set_snapshot_send_enabled(snapshot_send_enabled);
+            if snapshot_send_enabled {
+                tracing::warn!(
+                    "snapshot sync SENDING enabled (F5 Phase B); every peer must already \
+                     be running a binary that can receive the snapshot wire kinds"
+                );
+            } else {
+                tracing::info!(
+                    "snapshot sync sending disabled (F5 Phase A: receive and serve only)"
+                );
+            }
+
             // Set known noise keys for peer identity verification
             let has_noise_keys = !known_noise_keys.is_empty();
             if encryption_enabled && has_noise_keys {
@@ -1367,6 +1394,10 @@ fn main() {
                 snapshot_producer: Arc::clone(&snapshot_producer),
             });
             node.set_commit_callback(commit_callback);
+            // Gate F5 Stage 4: the node serves cached bundles from the same
+            // producer the commit hook feeds. Attached here so serving and
+            // producing can never disagree about which bundle is current.
+            node.set_snapshot_producer(Arc::clone(&snapshot_producer));
 
             // Wire gossip: allows peers to insert received txs into our mempool
             node.set_gossip_mempool(

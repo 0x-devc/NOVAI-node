@@ -27,3 +27,4 @@ pub mod rebuild;
 pub mod stage;
 pub mod store;
 pub mod valset;
+pub mod wire;
