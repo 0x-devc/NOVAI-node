@@ -2,7 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700;800;900&display=swap');
 
 @layer base {
   :root {
@@ -45,6 +44,64 @@
     --novai-border-glow: 228 100% 62%;
     --novai-gradient-1: linear-gradient(135deg, hsl(228, 100%, 62%), hsl(192, 95%, 68%));
     --novai-text-gradient: linear-gradient(90deg, hsl(228, 100%, 70%) 0%, hsl(192, 95%, 68%) 50%, hsl(270, 80%, 75%) 100%);
+
+    /* ---- design system v2 (Gate 2) ---- */
+    /* Neutral ramp: hue drifts 228 to 210 as lightness rises */
+    --n0: 228 30% 4%;
+    --n1: 228 28% 6%;
+    --n2: 226 26% 8%;
+    --n3: 225 24% 11%;
+    --n4: 224 21% 15%;
+    --n5: 224 18% 22%;
+    --n6: 220 15% 35%;
+    --n7: 216 18% 56%;
+    --n8: 213 24% 76%;
+    --n9: 210 40% 96%;
+
+    /* Semantic text. hi/mid/low carry content and must pass the 4.5:1 audit.
+       faint is DECORATIVE ONLY (rules, disabled glyphs): it fails body contrast
+       by design and the design-rules test bars it from text content. */
+    --text-hi: var(--n9);
+    --text-mid: var(--n8);
+    --text-low: var(--n7);
+    --text-faint: var(--n6);
+
+    /* Borders */
+    --line-subtle: var(--n4);
+    --line-default: var(--n5);
+    --line-strong: var(--n5);
+    --line-focus: 228 100% 62%;
+
+    /* Accents. brand = interactive fills; brand-text = link/text on dark
+       grounds (lighter, audit-passing). live = LIVE-STATE ONLY (cyan).
+       violet = third gradient stop only. warn/error split fill vs text. */
+    --brand: 228 100% 62%;
+    --brand-text: 228 100% 74%;
+    --live: 192 95% 68%;
+    --violet: 270 80% 75%;
+    --warn: 38 92% 58%;
+    --warn-text: 40 90% 65%;
+    --error: 0 72% 58%;
+    --error-text: 0 85% 71%;
+
+    /* Spacing: component-internal em scale + section rhythm */
+    --sp-3xs: 0.125em; --sp-2xs: 0.25em; --sp-xs: 0.5em; --sp-sm: 0.75em;
+    --sp-md: 1em; --sp-lg: 1.5em; --sp-xl: 2em; --sp-2xl: 3em;
+    --sp-3xl: 4em; --sp-4xl: 6em; --sp-5xl: 8em;
+    --section-pad: clamp(4rem, 3rem + 4vw, 7.5rem);
+
+    /* Fluid type, 360px to 2560px, tracking -3 percent on display sizes */
+    --fs-display: clamp(2.5rem, 2.01rem + 2.18vw, 5.5rem);
+    --fs-h2: clamp(1.75rem, 1.46rem + 1.27vw, 3.5rem);
+    --fs-h3: clamp(1.25rem, 1.17rem + 0.36vw, 1.75rem);
+    --fs-stat: clamp(2rem, 1.84rem + 0.73vw, 3rem);
+    --fs-body: clamp(1rem, 0.98rem + 0.09vw, 1.125rem);
+    --fs-label: clamp(0.75rem, 0.73rem + 0.09vw, 0.875rem);
+
+    /* Glow, three capped levels */
+    --glow-1: 0 4px 24px -8px hsl(228 30% 2% / 0.5);
+    --glow-2: 0 0 24px -8px hsl(228 100% 62% / 0.25);
+    --glow-3: 0 0 48px -12px hsl(228 100% 62% / 0.4);
   }
 }
 
@@ -53,8 +110,10 @@
     @apply border-border;
   }
 
-  html {
-    scroll-behavior: smooth;
+  @media (prefers-reduced-motion: no-preference) {
+    html {
+      scroll-behavior: smooth;
+    }
   }
 
   html, body, #root {
@@ -64,12 +123,12 @@
   body {
     @apply bg-background text-foreground;
     margin: 0;
-    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+    font-family: 'Inter Variable', 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
     overflow-x: hidden;
   }
 
   h1, h2, h3, h4, h5, h6 {
-    font-family: 'Space Grotesk', 'Inter', sans-serif;
+    font-family: 'Space Grotesk Variable', 'Space Grotesk', 'Inter Variable', sans-serif;
   }
 }
 
@@ -286,4 +345,20 @@ a:focus-visible {
 
 ::-webkit-scrollbar-thumb:hover {
   background: hsla(228, 100%, 62%, 0.4);
+}
+
+/* Reduced motion: every CSS animation and transition collapses to its final
+   state. Framer-driven motion is handled by MotionConfig plus the
+   usePrefersReducedMotion hook. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

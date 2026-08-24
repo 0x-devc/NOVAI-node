@@ -12,10 +12,42 @@ export default {
     },
     extend: {
       fontFamily: {
-        display: ["Space Grotesk", "sans-serif"],
-        body: ["Inter", "sans-serif"],
+        display: ["Space Grotesk Variable", "Space Grotesk", "sans-serif"],
+        body: ["Inter Variable", "Inter", "sans-serif"],
+        mono: ["ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
       },
       colors: {
+        ink: {
+          hi: "hsl(var(--text-hi))",
+          mid: "hsl(var(--text-mid))",
+          low: "hsl(var(--text-low))",
+          faint: "hsl(var(--text-faint))",
+        },
+        line: {
+          subtle: "hsl(var(--line-subtle) / 0.5)",
+          DEFAULT: "hsl(var(--line-default) / 0.6)",
+          strong: "hsl(var(--line-strong) / 0.95)",
+          focus: "hsl(var(--line-focus) / 0.7)",
+        },
+        surface: {
+          0: "hsl(var(--n0))",
+          1: "hsl(var(--n1))",
+          2: "hsl(var(--n2))",
+          3: "hsl(var(--n3))",
+        },
+        brand: {
+          DEFAULT: "hsl(var(--brand))",
+          text: "hsl(var(--brand-text))",
+        },
+        live: "hsl(var(--live))",
+        warnx: {
+          DEFAULT: "hsl(var(--warn))",
+          text: "hsl(var(--warn-text))",
+        },
+        errorx: {
+          DEFAULT: "hsl(var(--error))",
+          text: "hsl(var(--error-text))",
+        },
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
@@ -49,6 +81,26 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+      },
+      fontSize: {
+        display: ["var(--fs-display)", { lineHeight: "1.05", letterSpacing: "-0.03em" }],
+        h2x: ["var(--fs-h2)", { lineHeight: "1.1", letterSpacing: "-0.03em" }],
+        h3x: ["var(--fs-h3)", { lineHeight: "1.25", letterSpacing: "-0.02em" }],
+        stat: ["var(--fs-stat)", { lineHeight: "1.1", letterSpacing: "-0.02em" }],
+        bodyx: ["var(--fs-body)", { lineHeight: "1.6" }],
+        label: ["var(--fs-label)", { lineHeight: "1.4", letterSpacing: "0.05em" }],
+      },
+      boxShadow: {
+        glow1: "var(--glow-1)",
+        glow2: "var(--glow-2)",
+        glow3: "var(--glow-3)",
+      },
+      zIndex: {
+        backdrop: "0",
+        content: "10",
+        progress: "40",
+        nav: "50",
+        menu: "60",
       },
       borderRadius: {
         lg: "var(--radius)",
