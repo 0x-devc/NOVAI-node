@@ -1,0 +1,31 @@
+{
+  "generatedAt": "2026-08-24T08:35:47.755Z",
+  "linesOfRust": {
+    "value": 128811,
+    "method": "newline count over crates/**/*.rs (target and build dirs excluded)"
+  },
+  "tests": {
+    "value": 2138,
+    "method": "count of #[test] and #[tokio::test] attributes across crates/ and sdk/"
+  },
+  "crates": {
+    "value": 16,
+    "method": "direct subdirectories of crates/ containing a Cargo.toml"
+  },
+  "unsafeBlocks": {
+    "value": 0,
+    "method": "syntactic unsafe forms (unsafe brace/fn/impl/trait/extern) in crates/**/*.rs; prose mentions excluded"
+  },
+  "txTypes": {
+    "value": 11,
+    "method": "pub const *_PAYLOAD_V1: u8 discriminants in crates/execution/src/lib.rs, contiguity asserted"
+  },
+  "signalTypes": {
+    "value": 23,
+    "method": "unit variants of enum AiSignalType in crates/ai_entities/src/signals.rs, contiguity asserted"
+  },
+  "memoryObjectTypes": {
+    "value": 16,
+    "method": "unit variants of enum MemoryObjectType in crates/ai_entities/src/memory.rs, contiguity asserted"
+  }
+}

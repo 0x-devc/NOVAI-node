@@ -1,4 +1,3 @@
-import { Link } from "react-router-dom";
 import { DiscordIcon, XIcon, TelegramIcon, GitHubIcon } from "./SocialIcons";
 import NovaiLogo from "./NovaiLogo";
 
@@ -34,18 +33,18 @@ export default function Footer() {
             </h4>
             <div className="flex flex-col gap-2.5">
               {[
-                { to: "/", label: "Home" },
-                { to: "/vision", label: "Vision" },
-                { to: "/documents", label: "Documents" },
-                { to: "/testnet", label: "Testnet" },
+                { href: "#home", label: "Home" },
+                { href: "#vision", label: "Vision" },
+                { href: "#documents", label: "Documents" },
+                { href: "#testnet", label: "Testnet" },
               ].map((link) => (
-                <Link
-                  key={link.to}
-                  to={link.to}
+                <a
+                  key={link.href}
+                  href={link.href}
                   className="text-sm text-muted-foreground transition-colors hover:text-foreground no-underline"
                 >
                   {link.label}
-                </Link>
+                </a>
               ))}
             </div>
           </div>
