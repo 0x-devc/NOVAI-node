@@ -25,6 +25,9 @@ import { CpuArchitecture } from "@/components/ui/cpu-architecture";
 import { ContainerScroll } from "@/components/ui/container-scroll-animation";
 import { TypewriterEffect } from "@/components/ui/typewriter-effect";
 import { XIcon, DiscordIcon, TelegramIcon, GitHubIcon } from "@/components/novai/SocialIcons";
+import { STATS } from "@/data/stats";
+import repoStats from "@/data/repo-stats.generated.json";
+import { flooredClaim } from "@/lib/format";
 
 const EASE = [0.25, 0.46, 0.45, 0.94] as const;
 
@@ -53,13 +56,6 @@ const FEATURES = [
     description:
       "HotStuff-inspired BFT consensus with Sparse Merkle Tree state management for fast, predictable, low-cost transactions.",
   },
-];
-
-const STATS: { value?: number; suffix?: string; label: string; prefix?: string; textOnly?: string }[] = [
-  { textOnly: "Active", label: "Private Testnet Running" },
-  { value: 4, suffix: "", label: "Active Validators", prefix: "" },
-  { value: 1100, suffix: "+", label: "Tests Passing", prefix: "" },
-  { value: 30, suffix: "M+", label: "Blocks Committed", prefix: "" },
 ];
 
 const ROADMAP = [
@@ -118,7 +114,7 @@ const PILLARS = [
 ];
 
 const SOCIALS = [
-  { href: "https://github.com/0x-devc/NOVAI-node", title: "GitHub", description: "Full open source codebase - 65,000+ lines of Rust, 16 crates, Apache 2.0.", icon: GitHubIcon, followers: "Open Source", color: "210, 10%, 40%" },
+  { href: "https://github.com/0x-devc/NOVAI-node", title: "GitHub", description: `Full open source codebase - ${flooredClaim(repoStats.linesOfRust.value, 1000)} lines of Rust, ${repoStats.crates.value} crates, Apache 2.0.`, icon: GitHubIcon, followers: "Open Source", color: "210, 10%, 40%" },
   { href: "https://x.com/NOVAInetwork", title: "X (Twitter)", description: "Updates, announcements, and progress in public.", icon: XIcon, followers: "Growing", color: "228, 100%, 62%" },
   { href: "https://discord.gg/NTWr6x2dbM", title: "Discord", description: "Main community hub for ideas, feedback, and discussions.", icon: DiscordIcon, followers: "Active", color: "235, 86%, 65%" },
   { href: "https://t.me/+QoacVmowWNRkZjNk", title: "Telegram", description: "Updates and announcements.", icon: TelegramIcon, followers: "Live", color: "200, 90%, 55%" },
@@ -617,7 +613,7 @@ export default function SinglePage() {
               <p className="text-muted-foreground">Clean-room engineering. Every line built from scratch.</p>
             </div>
           </ScrollSection>
-          <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-8 sm:grid-cols-3">
             {STATS.map((stat, i) => (
               <ScrollSection key={stat.label} delay={i * 0.15}>
                 <div className="text-center">
