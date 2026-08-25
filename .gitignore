@@ -19,7 +19,8 @@ docs/gate3-bug1-diagnosis.md
 docs/deploy-bug1-fix.md
 docs/bug1-load-test-plan.md
 scripts/verify-host-fix.sh
-.claude/
+.claude/*
+!.claude/scrub-config.json
 clippy_full.txt
 week8.sh
 marketing/

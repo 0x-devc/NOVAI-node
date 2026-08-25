@@ -8,6 +8,7 @@ import StatTile from "@/components/system/StatTile";
 import MonoLabel from "@/components/system/MonoLabel";
 import Reveal from "@/components/system/Reveal";
 import LiveChainStats from "@/components/system/LiveChainStats";
+import VerifyPanel from "@/components/system/VerifyPanel";
 import { STATS } from "@/data/stats";
 import repoStats from "@/data/repo-stats.generated.json";
 import chainSnapshot from "@/data/chain-snapshot.json";
@@ -25,12 +26,13 @@ const TESTS_CLAIM = `${floorTo(repoStats.tests.value, 100).toLocaleString()}+`;
 
 const NAV = [
   ["01", "live", "Live chain"],
-  ["02", "compare", "Comparison"],
-  ["03", "tokens", "Tokens"],
-  ["04", "type", "Type"],
-  ["05", "accents", "Accents"],
-  ["06", "motion", "Motion"],
-  ["07", "glow", "Glow"],
+  ["02", "verify", "Verify panel"],
+  ["03", "compare", "Comparison"],
+  ["04", "tokens", "Tokens"],
+  ["05", "type", "Type"],
+  ["06", "accents", "Accents"],
+  ["07", "motion", "Motion"],
+  ["08", "glow", "Glow"],
 ] as const;
 
 function Section({ id, num, title, children }: { id: string; num: string; title: string; children: React.ReactNode }) {
@@ -236,7 +238,18 @@ export default function SpecimenApp() {
             <LiveChainSection />
           </Section>
 
-          <Section id="compare" num="02" title="Stats section: proposed beside current">
+          <Section id="verify" num="02" title="Verify panel (Gate 4, candidate B)">
+            <div className="space-y-3">
+              <VerifyPanel rpcUrl="/rpc" />
+              <p className="text-xs text-ink-low">
+                Dev proxy feeds this panel here; in production it calls the RPC directly and runs in terminal
+                mode until the CORS change. Every request is click-triggered with a client-side cooldown; the
+                RPC node is also a validator and the panel treats it gently.
+              </p>
+            </div>
+          </Section>
+
+          <Section id="compare" num="03" title="Stats section: proposed beside current">
             <div className="space-y-6">
               <div>
                 <MonoLabel>Proposed, system v2</MonoLabel>
@@ -253,7 +266,7 @@ export default function SpecimenApp() {
             </div>
           </Section>
 
-          <Section id="tokens" num="03" title="Neutral ramp and text emphasis">
+          <Section id="tokens" num="04" title="Neutral ramp and text emphasis">
             <div className="grid grid-cols-5 sm:grid-cols-10 gap-2">
               {ramp.map((n) => (
                 <div key={n} className="space-y-1.5">
@@ -277,7 +290,7 @@ export default function SpecimenApp() {
             </div>
           </Section>
 
-          <Section id="type" num="04" title="Type on real words">
+          <Section id="type" num="05" title="Type on real words">
             <div className="space-y-5">
               <p className="font-display text-display font-semibold text-ink-hi">The chain proves itself.</p>
               <p className="font-display text-h2x font-semibold text-ink-hi">Numbers that matter</p>
@@ -291,7 +304,7 @@ export default function SpecimenApp() {
             </div>
           </Section>
 
-          <Section id="accents" num="05" title="Accents and their scope">
+          <Section id="accents" num="06" title="Accents and their scope">
             <div className="grid sm:grid-cols-3 gap-4">
               <div className="border border-line rounded-lg p-5 bg-surface-1 space-y-3">
                 <button
@@ -334,7 +347,7 @@ export default function SpecimenApp() {
             </div>
           </Section>
 
-          <Section id="motion" num="06" title={`Motion primitives (reduced motion: ${reduced ? "on, reduced states shown" : "off"})`}>
+          <Section id="motion" num="07" title={`Motion primitives (reduced motion: ${reduced ? "on, reduced states shown" : "off"})`}>
             <div className="grid sm:grid-cols-3 gap-4">
               <MotionDemo name="fade-rise" spec="0.5s, ease-out-quart, y 16px. Reduced: static at final position, opaque, no transform.">
                 {(key) => (
@@ -360,7 +373,7 @@ export default function SpecimenApp() {
             </div>
           </Section>
 
-          <Section id="glow" num="07" title="Glow, three capped levels">
+          <Section id="glow" num="08" title="Glow, three capped levels">
             <div className="grid sm:grid-cols-3 gap-4">
               {(["--glow-1", "--glow-2", "--glow-3"] as const).map((g) => (
                 <div key={g} className="h-16 rounded-lg border border-line bg-surface-1 flex items-center justify-center" style={{ boxShadow: `var(${g})` }}>

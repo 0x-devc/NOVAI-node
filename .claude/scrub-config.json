@@ -1,0 +1,6 @@
+{
+  "_doc": "Project scrub config. chain-snapshot.json holds public chain data (block, parent, and state-root hashes served by the open RPC); its 64-char hex values false-positive the credential heuristic. Scoped to this ONE file by operator ruling; never allowlist the hex pattern globally, a hex string elsewhere could genuinely be a key.",
+  "ignore_paths": [
+    "website/src/data/chain-snapshot.json"
+  ]
+}
