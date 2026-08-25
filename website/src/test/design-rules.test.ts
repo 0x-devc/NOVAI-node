@@ -36,6 +36,7 @@ describe("design rules", () => {
     const ALLOW = new Set([
       "src/index.css", // token definition
       "src/dev/SpecimenApp.tsx", // reference demo
+      "src/components/system/StatusDot.tsx", // the canonical live-state indicator
     ]);
     const cyanRe = /(?:text|bg|border|fill|stroke|ring)-live\b|--live\b|hsl\(\s*192[,\s]/;
     for (const f of files) {

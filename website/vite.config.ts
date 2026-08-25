@@ -11,6 +11,16 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: false,
     },
+    // Dev-only live-data proxy (operator-approved Q15): lets the browser on
+    // localhost reach the public RPC without CORS. The `server` block applies
+    // to the dev server only; nothing here exists in the production build.
+    proxy: {
+      "/rpc": {
+        target: "https://rpc.novai.network",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/rpc/, ""),
+      },
+    },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
