@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import MonoLabel from "./MonoLabel";
+import Panel, { Caption, PanelRow } from "@/components/console/Panel";
+import DataTable, { Td } from "@/components/console/DataTable";
 import chainSnapshot from "@/data/chain-snapshot.json";
-import { rpcCall, curlFor, delay, type BlockHeader, type RpcOutcome } from "@/lib/rpc";
+import {
+  rpcCall,
+  curlFor,
+  curlForHeightTemplate,
+  delay,
+  type BlockHeader,
+  type RpcOutcome,
+} from "@/lib/rpc";
 
 // The verify panel: the visitor's own browser calls the live chain and, in
 // the centerpiece action, re-derives a consensus property by checking that
@@ -33,6 +41,9 @@ type FetchState =
   | { phase: "idle" }
   | { phase: "running" }
   | { phase: "done"; block: BlockHeader; elapsedMs: number }
+  // A null answer is not a failure. Which side of the chain the height falls on
+  // is the useful fact, so it is carried and explained rather than discarded.
+  | { phase: "empty"; height: number; tip: number | null }
   | { phase: "failed"; kind: string; detail: string };
 
 interface LinkRow {
@@ -69,27 +80,27 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function CurlBlock({ method, params }: { method: string; params: Record<string, unknown> }) {
-  const cmd = curlFor(method, params);
+function CurlBlock({ cmd, note }: { cmd: string; note?: string }) {
   return (
-    <div className="rounded-md border border-line-subtle bg-surface-0 p-3">
-      <div className="flex items-center justify-between mb-2">
-        <MonoLabel>terminal equivalent</MonoLabel>
+    <div className="bg-surface-0 px-4 py-2">
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low">terminal equivalent</span>
         <CopyButton text={cmd} />
       </div>
-      <pre className="text-xs font-mono text-ink-mid overflow-x-auto whitespace-pre">{cmd}</pre>
+      <pre className="text-xs font-mono text-ink-mid overflow-x-auto whitespace-pre mt-1">{cmd}</pre>
+      {note && <p className="mt-1 text-[11px] text-ink-low">{note}</p>}
     </div>
   );
 }
 
 function ResponseBlock({ block, elapsedMs, label }: { block: BlockHeader; elapsedMs?: number; label: string }) {
   return (
-    <div className="rounded-md border border-line-subtle bg-surface-0 p-3">
-      <div className="flex items-center justify-between mb-2">
-        <MonoLabel>{label}</MonoLabel>
+    <div className="bg-surface-0 px-4 py-2">
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low">{label}</span>
         {elapsedMs !== undefined && <span className="text-xs font-mono text-ink-low">{elapsedMs}ms</span>}
       </div>
-      <pre className="text-xs font-mono text-ink-mid overflow-x-auto whitespace-pre">
+      <pre className="text-xs font-mono text-ink-mid overflow-x-auto whitespace-pre mt-1">
         {JSON.stringify({ jsonrpc: "2.0", result: block, id: 1 }, null, 2)}
       </pre>
     </div>
@@ -98,7 +109,7 @@ function ResponseBlock({ block, elapsedMs, label }: { block: BlockHeader; elapse
 
 function FailureNotice({ kind, detail }: { kind: string; detail: string }) {
   return (
-    <div className="rounded-md border border-line bg-surface-0 p-3 space-y-1">
+    <div className="bg-surface-0 px-4 py-2.5 space-y-1">
       {kind === "blocked" ? (
         <>
           <p className="text-sm text-ink-hi">Your browser could not reach the RPC.</p>
@@ -109,6 +120,11 @@ function FailureNotice({ kind, detail }: { kind: string; detail: string }) {
         </>
       ) : kind === "rate-limited" ? (
         <p className="text-sm text-ink-mid">The node rate limiter answered. Wait a moment and try again.</p>
+      ) : kind === "empty" ? (
+        <p className="text-sm text-ink-mid">
+          The node answered with null for one of these blocks. That block is no longer retained: a node serves
+          recent history only and prunes older blocks.
+        </p>
       ) : (
         <p className="text-sm text-ink-mid">
           Request failed: {kind} ({detail})
@@ -118,10 +134,47 @@ function FailureNotice({ kind, detail }: { kind: string; detail: string }) {
   );
 }
 
+// A null answer to a height query is a fact about the chain, not a failure of
+// the request. Which side of the tip the height falls on decides which fact,
+// and saying so is more useful to a reader than reporting an empty result.
+function EmptyNotice({ height, tip }: { height: number; tip: number | null }) {
+  const pruned = tip !== null && height < tip;
+  const future = tip !== null && height > tip;
+  return (
+    <div className="bg-surface-0 px-4 py-2.5 space-y-1">
+      <p className="text-sm text-ink-hi tabular-nums">
+        No block at height {height.toLocaleString()}. The node answered, and the result was null.
+      </p>
+      {pruned && (
+        <p className="text-xs text-ink-low tabular-nums">
+          The chain tip is {tip.toLocaleString()}. A node serves recent history only and prunes older blocks, so
+          heights far behind the tip are no longer retrievable from the RPC. Plan any indexer around that window.
+        </p>
+      )}
+      {future && (
+        <p className="text-xs text-ink-low tabular-nums">
+          The chain tip is {tip.toLocaleString()}, so that block has not been produced yet.
+        </p>
+      )}
+      {tip === null && (
+        <p className="text-xs text-ink-low">
+          That height is either above the current tip or already pruned: a node serves recent history only. Fetch
+          the latest block to see where the tip is.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function VerifyPanel({ rpcUrl }: { rpcUrl?: string }) {
   const [latest, setLatest] = useState<FetchState>({ phase: "idle" });
   const [byHeight, setByHeight] = useState<FetchState>({ phase: "idle" });
-  const [heightInput, setHeightInput] = useState(String(chainSnapshot.height));
+  // Deliberately empty. Seeding this from the build snapshot prefilled a height
+  // that the node had long since pruned, so the first click on the default
+  // value answered null. The tip is the only height guaranteed to be servable,
+  // and it is not known until the visitor asks for it.
+  const [heightInput, setHeightInput] = useState("");
+  const [knownTip, setKnownTip] = useState<number | null>(null);
   const [walk, setWalk] = useState<WalkState>({ phase: "idle" });
   const [cooldowns, setCooldowns] = useState<{ [k: string]: number }>({});
   const [, forceTick] = useState(0);
@@ -151,6 +204,7 @@ export default function VerifyPanel({ rpcUrl }: { rpcUrl?: string }) {
     startCooldown("latest", FETCH_COOLDOWN_MS);
     if (out.ok) {
       setLatest({ phase: "done", block: out.result, elapsedMs: out.elapsedMs });
+      setKnownTip(out.result.height);
       setHeightInput(String(out.result.height));
     } else setLatest({ phase: "failed", kind: out.kind, detail: out.detail });
   };
@@ -164,6 +218,7 @@ export default function VerifyPanel({ rpcUrl }: { rpcUrl?: string }) {
     if (!alive.current) return;
     startCooldown("byHeight", FETCH_COOLDOWN_MS);
     if (out.ok) setByHeight({ phase: "done", block: out.result, elapsedMs: out.elapsedMs });
+    else if (out.kind === "empty") setByHeight({ phase: "empty", height: h, tip: knownTip });
     else setByHeight({ phase: "failed", kind: out.kind, detail: out.detail });
   };
 
@@ -179,6 +234,7 @@ export default function VerifyPanel({ rpcUrl }: { rpcUrl?: string }) {
       return;
     }
     const tip = tipOut.result;
+    setKnownTip(tip.height);
     let expectedHash = tip.parent_hash;
     const links: LinkRow[] = [];
     for (let i = 1; i <= VERIFY_DEPTH; i++) {
@@ -215,35 +271,32 @@ export default function VerifyPanel({ rpcUrl }: { rpcUrl?: string }) {
   const walkCooldown = coolingFor("walk");
 
   return (
-    <div className="border border-line rounded-lg bg-surface-1 divide-y divide-line-subtle">
-      <div className="px-6 py-4">
-        <p className="font-display text-h3x font-semibold text-ink-hi">Query the chain yourself</p>
-        <p className="text-sm text-ink-mid mt-1 max-w-2xl">
-          Real requests from your browser to the public RPC. Nothing runs until you click, every call shows its
-          terminal equivalent, and the responses are raw.
-        </p>
-      </div>
+    <Panel title="query the chain">
+      <Caption>
+        Real requests from your browser to the public RPC. Nothing runs until you click, every call shows its
+        terminal equivalent, and the responses are raw.
+      </Caption>
 
-      <div className="px-6 py-5 space-y-3">
+      <PanelRow>
         <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={() => void runLatest()}
             disabled={!canRun || latest.phase === "running" || coolingFor("latest") > 0}
-            className="rounded-md px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+            className="rounded-md px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-40"
             style={{ background: "hsl(var(--brand))" }}
           >
             {latest.phase === "running" ? "fetching" : "Fetch the latest block"}
           </button>
           {coolingFor("latest") > 0 && (
-            <span className="text-xs font-mono text-ink-low">again in {coolingFor("latest")}s</span>
+            <span className="text-[11px] font-mono text-ink-low">again in {coolingFor("latest")}s</span>
           )}
         </div>
-        {latest.phase === "done" && <ResponseBlock block={latest.block} elapsedMs={latest.elapsedMs} label="live response" />}
-        {latest.phase === "failed" && <FailureNotice kind={latest.kind} detail={latest.detail} />}
-        <CurlBlock method="novai_getLatestBlock" params={{}} />
-      </div>
+      </PanelRow>
+      {latest.phase === "done" && <ResponseBlock block={latest.block} elapsedMs={latest.elapsedMs} label="live response" />}
+      {latest.phase === "failed" && <FailureNotice kind={latest.kind} detail={latest.detail} />}
+      <CurlBlock cmd={curlFor("novai_getLatestBlock", {})} />
 
-      <div className="px-6 py-5 space-y-3">
+      <PanelRow>
         <div className="flex flex-wrap items-center gap-3">
           <label className="text-sm text-ink-mid" htmlFor="vp-height">
             Block at height
@@ -253,78 +306,101 @@ export default function VerifyPanel({ rpcUrl }: { rpcUrl?: string }) {
             value={heightInput}
             onChange={(e) => setHeightInput(e.target.value.replace(/[^0-9]/g, ""))}
             inputMode="numeric"
-            className="w-36 rounded-md border border-line bg-surface-0 px-3 py-1.5 text-sm font-mono text-ink-hi tabular-nums"
+            placeholder="fetch the tip first"
+            className="w-44 rounded-md border border-line bg-surface-0 px-2.5 py-1 text-sm font-mono text-ink-hi tabular-nums placeholder:text-ink-low placeholder:text-xs"
           />
           <button
             onClick={() => void runByHeight()}
-            disabled={!canRun || byHeight.phase === "running" || coolingFor("byHeight") > 0}
-            className="rounded-md border border-line px-4 py-1.5 text-sm font-semibold text-ink-hi disabled:opacity-40 hover:border-line-strong"
+            disabled={
+              !canRun || heightInput === "" || byHeight.phase === "running" || coolingFor("byHeight") > 0
+            }
+            className="rounded-md border border-line px-3 py-1 text-sm font-semibold text-ink-hi disabled:opacity-40 hover:border-line-strong"
           >
             {byHeight.phase === "running" ? "fetching" : "Fetch"}
           </button>
           {coolingFor("byHeight") > 0 && (
-            <span className="text-xs font-mono text-ink-low">again in {coolingFor("byHeight")}s</span>
+            <span className="text-[11px] font-mono text-ink-low">again in {coolingFor("byHeight")}s</span>
           )}
         </div>
-        {byHeight.phase === "done" && (
-          <ResponseBlock block={byHeight.block} elapsedMs={byHeight.elapsedMs} label="live response" />
-        )}
-        {byHeight.phase === "failed" && <FailureNotice kind={byHeight.kind} detail={byHeight.detail} />}
-        <CurlBlock method="novai_getBlockByHeight" params={{ height: Number(heightInput) || 0 }} />
-      </div>
+      </PanelRow>
+      {byHeight.phase === "done" && (
+        <ResponseBlock block={byHeight.block} elapsedMs={byHeight.elapsedMs} label="live response" />
+      )}
+      {byHeight.phase === "empty" && <EmptyNotice height={byHeight.height} tip={byHeight.tip} />}
+      {byHeight.phase === "failed" && <FailureNotice kind={byHeight.kind} detail={byHeight.detail} />}
+      {heightInput === "" ? (
+        <CurlBlock
+          cmd={curlForHeightTemplate()}
+          note="Substitute a height near the current tip. Older heights answer null once the node has pruned them."
+        />
+      ) : (
+        <CurlBlock cmd={curlFor("novai_getBlockByHeight", { height: Number(heightInput) })} />
+      )}
 
-      <div className="px-6 py-5 space-y-3">
+      <PanelRow>
         <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={() => void runWalk()}
             disabled={!canRun || walk.phase === "running" || walkCooldown > 0}
-            className="rounded-md px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+            className="rounded-md px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-40"
             style={{ background: "hsl(var(--brand))", boxShadow: "var(--glow-2)" }}
           >
             {walk.phase === "running" ? "verifying" : `Verify ${VERIFY_DEPTH} blocks in your browser`}
           </button>
-          {walkCooldown > 0 && <span className="text-xs font-mono text-ink-low">again in {walkCooldown}s</span>}
-          <span className="text-xs text-ink-low">
-            {VERIFY_DEPTH + 1} sequential requests, spaced. Each block must name the previous block's hash as its parent.
+          {walkCooldown > 0 && <span className="text-[11px] font-mono text-ink-low">again in {walkCooldown}s</span>}
+          <span className="text-[11px] text-ink-low">
+            {VERIFY_DEPTH + 1} sequential requests, spaced. Each block must name the previous block's hash as its
+            parent.
           </span>
         </div>
+      </PanelRow>
 
-        {(walk.phase === "running" || walk.phase === "done" || walk.phase === "mismatch") && walk.tip && (
-          <div className="rounded-md border border-line-subtle bg-surface-0 p-3 space-y-1.5">
-            <p className="text-xs font-mono text-ink-mid">
-              tip height {walk.tip.height.toLocaleString()} hash {short(walk.tip.block_hash)} tx_count{" "}
-              {walk.tip.tx_count}
-            </p>
-            {walk.links.map((l) => (
-              <p key={l.height} className={`text-xs font-mono ${l.ok ? "text-ink-mid" : "text-errorx-text"}`}>
-                {l.ok
-                  ? `block ${l.height.toLocaleString()} hash ${short(l.hash)} parent hash matches`
-                  : `block ${l.height.toLocaleString()} HASH MISMATCH: child says ${short(l.expected ?? "")}, chain returned ${short(l.got ?? "")}`}
-              </p>
-            ))}
-            {walk.phase === "done" && (
-              <p className="text-sm text-ink-hi pt-1">
-                {VERIFY_DEPTH} blocks, {VERIFY_DEPTH} hash links verified in your browser just now, in{" "}
-                {(walk.totalMs / 1000).toFixed(1)}s.
-              </p>
-            )}
-            {walk.phase === "mismatch" && (
-              <p className="text-sm text-errorx-text pt-1">
-                Verification failed at the row above. That is the point of a real check: it can fail. If you see
-                this, the chain served inconsistent headers and I want to know.
-              </p>
-            )}
+      {(walk.phase === "running" || walk.phase === "done" || walk.phase === "mismatch") && walk.tip && (
+        <div className="bg-surface-0">
+          <div className="px-4 py-1.5 border-b border-line-subtle">
+            <span className="font-mono text-xs text-ink-mid tabular-nums">
+              tip {walk.tip.height.toLocaleString()} hash {short(walk.tip.block_hash)} tx_count {walk.tip.tx_count}
+            </span>
           </div>
-        )}
-        {walk.phase === "failed" && <FailureNotice kind={walk.kind} detail={walk.detail} />}
-      </div>
-
-      <div className="px-6 py-4">
-        <MonoLabel>sample exchange, captured at build {chainSnapshot.capturedAt.slice(0, 10)}</MonoLabel>
-        <div className="mt-2">
-          <ResponseBlock block={SNAPSHOT_RESULT} label="novai_getLatestBlock response at capture time" />
+          <DataTable
+            columns={[
+              { key: "h", label: "height", align: "right" },
+              { key: "hash", label: "block hash" },
+              { key: "check", label: "parent check" },
+            ]}
+          >
+            {walk.links.map((l) => (
+              <tr key={l.height}>
+                <Td align="right">{l.height.toLocaleString()}</Td>
+                <Td className="text-ink-low">{short(l.hash)}</Td>
+                <Td className={l.ok ? "text-ink-mid" : "text-errorx-text"}>
+                  {l.ok
+                    ? "matches"
+                    : `HASH MISMATCH: child says ${short(l.expected ?? "")}, chain returned ${short(l.got ?? "")}`}
+                </Td>
+              </tr>
+            ))}
+          </DataTable>
+          {walk.phase === "done" && (
+            <p className="px-4 py-2 text-sm text-ink-hi border-t border-line-subtle">
+              {VERIFY_DEPTH} blocks, {VERIFY_DEPTH} hash links verified in your browser just now, in{" "}
+              {(walk.totalMs / 1000).toFixed(1)}s.
+            </p>
+          )}
+          {walk.phase === "mismatch" && (
+            <p className="px-4 py-2 text-sm text-errorx-text border-t border-line-subtle">
+              Verification failed at the row above. That is the point of a real check: it can fail. If you see
+              this, the chain served inconsistent headers and I want to know.
+            </p>
+          )}
         </div>
-      </div>
-    </div>
+      )}
+      {walk.phase === "failed" && <FailureNotice kind={walk.kind} detail={walk.detail} />}
+
+      <ResponseBlock
+        block={SNAPSHOT_RESULT}
+        label={`sample exchange, captured at build ${chainSnapshot.capturedAt.slice(0, 10)}`}
+      />
+    </Panel>
   );
 }

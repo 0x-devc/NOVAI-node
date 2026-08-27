@@ -14,7 +14,11 @@ export const PUBLIC_RPC_URL = "https://rpc.novai.network";
 
 export type RpcOutcome<T> =
   | { ok: true; result: T; elapsedMs: number }
-  | { ok: false; kind: "blocked" | "rate-limited" | "rpc-error" | "malformed" | "timeout"; detail: string };
+  | {
+      ok: false;
+      kind: "blocked" | "rate-limited" | "rpc-error" | "malformed" | "timeout" | "empty";
+      detail: string;
+    };
 
 export async function rpcCall<T>(
   url: string,
@@ -44,8 +48,12 @@ export async function rpcCall<T>(
       return { ok: false, kind: "malformed", detail: "response was not JSON" };
     }
     if (body.error) return { ok: false, kind: "rpc-error", detail: `${body.error.code}: ${body.error.message}` };
+    // A null result is not an error: the node answered correctly and there is
+    // no record. For a height query that means the block is either above the
+    // tip or below the pruning horizon, which are different facts to a reader,
+    // so this is its own outcome kind and the caller supplies the context.
     if (body.result === null || body.result === undefined)
-      return { ok: false, kind: "rpc-error", detail: "empty result" };
+      return { ok: false, kind: "empty", detail: "the node returned null for this query" };
     return { ok: true, result: body.result, elapsedMs: Date.now() - started };
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError")
@@ -62,6 +70,21 @@ export async function rpcCall<T>(
 export function curlFor(method: string, params: Record<string, unknown>): string {
   const body = JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 });
   return `curl -s -X POST ${PUBLIC_RPC_URL} \\\n  -H 'Content-Type: application/json' \\\n  -d '${body}'`;
+}
+
+/**
+ * The by-height call shown before a height is known. Every concrete height goes
+ * stale, because the node prunes older blocks, so the reference form carries a
+ * substitution token rather than a number that would answer null. Derived from
+ * curlFor so the two can never drift apart in format.
+ */
+export const HEIGHT_TOKEN = "<height>";
+
+export function curlForHeightTemplate(): string {
+  return curlFor("novai_getBlockByHeight", { height: 0 }).replace(
+    '"height":0',
+    `"height":${HEIGHT_TOKEN}`
+  );
 }
 
 export const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
