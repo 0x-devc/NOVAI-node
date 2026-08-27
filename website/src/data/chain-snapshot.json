@@ -1,9 +1,9 @@
 {
-  "capturedAt": "2026-08-25T03:40:50.295Z",
-  "height": 3618150,
+  "capturedAt": "2026-08-27T00:16:41.438Z",
+  "height": 4354701,
   "round": 0,
   "txCount": 0,
-  "blockHash": "4da0a309cfa0e3b42e08080c4ecf6a0a076fcae55c13101488252467b72ab1e4",
-  "parentHash": "0735fee74a78c59519e124010ad765b39225839b8b6cc73a1eca5395963a63ae",
+  "blockHash": "a9147feeab51e1d09fa78433fd8ed8dd45d75d5a65af52f14d149b144d1cf07d",
+  "parentHash": "271408e0d92eae86811e2b166f08534a6055df0584dcc97c9f4023efcdbee6bd",
   "stateRoot": "44d05abeff7808d25dcbbac97ee836ad11f9738725aca650683214ed67f2ad7c"
 }
