@@ -32,6 +32,36 @@ const LEGACY_EXEMPT = new Set([
 const isLegacy = (rel: string) => [...LEGACY_EXEMPT].some((e) => rel === e || rel.startsWith(e + "/"));
 
 describe("design rules", () => {
+  // The console is monochrome by construction rather than by discipline. Its
+  // markup lives in console.html, which is static rather than React, plus
+  // src/console/. The src walker covers neither .html nor anything outside
+  // src, so both are gathered explicitly.
+  //
+  // Not mechanically checkable, and therefore still a review item: brand used
+  // decoratively rather than on a link or control. Brand on links is permitted,
+  // so a count cap here would fire on ordinary content.
+  it("the console carries no marketing register", () => {
+    const consoleFiles = [
+      ...files.filter((f) => f.rel.startsWith("src/console/")),
+      { rel: "console.html", text: readFileSync(resolve("console.html"), "utf8") },
+    ];
+    // A rule with nothing to police is not a rule.
+    expect(consoleFiles.length, "expected console surfaces to exist").toBeGreaterThan(1);
+
+    const FORBIDDEN: [RegExp, string][] = [
+      [/gradient-text|bg-gradient|text-transparent/, "a gradient treatment"],
+      [/violet|--violet/, "violet, which is a marketing accent"],
+      [/glow-?[23]\b/, "a glow above glow-1"],
+      [/(?:text|bg|border|fill|stroke|ring)-live\b|--live\b|hsl\(\s*192[,\s]/, "the live/cyan accent directly"],
+      [/text-ink-faint|text-faint\b/, "the faint token, which fails contrast for content"],
+    ];
+    for (const f of consoleFiles) {
+      for (const [re, what] of FORBIDDEN) {
+        expect(re.test(f.text), `${f.rel} uses ${what}`).toBe(false);
+      }
+    }
+  });
+
   it("cyan (live token) appears only in live-state components and the specimen", () => {
     const ALLOW = new Set([
       "src/index.css", // token definition

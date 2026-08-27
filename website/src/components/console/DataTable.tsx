@@ -2,6 +2,11 @@ import { ReactNode } from "react";
 
 // Real tables for anything that is a list. Compact mono rows, numeric
 // columns right-aligned, hairline row dividers, no cell borders.
+//
+// Deliberately NOT w-full: the page uses the viewport width, but a table
+// stretched to it spreads three columns across two thousand pixels of dead
+// space. Sizing to content keeps columns adjacent, which is the whole point of
+// the dense register. The overflow-x wrapper handles the opposite case.
 export interface Column {
   key: string;
   label: string;
@@ -17,7 +22,7 @@ export default function DataTable({
 }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-xs font-mono">
+      <table className="text-xs font-mono">
         <thead>
           <tr className="border-b border-line-subtle">
             {columns.map((c) => (

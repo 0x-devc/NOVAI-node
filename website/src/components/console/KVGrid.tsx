@@ -4,7 +4,14 @@ import { ReactNode } from "react";
 // no per-cell borders, values first, labels small mono beneath.
 export function KVGrid({ cols = 4, children }: { cols?: 2 | 3 | 4; children: ReactNode }) {
   const colClass = { 2: "sm:grid-cols-2", 3: "sm:grid-cols-3", 4: "sm:grid-cols-4" }[cols];
-  return <div className={`grid ${colClass} divide-y sm:divide-y-0 sm:divide-x divide-line-subtle`}>{children}</div>;
+  // sm:w-max for the same reason DataTable is not w-full: cells size to their
+  // content rather than stretching across the viewport. max-w-full keeps that
+  // from overflowing when the content is genuinely wide.
+  return (
+    <div className={`grid ${colClass} divide-y divide-line-subtle sm:w-max sm:max-w-full sm:divide-y-0 sm:divide-x`}>
+      {children}
+    </div>
+  );
 }
 
 export function KV({

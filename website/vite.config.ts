@@ -22,6 +22,20 @@ export default defineConfig(({ mode }) => ({
       },
     },
   },
+  // Multi-page build. index.html MUST stay named here: the moment `input` is
+  // set explicitly it stops being the implicit default, and omitting it would
+  // silently drop the marketing site from the build.
+  //
+  // specimen.html is deliberately absent, which is what keeps it dev-only: the
+  // dev server still serves it, the production build never sees it.
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        console: path.resolve(__dirname, "console.html"),
+      },
+    },
+  },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
     alias: {

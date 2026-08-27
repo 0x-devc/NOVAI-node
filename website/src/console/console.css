@@ -1,0 +1,42 @@
+/* Console component classes.
+ *
+ * The console's reference sections are static HTML, never React, so the
+ * repeating pieces live here as classes rather than as components. Kept in the
+ * console's own stylesheet so these rules never load on the marketing page.
+ *
+ * Monochrome by construction: the neutral ramp carries everything, brand is
+ * reserved for links and focus, and nothing here reaches for an accent.
+ */
+
+/* Rail item: hard-left section nav, desktop only. */
+.console-rail {
+  @apply flex gap-2 px-4 py-1.5 font-mono text-[11px] text-ink-mid no-underline transition-colors;
+  @apply hover:bg-surface-1 hover:text-ink-hi;
+  @apply focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-line-focus;
+}
+
+.console-rail-n {
+  @apply tabular-nums text-ink-low;
+}
+
+/* Mobile section chip: the rail's small-screen form. */
+.console-chip {
+  @apply shrink-0 whitespace-nowrap rounded border border-line px-2.5 py-1;
+  @apply font-mono text-[11px] text-ink-low no-underline transition-colors;
+  @apply hover:border-line-strong hover:text-ink-hi;
+  @apply focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-line-focus;
+}
+
+/* Section shell. scroll-mt clears the sticky header on anchor navigation. */
+.console-section {
+  @apply mt-10 scroll-mt-28 border-t border-line pt-4 lg:scroll-mt-16;
+}
+
+/* Slim mono section head, in the explorer register rather than the marketing one. */
+.console-h2 {
+  @apply flex items-baseline gap-2 font-mono text-xs uppercase tracking-[0.12em] text-ink-hi;
+}
+
+.console-h2-n {
+  @apply tabular-nums text-ink-low;
+}
