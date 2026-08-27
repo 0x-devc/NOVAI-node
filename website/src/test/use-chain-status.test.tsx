@@ -187,3 +187,59 @@ describe("useChainStatus", () => {
     expect(spy.mock.calls.length).toBe(calls);
   });
 });
+
+describe("useChainStatus fast cadence (2s)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  async function tick(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  it("polls at 2s when fast, and the display gate holds bps until 16s of span", async () => {
+    let h = 1000;
+    const spy = vi.fn().mockImplementation(async () => okBlock((h += 3)));
+    vi.stubGlobal("fetch", spy);
+    const { result } = renderHook(() => useChainStatus({ rpcUrl: URL, fast: true }));
+    await tick(1);
+    expect(spy).toHaveBeenCalledTimes(1);
+    await tick(12_000); // six more polls at 2s
+    expect(spy).toHaveBeenCalledTimes(7);
+    expect(result.current.bps).toBeNull(); // 6 samples, 12s span, below the 16s gate
+    await tick(6_000); // span reaches 18s
+    expect(result.current.bps).toBeCloseTo(1.5, 5); // +3 blocks per 2s, exact
+  });
+
+  it("the 60s span window forgets old rates: only the last minute drives the number", async () => {
+    let h = 0;
+    let phase: "a" | "b" = "a";
+    const spy = vi.fn().mockImplementation(async () => okBlock((h += phase === "a" ? 3 : 2)));
+    vi.stubGlobal("fetch", spy);
+    const { result } = renderHook(() => useChainStatus({ rpcUrl: URL, fast: true }));
+    await tick(1);
+    await tick(40_000); // phase a: 1.5 bps
+    phase = "b";
+    await tick(70_000); // phase b: 1.0 bps for longer than the whole window
+    expect(result.current.bps).toBeCloseTo(1.0, 5);
+  });
+
+  it("toggling fast mid-flight keeps the estimator and does not crash", async () => {
+    let h = 0;
+    const spy = vi.fn().mockImplementation(async () => okBlock((h += 3)));
+    vi.stubGlobal("fetch", spy);
+    const { result, rerender } = renderHook(({ fast }) => useChainStatus({ rpcUrl: URL, fast }), {
+      initialProps: { fast: true },
+    });
+    await tick(20_001);
+    expect(result.current.bps).toBeCloseTo(1.5, 5);
+    rerender({ fast: false });
+    await tick(20_000);
+    expect(result.current.state).toBe("live");
+    expect(result.current.bps).not.toBeNull();
+  });
+});
