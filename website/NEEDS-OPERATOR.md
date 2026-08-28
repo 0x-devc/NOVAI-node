@@ -212,6 +212,36 @@ Anyone building an indexer needs this before they start, not after. The console
 publishes it as a generated configuration fact regardless, but the doc should
 carry it too.
 
+## 13. `novai_faucet` is documented as dev-keys only, but accepts `--faucet-key`
+
+`docs/RPC_REFERENCE.md:1555` says the method is "available **only** when the
+node was launched with `--dev-keys --allow-insecure-dev-keys`". `handle_faucet`
+resolves its key in three steps: use `--faucet-key` if one was loaded, else fall
+back to the deterministic dev key when `--dev-keys` is set, else refuse. So the
+method runs on a production node whenever a faucet key is present.
+
+This is item 9 again on a different surface. Item 9 is the HTTP route, this is
+the JSON-RPC method, and both read as self-limiting to devnets when neither is.
+Fixing one without the other leaves the document half wrong.
+
+The console carries this as drift exception `faucet-rpc-gating-incomplete`,
+printed on every generator run. Fixing the sentence forces the exception to be
+deleted, because the gate fails when a listed exception stops applying.
+
+## 14. `CONTRIBUTING.md` omits the gate test convention
+
+31 of the 121 test files under `crates/*/tests/` are named `gate_*`, and the
+convention carries real meaning about how a change is expected to be proven.
+`CONTRIBUTING.md` is 62 lines and never mentions it. Its "Consensus and
+Execution Changes" section comes closest, requiring a safety argument and
+forbidding auto-fixes, but it does not tell a contributor that gate-named tests
+exist or what makes one.
+
+A contributor meets this convention within minutes of opening the test
+directory and has nothing to read about it. The console's contributing section
+will describe it, but the console describing a repo convention that the repo
+itself does not document is the wrong way round.
+
 ---
 
 FYI, no action needed unless renewal fails: the rpc.novai.network TLS

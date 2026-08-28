@@ -6,8 +6,9 @@ other.
 
 Read this before touching anything under `website/`.
 
-**Status: 13 commits ahead of origin/main, none pushed. Pushing auto-deploys to
-Cloudflare. Do not push.**
+**Status: 17 commits ahead of origin/main, none pushed. Pushing auto-deploys to
+Cloudflare. Do not push.** One of the seventeen, `1842fb7`, is node work rather
+than website work.
 
 Two workstreams share this directory:
 
@@ -88,6 +89,9 @@ deleted by `4e32c47`; it is the origin of the config-facts rule in section 4.
 | `581564b` | C0: operator actions rewritten (CORS resolved, doc drift, hosting, funding) |
 | `e2f4647` | C0: enable `strictNullChecks` and gate the suite on typecheck |
 | `c102a5f` | C1: multi-page build and the console layout skeleton |
+| `dcc7488` | This handoff document |
+| (C2, this session) | C2: the console generation pipeline, the four-way drift gate and the four printed drift exceptions |
+| (C2, this session) | The dash gate fix, plus the audit of every other shared-regex site |
 
 ---
 
@@ -164,15 +168,22 @@ The ordering test the page must keep passing: a developer must reach a working
 transaction without scrolling through the AI section, and must reach the AI
 section without reading the transaction section.
 
-- **Gate C2, the generation pipeline.** `website/scripts/generate-console-data.mjs`
-  emitting `website/src/data/console-data.generated.json`, plus
-  `website/public/openrpc.json` from the same parsed data. Copies the
-  `generate-repo-stats.mjs` pattern exactly: pure Node, no network, no git, no
-  shell-outs, sorted directory reads, `--root` / `--out` / `--check`, every
-  value wrapped as `{value, method}` so provenance travels with the data,
-  `generatedAt` preserved when values are unchanged so determinism is a byte
-  compare, atomic tmp-plus-rename, `FAIL:` prefix and exit 1, `--check` wired
-  into `prebuild`.
+- **Gate C2, the generation pipeline. LANDED 2026-08-28.**
+  `website/scripts/generate-console-data.mjs` emits
+  `website/src/data/console-data.generated.json` and
+  `website/public/openrpc.json` from one parse, so the two cannot disagree.
+  Follows the `generate-repo-stats.mjs` pattern: pure Node, no network, no git,
+  no shell-outs, `--root` / `--out` / `--openrpc` / `--check`, provenance
+  travelling with the data, `generatedAt` preserved when values are unchanged so
+  determinism is a byte compare, atomic tmp-plus-rename, `FAIL:` prefix and exit
+  1, `--check` in `prebuild`. Measured coverage, printed on every run: 29
+  methods, 29 curls, 25 own params tables resolving to 29, 18 own result fences
+  resolving to 29, 21 own error sets resolving to 29, 19 sample responses. The
+  gap closes through 7 alias resolutions and 17 methods inheriting a record
+  shape from their category preamble. Those two numbers were originally believed
+  to be 4 and 11; building to the believed figures would have shipped six
+  methods showing a record type name with no definition behind it. Measure the
+  document, never the memory of it.
 - **Gate C3, the reference content.** Sections 02 through 09. Deletes the layout
   filler block currently in `console.html`. **The AI recipe list gets its own
   short review BEFORE C3**, because those are public claims about what the chain
@@ -343,8 +354,10 @@ surface while looking complete.
   on the live testnet decides whether the console documents a funding path or
   states plainly that none exists. Build no faucet UI either way.
   `NEEDS-OPERATOR.md` item 2.
-- **Three drift exceptions, as shrinking debt.** Each has a `NEEDS-OPERATOR.md`
-  entry and each must be deleted when the doc is fixed:
+- **Four drift exceptions, as shrinking debt.** Each has a `NEEDS-OPERATOR.md`
+  entry, each is printed on every generator run, and each must be deleted when
+  the doc is fixed. The gate fails when a listed exception stops applying,
+  naming the entry to delete, so the list can only shrink:
   1. `-32014 NonceTooHigh` is emitted at `crates/node/src/rpc.rs:2060` and
      appears zero times in the doc. This is client-breaking, not cosmetic: the
      doc's guidance for the codes it does list would make a client resync when
@@ -354,6 +367,11 @@ surface while looking complete.
      runs in production and does NOT run on a plain dev-keys devnet.
   3. `novai_faucet`'s disabled path returns `-32000`; the doc's table says
      `-32602`.
+  4. `novai_faucet` is documented as available only under `--dev-keys`, but
+     `handle_faucet` prefers a loaded `--faucet-key` and only falls back to the
+     dev key, so the method runs on a production node. This is defect 2 again on
+     the JSON-RPC surface rather than the HTTP route. `NEEDS-OPERATOR.md` item
+     13.
   Two further doc omissions are recorded but are not gate exceptions: every
   example assumes a loopback endpoint (the 29 curls themselves use `$URL` and
   are portable, so this is a one-line prose fix and probably the highest-value
@@ -362,9 +380,14 @@ surface while looking complete.
 - **300-weight stat at 360px is still unjudged.** Carried from site Gate 2. The
   operator could not reach the dev server from a phone. Open item for site
   Gate 7 mobile QA. Do not guess it.
-- **Candidate C, the treemap, is HELD, not rejected.** The operator hedged and
-  wanted it revisited after judging candidate B. B has since been built and
-  committed. C has not been revisited.
+- **Candidate C, the treemap, is CLOSED as rejected** (2026-08-28). It was held
+  rather than rejected for a long time, so the reasoning is recorded here to
+  stop it being revived. A treemap sizes crates by line count, which answers
+  "which crate is biggest". Nobody learning a system asks that, and on the
+  marketing site it is the same vanity-stat class that `4e32c47` deleted. The
+  same 16 crates rendered as the layered dependency DAG answer the question a
+  learner actually has, so the DAG replaces it and moves to the console, where a
+  crate map is a LEARN artifact rather than a marketing number.
 - **Console table scroll affordance.** On narrow viewports a wide table scrolls
   correctly inside its container and the document does not overflow, but a
   reader cannot tell that it scrolls. Open for C3.
@@ -487,9 +510,20 @@ A hero that passes i, ii and iv while failing iii is still rejected.
 
 ## 9. Practical notes for a fresh session
 
-- Baseline gate state at `c102a5f`: dash gate clean, typecheck clean, 48 tests
-  passing, lint 22 problems (pre-existing, all in legacy files), `specimen.html`
-  absent from `dist`.
+- Baseline gate state after C2: dash gate clean (and now actually running, see
+  section 10), typecheck clean, 82 tests of which 81 pass, lint 22 problems
+  (pre-existing, all in legacy files), `specimen.html` absent from `dist`. The
+  one failing test is `repo-stats`'s staleness gate. It is reporting truth: the
+  committed `repo-stats.generated.json` predates node work that has since landed
+  in `1842fb7`, so `linesOfRust` is 128,811 against a tree measuring 129,361 and
+  `tests` is 2,138 against 2,146.
+- **The reason for leaving that gate red has expired, and refreshing it is now a
+  one-command operator decision.** While the node work was uncommitted,
+  regenerating would have baked numbers derived from uncommitted work into a
+  file the public site publishes, which is why it was left alone. Now that
+  `1842fb7` has landed, `npm run stats` produces a file that describes committed
+  state and the suite goes green. That is a site-number change, so it is the
+  operator's call and not a side effect of a console commit.
 - `npm test` = dash gate, typecheck, suite. `npm run build` runs `prebuild`
   first, which is the dash gate plus the repo-stats staleness check.
   `npm run predeploy` is the full pre-deploy chain and writes the snapshot.
@@ -510,3 +544,39 @@ A hero that passes i, ii and iv while failing iii is still rejected.
   filename, so do not name it in a tracked file either.
 - Gate reports state what was done, what was NOT done, and what is uncertain,
   then STOP and wait.
+
+---
+
+## 10. Learnings
+
+Things that were expensive to find and are not obvious from the code.
+
+### The dash gate never worked
+
+One module-level `/g/` regex shared between `test()` and `matchAll()` meant
+`lastIndex` carried over, so every line was scanned from past the violation.
+Concealed because `check-dashes.mjs` defines the forbidden characters itself and
+is the first file the walk reaches. Every "dash gate: clean" recorded before
+2026-08-28 was unreliable, including in commits already made. Found not by
+review but by building a second generator that had to touch the same characters.
+The first attempt to PROVE the fix also reported clean and was also wrong: the
+probe file had a leading dot and the walk skips dotfiles.
+
+Generalisation: a gate that can only be exercised by its own definition site
+cannot be trusted, and a proof of a gate needs its own proof that the probe was
+actually seen.
+
+The fix builds the regex fresh at each use, and the definition-site exemption is
+two conditions, a path allowlist AND a per-line marker, so it cannot be used to
+silence an ordinary violation. The allowlist fails when an entry stops being
+needed, on the same only-shrink principle as `KNOWN_DRIFT`.
+
+The rest of the tree was audited for the same class on 2026-08-28. `testRe` and
+`unsafeRe` in `generate-repo-stats.mjs` are shared `/g/` regexes reused across
+every file in the walk, and they are safe only because `String.prototype.match`
+resets `lastIndex` to zero both before and after (verified empirically, and
+noted in a comment at the site so nobody converts those calls to `matchAll`).
+`errorCodePattern` in `generate-console-data.mjs` was safe by accident and is
+now a factory. Nothing under `src/` holds a reusable regex object at all: every
+hit is an import path, an SVG `<g>` element, or an inline literal built fresh at
+each call. No other instance of the bug exists in the tree.
