@@ -179,6 +179,9 @@ impl NonceProvider for InMemoryNonceProvider {
 struct CommitMetrics {
     block_tx_count: AtomicU64,
     total_txs_committed: AtomicU64,
+    block_applied_tx_count: AtomicU64,
+    total_txs_applied: AtomicU64,
+    total_txs_skipped: AtomicU64,
 }
 
 /// Post-commit callback: executes transactions, advances nonces, and updates the blockchain index.
@@ -303,6 +306,24 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
         self.commit_metrics
             .total_txs_committed
             .fetch_add(total_txs as u64, Ordering::Relaxed);
+
+        // Gate ACCEL-Q8: publish EXECUTED work beside the inclusion counters
+        // above, which are left untouched in meaning. Under the
+        // duplicate-inclusion window a transaction proposed at H is still
+        // selectable by the H+1 and H+2 leaders, and those re-inclusions
+        // commit as Skipped, so applied over committed is the duplication
+        // factor. One pass over the outcome slice and three relaxed atomic
+        // ops: no allocation, no lock, no I/O, no syscall on the commit path.
+        let tally = metrics::tally_outcomes(&outcomes);
+        self.commit_metrics
+            .block_applied_tx_count
+            .store(tally.applied, Ordering::Relaxed);
+        self.commit_metrics
+            .total_txs_applied
+            .fetch_add(tally.applied, Ordering::Relaxed);
+        self.commit_metrics
+            .total_txs_skipped
+            .fetch_add(tally.skipped, Ordering::Relaxed);
 
         // H-07 (periodic purge of expired governance proposals) is intentionally
         // not wired here: purge_expired_proposals deletes rows the SMT root still
@@ -1722,6 +1743,13 @@ fn main() {
                         total_txs_committed: commit_metrics
                             .total_txs_committed
                             .load(Ordering::Relaxed),
+                        // Gate ACCEL-Q8: the executed-work counters, read
+                        // lock-free beside the inclusion counters above.
+                        block_applied_tx_count: commit_metrics
+                            .block_applied_tx_count
+                            .load(Ordering::Relaxed),
+                        total_txs_applied: commit_metrics.total_txs_applied.load(Ordering::Relaxed),
+                        total_txs_skipped: commit_metrics.total_txs_skipped.load(Ordering::Relaxed),
                         // Copilot metrics from observer
                         copilot_observations_total: observer_metrics
                             .observations
@@ -2480,6 +2508,246 @@ mod tests {
             commit_metrics.total_txs_committed.load(Ordering::Relaxed),
             5,
             "total_txs_committed should accumulate across multiple commits",
+        );
+    }
+
+    /// A funded store plus a block whose three transactions do NOT all
+    /// apply, the fixture both gate ACCEL-Q8 arms measure against.
+    ///
+    /// Tx 1 applies. Tx 2 is byte-identical to tx 1: this is the live
+    /// duplicate-inclusion shape, a re-inclusion of an already-executed
+    /// transaction, and the executor skips it root-neutrally because the
+    /// sender's nonce has already moved past it. Tx 3 is an unfunded sender,
+    /// the other common skip. Mixed on purpose: against an all-skipped or
+    /// all-applied block an implementation that reported the included count
+    /// could still pass.
+    fn mixed_outcome_fixture() -> (Storage, Vec<TxV1>) {
+        const STRANGER: Address = [0x33; 32];
+
+        // Fund through the canonical SMT path so KEY_SMT_ROOT matches the
+        // rows, exactly as a live chain would.
+        let mut storage = Storage::Memory(MemKv::new());
+        for (k, v) in [
+            (
+                account_key(&C_SENDER),
+                encode_account_v1(&AccountStateV1 {
+                    balance: 1_000_000,
+                    nonce: 0,
+                })
+                .to_vec(),
+            ),
+            (
+                account_key(&C_RECIPIENT),
+                encode_account_v1(&AccountStateV1 {
+                    balance: 10_000,
+                    nonce: 0,
+                })
+                .to_vec(),
+            ),
+            (
+                novai_state::KEY_FEE_POOL.to_vec(),
+                novai_state::encode_fee_pool_v1(&novai_state::FeePoolV1 { balance: 0 }).to_vec(),
+            ),
+        ] {
+            let ops = vec![WriteOp::Put(k, v)];
+            let mut all = ops.clone();
+            novai_execution::append_smt_ops_for_state_ops(&storage, &ops, &mut all)
+                .expect("append smt ops");
+            storage.apply_batch(&all).expect("seed batch");
+        }
+
+        // Execution never verifies signatures, so a dummy pubkey is correct.
+        let transfer = |from: Address, nonce: u64, amount: u64| TxV1 {
+            version: TxVersion::V1,
+            from,
+            pubkey: from,
+            nonce,
+            fee: 1_000,
+            payload: novai_execution::encode_transfer_payload_v1(
+                &novai_execution::TransferPayloadV1 {
+                    to: C_RECIPIENT,
+                    amount,
+                },
+            )
+            .to_vec(),
+            sig: [0u8; 64],
+        };
+
+        let txs = vec![
+            transfer(C_SENDER, 0, 5_000),
+            transfer(C_SENDER, 0, 5_000),
+            transfer(STRANGER, 0, 1),
+        ];
+        (storage, txs)
+    }
+
+    /// Gate ACCEL-Q8: the executed-work counters.
+    ///
+    /// `novai_block_tx_count` and `novai_total_txs_committed` count
+    /// INCLUSIONS. The proposer's only selection predicate is
+    /// `tx.nonce == expected_nonce` (crates/mempool/src/lib.rs) and expected
+    /// advances only at commit, so a transaction proposed at H stays
+    /// selectable by the H+1 and H+2 leaders. Those re-inclusions execute as
+    /// `TxOutcome::Skipped` and change no state, which makes this a
+    /// MEASUREMENT bug and not a safety bug: the throughput counters overstate
+    /// executed work by an unknown, load-dependent factor.
+    ///
+    /// This pins the additive counters that make the factor observable. For a
+    /// block whose transactions do not all apply, the applied counters must
+    /// report the Applied count while the two existing counters keep reporting
+    /// the included count, unchanged in meaning.
+    ///
+    /// Non-vacuity: the fixture is deliberately MIXED (one Applied, two
+    /// Skipped) and the outcome vector is asserted directly, so the block can
+    /// never silently become all-skipped. An implementation that stores the
+    /// included count fails on 3 against 1; one that stores a constant zero
+    /// fails on 0 against 1.
+    #[test]
+    fn on_commit_counts_applied_separately_from_included() {
+        let commit_metrics = Arc::new(CommitMetrics::default());
+        let callback = ExecutionCommitCallback {
+            nonce_provider: Arc::new(InMemoryNonceProvider::new()),
+            blockchain_index: Arc::new(Mutex::new(rpc::BlockchainIndex::new())),
+            pending_mempool_removals: Arc::new(Mutex::new(Vec::new())),
+            commit_metrics: Arc::clone(&commit_metrics),
+            snapshot_producer: Arc::new(novai_node::snapshot::producer::SnapshotProducer::new(
+                std::path::PathBuf::from("unused-no-demand"),
+            )),
+        };
+
+        let (mut storage, txs) = mixed_outcome_fixture();
+        let exec = novai_execution::execute_block_to_root(&storage, &txs, 1).expect("execute");
+        assert_eq!(
+            exec.outcomes,
+            vec![
+                novai_execution::TxOutcome::Applied,
+                novai_execution::TxOutcome::Skipped,
+                novai_execution::TxOutcome::Skipped,
+            ],
+            "non-vacuity: the fixture must be a MIXED block, or an \
+             implementation that reported the included count could still pass",
+        );
+
+        let block = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: exec.post_root,
+            txs,
+        };
+        callback
+            .on_commit(&mut storage, &block, None)
+            .expect("on_commit mixed block");
+
+        assert_eq!(
+            commit_metrics.block_tx_count.load(Ordering::Relaxed),
+            3,
+            "novai_block_tx_count must keep counting INCLUSIONS; its meaning is \
+             consumed by the monitoring stack and by every historical \
+             measurement",
+        );
+        assert_eq!(
+            commit_metrics.total_txs_committed.load(Ordering::Relaxed),
+            3,
+            "novai_total_txs_committed must keep counting INCLUSIONS; \
+             alerts.py derives tx_rate from it",
+        );
+        assert_eq!(
+            commit_metrics
+                .block_applied_tx_count
+                .load(Ordering::Relaxed),
+            1,
+            "novai_block_applied_tx_count must report the last committed \
+             block's Applied count, not its included count",
+        );
+        assert_eq!(
+            commit_metrics.total_txs_applied.load(Ordering::Relaxed),
+            1,
+            "novai_total_txs_applied must accumulate Applied outcomes only; \
+             applied over committed IS the duplication factor",
+        );
+        assert_eq!(
+            commit_metrics.total_txs_skipped.load(Ordering::Relaxed),
+            2,
+            "novai_total_txs_skipped must accumulate Skipped outcomes only",
+        );
+    }
+
+    /// Gate ACCEL-Q8, the cached-hit arm.
+    ///
+    /// The test above drives the cache-MISS path, where the outcomes come
+    /// from a commit-time re-execution. In production most commits are cache
+    /// HITS (gate ACCEL Stage B): the outcomes come from the vote-time
+    /// `PendingExec` instead. The counters must read the same either way, or
+    /// the live surface would report the executed count on a rare path and
+    /// something else on the common one.
+    #[test]
+    fn on_commit_counts_applied_on_the_cached_hit_path() {
+        let commit_metrics = Arc::new(CommitMetrics::default());
+        let callback = ExecutionCommitCallback {
+            nonce_provider: Arc::new(InMemoryNonceProvider::new()),
+            blockchain_index: Arc::new(Mutex::new(rpc::BlockchainIndex::new())),
+            pending_mempool_removals: Arc::new(Mutex::new(Vec::new())),
+            commit_metrics: Arc::clone(&commit_metrics),
+            snapshot_producer: Arc::new(novai_node::snapshot::producer::SnapshotProducer::new(
+                std::path::PathBuf::from("unused-no-demand"),
+            )),
+        };
+
+        let (mut storage, txs) = mixed_outcome_fixture();
+        let exec = novai_execution::execute_block_to_root(&storage, &txs, 1).expect("execute");
+        assert_eq!(
+            exec.outcomes,
+            vec![
+                novai_execution::TxOutcome::Applied,
+                novai_execution::TxOutcome::Skipped,
+                novai_execution::TxOutcome::Skipped,
+            ],
+            "non-vacuity: the fixture must be a MIXED block",
+        );
+
+        // The vote-time write set handed to the commit callback, exactly as
+        // `CachedExec::from_pending` builds it from a taken `PendingExec`.
+        let cached = novai_node::exec_apply::CachedExec {
+            write_ops: exec.write_ops(),
+            outcomes: exec.outcomes.clone(),
+        };
+        let block = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: exec.post_root,
+            txs,
+        };
+        callback
+            .on_commit(&mut storage, &block, Some(cached))
+            .expect("on_commit cached hit");
+
+        assert_eq!(
+            commit_metrics.block_tx_count.load(Ordering::Relaxed),
+            3,
+            "novai_block_tx_count must still count INCLUSIONS on the cached path",
+        );
+        assert_eq!(
+            commit_metrics
+                .block_applied_tx_count
+                .load(Ordering::Relaxed),
+            1,
+            "the cached path must report the same Applied count as the \
+             re-execution path, or the live surface reads one number on \
+             the common path and another on the rare one",
+        );
+        assert_eq!(
+            commit_metrics.total_txs_applied.load(Ordering::Relaxed),
+            1,
+            "novai_total_txs_applied must accumulate Applied outcomes on \
+             the cached path too",
+        );
+        assert_eq!(
+            commit_metrics.total_txs_skipped.load(Ordering::Relaxed),
+            2,
+            "novai_total_txs_skipped must accumulate Skipped outcomes on \
+             the cached path too",
         );
     }
 

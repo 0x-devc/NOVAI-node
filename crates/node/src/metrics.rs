@@ -66,6 +66,46 @@ pub mod pool_metrics {
     }
 }
 
+/// Gate ACCEL-Q8: one committed block's outcome vector split into the work
+/// that executed and the work that did not.
+///
+/// `novai_block_tx_count` and `novai_total_txs_committed` count INCLUSIONS.
+/// The proposer's only selection predicate is `tx.nonce == expected_nonce`
+/// and expected advances only at commit, which lands at trigger height minus
+/// two while the leader rotates every height, so a transaction proposed at H
+/// stays selectable by the H+1 and H+2 leaders. Those re-inclusions execute as
+/// `TxOutcome::Skipped` and change no state, so this is a MEASUREMENT bug and
+/// not a safety bug: the throughput counters overstate executed work by a
+/// duplication factor that is unknown and load-dependent. Tallying the
+/// outcomes makes the factor directly observable as applied over committed.
+///
+/// Commit-path safe by construction: one pass over a borrowed slice, no
+/// allocation, no lock, no I/O, no syscall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OutcomeTally {
+    /// Transactions that executed and moved state.
+    pub applied: u64,
+    /// Transactions that were committed but skipped root-neutrally.
+    pub skipped: u64,
+}
+
+/// Tally one block's per-tx outcomes.
+///
+/// The match is deliberately exhaustive with no wildcard arm: a future
+/// `TxOutcome` variant must fail to compile here rather than being silently
+/// folded into `skipped` and quietly corrupting the duplication factor.
+#[must_use]
+pub fn tally_outcomes(outcomes: &[novai_execution::TxOutcome]) -> OutcomeTally {
+    let mut tally = OutcomeTally::default();
+    for outcome in outcomes {
+        match outcome {
+            novai_execution::TxOutcome::Applied => tally.applied += 1,
+            novai_execution::TxOutcome::Skipped => tally.skipped += 1,
+        }
+    }
+    tally
+}
+
 pub struct MetricsSnapshot {
     /// Height of last committed block.
     pub committed_height: u64,
@@ -135,6 +175,19 @@ pub struct MetricsSnapshot {
     pub block_tx_count: u64,
     /// Total transactions committed across all blocks.
     pub total_txs_committed: u64,
+    /// Gate ACCEL-Q8: transactions in the last committed block that actually
+    /// executed. Sits beside `block_tx_count`, which counts inclusions;
+    /// the two differ by the block's skipped re-inclusions.
+    pub block_applied_tx_count: u64,
+    /// Gate ACCEL-Q8: total transactions that executed as Applied since
+    /// startup. `total_txs_applied / total_txs_committed` IS the duplication
+    /// factor, read straight off the surface with no join and no query.
+    pub total_txs_applied: u64,
+    /// Gate ACCEL-Q8: total transactions that committed but were skipped
+    /// root-neutrally since startup. Carried because the outcome tally
+    /// already computes it, and because a rising skip rate at flat applied
+    /// throughput is the signature the duplication window is widening.
+    pub total_txs_skipped: u64,
 
     // Copilot metrics
     /// Total copilot observation cycles.
@@ -248,6 +301,18 @@ novai_block_tx_count {}
 # TYPE novai_total_txs_committed counter
 novai_total_txs_committed {}
 
+# HELP novai_block_applied_tx_count Transactions in last committed block that executed (Applied), against novai_block_tx_count which counts inclusions
+# TYPE novai_block_applied_tx_count gauge
+novai_block_applied_tx_count {}
+
+# HELP novai_total_txs_applied Total transactions that executed (Applied) since startup; applied over committed is the duplicate-inclusion factor
+# TYPE novai_total_txs_applied counter
+novai_total_txs_applied {}
+
+# HELP novai_total_txs_skipped Total transactions committed but skipped root-neutrally since startup
+# TYPE novai_total_txs_skipped counter
+novai_total_txs_skipped {}
+
 # HELP novai_copilot_observations_total Total copilot observation cycles
 # TYPE novai_copilot_observations_total counter
 novai_copilot_observations_total {}
@@ -290,6 +355,9 @@ novai_anomaly_last_confidence {}
             self.view_changes_total,
             self.block_tx_count,
             self.total_txs_committed,
+            self.block_applied_tx_count,
+            self.total_txs_applied,
+            self.total_txs_skipped,
             self.copilot_observations_total,
             self.anomaly_signals_total,
             self.anomaly_signals_published,
@@ -435,6 +503,12 @@ mod tests {
             view_changes_total: 5,
             block_tx_count: 25,
             total_txs_committed: 1050,
+            // Gate ACCEL-Q8 fields; compiler-forced constructor growth. Kept
+            // coherent with the two inclusion counters (10 <= 25, and
+            // 350 + 700 == 1050).
+            block_applied_tx_count: 10,
+            total_txs_applied: 350,
+            total_txs_skipped: 700,
             copilot_observations_total: 200,
             anomaly_signals_total: 3,
             anomaly_signals_published: 2,
@@ -498,6 +572,11 @@ mod tests {
             view_changes_total: 0,
             block_tx_count: 0,
             total_txs_committed: 0,
+            // Gate ACCEL-Q8 fields; compiler-forced constructor growth,
+            // zero like the rest of this fixture.
+            block_applied_tx_count: 0,
+            total_txs_applied: 0,
+            total_txs_skipped: 0,
             copilot_observations_total: 0,
             anomaly_signals_total: 0,
             anomaly_signals_published: 0,
@@ -544,6 +623,11 @@ mod tests {
             view_changes_total: 0,
             block_tx_count: 0,
             total_txs_committed: 0,
+            // Gate ACCEL-Q8 fields; compiler-forced constructor growth,
+            // zero like the rest of this fixture.
+            block_applied_tx_count: 0,
+            total_txs_applied: 0,
+            total_txs_skipped: 0,
             copilot_observations_total: 0,
             anomaly_signals_total: 0,
             anomaly_signals_published: 0,

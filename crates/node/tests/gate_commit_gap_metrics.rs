@@ -37,6 +37,13 @@ fn snapshot() -> MetricsSnapshot {
         view_changes_total: 5,
         block_tx_count: 2,
         total_txs_committed: 1_000,
+        // Gate ACCEL-Q8 fields; same compiler-forced growth as above.
+        // Kept coherent with the two inclusion counters (1 <= 2, and
+        // 350 + 650 == 1_000). Their own pins live in
+        // gate_applied_tx_metrics.rs; the assertions below are untouched.
+        block_applied_tx_count: 1,
+        total_txs_applied: 350,
+        total_txs_skipped: 650,
         copilot_observations_total: 0,
         anomaly_signals_total: 0,
         anomaly_signals_published: 0,

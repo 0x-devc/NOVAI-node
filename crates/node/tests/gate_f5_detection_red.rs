@@ -388,6 +388,11 @@ fn metrics_surface_exposes_sync_mode() {
         view_changes_total: 0,
         block_tx_count: 0,
         total_txs_committed: 0,
+        // Gate ACCEL-Q8 fields; compiler-forced constructor growth,
+        // zero like the rest of this fixture.
+        block_applied_tx_count: 0,
+        total_txs_applied: 0,
+        total_txs_skipped: 0,
         copilot_observations_total: 0,
         anomaly_signals_total: 0,
         anomaly_signals_published: 0,
