@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "prebuild": "node scripts/check-dashes.mjs && node scripts/generate-repo-stats.mjs --check",
+    "prebuild": "node scripts/check-dashes.mjs && node scripts/generate-repo-stats.mjs --check && node scripts/generate-console-data.mjs --check",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
@@ -15,6 +15,7 @@
     "test": "node scripts/check-dashes.mjs && npm run typecheck && vitest run",
     "test:watch": "vitest",
     "stats": "node scripts/generate-repo-stats.mjs",
+    "console:data": "node scripts/generate-console-data.mjs",
     "snapshot": "node scripts/capture-chain-snapshot.mjs",
     "snapshot:check": "node scripts/check-snapshot-freshness.mjs",
     "predeploy": "npm run snapshot && npm run snapshot:check && npm test && npm run build"

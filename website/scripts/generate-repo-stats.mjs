@@ -123,6 +123,11 @@ function compute(root) {
   if (lines === 0) fail("linesOfRust computed to zero");
 
   // tests over crates/ + sdk/
+  // These two are shared /g/ regexes reused across every file in the walk, which
+  // is normally the lastIndex trap that silently disarmed the dash gate. They
+  // are safe ONLY because String.prototype.match resets lastIndex to 0 both
+  // before and after a global match (verified, not assumed). Switch either call
+  // below to matchAll, exec or test and that stops being true.
   const testRe = /#\[(?:tokio::)?test(?:\(|\])/g;
   const unsafeRe = /\bunsafe\s*(?:\{|fn\b|impl\b|trait\b|extern\b)/g;
   let tests = 0;

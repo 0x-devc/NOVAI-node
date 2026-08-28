@@ -1,0 +1,1481 @@
+{
+  "openrpc": "1.2.6",
+  "info": {
+    "title": "NOVAI JSON-RPC",
+    "version": "1.0.0",
+    "description": "Generated from docs/RPC_REFERENCE.md and cross-checked against the node's dispatch table, the README method table and the Python SDK. Not hand-maintained.",
+    "x-generatedAt": "2026-08-28T19:12:27.602Z"
+  },
+  "methods": [
+    {
+      "name": "novai_getLatestBlock",
+      "summary": "Latest committed block header",
+      "description": "Returns the header of the most recently committed block.",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32600,
+          "message": "only the global ones (-32600 malformed envelope, -32601 unknown method)"
+        },
+        {
+          "code": -32601,
+          "message": "only the global ones (-32600 malformed envelope, -32601 unknown method)"
+        }
+      ],
+      "x-novai-params-source": "none",
+      "x-novai-result-source": "fence"
+    },
+    {
+      "name": "novai_getBlockByHeight",
+      "summary": "Block header at a given height",
+      "description": "Returns the header for a given height.",
+      "params": [
+        {
+          "name": "height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "must be ≤ committed height"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "missing/non-numeric `height`"
+        },
+        {
+          "code": -32602,
+          "message": "`height` exceeds the committed height (response includes the actual cap)"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "alias of novai_getLatestBlock"
+    },
+    {
+      "name": "novai_getBlockByHash",
+      "summary": "Block header by its hash",
+      "description": "Returns the header for a given block hash. Useful for following parent chains backwards.",
+      "params": [
+        {
+          "name": "hash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "exactly 64 hex chars"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "hash isn't 32 bytes"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "alias of novai_getLatestBlock"
+    },
+    {
+      "name": "novai_getBalance",
+      "summary": "Account balance and nonce",
+      "description": "Returns an account's current balance (u128) and expected nonce.",
+      "params": [
+        {
+          "name": "address",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "32-byte account address"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "address isn't 32 bytes"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence"
+    },
+    {
+      "name": "novai_getNonce",
+      "summary": "Account expected nonce",
+      "description": "Returns just the expected nonce for an account. Cheaper than `getBalance` if you don't need the balance.",
+      "params": [
+        {
+          "name": "address",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "32-byte account address"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "address isn't 32 bytes"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "alias of novai_getBalance",
+      "x-novai-result-source": "fence"
+    },
+    {
+      "name": "novai_submitTransaction",
+      "summary": "Submit a signed tx",
+      "description": "Submits a hex-encoded, signed `TxV1` to the mempool. The node validates the signature, address derivation, fee minimum, and size, then broadcasts it via P2P. It does **not** wait for inclusion.",
+      "params": [
+        {
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "x-novai-doc-type": "string"
+          },
+          "description": "hex-encoded signed tx; max 262 144 chars (= 128 KiB binary)"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "params malformed"
+        },
+        {
+          "code": -32000,
+          "message": "tx hex too large; tx decode failed; tx exceeds binary size cap; signature invalid"
+        },
+        {
+          "code": -32001,
+          "message": "mempool at capacity"
+        },
+        {
+          "code": -32010,
+          "message": "nonce too low (message: `NonceTooLow: expected N, got M`)"
+        },
+        {
+          "code": -32011,
+          "message": "fee too low (message: `FeeTooLow: minimum N, got M`)"
+        },
+        {
+          "code": -32012,
+          "message": "per-sender pending limit exceeded (message: `SenderLimitExceeded: max N pending per sender`)"
+        },
+        {
+          "code": -32013,
+          "message": "other validation error"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure during validation"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence"
+    },
+    {
+      "name": "novai_getTransaction",
+      "summary": "Tx receipt by txid",
+      "description": "Returns receipt metadata for a committed transaction. Returns `null` if the txid isn't known (either invalid, still in mempool, or evicted).",
+      "params": [
+        {
+          "name": "txid",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "as returned by `submitTransaction`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "txid isn't 32 bytes"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence"
+    },
+    {
+      "name": "novai_getAiEntity",
+      "summary": "AI entity record by id",
+      "description": "Returns the full on-chain record for an AI entity. Returns `{ \"entity\": null }` (note: not `null` at the top level) if the entity doesn't exist.",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "the canonical entity id, `blake3(\"NOVAI_AI_ENTITY_ID_V1\" \\"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "`entity_id` isn't 32 bytes"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence"
+    },
+    {
+      "name": "novai_getMemoryObjects",
+      "summary": "All memory objects owned by entity",
+      "description": "Returns every memory object owned by an entity. Order is by `object_id`.",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "canonical entity id (same value used in `getAiEntity`)"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "`entity_id` isn't 32 bytes"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence"
+    },
+    {
+      "name": "novai_getSignalsByHeight",
+      "summary": "Signals at a height",
+      "description": "Returns every signal published at a specific block height.",
+      "params": [
+        {
+          "name": "height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "the shared result shape declared in \"Signal methods\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "param decode failure or invalid hex length"
+        },
+        {
+          "code": -32602,
+          "message": "`end_height - start_height > 10000` (range queries)"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "categoryResult",
+      "x-novai-result-record-shape-from": "Signal methods"
+    },
+    {
+      "name": "novai_getSignalsByIssuer",
+      "summary": "Signals from an entity (range)",
+      "description": "Returns every signal published by a given entity within a height window.",
+      "params": [
+        {
+          "name": "issuer",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "canonical entity id"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "the shared result shape declared in \"Signal methods\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "param decode failure or invalid hex length"
+        },
+        {
+          "code": -32602,
+          "message": "`end_height - start_height > 10000` (range queries)"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "categoryResult",
+      "x-novai-result-record-shape-from": "Signal methods"
+    },
+    {
+      "name": "novai_getSignalsByType",
+      "summary": "Signals by type (range)",
+      "description": "Returns every signal of a given type within a height window.",
+      "params": [
+        {
+          "name": "signal_type",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255,
+            "x-novai-doc-type": "u8"
+          },
+          "description": "one of `0..=22`"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "the shared result shape declared in \"Signal methods\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "param decode failure or invalid hex length"
+        },
+        {
+          "code": -32602,
+          "message": "`end_height - start_height > 10000` (range queries)"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "categoryResult",
+      "x-novai-result-record-shape-from": "Signal methods"
+    },
+    {
+      "name": "novai_getPaymentsByEntity",
+      "summary": "Payments where the entity is payer or payee (range)",
+      "description": "Returns every `PaymentRecord` where the queried entity is the `payer` or the `payee` within a height window, joined with the optional Week 33 splits aux row and the optional Week 36 condition aux row.",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "canonical entity id"
+        },
+        {
+          "name": "role",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "x-novai-doc-type": "string"
+          },
+          "description": "`\"payer\"` (outgoing) or `\"payee\"` (incoming)"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "PaymentRecord records, shape declared in \"Payment methods (Week 28)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "`entity_id` isn't 32 bytes; `role` not `\"payer\"` or `\"payee\"`; range too large"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "inline",
+      "x-novai-result-record-shape-from": "Payment methods (Week 28)"
+    },
+    {
+      "name": "novai_getServiceDescriptorsByCategory",
+      "summary": "Service descriptors filtered by category",
+      "description": "Returns every `ServiceDescriptor` memory object whose `category` byte equals the queried value. Category 0..=15 is the well-known range; 16..=255 is reserved for governance allocation. No height windowing applies.",
+      "params": [
+        {
+          "name": "category",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255,
+            "x-novai-doc-type": "u8"
+          },
+          "description": "service category discriminant"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "ServiceDescriptor records, shape declared in \"Service discovery methods (Week 29)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "`category` not in `0..=255` (i.e. malformed JSON number)"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "inline",
+      "x-novai-result-record-shape-from": "Service discovery methods (Week 29)"
+    },
+    {
+      "name": "novai_getVkRegistration",
+      "summary": "A registered Groth16 verifying key by handle",
+      "description": "Point-resolves a single `VkRegistration` by its memory-object id (the canonical handle a `ProofSubmission` carries).",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "the VK registry handle"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "VkRegistration records, shape declared in \"VK registry methods (Week 30)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "`id` isn't 32 bytes"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence",
+      "x-novai-result-record-shape-from": "VK registry methods (Week 30)"
+    },
+    {
+      "name": "novai_listVkRegistrations",
+      "summary": "All VK registrations owned by an entity",
+      "description": "Returns every `VkRegistration` owned by the queried entity. Bounded by `MAX_VK_REGISTRATIONS_PER_ENTITY` (= 8 in v1).",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "owner entity id"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "VkRegistration records, shape declared in \"VK registry methods (Week 30)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "`id` isn't 32 bytes"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence",
+      "x-novai-result-record-shape-from": "VK registry methods (Week 30)"
+    },
+    {
+      "name": "novai_getSlaAgreement",
+      "summary": "An SLA memory object by `(owner, object_id)`",
+      "description": "Point-resolves a single SLA memory object by the `(owner, object_id)` pair.",
+      "params": [
+        {
+          "name": "owner",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "buyer entity id (the SLA's memory-object owner)"
+        },
+        {
+          "name": "object_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "SLA memory object id"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "SlaAgreement records, shape declared in \"SLA methods (Week 31)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence",
+      "x-novai-result-record-shape-from": "SLA methods (Week 31)"
+    },
+    {
+      "name": "novai_getActiveSla",
+      "summary": "The currently active SLA between a buyer and seller",
+      "description": "Returns the SLA that is currently open between a given `(buyer, seller)` pair via the active-pair singleton index (max one active SLA per pair).",
+      "params": [
+        {
+          "name": "buyer",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "buyer entity id"
+        },
+        {
+          "name": "seller",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "seller entity id"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "SlaAgreement records, shape declared in \"SLA methods (Week 31)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "alias of novai_getSlaAgreement",
+      "x-novai-result-record-shape-from": "SLA methods (Week 31)"
+    },
+    {
+      "name": "novai_listSlasByBuyer",
+      "summary": "SLAs where the entity is the buyer (range)",
+      "description": "Returns every SLA where the queried entity is the buyer (memory-object owner) and the SLA's `created_at` falls within the height window.",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "buyer entity id"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "SlaAgreement records, shape declared in \"SLA methods (Week 31)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex or range too large"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence",
+      "x-novai-result-record-shape-from": "SLA methods (Week 31)"
+    },
+    {
+      "name": "novai_listSlasBySeller",
+      "summary": "SLAs where the entity is the seller (range)",
+      "description": "Returns every SLA where the queried entity is the seller and the SLA's `created_at` falls within the height window. Bounded internally by the per-buyer cap (= 8 in v1).",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "buyer entity id"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "SlaAgreement records, shape declared in \"SLA methods (Week 31)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex or range too large"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "alias of novai_listSlasByBuyer",
+      "x-novai-result-source": "inline",
+      "x-novai-result-record-shape-from": "SLA methods (Week 31)"
+    },
+    {
+      "name": "novai_getPaymentChannel",
+      "summary": "A payment channel by `(owner, object_id)`",
+      "description": "Point-resolves a payment channel by `(owner, object_id)`. Owner is party A.",
+      "params": [
+        {
+          "name": "owner",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "party A entity id (memory-object owner)"
+        },
+        {
+          "name": "object_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "channel memory object id"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "PaymentChannel records, shape declared in \"Payment channel methods (Week 32)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence",
+      "x-novai-result-record-shape-from": "Payment channel methods (Week 32)"
+    },
+    {
+      "name": "novai_listChannelsByPartyA",
+      "summary": "Channels where the entity is party A (range)",
+      "description": "Returns every `PaymentChannel` whose memory-object owner (party A) is the queried entity and whose `created_at` falls within the height window.",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "party A entity id"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "PaymentChannel records, shape declared in \"Payment channel methods (Week 32)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex or range too large"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence",
+      "x-novai-result-record-shape-from": "Payment channel methods (Week 32)"
+    },
+    {
+      "name": "novai_listChannelsByPartyB",
+      "summary": "Channels where the entity is party B (range)",
+      "description": "Returns every `PaymentChannel` where the queried entity is the embedded counterparty (party B). The by-party-B secondary index embeds party A so primary-record resolution is O(1) per match.",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "party A entity id"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "PaymentChannel records, shape declared in \"Payment channel methods (Week 32)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex or range too large"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "alias of novai_listChannelsByPartyA",
+      "x-novai-result-source": "inline",
+      "x-novai-result-record-shape-from": "Payment channel methods (Week 32)"
+    },
+    {
+      "name": "novai_getChannelDisputeStatus",
+      "summary": "Dispute window status with derived `finalize_ready`",
+      "description": "Returns the dispute-window fields for a channel plus the derived `blocks_remaining` and `finalize_ready`, so a client does not need to combine a separate latest-block read with the channel record. When the channel is not in the `CLOSING` state, `blocks_remaining` is `0` and `finalize_ready` is `false`. When the channel does not resolve (wrong type or missing), `found` is `false` and the other fields are placeholder zeros.",
+      "params": [
+        {
+          "name": "owner",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "party A entity id"
+        },
+        {
+          "name": "object_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "channel memory object id"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence"
+    },
+    {
+      "name": "novai_getUpgradeHistory",
+      "summary": "EntityUpgrade history for an entity (range)",
+      "description": "Returns every `UpgradeRecord` for the entity whose `upgrade_height` falls within the height window, ordered ascending by height.",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "the entity whose history to read"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed entity_id or range too large"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence"
+    },
+    {
+      "name": "novai_getOracleAnchor",
+      "summary": "An oracle anchor by `signal_hash`",
+      "description": "Point-resolves a single anchor by the wrapping signal's canonical `signal_hash`.",
+      "params": [
+        {
+          "name": "signal_hash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "the 32-byte signal hash of the wrapping `OracleAnchor` signal"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "OracleAnchor records, shape declared in \"Oracle anchor methods (Week 35)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence",
+      "x-novai-result-record-shape-from": "Oracle anchor methods (Week 35)"
+    },
+    {
+      "name": "novai_getOracleAnchorsByEntity",
+      "summary": "Oracle anchors posted by an entity (range)",
+      "description": "Returns every `OracleAnchorRecord` posted by the queried entity whose `anchor_height` falls within the chain-height window. The optional inclusive `[ts_min, ts_max]` filters by the anchor's external timestamp (post-filter, applied in memory).",
+      "params": [
+        {
+          "name": "entity_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "issuer entity id"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        },
+        {
+          "name": "ts_min",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "lower bound on `external_timestamp`"
+        },
+        {
+          "name": "ts_max",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "upper bound on `external_timestamp`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "OracleAnchor records, shape declared in \"Oracle anchor methods (Week 35)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "malformed hex or range too large"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence",
+      "x-novai-result-record-shape-from": "Oracle anchor methods (Week 35)"
+    },
+    {
+      "name": "novai_getOracleAnchorsByTag",
+      "summary": "Oracle anchors matching a `data_tag` (range)",
+      "description": "Returns every `OracleAnchorRecord` whose `data_tag` matches the queried tag (e.g. `\"price/ETH-USD\"`) within the chain-height window. Matching is by the domain-separated blake3 hash of the tag bytes, so callers pass the raw tag string. The optional `[ts_min, ts_max]` filter behaves as in `getOracleAnchorsByEntity`.",
+      "params": [
+        {
+          "name": "data_tag",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "x-novai-doc-type": "string"
+          },
+          "description": "raw tag string, 1..=32 bytes"
+        },
+        {
+          "name": "start_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive"
+        },
+        {
+          "name": "end_height",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+        },
+        {
+          "name": "ts_min",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "lower bound on `external_timestamp`"
+        },
+        {
+          "name": "ts_max",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "x-novai-doc-type": "u64"
+          },
+          "description": "upper bound on `external_timestamp`"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "OracleAnchor records, shape declared in \"Oracle anchor methods (Week 35)\""
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "empty / oversized data_tag or range too large"
+        },
+        {
+          "code": -32002,
+          "message": "DB read failure"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "inline",
+      "x-novai-result-record-shape-from": "Oracle anchor methods (Week 35)"
+    },
+    {
+      "name": "novai_faucet",
+      "summary": "Mint test tokens (dev mode only)",
+      "description": "Mints `10_000_000` test tokens to the supplied address. Available **only** when the node was launched with `--dev-keys --allow-insecure-dev-keys` (which `scripts/devnet.sh` provides).",
+      "params": [
+        {
+          "name": "address",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "x-novai-doc-type": "hex32"
+          },
+          "description": "recipient"
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": "see the documented shape"
+      },
+      "errors": [
+        {
+          "code": -32602,
+          "message": "address isn't 32 bytes; node not in dev-mode"
+        },
+        {
+          "code": -32000,
+          "message": "per-address cooldown still active (message includes `try again in N seconds`)"
+        },
+        {
+          "code": -32000,
+          "message": "global cooldown still active"
+        }
+      ],
+      "x-novai-params-source": "table",
+      "x-novai-result-source": "fence"
+    }
+  ],
+  "x-novai-endpoint-note": "Examples in the reference assume a local endpoint. Set URL to the endpoint you are querying."
+}
