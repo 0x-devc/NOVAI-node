@@ -136,6 +136,75 @@ function readText(root, rel) {
   return text;
 }
 
+/** 1-based line number of a character offset. */
+function lineOf(text, index) {
+  let n = 1;
+  for (let i = 0; i < index && i < text.length; i++) if (text[i] === "\n") n += 1;
+  return n;
+}
+
+// Integer expression evaluator for constant right-hand sides such as
+// `512 * 1024`, `32 + 8 + 32` or `2 * ((n - 1) / 3) + 1`.
+//
+// Deliberately not eval and not new Function: the input is Rust source read
+// off disk, and a parser that only knows integers and four operators cannot be
+// talked into running anything. Division floors, matching Rust integer
+// division, because the quorum formula depends on it.
+function evalIntExpr(expr, where, vars = {}) {
+  let src = expr.replace(/_/g, "");
+  for (const [name, value] of Object.entries(vars)) {
+    src = src.replace(new RegExp(`\\b${name}\\b`, "g"), String(value));
+  }
+  if (!/^[0-9\s()*+/-]+$/.test(src)) {
+    fail(`${where}: not a plain integer expression: ${expr}`);
+  }
+  let i = 0;
+  function ws() { while (i < src.length && /\s/.test(src[i])) i += 1; }
+  function primary() {
+    ws();
+    if (src[i] === "(") {
+      i += 1;
+      const v = sum();
+      ws();
+      if (src[i] !== ")") fail(`${where}: unbalanced parentheses in ${expr}`);
+      i += 1;
+      return v;
+    }
+    const m = /^\d+/.exec(src.slice(i));
+    if (!m) fail(`${where}: expected a number at offset ${i} in ${expr}`);
+    i += m[0].length;
+    return Number(m[0]);
+  }
+  function product() {
+    let v = primary();
+    for (;;) {
+      ws();
+      const op = src[i];
+      if (op !== "*" && op !== "/") return v;
+      i += 1;
+      const r = primary();
+      if (op === "/" && r === 0) fail(`${where}: division by zero in ${expr}`);
+      v = op === "*" ? v * r : Math.floor(v / r);
+    }
+  }
+  function sum() {
+    let v = product();
+    for (;;) {
+      ws();
+      const op = src[i];
+      if (op !== "+" && op !== "-") return v;
+      i += 1;
+      const r = product();
+      v = op === "+" ? v + r : v - r;
+    }
+  }
+  const out = sum();
+  ws();
+  if (i !== src.length) fail(`${where}: trailing characters in ${expr}`);
+  if (!Number.isSafeInteger(out)) fail(`${where}: ${expr} is not a safe integer`);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Rust source scanning
 // ---------------------------------------------------------------------------
@@ -287,6 +356,16 @@ function dispatchMethods(root) {
   const bodyMasked = masked.slice(open + 1, close);
 
   // Collect arms that sit at depth 0 relative to the match body.
+  //
+  // armLine records the ABSOLUTE 1-based line of each arm in rpc.rs, which is
+  // what the console's per-method source links point at. scanRust preserves
+  // length, so a line number in `code` is a line number in the real file.
+  // The link is only as good as this number, so compute(root) re-asserts that
+  // the method name still appears at its recorded line and fails when it
+  // moves: a link that still resolves but points at the wrong line rots
+  // silently, which is worse than one that 404s.
+  const bodyFirstLine = lineOf(code, open + 1);
+  const armLine = new Map();
   const arms = [];
   let d = 0;
   const lines = bodyCode.split("\n");
@@ -309,6 +388,7 @@ function dispatchMethods(root) {
         fail(`${rel}: dispatch arm uses an or-pattern, which would hide an alias: ${line.trim()}`);
       }
       arms.push(m[1]);
+      armLine.set(m[1], bodyFirstLine + li);
       continue;
     }
     if (/^\s*_\s*=>/.test(line)) {
@@ -342,7 +422,7 @@ function dispatchMethods(root) {
     fail(`dispatch-shaped lines found outside ${rel}, so the drift gate reads only part of the surface: ${others.join(", ")}`);
   }
 
-  return { names: new Set(names), source: rel, emitted: code };
+  return { names: new Set(names), source: rel, emitted: code, armLine };
 }
 
 // ---------------------------------------------------------------------------
@@ -792,7 +872,21 @@ const KNOWN_DRIFT = [
       "Client-breaking rather than cosmetic. A client following the documented codes treats an " +
       "unknown rejection as terminal and resyncs, when the correct handling for NonceTooHigh is to " +
       "retry the same transaction unchanged once the sender's earlier nonces commit.",
+    codes: [-32014],
     holds: (f) => f.emittedErrorCodes.includes(-32014) && !f.documentedErrorCodes.includes(-32014),
+  },
+  {
+    id: "getnonce-documented-as-interchangeable",
+    operatorRef: "NEEDS-OPERATOR.md item 15",
+    summary:
+      "novai_getNonce is documented as a cheaper substitute for novai_getBalance, but the two read different sources",
+    why:
+      "Client-breaking rather than cosmetic. getNonce answers from the mempool admission cursor and getBalance " +
+      "answers from the committed account row. They agree until a committed-but-failed transaction from that " +
+      "sender, after which the cursor runs ahead until the node restarts and reseeds from state. A client that " +
+      "builds plain-account transactions from getNonce, as the wording invites, then signs a nonce that " +
+      "execution will not accept.",
+    holds: (f) => f.getNonceDocClaimsInterchangeable && f.getNonceReadsMempoolCursor,
   },
   {
     id: "public-faucet-gating-backwards",
@@ -874,9 +968,40 @@ function measureDriftFacts(root, doc, methodsByName) {
   const faucetDocClaimsDevKeysOnly =
     /--dev-keys/.test(faucet.description) && !/--faucet-key/.test(faucet.description);
 
+  // novai_getNonce against novai_getBalance. Two independent measurements:
+  // what the document invites the reader to do, and what the handler actually
+  // reads. The exception holds only while both are true, so fixing either the
+  // wording or the handler retires it.
+  const getNonce = methodsByName.get("novai_getNonce");
+  if (!getNonce) fail("docs/RPC_REFERENCE.md: novai_getNonce section not found");
+  const getNonceDocClaimsInterchangeable =
+    /cheaper than\s+`?getBalance`?/i.test(getNonce.description) ||
+    /instead of\s+`?getBalance`?/i.test(getNonce.description);
+
+  const nonceFnStart = code.indexOf("fn handle_get_nonce(");
+  if (nonceFnStart === -1) fail(`${rel}: fn handle_get_nonce not found`);
+  const nonceFnEnd = code.indexOf("\nfn ", nonceFnStart + 1);
+  const nonceBody = code.slice(nonceFnStart, nonceFnEnd === -1 ? code.length : nonceFnEnd);
+  const getNonceReadsMempoolCursor = /nonce_provider\s*\.\s*expected_nonce/.test(nonceBody);
+
+  // getBalance must still be reading the committed row, or the contrast this
+  // exception describes is no longer the contrast that exists.
+  const balanceFnStart = code.indexOf("fn handle_get_balance(");
+  if (balanceFnStart === -1) fail(`${rel}: fn handle_get_balance not found`);
+  const balanceFnEnd = code.indexOf("\nfn ", balanceFnStart + 1);
+  const balanceBody = code.slice(balanceFnStart, balanceFnEnd === -1 ? code.length : balanceFnEnd);
+  if (getNonceReadsMempoolCursor && !/read_account_or_default/.test(balanceBody)) {
+    fail(
+      `${rel}: handle_get_nonce reads the mempool cursor but handle_get_balance no longer reads the account row, ` +
+      `so the documented contrast between the two is no longer accurate and needs re-measuring`
+    );
+  }
+
   return {
     emittedErrorCodes: emitted,
     documentedErrorCodes: documented,
+    getNonceDocClaimsInterchangeable,
+    getNonceReadsMempoolCursor,
     publicFaucetGatesOnKeyOnly,
     httpRouteDocClaimsDevMode,
     faucetDisabledCode,
@@ -955,6 +1080,568 @@ function namedConst(root, rel, name) {
   const m = new RegExp(`^pub const ${name}: [A-Za-z0-9_]+ = ([0-9_]+);`, "m").exec(src);
   if (!m) fail(`${rel}: const ${name} not found`);
   return Number(m[1].replace(/_/g, ""));
+}
+
+// ---------------------------------------------------------------------------
+// Source-derived datasets
+//
+// Everything below reads crates/ and sdk/ rather than the reference document.
+// The document is one witness; these are the implementation. Where a value
+// exists in both, the two are cross-checked and a disagreement fails the build.
+// ---------------------------------------------------------------------------
+
+/**
+ * A constant declaration anywhere in a Rust file, with or without `pub` and
+ * with or without a type annotation, so this reaches both a crate-level
+ * `pub const` and a function-local `const`.
+ *
+ * Asserts exactly one declaration. Two would mean a test module shadows the
+ * real one and the generator would be reading whichever came first, which is
+ * the kind of instrument error that makes the measurement worthless.
+ */
+function rustConst(root, rel, name) {
+  const src = readText(root, rel);
+  const { code } = scanRust(src, rel);
+  const re = new RegExp(
+    `^[ \\t]*(?:pub[ \\t]+)?const[ \\t]+${name}[ \\t]*(?::[^=;]+)?=[ \\t]*([^;]+);`,
+    "gm"
+  );
+  const hits = [...code.matchAll(re)];
+  if (hits.length === 0) fail(`${rel}: const ${name} not found`);
+  if (hits.length > 1) {
+    fail(`${rel}: const ${name} is declared ${hits.length} times, so which one is read is ambiguous`);
+  }
+  return {
+    name,
+    value: evalIntExpr(hits[0][1].trim(), `${rel} ${name}`),
+    file: rel,
+    line: lineOf(code, hits[0].index),
+  };
+}
+
+/** Every `pub const` whose name matches, with its leading doc comment. */
+function rustConstsMatching(root, rel, namePattern) {
+  const src = readText(root, rel);
+  const { code } = scanRust(src, rel);
+  const out = [];
+  const re = new RegExp(`^[ \\t]*pub[ \\t]+const[ \\t]+(${namePattern})[ \\t]*(?::[^=;]+)?=[ \\t]*([^;]+);`, "gm");
+  for (const m of code.matchAll(re)) {
+    // The doc comment is taken from the ORIGINAL text, because scanRust strips
+    // comments. Walk back over the preceding /// lines.
+    const line = lineOf(code, m.index);
+    const srcLines = src.split("\n");
+    const doc = [];
+    for (let i = line - 2; i >= 0; i--) {
+      const t = srcLines[i].trim();
+      if (t.startsWith("///")) { doc.unshift(t.replace(/^\/\/\/\s?/, "")); continue; }
+      break;
+    }
+    out.push({
+      name: m[1],
+      value: evalIntExpr(m[2].trim(), `${rel} ${m[1]}`),
+      expression: m[2].trim(),
+      description: doc.length ? normaliseDashes(doc.join(" "), rel) : null,
+      file: rel,
+      line,
+    });
+  }
+  if (out.length === 0) fail(`${rel}: no constants matched /${namePattern}/`);
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Every JSON-RPC error code the node can emit.
+ *
+ * Three emission forms exist and all three are scanned, because measuring only
+ * the obvious one silently loses the mempool codes:
+ *   1. `code: -32602` in an RpcError literal
+ *   2. `(-32014, format!(...))` tuple arms in the mempool error mapping
+ *   3. `"code": -32003` inside the hand-built JSON of the too-large path
+ * Comments are stripped by scanRust first, so the commented code table above
+ * the mempool match does not inject phantom codes.
+ *
+ * The real guard is not this scan but the cross-check in compute(): the set
+ * found here must equal the document's table plus the codes carried in
+ * KNOWN_DRIFT. A missed form therefore fails the build rather than quietly
+ * shrinking the count.
+ */
+function errorCodesFromSource(root) {
+  const rel = "crates/node/src/rpc.rs";
+  const { code } = scanRust(readText(root, rel), rel);
+  const fns = [...code.matchAll(/\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[(<]/g)]
+    .map((m) => ({ name: m[1], index: m.index }));
+  const patterns = [
+    /\bcode:\s*(-3\d{4})\b/g,
+    /\(\s*(-3\d{4})\s*,/g,
+    /"code":\s*(-3\d{4})\b/g,
+  ];
+  const byCode = new Map();
+  for (const re of patterns) {
+    for (const m of code.matchAll(re)) {
+      const value = Number(m[1]);
+      let owner = null;
+      for (const f of fns) {
+        if (f.index < m.index) owner = f.name;
+        else break;
+      }
+      const line = lineOf(code, m.index);
+      if (!byCode.has(value)) byCode.set(value, { code: value, file: rel, line, functions: new Set() });
+      const entry = byCode.get(value);
+      if (line < entry.line) entry.line = line;
+      if (owner) entry.functions.add(owner);
+    }
+  }
+  if (byCode.size === 0) fail(`${rel}: zero JSON-RPC error codes matched`);
+
+  // Prove the instrument. The three patterns above are structured, so they can
+  // attach a function and a line to each code, but a structured pattern is
+  // exactly the thing that silently misses a fourth emission form. A broad
+  // sweep of the same comment-stripped source cannot miss one, so the two must
+  // agree: if the broad sweep sees a code the structured patterns did not, a
+  // form has been added and this parser is now undercounting.
+  const broad = new Set([...code.matchAll(/-3\d{4}/g)].map((m) => Number(m[0])));
+  const missed = [...broad].filter((c) => !byCode.has(c)).sort((a, b) => b - a);
+  if (missed.length) {
+    fail(
+      `${rel}: error codes ${missed.join(", ")} appear in the source but match none of the known emission ` +
+      `forms, so the structured scan is undercounting. Add the new form to errorCodesFromSource.`
+    );
+  }
+
+  return [...byCode.values()]
+    .sort((a, b) => b.code - a.code)
+    .map((e) => ({ code: e.code, file: e.file, line: e.line, functions: [...e.functions].sort() }));
+}
+
+/**
+ * HTTP-level rejections that never carry a JSON-RPC envelope.
+ *
+ * These are the ones that break a client calling .json() on the response, so
+ * the body literal matters as much as the status.
+ */
+function httpRejectionsFromSource(root) {
+  const rel = "crates/node/src/rpc.rs";
+  const { code } = scanRust(readText(root, rel), rel);
+  const out = [];
+  for (const m of code.matchAll(/StatusCode\((\d{3})\)/g)) {
+    const before = code.slice(Math.max(0, m.index - 400), m.index);
+    // Bodies appear both as a bare literal and wrapped in format!, so both
+    // shapes are read. A format! body is reported as a template rather than as
+    // a fixed string, because that is what a client actually receives.
+    const body = [...before.matchAll(/from_string\(\s*(?:format!\(\s*)?"([^"]*)"/g)].pop();
+    const templated = /from_string\(\s*format!\(/.test(before.slice(before.lastIndexOf("from_string(")));
+    out.push({
+      status: Number(m[1]),
+      body: body ? body[1] : null,
+      bodyIsTemplate: body ? templated : null,
+      file: rel,
+      line: lineOf(code, m.index),
+    });
+  }
+  const byStatus = new Map();
+  for (const r of out) if (!byStatus.has(r.status)) byStatus.set(r.status, r);
+  for (const want of [400, 413, 429, 503]) {
+    if (!byStatus.has(want)) fail(`${rel}: expected an HTTP ${want} rejection site and found none`);
+    if (byStatus.get(want).body === null) {
+      fail(`${rel}: the HTTP ${want} rejection has no readable body, so its documented shape cannot be generated`);
+    }
+  }
+  return [...byStatus.values()].sort((a, b) => a.status - b.status);
+}
+
+/** The six RPC limits, read from the constants rather than from the doc table. */
+function limitsFromSource(root) {
+  const rpc = "crates/node/src/rpc.rs";
+  return [
+    { ...rustConst(root, rpc, "MAX_RPC_REQUESTS_PER_SEC"), unit: "requests per second per source IP" },
+    { ...rustConst(root, rpc, "MAX_CONCURRENT_RPC"), unit: "concurrent in-flight requests" },
+    { ...rustConst(root, rpc, "MAX_RPC_BODY_SIZE"), unit: "bytes, request body" },
+    { ...rustConst(root, rpc, "MAX_RPC_RESPONSE_SIZE"), unit: "bytes, response body" },
+    { ...rustConst(root, "crates/types/src/lib.rs", "MAX_TX_SIZE"), unit: "bytes, decoded transaction" },
+    { ...rustConst(root, rpc, "MAX_SIGNAL_QUERY_RANGE"), unit: "blocks, signal query height range" },
+  ];
+}
+
+/**
+ * The minimum fee for every transaction type, from the dispatch in
+ * minimum_fee_for_tx rather than from the cookbook's table, which lists seven
+ * operations and omits two of the eleven types.
+ */
+function feesFromSource(root, payloads) {
+  const rel = "crates/execution/src/lib.rs";
+  const { code } = scanRust(readText(root, rel), rel);
+  const anchor = /pub fn minimum_fee_for_tx\s*\([^)]*\)[^{]*\{/.exec(code);
+  if (!anchor) fail(`${rel}: minimum_fee_for_tx not found`);
+  const matchIdx = code.indexOf("match version {", anchor.index);
+  if (matchIdx === -1) fail(`${rel}: the fee match block was not found inside minimum_fee_for_tx`);
+  const open = code.indexOf("{", matchIdx + "match version".length);
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === "{") depth += 1;
+    else if (code[i] === "}") { depth -= 1; if (depth === 0) { close = i; break; } }
+  }
+  if (close === -1) fail(`${rel}: unbalanced braces in the fee match block`);
+  const body = code.slice(open + 1, close);
+
+  // Arms may carry or-patterns, which is how the three memory-object types
+  // share one fee. Splitting on => and then on | covers both shapes.
+  const feeOf = new Map();
+  for (const arm of body.split(/,\s*(?=[A-Z_]|_\s*=>)/)) {
+    const m = /^([\s\S]*?)=>\s*Ok\(\s*([A-Z_][A-Z0-9_]*)\s*\)/.exec(arm.trim());
+    if (!m) continue;
+    const feeConst = m[2];
+    for (const raw of m[1].split("|")) {
+      const name = raw.trim();
+      if (!/^[A-Z][A-Z0-9_]*$/.test(name)) continue;
+      feeOf.set(name, feeConst);
+    }
+  }
+  if (feeOf.size === 0) fail(`${rel}: zero fee arms parsed from minimum_fee_for_tx`);
+
+  const out = payloads.map((t) => {
+    const feeConst = feeOf.get(t.constant);
+    if (!feeConst) {
+      fail(`${rel}: transaction type ${t.constant} has no arm in minimum_fee_for_tx, so its fee cannot be generated`);
+    }
+    const c = rustConst(root, rel, feeConst);
+    return { ...t, feeConstant: feeConst, minFee: c.value, feeLine: c.line, feeFile: rel };
+  });
+  return out;
+}
+
+/** Percentage fees, expressed in basis points against a shared denominator. */
+function bpsFeesFromSource(root) {
+  const rel = "crates/execution/src/lib.rs";
+  const denominator = rustConst(root, rel, "BPS_DENOMINATOR");
+  const names = ["PAYMENT_FEE_BPS", "MARKETPLACE_FEE_BPS", "SUBSCRIPTION_CANCEL_FEE_BPS"];
+  return {
+    denominator: denominator.value,
+    denominatorConstant: denominator.name,
+    entries: names.map((n) => {
+      const c = rustConst(root, rel, n);
+      return { constant: c.name, bps: c.value, percent: (c.value / denominator.value) * 100, file: c.file, line: c.line };
+    }),
+  };
+}
+
+/**
+ * The canonical unsigned transaction encoding, walked out of the encoder.
+ *
+ * This is the artifact a non-Rust client most needs and most easily gets
+ * wrong, because the envelope is little-endian while payload internals are
+ * big-endian.
+ */
+const WIRE_WRITERS = new Map([
+  ["write_u8", { bytes: 1, endianness: null }],
+  ["write_32", { bytes: 32, endianness: null }],
+  ["write_u32_le", { bytes: 4, endianness: "little" }],
+  ["write_u64_le", { bytes: 8, endianness: "little" }],
+]);
+
+function txWireLayout(root) {
+  const rel = "crates/codec/src/lib.rs";
+  const { code } = scanRust(readText(root, rel), rel);
+  const anchor = /pub fn encode_tx_v1_unsigned\s*\([^)]*\)[^{]*\{/.exec(code);
+  if (!anchor) fail(`${rel}: encode_tx_v1_unsigned not found`);
+  let depth = 0;
+  let close = -1;
+  const open = anchor.index + anchor[0].length - 1;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === "{") depth += 1;
+    else if (code[i] === "}") { depth -= 1; if (depth === 0) { close = i; break; } }
+  }
+  if (close === -1) fail(`${rel}: unbalanced braces in encode_tx_v1_unsigned`);
+  const body = code.slice(open + 1, close);
+
+  const fieldName = (arg) =>
+    arg.trim()
+      .replace(/^&/, "")
+      .replace(/^tx\./, "")
+      .replace(/\s+as\s+\w+$/, "")
+      .replace(/\.len\(\)$/, "_len")
+      .trim();
+
+  const fields = [];
+  let offset = 0;
+  for (const line of body.split("\n")) {
+    // Greedy to the final close paren: the payload-length argument is
+    // `tx.payload.len() as u32`, which contains a paren of its own, so a
+    // non-greedy [^)] class stops early, matches nothing, and drops the field
+    // without saying so. The overhead assertion below exists because that is
+    // exactly what happened.
+    const w = /^\s*(write_[a-z0-9_]+)\(\s*&mut out\s*,\s*(.+)\)\s*;\s*$/.exec(line);
+    if (w) {
+      const spec = WIRE_WRITERS.get(w[1]);
+      if (!spec) fail(`${rel}: unknown wire writer ${w[1]} in encode_tx_v1_unsigned`);
+      const name = fieldName(w[2]);
+      if (!/^[a-z][a-z0-9_]*$/.test(name)) fail(`${rel}: could not resolve a field name from "${w[2]}"`);
+      fields.push({ field: name, bytes: spec.bytes, endianness: spec.endianness, offset });
+      offset += spec.bytes;
+      continue;
+    }
+    const ext = /^\s*out\.extend_from_slice\(\s*(.+)\)\s*;\s*$/.exec(line);
+    if (ext) {
+      const name = fieldName(ext[1]);
+      if (!/^[a-z][a-z0-9_]*$/.test(name)) fail(`${rel}: could not resolve a field name from "${ext[1]}"`);
+      fields.push({ field: name, bytes: null, endianness: null, offset });
+      offset = null;
+    }
+  }
+  if (fields.length === 0) fail(`${rel}: zero fields parsed from encode_tx_v1_unsigned`);
+  if (!fields.some((f) => f.bytes === null)) {
+    fail(`${rel}: expected a variable-length payload field in encode_tx_v1_unsigned and found none`);
+  }
+  // The signature width, read from the signed encoder rather than assumed.
+  const signedAnchor = /pub fn encode_tx_v1_signed\s*\([^)]*\)[^{]*\{/.exec(code);
+  if (!signedAnchor) fail(`${rel}: encode_tx_v1_signed not found`);
+  const signedBody = code.slice(signedAnchor.index, code.indexOf("\n}", signedAnchor.index));
+  const sigWrite = /write_(\d+)\(\s*&mut out\s*,\s*&tx\.sig\s*\)/.exec(signedBody);
+  if (!sigWrite) fail(`${rel}: the signature write in encode_tx_v1_signed could not be read`);
+  const signatureBytes = Number(sigWrite[1]);
+
+  // Arithmetic check on the parsed layout.
+  //
+  // TX_V1_OVERHEAD is everything except the payload, so the fixed fields
+  // walked out of the encoder plus the signature must add up to it exactly. A
+  // field that the line parser silently failed to match makes this sum come up
+  // short, which is how a dropped field becomes a build failure instead of a
+  // wrong byte offset published as a signing spec.
+  const overhead = rustConst(root, rel, "TX_V1_OVERHEAD");
+  const fixedSum = fields.reduce((a, f) => a + (f.bytes ?? 0), 0);
+  if (fixedSum + signatureBytes !== overhead.value) {
+    fail(
+      `${rel}: the fields parsed from encode_tx_v1_unsigned sum to ${fixedSum} bytes and the signature is ` +
+      `${signatureBytes}, totalling ${fixedSum + signatureBytes}, but ${overhead.name} is ${overhead.value}. ` +
+      `A field was missed or the encoding changed; the published signing spec would be wrong either way. ` +
+      `Parsed: ${fields.map((f) => `${f.field}(${f.bytes ?? "var"})`).join(", ")}.`
+    );
+  }
+
+  return {
+    fields,
+    signatureBytes,
+    overhead: overhead.value,
+    overheadConstant: overhead.name,
+    file: rel,
+    line: lineOf(code, anchor.index),
+  };
+}
+
+/** The capability bits, read from the bit tests rather than from the table. */
+function capabilityBits(root) {
+  const rel = "crates/ai_entities/src/lib.rs";
+  const { code } = scanRust(readText(root, rel), rel);
+  // Anchor on the impl block, not on the bare function name: AutonomyMode
+  // declares a from_byte too and it comes first in the file, so searching for
+  // the function alone reads the wrong body and finds no bits.
+  const implStart = code.indexOf("impl Capabilities {");
+  if (implStart === -1) fail(`${rel}: impl Capabilities block not found`);
+  let depth = 0;
+  let implEnd = -1;
+  const braceAt = code.indexOf("{", implStart);
+  for (let i = braceAt; i < code.length; i++) {
+    if (code[i] === "{") depth += 1;
+    else if (code[i] === "}") { depth -= 1; if (depth === 0) { implEnd = i; break; } }
+  }
+  if (implEnd === -1) fail(`${rel}: unbalanced braces in impl Capabilities`);
+  const anchor = code.indexOf("pub fn from_byte", implStart);
+  if (anchor === -1 || anchor > implEnd) fail(`${rel}: Capabilities::from_byte not found`);
+  const region = code.slice(anchor, implEnd);
+  const out = [];
+  for (const m of region.matchAll(/([a-z_][a-z0-9_]*)\s*:\s*\(\s*byte\s*&\s*\(\s*1\s*<<\s*(\d+)\s*\)\s*\)\s*!=\s*0/g)) {
+    out.push({ capability: m[1], bit: Number(m[2]), hex: `0x${(1 << Number(m[2])).toString(16).padStart(2, "0")}` });
+  }
+  if (out.length === 0) fail(`${rel}: zero capability bits parsed from from_byte`);
+  return out.sort((a, b) => a.bit - b.bit);
+}
+
+/**
+ * The quorum rule, read from BOTH const fn sites and asserted identical.
+ *
+ * Two independent implementations of the same formula is itself the gate: if
+ * one is edited and the other is not, this fails rather than publishing a rule
+ * that only half the code obeys.
+ */
+function quorumRule(root) {
+  const sites = [
+    { file: "crates/node/src/snapshot/valset.rs", fn: "quorum" },
+    { file: "crates/consensus_types/src/leader.rs", fn: "quorum_threshold" },
+  ];
+  const found = sites.map((s) => {
+    const { code } = scanRust(readText(root, s.file), s.file);
+    const anchor = new RegExp(`pub const fn ${s.fn}\\s*\\([^)]*\\)[^{]*\\{`).exec(code);
+    if (!anchor) fail(`${s.file}: const fn ${s.fn} not found`);
+    let depth = 0;
+    let close = -1;
+    const open = anchor.index + anchor[0].length - 1;
+    for (let i = open; i < code.length; i++) {
+      if (code[i] === "{") depth += 1;
+      else if (code[i] === "}") { depth -= 1; if (depth === 0) { close = i; break; } }
+    }
+    if (close === -1) fail(`${s.file}: unbalanced braces in ${s.fn}`);
+    const tail = code.slice(open + 1, close).split("\n").map((l) => l.trim()).filter(Boolean);
+    const expr = tail[tail.length - 1];
+    if (!expr) fail(`${s.file}: ${s.fn} has an empty body`);
+    return { ...s, expression: expr.replace(/\s+/g, " "), line: lineOf(code, anchor.index) };
+  });
+  if (found[0].expression !== found[1].expression) {
+    fail(
+      `the quorum rule differs between its two sites: ` +
+      `${found[0].file} has "${found[0].expression}" and ${found[1].file} has "${found[1].expression}"`
+    );
+  }
+  return { expression: found[0].expression, sites: found };
+}
+
+/**
+ * SDK coverage across the three SDKs.
+ *
+ * Names are compared on a canonical key rather than literally, because the
+ * builders drop the word "object" from the memory types. An unmatched
+ * transaction type is reported as missing rather than skipped.
+ */
+/**
+ * Split a source file into named function bodies, given a regex whose first
+ * capture is the function name. A body runs to the next declaration.
+ */
+function functionBodies(src, declRe) {
+  const decls = [...src.matchAll(declRe)].map((m) => ({ name: m[1], index: m.index }));
+  return decls.map((d, i) => ({
+    name: d.name,
+    body: src.slice(d.index, i + 1 < decls.length ? decls[i + 1].index : src.length),
+  }));
+}
+
+/** Members of a Python IntEnum, as name to value. */
+function pyEnumMembers(src, className, where) {
+  const lines = src.split("\n");
+  const start = lines.findIndex((l) => new RegExp(`^class ${className}\\(IntEnum\\):`).test(l));
+  if (start === -1) fail(`${where}: class ${className} not found`);
+  const out = new Map();
+  for (let i = start + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.trim() === "") continue;
+    if (!/^\s/.test(l)) break; // dedent to column zero ends the class
+    const m = /^\s+([A-Z][A-Z0-9_]*)\s*=\s*(\d+)/.exec(l);
+    if (m) out.set(m[1], Number(m[2]));
+  }
+  if (out.size === 0) fail(`${where}: class ${className} has no integer members`);
+  return out;
+}
+
+function sdkCoverage(root, payloads, signalCount, memoryCount) {
+  // Builders are matched to transaction types by the DISCRIMINANT THEY EMIT,
+  // not by their name. The three SDKs name the same builder three different
+  // ways (register_ai_entity, registerAiEntity, build_register_entity_payload),
+  // so name matching needs a per-SDK convention table that silently reports a
+  // renamed builder as a missing one. The first payload byte is the thing that
+  // actually decides which transaction type is being built, and it cannot be
+  // renamed.
+  const rustBodies = functionBodies(readText(root, "sdk/novai-sdk/src/tx.rs"), /^pub fn ([a-z_][a-z0-9_]*)\s*\(/gm);
+  const rustByCode = new Map();
+  for (const f of rustBodies) {
+    const m = /payload\.push\((\d+)\)/.exec(f.body);
+    if (m) rustByCode.set(Number(m[1]), f.name);
+  }
+
+  const tsBodies = functionBodies(readText(root, "sdk/novai-sdk-ts/src/tx.ts"), /^export function ([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm);
+  const tsByCode = new Map();
+  for (const f of tsBodies) {
+    const m = /payload\[0\]\s*=\s*(\d+)\s*;/.exec(f.body);
+    if (m) tsByCode.set(Number(m[1]), f.name);
+  }
+
+  const pyEnumsSrc = readText(root, "sdk/novai-python-sdk/novai_sdk/enums.py");
+  const pyPayloadTypes = pyEnumMembers(pyEnumsSrc, "TxPayloadType", "sdk/novai-python-sdk/novai_sdk/enums.py");
+  const pyByCode = new Map();
+  for (const f of walkFiles(join(root, "sdk/novai-python-sdk/novai_sdk/tx"), ".py")) {
+    const rel = relative(root, f);
+    for (const fn of functionBodies(readText(root, rel), /^def (build_[a-z0-9_]+_payload)\s*\(/gm)) {
+      const m = /TxPayloadType\.([A-Z][A-Z0-9_]*)/.exec(fn.body);
+      if (!m) continue;
+      const value = pyPayloadTypes.get(m[1]);
+      if (value === undefined) fail(`${rel}: ${fn.name} names TxPayloadType.${m[1]}, which is not a member of that enum`);
+      pyByCode.set(value, fn.name);
+    }
+  }
+
+  for (const [label, map] of [["Rust", rustByCode], ["TypeScript", tsByCode], ["Python", pyByCode]]) {
+    if (map.size === 0) fail(`the ${label} SDK: zero transaction builders were matched to a payload discriminant`);
+  }
+
+  const builders = payloads.map((t) => ({
+    txType: t.name,
+    discriminant: t.discriminant,
+    rust: rustByCode.get(t.discriminant) ?? null,
+    typescript: tsByCode.get(t.discriminant) ?? null,
+    python: pyByCode.get(t.discriminant) ?? null,
+  }));
+
+  // Enum coverage. The Rust SDK re-exports the chain's own enums, so its
+  // coverage is the chain's by construction; the TypeScript SDK redeclares
+  // them, which is exactly why it can drift. That distinction is asserted
+  // rather than assumed.
+  const rustLib = readText(root, "sdk/novai-sdk/src/lib.rs");
+  const rustReexports = /pub use novai_ai_entities::\{[^}]*\bAiSignalType\b[^}]*\bMemoryObjectType\b[^}]*\}/s.test(rustLib);
+  if (!rustReexports) {
+    fail("sdk/novai-sdk/src/lib.rs: the Rust SDK no longer re-exports AiSignalType and MemoryObjectType from novai_ai_entities, so its type coverage can no longer be stated as structural");
+  }
+  const tsTypes = readText(root, "sdk/novai-sdk-ts/src/types.ts");
+  const enumCount = (name) => {
+    const m = new RegExp(`export enum ${name}\\s*\\{([^}]*)\\}`, "s").exec(tsTypes);
+    if (!m) fail(`sdk/novai-sdk-ts/src/types.ts: enum ${name} not found`);
+    return [...m[1].matchAll(/^\s*[A-Za-z][A-Za-z0-9_]*\s*=\s*\d+\s*,?\s*$/gm)].length;
+  };
+
+  const pyEnumCount = (name) => pyEnumMembers(pyEnumsSrc, name, "sdk/novai-python-sdk/novai_sdk/enums.py").size;
+
+  return {
+    builders,
+    totals: {
+      txTypes: payloads.length,
+      rustBuilders: builders.filter((b) => b.rust).length,
+      typescriptBuilders: builders.filter((b) => b.typescript).length,
+      pythonBuilders: builders.filter((b) => b.python).length,
+    },
+    signalTypes: {
+      chain: signalCount,
+      rust: signalCount,
+      rustIsStructural: true,
+      typescript: enumCount("SignalType"),
+      python: pyEnumCount("AiSignalType"),
+    },
+    memoryObjectTypes: {
+      chain: memoryCount,
+      rust: memoryCount,
+      rustIsStructural: true,
+      typescript: enumCount("MemoryObjectType"),
+      python: pyEnumCount("MemoryObjectType"),
+    },
+    // Only the Rust case is derivable from the tree: a manifest with path
+    // dependencies on the workspace cannot be consumed from a registry, and
+    // that is a fact about these files. Whether a package is PUBLISHED is an
+    // external fact that no amount of reading this repo can establish, so it
+    // is deliberately absent here and hand-written with its check date in the
+    // section-07 copy instead. Emitting it here would dress an operator
+    // observation up as a generated one.
+    workspaceCoupling: {
+      rust: rustPathDeps(root),
+    },
+  };
+}
+
+/**
+ * Path dependencies in the Rust SDK's manifest. A crate depending on
+ * `path = "../../crates/..."` cannot be published or consumed outside a clone
+ * of this repository, which is the real constraint on the Rust install line.
+ */
+function rustPathDeps(root) {
+  const rel = "sdk/novai-sdk/Cargo.toml";
+  const src = readText(root, rel);
+  const deps = [...src.matchAll(/^([A-Za-z0-9_-]+)\s*=\s*\{[^}]*\bpath\s*=\s*"([^"]+)"/gm)]
+    .map((m) => ({ crate: m[1], path: m[2] }));
+  return { file: rel, pathDependencies: deps, consumableFromRegistry: deps.length === 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -1225,6 +1912,145 @@ function compute(root) {
   const payloads = txTypes(root);
   const retentionBlocks = namedConst(root, "crates/consensus/src/lib.rs", "PRUNE_RETAIN_BLOCKS");
 
+  // -------------------------------------------------------------------------
+  // Source-derived datasets, and the cross-checks that make them gates
+  // -------------------------------------------------------------------------
+
+  // Source links.
+  //
+  // What actually stops a published line number from going stale is --check in
+  // prebuild: rpc.rs moving changes these numbers, the committed JSON stops
+  // matching a fresh run, and the build fails until it is regenerated. That is
+  // the gate, and it is the reason the link carries a line at all.
+  //
+  // The assertion below is NOT that gate. It reads back from the same parse
+  // that produced the number, so it cannot detect staleness; it is a parser
+  // self-check that catches an off-by-one or a mis-sliced match block. Stated
+  // plainly because a comment claiming this prevents rot would be false.
+  const sourceRefs = [];
+  for (const m of built) {
+    // A method the dispatch table does not carry is drift, and the drift gate
+    // reports it with far more useful detail than a missing-source-link error
+    // would. Yielding to it keeps the better diagnostic.
+    if (!dispatch.names.has(m.name)) continue;
+    const line = dispatch.armLine.get(m.name);
+    if (line === undefined) fail(`${m.name}: no dispatch arm line was recorded, so no source link can be generated`);
+    const armText = dispatch.emitted.split("\n")[line - 1] ?? "";
+    if (!armText.includes(`"${m.name}"`)) {
+      fail(
+        `${dispatch.source}:${line} no longer carries the dispatch arm for ${m.name}. ` +
+        `The source link would still resolve but point at the wrong line, so regenerate.`
+      );
+    }
+    sourceRefs.push({ name: m.name, file: dispatch.source, line });
+  }
+
+  const errorCodes = errorCodesFromSource(root);
+  const httpRejections = httpRejectionsFromSource(root);
+  const sourceLimits = limitsFromSource(root);
+  const fees = feesFromSource(root, payloads);
+  const bpsFees = bpsFeesFromSource(root);
+  const wire = txWireLayout(root);
+  const capabilities = capabilityBits(root);
+  const quorum = quorumRule(root);
+  const coverageMatrix = sdkCoverage(root, payloads, signals.length, memoryObjectTypes.length);
+
+  const signalTails = rustConstsMatching(root, "crates/execution/src/lib.rs", "[A-Z0-9_]+_EXTRA(?:_FIXED)?_LEN");
+  const signalBaseLen = rustConst(root, "crates/execution/src/lib.rs", "SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN");
+  const entityCaps = rustConstsMatching(root, "crates/ai_entities/src/memory.rs", "MAX_[A-Z0-9_]+");
+
+  const retentionHorizons = {
+    disk: { ...rustConst(root, "crates/consensus/src/lib.rs", "PRUNE_RETAIN_BLOCKS"), what: "blocks retained on disk" },
+    index: { ...rustConst(root, "crates/node/src/main.rs", "MAX_INDEX_ENTRIES"), what: "heights retained in the in-memory block index" },
+  };
+
+  // The two horizons are deliberately different sizes and a client has to know
+  // which one it is past. Publishing them as a pair only makes sense while the
+  // index reaches further back than the disk does, so that ordering is asserted
+  // rather than assumed.
+  if (!(retentionHorizons.index.value >= retentionHorizons.disk.value)) {
+    fail(
+      `retention horizons: the in-memory index (${retentionHorizons.index.value}) no longer reaches at least as ` +
+      `far back as the pruned disk (${retentionHorizons.disk.value}), so the documented gap between them is inverted`
+    );
+  }
+
+  // Cross-check 1: the error codes the node emits against the codes the
+  // document lists. KNOWN_DRIFT carries the accepted difference, so a NEW
+  // undocumented code fails the build rather than appearing unannounced.
+  const docCodes = new Set(errorCatalogue.map((e) => e.code));
+  const srcCodes = new Set(errorCodes.map((e) => e.code));
+  const exceptedCodes = new Set(KNOWN_DRIFT.flatMap((e) => e.codes ?? []));
+  const undocumentedCodes = setDiff(srcCodes, docCodes).filter((c) => !exceptedCodes.has(c));
+  const phantomCodes = setDiff(docCodes, srcCodes);
+  if (undocumentedCodes.length || phantomCodes.length) {
+    fail(
+      `error codes: the implementation and docs/RPC_REFERENCE.md disagree. ` +
+      `Emitted but undocumented and not in KNOWN_DRIFT: ${undocumentedCodes.join(", ") || "none"}. ` +
+      `Documented but not emitted: ${phantomCodes.join(", ") || "none"}.`
+    );
+  }
+
+  // Cross-check 2: the limits table against the constants it cites. The doc
+  // names the constant in its Source column, so the two can be joined and the
+  // values compared rather than trusted.
+  // The document writes values in human units ("512 KiB", "10 MiB") and its
+  // Source column may carry a multiplier ("MAX_TX_SIZE x 2", because the hex
+  // encoding is twice the binary size). Converting the constant INTO the
+  // document's own unit and multiplier makes this an exact comparison rather
+  // than a guess at which of several plausible renderings was meant.
+  const UNIT_DIVISOR = new Map([["KiB", 1024], ["MiB", 1024 * 1024], ["GiB", 1024 * 1024 * 1024]]);
+  const limitByConst = new Map(sourceLimits.map((l) => [l.name, l]));
+  let limitsCompared = 0;
+  for (const row of limitsTable.rows) {
+    const cited = [...String(row.Source).matchAll(/`?\b([A-Z][A-Z0-9_]{3,})\b/g)].map((m) => m[1]);
+    for (const name of cited) {
+      if (!limitByConst.has(name)) continue;
+      const constant = limitByConst.get(name);
+      const valueText = String(row.Value);
+      const lead = /([0-9][0-9\s,]*)/.exec(valueText);
+      if (!lead) continue;
+      const stated = Number(lead[1].replace(/[\s,]/g, ""));
+      const unit = [...UNIT_DIVISOR.keys()].find((u) => new RegExp(`^[0-9\\s,]*${u}\\b`).test(valueText));
+      const multiplier = /[x×*]\s*(\d+)/.exec(String(row.Source));
+      const scaled =
+        (constant.value / (unit ? UNIT_DIVISOR.get(unit) : 1)) * (multiplier ? Number(multiplier[1]) : 1);
+      limitsCompared += 1;
+      if (stated !== scaled) {
+        fail(
+          `limits: the document says ${name} is "${valueText}" which is ${stated}${unit ? " " + unit : ""}, ` +
+          `but the constant is ${constant.value} at ${constant.file}:${constant.line}` +
+          `${multiplier ? ` with the document's x${multiplier[1]} applied` : ""}, which is ${scaled}. ` +
+          `One of the two is stale.`
+        );
+      }
+    }
+  }
+  // A cross-check that compared nothing is not a cross-check. If the Source
+  // column stops naming constants, this fails rather than passing vacuously.
+  if (limitsCompared !== sourceLimits.length) {
+    fail(
+      `limits: expected to compare all ${sourceLimits.length} constants against the document's table but ` +
+      `matched ${limitsCompared}. The table's Source column no longer names every constant.`
+    );
+  }
+
+  // The Observed gaps table, which is the document's own account of what has
+  // shipped at the protocol layer but is not reachable over RPC.
+  const gapsHeading = lines.findIndex((l) => /^##\s+Observed gaps\s*$/.test(l));
+  if (gapsHeading === -1) fail("docs/RPC_REFERENCE.md: the Observed gaps section was not found");
+  const gapsEndRaw = lines.findIndex((l, i) => i > gapsHeading && /^##\s/.test(l));
+  const gapsEnd = gapsEndRaw === -1 ? lines.length : gapsEndRaw;
+  // parseTable stops at the first prose line, and this section opens with a
+  // paragraph, so advance to the table itself before parsing.
+  let gapsStart = -1;
+  for (let i = gapsHeading + 1; i < gapsEnd; i++) {
+    if (!inFence[i] && lines[i].trim().startsWith("|")) { gapsStart = i; break; }
+  }
+  if (gapsStart === -1) fail("docs/RPC_REFERENCE.md: no table found under ## Observed gaps");
+  const gapsTable = parseTable(lines, inFence, gapsStart, gapsEnd);
+  if (!gapsTable) fail("docs/RPC_REFERENCE.md: the Observed gaps table was not found");
+
   const coverage = {
     methods: built.length,
     withCurl: built.filter((m) => m.curl).length,
@@ -1253,6 +2079,21 @@ function compute(root) {
     retentionBlocks,
     coverage,
     docNames,
+    sourceRefs,
+    errorCodes,
+    httpRejections,
+    sourceLimits,
+    fees,
+    bpsFees,
+    wire,
+    capabilities,
+    quorum,
+    coverageMatrix,
+    signalTails,
+    signalBaseLen,
+    entityCaps,
+    retentionHorizons,
+    observedGaps: gapsTable.rows,
   };
 }
 
@@ -1312,6 +2153,81 @@ function payloadFor(c) {
     },
     memoryObjectTypes: { value: c.memoryObjectTypes, method: "unit variants of enum MemoryObjectType in crates/ai_entities/src/memory.rs" },
     txTypes: { value: c.txTypes, method: "pub const *_PAYLOAD_V1: u8 discriminants in crates/execution/src/lib.rs, contiguity asserted" },
+    sourceRefs: {
+      value: c.sourceRefs,
+      method:
+        "the line of each method's dispatch arm in crates/node/src/rpc.rs; every recorded line is re-read and " +
+        "must still carry its own method name, so a link cannot go on pointing at the wrong line",
+    },
+    errorCodes: {
+      value: c.errorCodes,
+      method:
+        "every -32xxx literal emitted by crates/node/src/rpc.rs, across all three emission forms (RpcError literal, " +
+        "mempool tuple arm, and the hand-built JSON of the too-large path), cross-checked against the document's " +
+        "error tables; a code emitted but undocumented fails the build unless carried in KNOWN_DRIFT",
+    },
+    httpRejections: {
+      value: c.httpRejections,
+      method:
+        "StatusCode(N) sites in crates/node/src/rpc.rs with their body literal. These carry no JSON-RPC envelope, " +
+        "so a client that calls .json() on them raises a parse error rather than reading an error object",
+    },
+    sourceLimits: {
+      value: c.sourceLimits,
+      method: "the named constants themselves, joined to the document's Limits table by the constant it cites and compared",
+    },
+    fees: {
+      value: c.fees,
+      method:
+        "the match arms of minimum_fee_for_tx in crates/execution/src/lib.rs, joined to the payload discriminants. " +
+        "Every one of the transaction types is covered or the build fails",
+    },
+    bpsFees: {
+      value: c.bpsFees,
+      method: "basis-point fee constants in crates/execution/src/lib.rs against BPS_DENOMINATOR",
+    },
+    txWireLayout: {
+      value: c.wire,
+      method:
+        "the write sequence of encode_tx_v1_unsigned in crates/codec/src/lib.rs, in order, with each field's width " +
+        "and endianness taken from the writer it uses",
+    },
+    capabilityBits: {
+      value: c.capabilities,
+      method: "the bit tests in Capabilities::from_byte in crates/ai_entities/src/lib.rs",
+    },
+    quorum: {
+      value: c.quorum,
+      method:
+        "the body of the quorum const fn, read from both sites that implement it and asserted identical; the " +
+        "validator count is a configuration fact and is deliberately NOT generated",
+    },
+    signalPayloads: {
+      value: { baseLength: c.signalBaseLen, tails: c.signalTails },
+      method: "the signal commitment base length and every *_EXTRA_LEN constant in crates/execution/src/lib.rs",
+    },
+    entityCaps: {
+      value: c.entityCaps,
+      method: "pub const MAX_* declarations in crates/ai_entities/src/memory.rs with their doc comments",
+    },
+    retentionHorizons: {
+      value: c.retentionHorizons,
+      method:
+        "PRUNE_RETAIN_BLOCKS in crates/consensus/src/lib.rs and MAX_INDEX_ENTRIES in crates/node/src/main.rs. " +
+        "Published in blocks only: the wall-clock equivalent moves with cadence and is left for the reader to derive " +
+        "from the live rate",
+    },
+    sdkCoverage: {
+      value: c.coverageMatrix,
+      method:
+        "transaction builders exported by each SDK matched to the payload discriminants on a canonical name key, " +
+        "plus the signal and memory type counts each SDK declares. The Rust SDK re-exports the chain's own enums, " +
+        "which is asserted, so its type coverage is structural rather than maintained",
+    },
+    observedGaps: {
+      value: c.observedGaps,
+      method: "the table under ## Observed gaps in docs/RPC_REFERENCE.md",
+    },
     gaps: {
       value: {
         signalTypesWithoutSourceDescription: c.undocumentedSignals,
@@ -1356,8 +2272,23 @@ function main() {
   }
   if (driftFailed) fail("drift gate did not pass");
 
+  // Grouped by file and code point, with the first location kept as the proof.
+  // Reading crates/ brought in source whose COMMENTS carry em dashes, which
+  // printed one line each and buried the KNOWN_DRIFT block above. The evidence
+  // that a substitution happened is what matters, not one line per occurrence.
+  const subsByKey = new Map();
   for (const s of substitutionLog) {
-    console.log(`console-data: normalised ${s.from} to "${s.to}" at ${s.source}:${s.line}:${s.column}`);
+    const key = `${s.source}::${s.from}`;
+    if (!subsByKey.has(key)) subsByKey.set(key, { ...s, count: 0 });
+    subsByKey.get(key).count += 1;
+  }
+  for (const s of [...subsByKey.values()].sort((a, b) => a.source.localeCompare(b.source))) {
+    const where = `${s.source}:${s.line}:${s.column}`;
+    console.log(
+      s.count === 1
+        ? `console-data: normalised ${s.from} to "${s.to}" at ${where}`
+        : `console-data: normalised ${s.count} x ${s.from} to "${s.to}" in ${s.source} (first at ${where})`
+    );
   }
   if (substitutionLog.length === 0) {
     console.log("console-data: no forbidden dash code points found in the sources");

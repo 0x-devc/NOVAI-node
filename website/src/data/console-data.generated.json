@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-28T19:12:27.602Z",
+  "generatedAt": "2026-08-29T13:09:38.855Z",
   "source": {
     "reference": "docs/RPC_REFERENCE.md",
     "dispatch": "crates/node/src/rpc.rs",
@@ -57,6 +57,12 @@
           "summary": "-32014 NonceTooHigh is emitted by the node and appears nowhere in the RPC reference",
           "why": "Client-breaking rather than cosmetic. A client following the documented codes treats an unknown rejection as terminal and resyncs, when the correct handling for NonceTooHigh is to retry the same transaction unchanged once the sender's earlier nonces commit.",
           "operatorRef": "NEEDS-OPERATOR.md item 8"
+        },
+        {
+          "id": "getnonce-documented-as-interchangeable",
+          "summary": "novai_getNonce is documented as a cheaper substitute for novai_getBalance, but the two read different sources",
+          "why": "Client-breaking rather than cosmetic. getNonce answers from the mempool admission cursor and getBalance answers from the committed account row. They agree until a committed-but-failed transaction from that sender, after which the cursor runs ahead until the node restarts and reseeds from state. A client that builds plain-account transactions from getNonce, as the wording invites, then signs a nonce that execution will not accept.",
+          "operatorRef": "NEEDS-OPERATOR.md item 15"
         },
         {
           "id": "public-faucet-gating-backwards",
@@ -2037,6 +2043,1058 @@
       }
     ],
     "method": "pub const *_PAYLOAD_V1: u8 discriminants in crates/execution/src/lib.rs, contiguity asserted"
+  },
+  "sourceRefs": {
+    "value": [
+      {
+        "name": "novai_getLatestBlock",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1903
+      },
+      {
+        "name": "novai_getBlockByHeight",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1869
+      },
+      {
+        "name": "novai_getBlockByHash",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1886
+      },
+      {
+        "name": "novai_getBalance",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1693
+      },
+      {
+        "name": "novai_getNonce",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1385
+      },
+      {
+        "name": "novai_submitTransaction",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1365
+      },
+      {
+        "name": "novai_getTransaction",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1852
+      },
+      {
+        "name": "novai_getAiEntity",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1711
+      },
+      {
+        "name": "novai_getMemoryObjects",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1805
+      },
+      {
+        "name": "novai_getSignalsByHeight",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1404
+      },
+      {
+        "name": "novai_getSignalsByIssuer",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1424
+      },
+      {
+        "name": "novai_getSignalsByType",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1444
+      },
+      {
+        "name": "novai_getPaymentsByEntity",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1463
+      },
+      {
+        "name": "novai_getServiceDescriptorsByCategory",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1484
+      },
+      {
+        "name": "novai_getVkRegistration",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1505
+      },
+      {
+        "name": "novai_listVkRegistrations",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1523
+      },
+      {
+        "name": "novai_getSlaAgreement",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1543
+      },
+      {
+        "name": "novai_getActiveSla",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1561
+      },
+      {
+        "name": "novai_listSlasByBuyer",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1579
+      },
+      {
+        "name": "novai_listSlasBySeller",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1597
+      },
+      {
+        "name": "novai_getPaymentChannel",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1615
+      },
+      {
+        "name": "novai_listChannelsByPartyA",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1633
+      },
+      {
+        "name": "novai_listChannelsByPartyB",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1653
+      },
+      {
+        "name": "novai_getChannelDisputeStatus",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1673
+      },
+      {
+        "name": "novai_getUpgradeHistory",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1729
+      },
+      {
+        "name": "novai_getOracleAnchor",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1787
+      },
+      {
+        "name": "novai_getOracleAnchorsByEntity",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1747
+      },
+      {
+        "name": "novai_getOracleAnchorsByTag",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1767
+      },
+      {
+        "name": "novai_faucet",
+        "file": "crates/node/src/rpc.rs",
+        "line": 1823
+      }
+    ],
+    "method": "the line of each method's dispatch arm in crates/node/src/rpc.rs; every recorded line is re-read and must still carry its own method name, so a link cannot go on pointing at the wrong line"
+  },
+  "errorCodes": {
+    "value": [
+      {
+        "code": -32000,
+        "file": "crates/node/src/rpc.rs",
+        "line": 1958,
+        "functions": [
+          "dispense_transfer",
+          "handle_faucet",
+          "handle_submit_tx",
+          "test_rpc_error_response_serializes"
+        ]
+      },
+      {
+        "code": -32001,
+        "file": "crates/node/src/rpc.rs",
+        "line": 2045,
+        "functions": [
+          "dispense_transfer",
+          "handle_submit_tx"
+        ]
+      },
+      {
+        "code": -32002,
+        "file": "crates/node/src/rpc.rs",
+        "line": 2126,
+        "functions": [
+          "handle_get_active_sla",
+          "handle_get_ai_entity",
+          "handle_get_balance",
+          "handle_get_block_by_hash",
+          "handle_get_block_by_height",
+          "handle_get_channel_dispute_status",
+          "handle_get_latest_block",
+          "handle_get_memory_objects",
+          "handle_get_oracle_anchor",
+          "handle_get_oracle_anchors_by_entity",
+          "handle_get_oracle_anchors_by_tag",
+          "handle_get_payment_channel",
+          "handle_get_payments_by_entity",
+          "handle_get_service_descriptors_by_category",
+          "handle_get_signals_by_height",
+          "handle_get_signals_by_issuer",
+          "handle_get_signals_by_type",
+          "handle_get_sla_agreement",
+          "handle_get_transaction",
+          "handle_get_upgrade_history",
+          "handle_get_vk_registration",
+          "handle_list_channels_by_party_a",
+          "handle_list_channels_by_party_b",
+          "handle_list_slas_by_buyer",
+          "handle_list_slas_by_seller",
+          "handle_list_vk_registrations"
+        ]
+      },
+      {
+        "code": -32003,
+        "file": "crates/node/src/rpc.rs",
+        "line": 3677,
+        "functions": [
+          "json_response"
+        ]
+      },
+      {
+        "code": -32010,
+        "file": "crates/node/src/rpc.rs",
+        "line": 2046,
+        "functions": [
+          "handle_submit_tx"
+        ]
+      },
+      {
+        "code": -32011,
+        "file": "crates/node/src/rpc.rs",
+        "line": 2064,
+        "functions": [
+          "handle_submit_tx"
+        ]
+      },
+      {
+        "code": -32012,
+        "file": "crates/node/src/rpc.rs",
+        "line": 2066,
+        "functions": [
+          "handle_submit_tx"
+        ]
+      },
+      {
+        "code": -32013,
+        "file": "crates/node/src/rpc.rs",
+        "line": 2070,
+        "functions": [
+          "handle_submit_tx"
+        ]
+      },
+      {
+        "code": -32014,
+        "file": "crates/node/src/rpc.rs",
+        "line": 2059,
+        "functions": [
+          "handle_submit_tx"
+        ]
+      },
+      {
+        "code": -32600,
+        "file": "crates/node/src/rpc.rs",
+        "line": 1352,
+        "functions": [
+          "drop"
+        ]
+      },
+      {
+        "code": -32601,
+        "file": "crates/node/src/rpc.rs",
+        "line": 1922,
+        "functions": [
+          "drop"
+        ]
+      },
+      {
+        "code": -32602,
+        "file": "crates/node/src/rpc.rs",
+        "line": 1950,
+        "functions": [
+          "handle_faucet",
+          "handle_get_active_sla",
+          "handle_get_ai_entity",
+          "handle_get_balance",
+          "handle_get_block_by_hash",
+          "handle_get_block_by_height",
+          "handle_get_channel_dispute_status",
+          "handle_get_memory_objects",
+          "handle_get_nonce",
+          "handle_get_oracle_anchor",
+          "handle_get_oracle_anchors_by_entity",
+          "handle_get_oracle_anchors_by_tag",
+          "handle_get_payment_channel",
+          "handle_get_payments_by_entity",
+          "handle_get_service_descriptors_by_category",
+          "handle_get_signals_by_height",
+          "handle_get_signals_by_issuer",
+          "handle_get_signals_by_type",
+          "handle_get_sla_agreement",
+          "handle_get_transaction",
+          "handle_get_upgrade_history",
+          "handle_get_vk_registration",
+          "handle_list_channels_by_party_a",
+          "handle_list_channels_by_party_b",
+          "handle_list_slas_by_buyer",
+          "handle_list_slas_by_seller",
+          "handle_list_vk_registrations",
+          "handle_submit_tx",
+          "parse_hex32"
+        ]
+      },
+      {
+        "code": -32700,
+        "file": "crates/node/src/rpc.rs",
+        "line": 1335,
+        "functions": [
+          "drop"
+        ]
+      }
+    ],
+    "method": "every -32xxx literal emitted by crates/node/src/rpc.rs, across all three emission forms (RpcError literal, mempool tuple arm, and the hand-built JSON of the too-large path), cross-checked against the document's error tables; a code emitted but undocumented fails the build unless carried in KNOWN_DRIFT"
+  },
+  "httpRejections": {
+    "value": [
+      {
+        "status": 400,
+        "body": "Failed to read request: {e}",
+        "bodyIsTemplate": true,
+        "file": "crates/node/src/rpc.rs",
+        "line": 1312
+      },
+      {
+        "status": 413,
+        "body": "Request body too large",
+        "bodyIsTemplate": false,
+        "file": "crates/node/src/rpc.rs",
+        "line": 1321
+      },
+      {
+        "status": 429,
+        "body": "Too Many Requests",
+        "bodyIsTemplate": false,
+        "file": "crates/node/src/rpc.rs",
+        "line": 1297
+      },
+      {
+        "status": 503,
+        "body": "Service Unavailable - too many concurrent requests",
+        "bodyIsTemplate": false,
+        "file": "crates/node/src/rpc.rs",
+        "line": 1242
+      }
+    ],
+    "method": "StatusCode(N) sites in crates/node/src/rpc.rs with their body literal. These carry no JSON-RPC envelope, so a client that calls .json() on them raises a parse error rather than reading an error object"
+  },
+  "sourceLimits": {
+    "value": [
+      {
+        "name": "MAX_RPC_REQUESTS_PER_SEC",
+        "value": 100,
+        "file": "crates/node/src/rpc.rs",
+        "line": 65,
+        "unit": "requests per second per source IP"
+      },
+      {
+        "name": "MAX_CONCURRENT_RPC",
+        "value": 64,
+        "file": "crates/node/src/rpc.rs",
+        "line": 74,
+        "unit": "concurrent in-flight requests"
+      },
+      {
+        "name": "MAX_RPC_BODY_SIZE",
+        "value": 524288,
+        "file": "crates/node/src/rpc.rs",
+        "line": 70,
+        "unit": "bytes, request body"
+      },
+      {
+        "name": "MAX_RPC_RESPONSE_SIZE",
+        "value": 10485760,
+        "file": "crates/node/src/rpc.rs",
+        "line": 3667,
+        "unit": "bytes, response body"
+      },
+      {
+        "name": "MAX_TX_SIZE",
+        "value": 131072,
+        "file": "crates/types/src/lib.rs",
+        "line": 19,
+        "unit": "bytes, decoded transaction"
+      },
+      {
+        "name": "MAX_SIGNAL_QUERY_RANGE",
+        "value": 10000,
+        "file": "crates/node/src/rpc.rs",
+        "line": 77,
+        "unit": "blocks, signal query height range"
+      }
+    ],
+    "method": "the named constants themselves, joined to the document's Limits table by the constant it cites and compared"
+  },
+  "fees": {
+    "value": [
+      {
+        "constant": "TRANSFER_PAYLOAD_V1",
+        "name": "transfer",
+        "discriminant": 1,
+        "feeConstant": "MIN_FEE_TRANSFER",
+        "minFee": 100,
+        "feeLine": 12325,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "SIGNAL_COMMITMENT_PAYLOAD_V1",
+        "name": "signalCommitment",
+        "discriminant": 2,
+        "feeConstant": "MIN_FEE_SIGNAL_COMMITMENT",
+        "minFee": 1000,
+        "feeLine": 12328,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "CREATE_MEMORY_OBJECT_PAYLOAD_V1",
+        "name": "createMemoryObject",
+        "discriminant": 3,
+        "feeConstant": "MIN_FEE_MEMORY_OBJECT",
+        "minFee": 500,
+        "feeLine": 12331,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "UPDATE_MEMORY_OBJECT_PAYLOAD_V1",
+        "name": "updateMemoryObject",
+        "discriminant": 4,
+        "feeConstant": "MIN_FEE_MEMORY_OBJECT",
+        "minFee": 500,
+        "feeLine": 12331,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "DELETE_MEMORY_OBJECT_PAYLOAD_V1",
+        "name": "deleteMemoryObject",
+        "discriminant": 5,
+        "feeConstant": "MIN_FEE_MEMORY_OBJECT",
+        "minFee": 500,
+        "feeLine": 12331,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "SUBMIT_PROPOSAL_PAYLOAD_V1",
+        "name": "submitProposal",
+        "discriminant": 6,
+        "feeConstant": "MIN_FEE_GOVERNANCE_SUBMIT",
+        "minFee": 2000,
+        "feeLine": 12334,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "EXECUTE_PROPOSAL_PAYLOAD_V1",
+        "name": "executeProposal",
+        "discriminant": 7,
+        "feeConstant": "MIN_FEE_GOVERNANCE_EXECUTE",
+        "minFee": 500,
+        "feeLine": 12337,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "REGISTER_AI_ENTITY_PAYLOAD_V1",
+        "name": "registerAiEntity",
+        "discriminant": 8,
+        "feeConstant": "MIN_FEE_REGISTER_AI_ENTITY",
+        "minFee": 5000,
+        "feeLine": 12340,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "CREDIT_AI_ENTITY_PAYLOAD_V1",
+        "name": "creditAiEntity",
+        "discriminant": 9,
+        "feeConstant": "MIN_FEE_CREDIT_AI_ENTITY",
+        "minFee": 100,
+        "feeLine": 12343,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "REGISTER_AI_ENTITY_WITH_KEY_PAYLOAD_V1",
+        "name": "registerAiEntityWithKey",
+        "discriminant": 10,
+        "feeConstant": "MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY",
+        "minFee": 5000,
+        "feeLine": 12346,
+        "feeFile": "crates/execution/src/lib.rs"
+      },
+      {
+        "constant": "ENTITY_UPGRADE_PAYLOAD_V1",
+        "name": "entityUpgrade",
+        "discriminant": 11,
+        "feeConstant": "MIN_FEE_ENTITY_UPGRADE",
+        "minFee": 5000,
+        "feeLine": 12349,
+        "feeFile": "crates/execution/src/lib.rs"
+      }
+    ],
+    "method": "the match arms of minimum_fee_for_tx in crates/execution/src/lib.rs, joined to the payload discriminants. Every one of the transaction types is covered or the build fails"
+  },
+  "bpsFees": {
+    "value": {
+      "denominator": 10000,
+      "denominatorConstant": "BPS_DENOMINATOR",
+      "entries": [
+        {
+          "constant": "PAYMENT_FEE_BPS",
+          "bps": 200,
+          "percent": 2,
+          "file": "crates/execution/src/lib.rs",
+          "line": 1541
+        },
+        {
+          "constant": "MARKETPLACE_FEE_BPS",
+          "bps": 200,
+          "percent": 2,
+          "file": "crates/execution/src/lib.rs",
+          "line": 12443
+        },
+        {
+          "constant": "SUBSCRIPTION_CANCEL_FEE_BPS",
+          "bps": 500,
+          "percent": 5,
+          "file": "crates/execution/src/lib.rs",
+          "line": 12450
+        }
+      ]
+    },
+    "method": "basis-point fee constants in crates/execution/src/lib.rs against BPS_DENOMINATOR"
+  },
+  "txWireLayout": {
+    "value": {
+      "fields": [
+        {
+          "field": "version",
+          "bytes": 1,
+          "endianness": null,
+          "offset": 0
+        },
+        {
+          "field": "from",
+          "bytes": 32,
+          "endianness": null,
+          "offset": 1
+        },
+        {
+          "field": "pubkey",
+          "bytes": 32,
+          "endianness": null,
+          "offset": 33
+        },
+        {
+          "field": "nonce",
+          "bytes": 8,
+          "endianness": "little",
+          "offset": 65
+        },
+        {
+          "field": "fee",
+          "bytes": 8,
+          "endianness": "little",
+          "offset": 73
+        },
+        {
+          "field": "payload_len",
+          "bytes": 4,
+          "endianness": "little",
+          "offset": 81
+        },
+        {
+          "field": "payload",
+          "bytes": null,
+          "endianness": null,
+          "offset": 85
+        }
+      ],
+      "signatureBytes": 64,
+      "overhead": 149,
+      "overheadConstant": "TX_V1_OVERHEAD",
+      "file": "crates/codec/src/lib.rs",
+      "line": 94
+    },
+    "method": "the write sequence of encode_tx_v1_unsigned in crates/codec/src/lib.rs, in order, with each field's width and endianness taken from the writer it uses"
+  },
+  "capabilityBits": {
+    "value": [
+      {
+        "capability": "read_public_chain",
+        "bit": 0,
+        "hex": "0x01"
+      },
+      {
+        "capability": "read_memory_objects",
+        "bit": 1,
+        "hex": "0x02"
+      },
+      {
+        "capability": "emit_proposals",
+        "bit": 2,
+        "hex": "0x04"
+      },
+      {
+        "capability": "request_execution",
+        "bit": 3,
+        "hex": "0x08"
+      },
+      {
+        "capability": "read_nnpx_derived",
+        "bit": 4,
+        "hex": "0x10"
+      },
+      {
+        "capability": "submit_reputation_updates",
+        "bit": 5,
+        "hex": "0x20"
+      },
+      {
+        "capability": "post_oracle_anchors",
+        "bit": 6,
+        "hex": "0x40"
+      }
+    ],
+    "method": "the bit tests in Capabilities::from_byte in crates/ai_entities/src/lib.rs"
+  },
+  "quorum": {
+    "value": {
+      "expression": "2 * ((n - 1) / 3) + 1",
+      "sites": [
+        {
+          "file": "crates/node/src/snapshot/valset.rs",
+          "fn": "quorum",
+          "expression": "2 * ((n - 1) / 3) + 1",
+          "line": 28
+        },
+        {
+          "file": "crates/consensus_types/src/leader.rs",
+          "fn": "quorum_threshold",
+          "expression": "2 * ((n - 1) / 3) + 1",
+          "line": 115
+        }
+      ]
+    },
+    "method": "the body of the quorum const fn, read from both sites that implement it and asserted identical; the validator count is a configuration fact and is deliberately NOT generated"
+  },
+  "signalPayloads": {
+    "value": {
+      "baseLength": {
+        "name": "SIGNAL_COMMITMENT_PAYLOAD_V1_BASE_LEN",
+        "value": 66,
+        "file": "crates/execution/src/lib.rs",
+        "line": 1187
+      },
+      "tails": [
+        {
+          "name": "CHANNEL_ACCEPT_EXTRA_LEN",
+          "value": 64,
+          "expression": "32 + 32",
+          "description": "Inline-extra size for a `ChannelAccept` signal payload (Week 32).  Layout: `channel_object_id:32 | party_a_entity_id:32`. The party A id is carried alongside the channel object id so the handler can construct the primary `ai_memory_object_key(party_a, object_id)` without scanning every entity's memory namespace; defence in depth verifies that the resolved channel's `party_a_entity_id` matches the wire value.",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1418
+        },
+        {
+          "name": "CHANNEL_CLOSE_EXTRA_LEN",
+          "value": 233,
+          "expression": "32 + 32 + 8 + 16 + 16 + 1 + 64 + 64",
+          "description": "Inline-extra size for a `ChannelClose` signal payload (Week 32).  Layout: `channel_object_id:32 | party_a_entity_id:32 | nonce_be:8 | balance_a_be:16 | balance_b_be:16 | is_final:1 | sig_a:64 | sig_b:64`. Both signatures are always required; the handler verifies `sig_a` under party A's pubkey and `sig_b` under party B's pubkey over the canonical channel state signing bytes (see `novai_crypto::channel_state_signing_bytes`).",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1432
+        },
+        {
+          "name": "CHANNEL_FINALIZE_EXTRA_LEN",
+          "value": 64,
+          "expression": "32 + 32",
+          "description": "Inline-extra size for a `ChannelFinalize` signal payload (Week 32).  Layout: `channel_object_id:32 | party_a_entity_id:32`. Permissionless finalize after the dispute window expires; either party (or any third party with an active AI entity) may submit.",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1443
+        },
+        {
+          "name": "COMPOSITION_CHECK_EXTRA_LEN",
+          "value": 34,
+          "expression": "34",
+          "description": "Inline-extra size for a `CompositionCheck` signal payload. `target_entity_id:32 | failed_dependency_idx:1 | failure_reason:1`",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1231
+        },
+        {
+          "name": "ORACLE_ANCHOR_EXTRA_FIXED_LEN",
+          "value": 81,
+          "expression": "32 + 8 + 32 + 8 + 1",
+          "description": "Fixed portion of the `OracleAnchorExtraV1` signal tail, in bytes (everything before the variable-length `data_tag`). See the struct for the full field layout.",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1483
+        },
+        {
+          "name": "PAYMENT_REQUEST_EXTRA_LEN",
+          "value": 112,
+          "expression": "32 + 8 + 32 + 32 + 8",
+          "description": "Inline-extra size for a `PaymentRequest` signal payload. `payee_entity_id:32 | amount_be:8 | service_descriptor_hash:32 | request_hash:32 | max_block_height_be:8`.",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1287
+        },
+        {
+          "name": "PROOF_SUBMISSION_EXTRA_LEN",
+          "value": 65,
+          "expression": "1 + 32 + 32",
+          "description": "Inline-extra size for a v1 `ProofSubmission` signal payload (stub layout). `proof_type:1 | code_hash:32 | computation_hash:32`  The v1 layout is used when `proof_type == PROOF_TYPE_STUB`. For `proof_type >= PROOF_TYPE_GROTH16` the encoder switches to the v2 layout which appends length-prefixed `vk_bytes` and `proof_bytes` after this fixed tail (see `PROOF_SUBMISSION_MAX_VK_BYTES` and `PROOF_SUBMISSION_MAX_PROOF_BYTES`).",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1245
+        },
+        {
+          "name": "REPUTATION_UPDATE_EXTRA_LEN",
+          "value": 35,
+          "expression": "35",
+          "description": "Inline-extra size for a `ReputationUpdate` signal payload. `target_entity_id:32 | event_type:1 | points_delta_be:2`",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1191
+        },
+        {
+          "name": "SERVICE_ATTESTATION_EXTRA_LEN",
+          "value": 65,
+          "expression": "32 + 32 + 1",
+          "description": "Inline-extra size for a `ServiceAttestation` signal payload. `payment_signal_hash:32 | payee_entity_id:32 | status:1`.",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1393
+        },
+        {
+          "name": "SIGNAL_PURCHASE_EXTRA_LEN",
+          "value": 41,
+          "expression": "41",
+          "description": "Inline-extra size for a `SignalPurchase` signal payload. `seller_entity_id:32 | purchased_signal_type:1 | max_price_be:8`",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1199
+        },
+        {
+          "name": "SLA_ACCEPT_EXTRA_LEN",
+          "value": 64,
+          "expression": "32 + 32",
+          "description": "Inline-extra size for an `SlaAccept` signal payload (Week 31).  Layout: `sla_object_id:32 | buyer_entity_id:32`. The buyer id is carried alongside the SLA object id so the handler can construct the primary `ai_memory_object_key(buyer, object_id)` without scanning every entity's memory namespace; defence in depth verifies that the resolved SLA's `buyer_entity_id` matches the wire value.",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1403
+        },
+        {
+          "name": "STAKE_DEPOSIT_EXTRA_LEN",
+          "value": 16,
+          "expression": "16",
+          "description": "Inline-extra size for a `StakeDeposit` signal payload. `amount_be:16`",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1207
+        },
+        {
+          "name": "STAKE_SLASH_EXTRA_LEN",
+          "value": 51,
+          "expression": "51",
+          "description": "Inline-extra size for a `StakeSlash` signal payload. `target_entity_id:32 | slash_amount_be:16 | rep_event_type:1 | points_delta_be:2`",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1223
+        },
+        {
+          "name": "STAKE_WITHDRAW_EXTRA_LEN",
+          "value": 16,
+          "expression": "16",
+          "description": "Inline-extra size for a `StakeWithdraw` signal payload. `amount_be:16`",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1215
+        },
+        {
+          "name": "SUBSCRIPTION_CANCEL_EXTRA_LEN",
+          "value": 32,
+          "expression": "32",
+          "description": "Inline-extra size for a `SubscriptionCancel` signal payload. `subscription_id:32` (memory object id of the `Subscription` record).",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1278
+        },
+        {
+          "name": "SUBSCRIPTION_CREATE_EXTRA_LEN",
+          "value": 49,
+          "expression": "32 + 1 + 8 + 8",
+          "description": "Inline-extra size for a `SubscriptionCreate` signal payload. `producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 | duration_blocks_be:8`.",
+          "file": "crates/execution/src/lib.rs",
+          "line": 1270
+        }
+      ]
+    },
+    "method": "the signal commitment base length and every *_EXTRA_LEN constant in crates/execution/src/lib.rs"
+  },
+  "entityCaps": {
+    "value": [
+      {
+        "name": "MAX_CATALOG_OFFERINGS",
+        "value": 10,
+        "expression": "10",
+        "description": "Maximum number of distinct signal offerings a single entity may list.",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 858
+      },
+      {
+        "name": "MAX_COMPOSITION_DEPENDENCIES",
+        "value": 10,
+        "expression": "10",
+        "description": "Maximum number of inbound dependencies a single entity may declare.",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 985
+      },
+      {
+        "name": "MAX_DELEGATION_GRANTS",
+        "value": 20,
+        "expression": "20",
+        "description": "Maximum number of `DelegationGrant` memory objects a single delegator may hold open at one time. Counts against the per-entity object cap as well.",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 33
+      },
+      {
+        "name": "MAX_MEMORY_OBJECT_SIZE",
+        "value": 65536,
+        "expression": "65536",
+        "description": "Maximum size of a single memory object's data field (64KB).",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 26
+      },
+      {
+        "name": "MAX_MEMORY_OBJECTS_PER_ENTITY",
+        "value": 100,
+        "expression": "100",
+        "description": "Maximum number of memory objects per AI entity.",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 29
+      },
+      {
+        "name": "MAX_PAYMENT_CHANNELS_PER_ENTITY",
+        "value": 32,
+        "expression": "32",
+        "description": "Maximum number of `PaymentChannel` memory objects a single entity may participate in (Week 32), counted across BOTH party roles (memory-object owner AND embedded counterparty). Counted by a bounded prefix scan over `ai/channels/by_party_a/<entity>/` plus `ai/channels/by_party_b/<entity>/` at propose / accept time. The cap is intentionally higher than `MAX_SLAS_PER_ENTITY` (= 8) because channels are designed for high-frequency micropayments and an entity may reasonably hold several concurrent streams to different counterparties; the cap still bounds the worst-case fan-out for the by-party scans.",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 244
+      },
+      {
+        "name": "MAX_SERVICE_DESCRIPTORS_PER_ENTITY",
+        "value": 16,
+        "expression": "16",
+        "description": "Maximum number of `ServiceDescriptor` memory objects a single entity may publish (Week 29).  Counts against the global `MAX_MEMORY_OBJECTS_PER_ENTITY` cap. 16 was chosen to leave room for the other memory types an active entity typically holds (subscriptions, delegation grants, ratings, etc.) while still allowing a publisher to advertise a meaningful catalogue of services per category.",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 63
+      },
+      {
+        "name": "MAX_SLAS_PER_ENTITY",
+        "value": 8,
+        "expression": "8",
+        "description": "Maximum number of `SlaAgreement` memory objects a single buyer may open (Week 31). Counted against the global `MAX_MEMORY_OBJECTS_PER_ENTITY` cap and against this per-type cap by the create handler via a bounded prefix scan of `ai/memory_by_type/14/<buyer>/`.  The cap is per BUYER (memory-object owner). Sellers are not capped in v1: they appear in arbitrarily many SLAs but never own the underlying memory object. Cap value mirrors `MAX_VK_REGISTRATIONS_PER_ENTITY` (a deliberately tight v1 cap that can be raised by future governance once usage patterns are known).",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 163
+      },
+      {
+        "name": "MAX_SUBSCRIPTIONS_PER_ENTITY",
+        "value": 10,
+        "expression": "10",
+        "description": "Maximum number of `Subscription` memory objects a single subscriber may hold (active or cancelled) at one time. Counts against the per-entity object cap as well; cancelled records remain in state for audit until the subscriber explicitly deletes them via `DELETE_MEMORY_OBJECT`.",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 45
+      },
+      {
+        "name": "MAX_VK_REGISTRATIONS_PER_ENTITY",
+        "value": 8,
+        "expression": "8",
+        "description": "Maximum number of `VkRegistration` memory objects a single entity may publish (Week 30).  Counts against the global `MAX_MEMORY_OBJECTS_PER_ENTITY` cap. The cap is intentionally tight: verification keys are bulky (hundreds of bytes to several KB compressed for BN254 Groth16), and in v1 most entities will register one VK per circuit they own. The pattern mirrors the per-entity caps already in place for `DelegationGrant` and `ServiceDescriptor`.",
+        "file": "crates/ai_entities/src/memory.rs",
+        "line": 131
+      }
+    ],
+    "method": "pub const MAX_* declarations in crates/ai_entities/src/memory.rs with their doc comments"
+  },
+  "retentionHorizons": {
+    "value": {
+      "disk": {
+        "name": "PRUNE_RETAIN_BLOCKS",
+        "value": 50000,
+        "file": "crates/consensus/src/lib.rs",
+        "line": 65,
+        "what": "blocks retained on disk"
+      },
+      "index": {
+        "name": "MAX_INDEX_ENTRIES",
+        "value": 100000,
+        "file": "crates/node/src/main.rs",
+        "line": 339,
+        "what": "heights retained in the in-memory block index"
+      }
+    },
+    "method": "PRUNE_RETAIN_BLOCKS in crates/consensus/src/lib.rs and MAX_INDEX_ENTRIES in crates/node/src/main.rs. Published in blocks only: the wall-clock equivalent moves with cadence and is left for the reader to derive from the live rate"
+  },
+  "sdkCoverage": {
+    "value": {
+      "builders": [
+        {
+          "txType": "transfer",
+          "discriminant": 1,
+          "rust": "transfer",
+          "typescript": "transfer",
+          "python": "build_transfer_payload"
+        },
+        {
+          "txType": "signalCommitment",
+          "discriminant": 2,
+          "rust": "signal_commitment",
+          "typescript": "signalCommitment",
+          "python": "build_signal_commitment_payload"
+        },
+        {
+          "txType": "createMemoryObject",
+          "discriminant": 3,
+          "rust": "create_memory",
+          "typescript": "createMemory",
+          "python": "build_create_memory_payload"
+        },
+        {
+          "txType": "updateMemoryObject",
+          "discriminant": 4,
+          "rust": "update_memory",
+          "typescript": "updateMemory",
+          "python": "build_update_memory_payload"
+        },
+        {
+          "txType": "deleteMemoryObject",
+          "discriminant": 5,
+          "rust": "delete_memory",
+          "typescript": "deleteMemory",
+          "python": "build_delete_memory_payload"
+        },
+        {
+          "txType": "submitProposal",
+          "discriminant": 6,
+          "rust": "submit_proposal",
+          "typescript": "submitProposal",
+          "python": "build_submit_proposal_payload"
+        },
+        {
+          "txType": "executeProposal",
+          "discriminant": 7,
+          "rust": "execute_proposal",
+          "typescript": "executeProposal",
+          "python": "build_execute_proposal_payload"
+        },
+        {
+          "txType": "registerAiEntity",
+          "discriminant": 8,
+          "rust": "register_ai_entity",
+          "typescript": "registerAiEntity",
+          "python": "build_register_entity_payload"
+        },
+        {
+          "txType": "creditAiEntity",
+          "discriminant": 9,
+          "rust": "credit_ai_entity",
+          "typescript": "creditAiEntity",
+          "python": "build_credit_entity_payload"
+        },
+        {
+          "txType": "registerAiEntityWithKey",
+          "discriminant": 10,
+          "rust": "register_ai_entity_with_key",
+          "typescript": "registerAiEntityWithKey",
+          "python": "build_register_with_key_payload"
+        },
+        {
+          "txType": "entityUpgrade",
+          "discriminant": 11,
+          "rust": "entity_upgrade",
+          "typescript": null,
+          "python": "build_entity_upgrade_payload"
+        }
+      ],
+      "totals": {
+        "txTypes": 11,
+        "rustBuilders": 11,
+        "typescriptBuilders": 10,
+        "pythonBuilders": 11
+      },
+      "signalTypes": {
+        "chain": 23,
+        "rust": 23,
+        "rustIsStructural": true,
+        "typescript": 7,
+        "python": 23
+      },
+      "memoryObjectTypes": {
+        "chain": 16,
+        "rust": 16,
+        "rustIsStructural": true,
+        "typescript": 5,
+        "python": 16
+      },
+      "workspaceCoupling": {
+        "rust": {
+          "file": "sdk/novai-sdk/Cargo.toml",
+          "pathDependencies": [
+            {
+              "crate": "novai-types",
+              "path": "../../crates/types"
+            },
+            {
+              "crate": "novai-crypto",
+              "path": "../../crates/crypto"
+            },
+            {
+              "crate": "novai-codec",
+              "path": "../../crates/codec"
+            },
+            {
+              "crate": "novai-ai-entities",
+              "path": "../../crates/ai_entities"
+            }
+          ],
+          "consumableFromRegistry": false
+        }
+      }
+    },
+    "method": "transaction builders exported by each SDK matched to the payload discriminants on a canonical name key, plus the signal and memory type counts each SDK declares. The Rust SDK re-exports the chain's own enums, which is asserted, so its type coverage is structural rather than maintained"
+  },
+  "observedGaps": {
+    "value": [
+      {
+        "Gap": "No treasury balance method",
+        "Impact": "`treasury/ai`, `treasury/marketplace`, `treasury/slash` accumulate value but are not addressable accounts",
+        "Workaround today": "Direct KV inspection (string keys: `treasury/ai`, `treasury/marketplace`, `treasury/slash`)"
+      },
+      {
+        "Gap": "No mempool query",
+        "Impact": "Cannot enumerate pending txs",
+        "Workaround today": "Poll `getTransaction(txid)` for inclusion"
+      },
+      {
+        "Gap": "No event subscription",
+        "Impact": "RPC is HTTP request/response only; no WebSocket or push",
+        "Workaround today": "Poll `getLatestBlock` and the signal index"
+      },
+      {
+        "Gap": "No transaction logs / traces",
+        "Impact": "Receipts carry only `(block_height, tx_index, from, nonce, fee, payload_len)`",
+        "Workaround today": "For execution outcome, cross-check the relevant state read after `getTransaction` returns non-null"
+      },
+      {
+        "Gap": "Memory object filter by type",
+        "Impact": "`getMemoryObjects` returns all objects for an entity; no per-type query",
+        "Workaround today": "Filter client-side on `object_type`"
+      },
+      {
+        "Gap": "Signal payload tail not surfaced",
+        "Impact": "Index returns only base header (commitment_hash, signal_type, height, issuer); the tail bytes for signals 7..=22 are not in the response",
+        "Workaround today": "Read the wrapping tx via `getTransaction`, or use the dedicated aux-record methods (`getPaymentsByEntity`, `getOracleAnchor`, etc.) where the chain persists structured aux rows"
+      }
+    ],
+    "method": "the table under ## Observed gaps in docs/RPC_REFERENCE.md"
   },
   "gaps": {
     "value": {

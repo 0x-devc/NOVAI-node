@@ -4,7 +4,7 @@
     "title": "NOVAI JSON-RPC",
     "version": "1.0.0",
     "description": "Generated from docs/RPC_REFERENCE.md and cross-checked against the node's dispatch table, the README method table and the Python SDK. Not hand-maintained.",
-    "x-generatedAt": "2026-08-28T19:12:27.602Z"
+    "x-generatedAt": "2026-08-29T13:09:38.855Z"
   },
   "methods": [
     {

@@ -244,6 +244,45 @@ itself does not document is the wrong way round.
 
 ---
 
+## 15. `novai_getNonce` is documented as interchangeable with `getBalance`
+
+`docs/RPC_REFERENCE.md` describes `novai_getNonce` as "Cheaper than
+`getBalance` if you don't need the balance." The two answer from different
+sources and are not substitutes.
+
+- `handle_get_nonce` returns `nonce_provider.expected_nonce(&address)`
+  (`crates/node/src/rpc.rs:2105`), the in-memory mempool admission cursor.
+- `handle_get_balance` returns `account.nonce` from
+  `read_account_or_default` (`crates/node/src/rpc.rs:2719-2727`), the
+  committed state row.
+
+The cursor advances on every committed transaction regardless of whether
+execution succeeded (`crates/node/src/main.rs:250-266`, with the reasoning in
+its own comment). The account nonce advances only on success: the equality
+check at `crates/execution/src/lib.rs:6922` returns before any write. So after
+one committed-but-failed transaction from a sender the two diverge, and the
+cursor stays ahead until the node restarts and reseeds from state
+(`crates/node/src/main.rs:136-149`).
+
+Consequence for a client: build plain-account transactions from
+`getBalance.nonce`, and use `getNonce` only to predict whether the mempool will
+admit. A client following the doc's wording signs a nonce execution will
+reject. Registered AI entities are unaffected, because their path compares with
+`>=` rather than equality and self-heals.
+
+This is a documentation defect, not a chain change, and nothing here proposes
+one. It is carried as the `getnonce-documented-as-interchangeable` entry in
+`KNOWN_DRIFT` and is printed on every generator run. The console publishes the
+distinction in its known-gaps section. Fixing the doc's wording retires the
+exception, and the gate will then fail until it is deleted.
+
+---
+
 FYI, no action needed unless renewal fails: the rpc.novai.network TLS
 certificate expires 2026-08-30 with certbot auto-renewal configured. That is
 close enough now to be worth a glance.
+
+**Update 2026-08-29: that is tomorrow.** Worth confirming renewal actually
+fired rather than assuming it did. Every runnable example on the console posts
+to `https://rpc.novai.network`, so an expired certificate does not degrade the
+page, it makes the whole first-call section fail in the visitor's terminal.

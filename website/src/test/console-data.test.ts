@@ -28,11 +28,28 @@ const FIXTURE_FILES = [
   "docs/RPC_REFERENCE.md",
   "README.md",
   "crates/node/src/rpc.rs",
+  "crates/node/src/main.rs",
+  "crates/node/src/snapshot/valset.rs",
   "crates/execution/src/lib.rs",
   "crates/consensus/src/lib.rs",
+  "crates/consensus_types/src/leader.rs",
+  "crates/codec/src/lib.rs",
+  "crates/types/src/lib.rs",
+  "crates/ai_entities/src/lib.rs",
   "crates/ai_entities/src/signals.rs",
   "crates/ai_entities/src/memory.rs",
   "sdk/novai-python-sdk/novai_sdk/client.py",
+  "sdk/novai-python-sdk/novai_sdk/enums.py",
+  "sdk/novai-python-sdk/novai_sdk/tx/transfer.py",
+  "sdk/novai-python-sdk/novai_sdk/tx/signal.py",
+  "sdk/novai-python-sdk/novai_sdk/tx/memory.py",
+  "sdk/novai-python-sdk/novai_sdk/tx/governance.py",
+  "sdk/novai-python-sdk/novai_sdk/tx/entities.py",
+  "sdk/novai-sdk/Cargo.toml",
+  "sdk/novai-sdk/src/lib.rs",
+  "sdk/novai-sdk/src/tx.rs",
+  "sdk/novai-sdk-ts/src/tx.ts",
+  "sdk/novai-sdk-ts/src/types.ts",
 ];
 
 function fixtureRoot(edit?: (rel: string, text: string) => string): string {
@@ -172,6 +189,7 @@ describe("generate-console-data: the KNOWN_DRIFT exception list", () => {
       "error-code-32014-undocumented",
       "faucet-disabled-code-mismatch",
       "faucet-rpc-gating-incomplete",
+      "getnonce-documented-as-interchangeable",
       "public-faucet-gating-backwards",
     ]);
     for (const e of data.drift.value.knownExceptions) {
@@ -335,12 +353,31 @@ describe("generate-console-data: dash normalisation is proven, not assumed", () 
     }
   });
 
-  it("logs one substitution for every forbidden code point in the sources", () => {
-    const doc = readFileSync(join(REPO, "docs/RPC_REFERENCE.md"), "utf8");
+  it("accounts for every forbidden code point in the reference document", () => {
+    // The log groups by file and code point, because reading crates/ pulls in
+    // source whose comments carry em dashes and one line per occurrence buried
+    // the drift report. The proof is unchanged in substance: the count the
+    // generator reports for a file must equal the count actually in that file.
+    const rel = "docs/RPC_REFERENCE.md";
+    const doc = readFileSync(join(REPO, rel), "utf8");
     const present = [...doc].filter((c) => FORBIDDEN.includes(c)).length;
     const res = run(SCRIPT, ["--check"]);
-    const logged = res.output.split("\n").filter((l) => l.includes("console-data: normalised")).length;
-    expect(logged).toBe(present);
+    const lines = res.output.split("\n").filter((l) => l.includes("console-data: normalised") && l.includes(rel));
+    const reported = lines.reduce((total, line) => {
+      const many = /normalised (\d+) x /.exec(line);
+      return total + (many ? Number(many[1]) : 1);
+    }, 0);
+    expect(reported, `expected ${rel} to account for ${present} substitution(s)`).toBe(present);
+  });
+
+  it("reports a count for every source it normalises, so the log cannot be vacuous", () => {
+    const res = run(SCRIPT, ["--check"]);
+    const lines = res.output.split("\n").filter((l) => l.includes("console-data: normalised"));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      // Every line names a file and a source location, grouped or not.
+      expect(line, `substitution line carries no location: ${line}`).toMatch(/[\w./-]+:\d+:\d+/);
+    }
   });
 
   it("the dash gate reports a violation when one is present", () => {
@@ -426,5 +463,432 @@ describe("openrpc.json", () => {
     rmSync(root, { recursive: true, force: true });
     expect(res.status).not.toBe(0);
     expect(res.output).toContain("no schema mapping");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The source-derived datasets
+//
+// Every gate below is proven by doctoring a fixture, and every doctoring is
+// itself asserted to have landed. A gate that has never been seen to fail has
+// not been shown to work, and a doctoring that silently did nothing makes a
+// passing run mean nothing.
+// ---------------------------------------------------------------------------
+
+describe("generate-console-data: error codes read from the implementation", () => {
+  it("carries all thirteen codes the node can emit, each with a source line", () => {
+    const codes = data.errorCodes.value.map((e: { code: number }) => e.code);
+    expect(codes).toHaveLength(13);
+    expect(codes).toContain(-32014);
+    for (const e of data.errorCodes.value) {
+      expect(e.file).toBe("crates/node/src/rpc.rs");
+      expect(e.line).toBeGreaterThan(0);
+    }
+  });
+
+  it("finds the codes emitted as tuple arms, not only the RpcError literals", () => {
+    // -32010 through -32014 exist ONLY as `(-32010, format!(...))` tuple arms.
+    // A scan that knows just the `code: -32602` form loses all five and the
+    // count silently drops to eight.
+    const codes = data.errorCodes.value.map((e: { code: number }) => e.code);
+    for (const c of [-32010, -32011, -32012, -32013, -32014]) expect(codes).toContain(c);
+  });
+
+  it("fails when the source emits a code that is neither documented nor excepted", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "crates/node/src/rpc.rs") return text;
+      const out = text.replace(
+        'code: -32700,',
+        'code: -32777,\n        message: "invented".to_string(),\n    });\n    let _unused = RpcError {\n        code: -32700,'
+      );
+      landed = out.includes("-32777");
+      return out;
+    });
+    expect(landed, "the doctored code was not inserted").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("-32777");
+  });
+
+  it("fails when a code appears in a form the structured scan does not know", () => {
+    // The broad sweep cannot miss a code; the structured patterns can. Making
+    // the two disagree is what proves the structured scan is being checked.
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "crates/node/src/rpc.rs") return text;
+      const out = text.replace("fn handle_get_nonce(", "fn unreachable_probe() -> i64 { -32999 }\n\nfn handle_get_nonce(");
+      landed = out.includes("-32999");
+      return out;
+    });
+    expect(landed, "the doctored emission form was not inserted").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("undercounting");
+  });
+});
+
+describe("generate-console-data: limits cross-checked against their constants", () => {
+  it("reads all six limits from source with a file and line", () => {
+    const names = data.sourceLimits.value.map((l: { name: string }) => l.name);
+    expect(names).toContain("MAX_RPC_REQUESTS_PER_SEC");
+    expect(names).toContain("MAX_TX_SIZE");
+    expect(data.sourceLimits.value).toHaveLength(6);
+    for (const l of data.sourceLimits.value) expect(l.line).toBeGreaterThan(0);
+  });
+
+  it("fails when a constant and the document's Limits table disagree", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "crates/node/src/rpc.rs") return text;
+      const out = text.replace(
+        "const MAX_RPC_REQUESTS_PER_SEC: usize = 100;",
+        "const MAX_RPC_REQUESTS_PER_SEC: usize = 250;"
+      );
+      landed = out.includes("= 250;");
+      return out;
+    });
+    expect(landed, "the doctored limit was not applied").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("MAX_RPC_REQUESTS_PER_SEC");
+  });
+
+  it("fails rather than passing vacuously when the table stops naming constants", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace("`MAX_RPC_REQUESTS_PER_SEC`", "the rate limiter");
+      landed = !out.includes("`MAX_RPC_REQUESTS_PER_SEC`");
+      return out;
+    });
+    expect(landed, "the constant reference was not removed").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("no longer names every constant");
+  });
+});
+
+describe("generate-console-data: fees for every transaction type", () => {
+  it("covers all eleven types, including the two the cookbook omits", () => {
+    expect(data.fees.value).toHaveLength(11);
+    const byName = Object.fromEntries(
+      data.fees.value.map((f: { name: string; minFee: number }) => [f.name, f.minFee])
+    );
+    expect(byName.transfer).toBe(100);
+    expect(byName.registerAiEntityWithKey).toBe(5000);
+    expect(byName.entityUpgrade).toBe(5000);
+  });
+
+  it("fails when a transaction type has no fee arm", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "crates/execution/src/lib.rs") return text;
+      const out = text.replace(
+        "ENTITY_UPGRADE_PAYLOAD_V1 => Ok(MIN_FEE_ENTITY_UPGRADE),",
+        ""
+      );
+      landed = !out.includes("ENTITY_UPGRADE_PAYLOAD_V1 => Ok(MIN_FEE_ENTITY_UPGRADE),");
+      return out;
+    });
+    expect(landed, "the fee arm was not removed").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("ENTITY_UPGRADE_PAYLOAD_V1");
+  });
+});
+
+describe("generate-console-data: the transaction wire layout", () => {
+  it("walks the full envelope, and its widths add up to the overhead constant", () => {
+    const w = data.txWireLayout.value;
+    expect(w.fields.map((f: { field: string }) => f.field)).toEqual([
+      "version", "from", "pubkey", "nonce", "fee", "payload_len", "payload",
+    ]);
+    const fixed = w.fields.reduce((a: number, f: { bytes: number | null }) => a + (f.bytes ?? 0), 0);
+    expect(fixed + w.signatureBytes).toBe(w.overhead);
+  });
+
+  it("records that the envelope is little-endian", () => {
+    const w = data.txWireLayout.value;
+    const nonce = w.fields.find((f: { field: string }) => f.field === "nonce");
+    expect(nonce.endianness).toBe("little");
+  });
+
+  it("fails when a field is dropped, rather than publishing wrong offsets", () => {
+    // This is the bug the arithmetic check exists for: the payload-length
+    // argument contains a paren, and a parser that stops at the first one
+    // drops the field and shifts every offset after it.
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "crates/codec/src/lib.rs") return text;
+      const out = text.replace("    write_u64_le(&mut out, tx.fee);\n", "");
+      landed = !out.includes("write_u64_le(&mut out, tx.fee);");
+      return out;
+    });
+    expect(landed, "the wire field was not removed").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("TX_V1_OVERHEAD");
+  });
+});
+
+describe("generate-console-data: the quorum rule", () => {
+  it("reads one expression agreed by both implementing sites", () => {
+    expect(data.quorum.value.sites).toHaveLength(2);
+    expect(data.quorum.value.expression).toContain("n - 1");
+    for (const s of data.quorum.value.sites) {
+      expect(s.expression).toBe(data.quorum.value.expression);
+    }
+  });
+
+  it("fails when the two sites stop agreeing", () => {
+    // leader.rs carries the formula TWICE: once in a comment on the line above
+    // and once as the expression. A plain string replace hits the comment,
+    // which scanRust strips, so the probe lands somewhere the gate cannot see
+    // and the test passes for the wrong reason. Target the code line, and
+    // assert the doctoring landed in scanned scope rather than merely landing.
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "crates/consensus_types/src/leader.rs") return text;
+      const out = text.replace(
+        /^(\s*)2 \* \(\(n - 1\) \/ 3\) \+ 1(\s*)$/m,
+        "$12 * ((n - 1) / 4) + 1$2"
+      );
+      const codeLines = out
+        .split("\n")
+        .filter((l) => !l.trim().startsWith("//"))
+        .join("\n");
+      landed = codeLines.includes("2 * ((n - 1) / 4) + 1");
+      return out;
+    });
+    expect(landed, "the quorum expression was not altered outside a comment").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("quorum rule differs");
+  });
+});
+
+describe("generate-console-data: retention horizons", () => {
+  it("publishes both horizons in blocks, never in wall-clock time", () => {
+    const r = data.retentionHorizons.value;
+    expect(r.disk.value).toBe(50000);
+    expect(r.index.value).toBe(100000);
+    expect(JSON.stringify(r)).not.toMatch(/hour|minute|second/i);
+  });
+
+  it("fails when the index no longer reaches back at least as far as the disk", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "crates/node/src/main.rs") return text;
+      const out = text.replace("const MAX_INDEX_ENTRIES: usize = 100_000;", "const MAX_INDEX_ENTRIES: usize = 1_000;");
+      landed = out.includes("MAX_INDEX_ENTRIES: usize = 1_000;");
+      return out;
+    });
+    expect(landed, "the index horizon was not altered").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("inverted");
+  });
+});
+
+describe("generate-console-data: SDK coverage", () => {
+  it("matches builders by the discriminant they emit, not by their name", () => {
+    // The three SDKs name the same builder three different ways, so a
+    // name-matched join reports Python as missing three builders it has.
+    const c = data.sdkCoverage.value;
+    expect(c.totals).toEqual({
+      txTypes: 11,
+      rustBuilders: 11,
+      typescriptBuilders: 10,
+      pythonBuilders: 11,
+    });
+    const upgrade = c.builders.find((b: { txType: string }) => b.txType === "entityUpgrade");
+    expect(upgrade.python).toBe("build_entity_upgrade_payload");
+    expect(upgrade.typescript).toBeNull();
+  });
+
+  it("states the TypeScript type gap in numbers", () => {
+    const c = data.sdkCoverage.value;
+    expect(c.signalTypes.chain).toBe(23);
+    expect(c.signalTypes.typescript).toBe(7);
+    expect(c.memoryObjectTypes.chain).toBe(16);
+    expect(c.memoryObjectTypes.typescript).toBe(5);
+  });
+
+  it("treats the Rust SDK's type coverage as structural, and asserts the re-export", () => {
+    const c = data.sdkCoverage.value;
+    expect(c.signalTypes.rust).toBe(c.signalTypes.chain);
+    expect(c.signalTypes.rustIsStructural).toBe(true);
+  });
+
+  it("fails when the Rust SDK stops re-exporting the chain's own enums", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "sdk/novai-sdk/src/lib.rs") return text;
+      const out = text.replace("AiSignalType,", "");
+      landed = !out.includes("AiSignalType,");
+      return out;
+    });
+    expect(landed, "the re-export was not removed").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("structural");
+  });
+
+  it("records that the Rust SDK cannot be consumed from a registry", () => {
+    const w = data.sdkCoverage.value.workspaceCoupling.rust;
+    expect(w.consumableFromRegistry).toBe(false);
+    expect(w.pathDependencies.length).toBeGreaterThan(0);
+  });
+});
+
+describe("generate-console-data: the remaining source datasets", () => {
+  it("reads the seven capability bits", () => {
+    expect(data.capabilityBits.value).toHaveLength(7);
+    const bit5 = data.capabilityBits.value.find((c: { bit: number }) => c.bit === 5);
+    expect(bit5.capability).toBe("submit_reputation_updates");
+    expect(bit5.hex).toBe("0x20");
+  });
+
+  it("reads the signal payload base length and its tails", () => {
+    expect(data.signalPayloads.value.baseLength.value).toBe(66);
+    const byName = Object.fromEntries(
+      data.signalPayloads.value.tails.map((t: { name: string; value: number }) => [t.name, t.value])
+    );
+    expect(byName.REPUTATION_UPDATE_EXTRA_LEN).toBe(35);
+    expect(byName.SIGNAL_PURCHASE_EXTRA_LEN).toBe(41);
+    expect(byName.STAKE_DEPOSIT_EXTRA_LEN).toBe(16);
+    expect(byName.STAKE_SLASH_EXTRA_LEN).toBe(51);
+  });
+
+  it("reads the percentage fees against their shared denominator", () => {
+    const b = data.bpsFees.value;
+    expect(b.denominator).toBe(10000);
+    const market = b.entries.find((e: { constant: string }) => e.constant === "MARKETPLACE_FEE_BPS");
+    expect(market.bps).toBe(200);
+    expect(market.percent).toBe(2);
+  });
+
+  it("carries the document's own Observed gaps table", () => {
+    expect(data.observedGaps.value.length).toBeGreaterThan(3);
+    const joined = JSON.stringify(data.observedGaps.value);
+    expect(joined).toContain("mempool");
+  });
+
+  it("gives every method a source link into the dispatch table", () => {
+    expect(data.sourceRefs.value).toHaveLength(29);
+    for (const r of data.sourceRefs.value) {
+      expect(r.file).toBe("crates/node/src/rpc.rs");
+      expect(r.line).toBeGreaterThan(0);
+    }
+  });
+
+  it("fails when a constant is declared twice, rather than reading whichever came first", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "crates/types/src/lib.rs") return text;
+      const out = text.replace(
+        "pub const MAX_TX_SIZE: usize = 128 * 1024;",
+        "pub const MAX_TX_SIZE: usize = 128 * 1024;\npub const MAX_TX_SIZE: usize = 64 * 1024;"
+      );
+      landed = (out.match(/pub const MAX_TX_SIZE/g) ?? []).length === 2;
+      return out;
+    });
+    expect(landed, "the duplicate constant was not inserted").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("ambiguous");
+  });
+});
+
+describe("generate-console-data: the getNonce exception", () => {
+  it("is carried while the document still calls the two interchangeable", () => {
+    const ids = data.drift.value.knownExceptions.map((e: { id: string }) => e.id);
+    expect(ids).toContain("getnonce-documented-as-interchangeable");
+  });
+
+  it("fails, naming the entry to delete, when the document is fixed", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace(
+        "Cheaper than `getBalance` if you don't need the balance.",
+        "Answers from the mempool admission cursor, which is not the committed account nonce."
+      );
+      landed = !out.includes("Cheaper than `getBalance`");
+      return out;
+    });
+    expect(landed, "the getNonce wording was not changed").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("getnonce-documented-as-interchangeable");
+  });
+});
+
+describe("generate-console-data: the source-link gate, proven by moving an arm", () => {
+  // The in-generator assertion reads the recorded line back from the SAME parse
+  // that produced it, so it cannot detect staleness and is only a parser
+  // self-check. What actually stops a published line number from rotting is
+  // --check in prebuild. These two tests prove that, by moving the dispatch
+  // block in a fixture rather than by observing the gate pass against an
+  // unmodified tree.
+  const ANCHOR = "let http_response = match rpc_request.method.as_str() {";
+  const SHIFT = 3;
+
+  function shiftedRoot(): string {
+    // The probe must prove the block actually MOVED by the expected amount,
+    // not merely that the file changed. "out !== text" would be satisfied by
+    // any edit at all, including one the gate cannot see.
+    let movedBy = -1;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "crates/node/src/rpc.rs") return text;
+      const lineOfAnchor = (s: string) => s.split("\n").findIndex((l) => l.includes(ANCHOR));
+      const wasAt = lineOfAnchor(text);
+      const out = text.replace(ANCHOR, "\n".repeat(SHIFT) + ANCHOR);
+      movedBy = lineOfAnchor(out) - wasAt;
+      return out;
+    });
+    expect(movedBy, `expected the dispatch block to move down ${SHIFT} lines`).toBe(SHIFT);
+    return root;
+  }
+
+  it("every recorded line moves by exactly the shift when the dispatch block moves", () => {
+    const root = shiftedRoot();
+    const out = join(root, "out.json");
+    const res = run(SCRIPT, ["--root", root, "--out", out, "--openrpc", join(root, "openrpc.json")]);
+    expect(res.status, res.output).toBe(0);
+    const moved = JSON.parse(readFileSync(out, "utf8"));
+    rmSync(root, { recursive: true, force: true });
+
+    const before = new Map<string, number>(
+      data.sourceRefs.value.map((r: { name: string; line: number }) => [r.name, r.line])
+    );
+    expect(moved.sourceRefs.value).toHaveLength(29);
+    for (const r of moved.sourceRefs.value) {
+      expect(r.line, `${r.name} did not track the moved dispatch block`).toBe(
+        (before.get(r.name) as number) + SHIFT
+      );
+    }
+  });
+
+  it("--check fails against the committed data once an arm has moved", () => {
+    // This is the gate: prebuild runs --check, so a moved arm cannot ship with
+    // links still pointing at the old lines.
+    const root = shiftedRoot();
+    const res = run(SCRIPT, ["--check", "--root", root, "--out", DATA, "--openrpc", OPENRPC]);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("stale");
   });
 });
