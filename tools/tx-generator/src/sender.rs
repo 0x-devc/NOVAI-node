@@ -27,7 +27,17 @@ struct SenderHealth {
     nonce_error_streak: u32,
     /// When any worker last began a chain nonce query for this sender.
     last_resync: Option<Instant>,
+    /// Corrections applied to this sender without an accepted submission in
+    /// between. One is ordinary. A run of them means every correction is
+    /// being undone before it can be used, and the sweep is holding a sender
+    /// upright rather than fixing it.
+    consecutive_corrections: u32,
 }
+
+/// Corrections in a row, with nothing accepted between them, that make a
+/// sender thrashing rather than recovering. Two could be a slow chain; by the
+/// third the sweep has corrected, watched it undone, and corrected again.
+pub const THRASH_THRESHOLD: u32 = 3;
 
 /// A sender account with signing capability and nonce tracking.
 #[derive(Debug)]
@@ -86,8 +96,15 @@ impl SenderAccount {
     }
 
     /// An accepted submission: this sender's nonce is demonstrably right.
+    ///
+    /// This is also the only proof that a correction stuck. Nothing else
+    /// distinguishes a sender that was fixed from one that was reset and
+    /// immediately drifted back, which is why the thrash run clears here and
+    /// nowhere else.
     pub fn record_accepted(&self) {
-        self.health().nonce_error_streak = 0;
+        let mut h = self.health();
+        h.nonce_error_streak = 0;
+        h.consecutive_corrections = 0;
     }
 
     /// A rejection that says our nonce state is wrong (too low, too high, or
@@ -108,8 +125,32 @@ impl SenderAccount {
 
     /// The sender was corrected from a value read off the chain, so whatever
     /// the streak was counting has been answered.
+    ///
+    /// The correction is also counted. The sweep used to report only how many
+    /// senders it decided to correct, which is the same number whether the
+    /// pool converged afterwards or every sender drifted straight back. On
+    /// 2026-08-28 it read `corrected=10 senders=10` on consecutive passes
+    /// with byte identical per sender values, and nothing in the log could
+    /// say that was a failure.
     pub fn record_resynced(&self) {
-        self.health().nonce_error_streak = 0;
+        let mut h = self.health();
+        h.nonce_error_streak = 0;
+        h.consecutive_corrections = h.consecutive_corrections.saturating_add(1);
+    }
+
+    /// Corrections applied since this sender last had anything accepted.
+    pub fn consecutive_corrections(&self) -> u32 {
+        self.health().consecutive_corrections
+    }
+
+    /// Is this sender being corrected repeatedly without ever recovering?
+    ///
+    /// A true here means the sweep is not the thing that will fix it. The
+    /// cause is downstream: nothing this sender submits is being accepted, so
+    /// the chain nonce never advances and the local one climbs back to the
+    /// same offset before the next pass.
+    pub fn is_thrashing(&self) -> bool {
+        self.consecutive_corrections() >= THRASH_THRESHOLD
     }
 
     pub fn nonce_error_streak(&self) -> u32 {
@@ -173,6 +214,9 @@ impl SenderAccount {
 pub struct SenderPool {
     accounts: Vec<Arc<SenderAccount>>,
     next_index: AtomicU64,
+    /// Per-sender shares. `None` is strict round robin, which gives every
+    /// sender exactly the same rate and is what this pool did before.
+    selector: Option<crate::rates::WeightedSelector>,
 }
 
 impl SenderPool {
@@ -187,13 +231,45 @@ impl SenderPool {
         Self {
             accounts,
             next_index: AtomicU64::new(0),
+            selector: None,
         }
     }
 
-    /// Get next sender in round-robin fashion.
+    /// Give each sender its own share of the offered rate.
     ///
-    /// This provides fair distribution across senders for load testing.
+    /// This changes WHICH sender gets a tick, never HOW MANY ticks there are,
+    /// so the aggregate stays exactly `--tps`. Drawn from `seed`, so the same
+    /// seed places the same load twice.
+    #[must_use]
+    pub fn with_rate_distribution(
+        mut self,
+        dist: crate::rates::RateDistribution,
+        seed: u64,
+    ) -> Self {
+        let weights = crate::rates::draw_weights(self.accounts.len(), dist, seed);
+        self.selector = crate::rates::WeightedSelector::new(&weights, seed);
+        self
+    }
+
+    /// The share of the offered rate sender `index` is expected to receive,
+    /// or an equal share when the pool is homogeneous.
+    pub fn share_of(&self, index: usize) -> f64 {
+        match &self.selector {
+            Some(sel) => sel.share(index),
+            None => 1.0 / self.accounts.len() as f64,
+        }
+    }
+
+    /// Get the next sender for a tick.
+    ///
+    /// Round robin by default, which spreads the offered rate equally. With a
+    /// rate distribution attached the sender is drawn in proportion to its
+    /// share instead, so the pool behaves like a population of independent
+    /// agents rather than N copies of one client.
     pub fn next_sender(&self) -> Arc<SenderAccount> {
+        if let Some(sel) = &self.selector {
+            return Arc::clone(&self.accounts[sel.next_index()]);
+        }
         let idx = self.next_index.fetch_add(1, Ordering::SeqCst);
         let account_idx = (idx as usize) % self.accounts.len();
         Arc::clone(&self.accounts[account_idx])

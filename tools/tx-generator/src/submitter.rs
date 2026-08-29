@@ -177,6 +177,9 @@ pub struct Submitter {
     /// Optional adaptive throttle. Workers record every outcome into it; the
     /// generator reads the resulting level to pace itself.
     throttle: Option<Arc<crate::throttle::Throttle>>,
+    /// Optional adaptive fee policy. Workers stamp every transaction with the
+    /// fee it currently offers and teach it from every refusal.
+    fee_policy: Option<Arc<crate::fee::FeePolicy>>,
 }
 
 impl Submitter {
@@ -200,6 +203,7 @@ impl Submitter {
             sender_pool,
             paused,
             throttle: None,
+            fee_policy: None,
         }
     }
 
@@ -207,6 +211,16 @@ impl Submitter {
     #[must_use]
     pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
         self.throttle = Some(throttle);
+        self
+    }
+
+    /// Attach the adaptive fee policy.
+    ///
+    /// Without one the worker sends whatever fee the template carries, which
+    /// is the fixed command line fee and the behaviour this replaces.
+    #[must_use]
+    pub fn with_fee_policy(mut self, fee_policy: Arc<crate::fee::FeePolicy>) -> Self {
+        self.fee_policy = Some(fee_policy);
         self
     }
 
@@ -240,6 +254,7 @@ impl Submitter {
             let sender_pool = Arc::clone(&self.sender_pool);
             let paused = Arc::clone(&self.paused);
             let throttle = self.throttle.clone();
+            let fee_policy = self.fee_policy.clone();
 
             let handle = tokio::spawn(async move {
                 let mut stats = WorkerStats::default();
@@ -265,7 +280,13 @@ impl Submitter {
                                 from: template.sender.address,
                                 pubkey: template.sender.verifying_key.to_bytes(),
                                 nonce,
-                                fee: template.fee,
+                                // The node's floor moves at runtime, so the
+                                // fee is decided here and now rather than
+                                // once on the command line.
+                                fee: fee_for_submission(
+                                    fee_policy.as_deref(),
+                                    template.fee,
+                                ),
                                 payload: template.payload,
                                 sig: [0u8; 64],
                             };
@@ -293,6 +314,9 @@ impl Submitter {
                                     if let Some(t) = &throttle {
                                         t.record_accepted();
                                     }
+                                    if let Some(f) = &fee_policy {
+                                        f.observe_accepted();
+                                    }
                                     if let Some(sender) =
                                         sender_pool.find_by_address(&sender_address)
                                     {
@@ -303,6 +327,14 @@ impl Submitter {
                                     stats.rejected_count += 1;
                                     if let Some(t) = &throttle {
                                         t.record_rejected();
+                                    }
+                                    // A fee refusal names the floor that
+                                    // refused it. This is the only place the
+                                    // generator can learn it, and learning it
+                                    // is what stops the next submission
+                                    // burning another nonce for nothing.
+                                    if let Some(f) = &fee_policy {
+                                        f.observe_rejection(reason);
                                     }
                                     // Track NonceTooLow for nonce reset.
                                     // Uses code-based detection (not string matching)
@@ -877,6 +909,7 @@ pub async fn reconcile_sender_nonces(
     pace: Duration,
 ) -> usize {
     let mut corrected = 0usize;
+    let mut thrashing = 0usize;
 
     for account in pool.all_accounts() {
         let chain = match query_nonce_retrying(http_client, endpoint, &account.address).await {
@@ -902,10 +935,27 @@ pub async fn reconcile_sender_nonces(
             account.reset_nonce(chain);
             account.record_resynced();
             corrected += 1;
-            info!(
-                sender = account.index,
-                local, chain, ?drift, "reconciled sender to chain nonce"
-            );
+            if account.is_thrashing() {
+                thrashing += 1;
+                warn!(
+                    sender = account.index,
+                    local,
+                    chain,
+                    ?drift,
+                    passes = account.consecutive_corrections(),
+                    "sender corrected again with nothing accepted since the last \
+                     correction: the sweep is not what will fix this one, nothing \
+                     it submits is being accepted"
+                );
+            } else {
+                info!(
+                    sender = account.index,
+                    local,
+                    chain,
+                    ?drift,
+                    "reconciled sender to chain nonce"
+                );
+            }
         }
 
         if !pace.is_zero() {
@@ -913,8 +963,23 @@ pub async fn reconcile_sender_nonces(
         }
     }
 
-    if corrected > 0 {
-        info!(corrected, senders = pool.len(), "reconciliation sweep corrected senders");
+    if thrashing > 0 {
+        // Deliberately louder than the success line it replaces. A sweep that
+        // corrects the same senders every pass forever reported identically
+        // to one that fixed a pool and found it clean, and those are opposite
+        // conditions.
+        warn!(
+            corrected,
+            thrashing,
+            senders = pool.len(),
+            "reconciliation sweep is not converging"
+        );
+    } else if corrected > 0 {
+        info!(
+            corrected,
+            senders = pool.len(),
+            "reconciliation sweep corrected senders"
+        );
     }
     corrected
 }
@@ -1026,6 +1091,15 @@ pub async fn resync_sender_nonces(
         min_nonce, max_nonce, "startup nonce resync complete"
     );
     Ok(())
+}
+
+/// The fee to stamp on the transaction about to be submitted.
+///
+/// Split out of the worker so the choice itself can be pinned. Without a
+/// policy the template's fee is used unchanged, which is the fixed command
+/// line fee and the behaviour that predates the adaptive path.
+pub fn fee_for_submission(policy: Option<&crate::fee::FeePolicy>, template_fee: u64) -> u64 {
+    policy.map_or(template_fee, |f| f.current())
 }
 
 /// Check if error is a validation error (should not retry).
@@ -1669,8 +1743,7 @@ mod tests {
         let sender = SenderAccount::from_index(0);
         sender.reset_nonce(300);
 
-        let corrected =
-            resync_one_sender(&reqwest::Client::new(), &server.url(), &sender).await;
+        let corrected = resync_one_sender(&reqwest::Client::new(), &server.url(), &sender).await;
 
         assert!(
             !corrected,
@@ -1714,8 +1787,7 @@ mod tests {
         let sender = SenderAccount::from_index(0);
         sender.reset_nonce(7);
 
-        let corrected =
-            resync_one_sender(&reqwest::Client::new(), &server.url(), &sender).await;
+        let corrected = resync_one_sender(&reqwest::Client::new(), &server.url(), &sender).await;
 
         assert!(
             corrected,
@@ -1836,8 +1908,13 @@ mod tests {
         let client = reqwest::Client::new();
 
         for _ in 0..(NONCE_RESET_THRESHOLD * 3) {
-            maybe_resync_after(&client, &server.url(), &sender, "FeeTooLow: minimum 10, got 1")
-                .await;
+            maybe_resync_after(
+                &client,
+                &server.url(),
+                &sender,
+                "FeeTooLow: minimum 10, got 1",
+            )
+            .await;
         }
 
         assert_eq!(

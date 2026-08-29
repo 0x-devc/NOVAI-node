@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
-use tx_generator::{generator, metrics, sender, submitter};
+use tx_generator::{generator, metrics, rates, sender, submitter};
 
 /// Transaction generator for load testing NOVAI nodes.
 #[derive(Parser, Debug)]
@@ -101,6 +101,18 @@ struct Args {
     /// Disable the adaptive throttle (always offer at full rate).
     #[arg(long)]
     no_throttle: bool,
+
+    /// How the offered rate is shared across senders: uniform, spread,
+    /// lognormal. Uniform gives every sender the same rate, which is the
+    /// old behaviour and makes the whole pool hit its per-sender ceiling on
+    /// the same block. The aggregate is `--tps` under all of them.
+    #[arg(long, default_value = "lognormal")]
+    sender_rate_distribution: String,
+
+    /// Seed for the per-sender share draw. The same seed places the same
+    /// load, so a measurement can be repeated exactly.
+    #[arg(long, default_value_t = 0)]
+    sender_rate_seed: u64,
 }
 
 #[tokio::main]
@@ -128,7 +140,21 @@ async fn main() -> Result<()> {
     info!("Confirmation Tracking: {}", args.track_confirmations);
 
     // 1. Create sender pool
-    let sender_pool = Arc::new(sender::SenderPool::new(args.senders));
+    let rate_distribution = rates::RateDistribution::parse(&args.sender_rate_distribution)
+        .with_context(|| {
+            format!(
+                "Invalid --sender-rate-distribution {:?}: expected uniform, spread or lognormal",
+                args.sender_rate_distribution
+            )
+        })?;
+    let sender_pool = Arc::new(
+        sender::SenderPool::new(args.senders)
+            .with_rate_distribution(rate_distribution, args.sender_rate_seed),
+    );
+    info!(
+        "Sender rates: {} (seed {})",
+        args.sender_rate_distribution, args.sender_rate_seed
+    );
     info!("Initialized {} sender accounts", sender_pool.len());
 
     // 1b. Resync every sender to its current on-chain nonce BEFORE any
@@ -184,6 +210,8 @@ async fn main() -> Result<()> {
     if let Some(t) = &throttle {
         submitter = submitter.with_throttle(Arc::clone(t));
     }
+    let fee_policy = Arc::new(tx_generator::fee::FeePolicy::new(args.fee));
+    submitter = submitter.with_fee_policy(Arc::clone(&fee_policy));
     let submitter_handle = submitter.start(tx_receiver, metric_tx);
     info!("Started {} submitter workers", args.workers);
 
@@ -447,6 +475,8 @@ mod tests {
             no_resync_sweep: false,
             throttle_window_secs: 10,
             no_throttle: false,
+            sender_rate_distribution: "lognormal".to_string(),
+            sender_rate_seed: 0,
         };
         assert!(validate_args(&args).is_ok());
     }
@@ -472,6 +502,8 @@ mod tests {
             no_resync_sweep: false,
             throttle_window_secs: 10,
             no_throttle: false,
+            sender_rate_distribution: "lognormal".to_string(),
+            sender_rate_seed: 0,
         };
         assert!(validate_args(&args).is_err());
     }
@@ -497,6 +529,8 @@ mod tests {
             no_resync_sweep: false,
             throttle_window_secs: 10,
             no_throttle: false,
+            sender_rate_distribution: "lognormal".to_string(),
+            sender_rate_seed: 0,
         };
         assert!(validate_args(&args).is_err());
     }

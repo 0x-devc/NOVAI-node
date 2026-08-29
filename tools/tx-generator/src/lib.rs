@@ -5,8 +5,10 @@
 //! integration tests under `tests/` can drive `Generator` + `Submitter`
 //! against a mock RPC endpoint without spawning the CLI process.
 
+pub mod fee;
 pub mod generator;
 pub mod metrics;
+pub mod rates;
 pub mod sender;
 pub mod submitter;
 pub mod throttle;
