@@ -393,6 +393,21 @@ fn metrics_surface_exposes_sync_mode() {
         block_applied_tx_count: 0,
         total_txs_applied: 0,
         total_txs_skipped: 0,
+        // Gate G0 fields; compiler-forced constructor growth, zero like the
+        // rest of this fixture. The G0 surface is asserted with distinct
+        // values in gate_g0_metrics_surface.rs.
+        block_interval_seconds: 0.0,
+        block_interval_window_seconds: 0.0,
+        block_interval_window_blocks: 0,
+        commit_latency_seconds: 0.0,
+        commit_latency_pending: 0,
+        block_bytes: 0,
+        total_block_bytes: 0,
+        db_bytes_total: 0,
+        db_bytes_smt_nodes: 0,
+        db_bytes_straddling: 0,
+        db_bytes_scan_seconds: 0.0,
+        db_bytes_age_seconds: 0,
         copilot_observations_total: 0,
         anomaly_signals_total: 0,
         anomaly_signals_published: 0,

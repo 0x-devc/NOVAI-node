@@ -182,6 +182,11 @@ struct CommitMetrics {
     block_applied_tx_count: AtomicU64,
     total_txs_applied: AtomicU64,
     total_txs_skipped: AtomicU64,
+    /// Gate G0: encoded bytes of the last committed block, and the running
+    /// total. Two more relaxed atomic ops on the commit path, fed by a size
+    /// computation that reads Vec lengths and allocates nothing.
+    block_bytes: AtomicU64,
+    total_block_bytes: AtomicU64,
 }
 
 /// Post-commit callback: executes transactions, advances nonces, and updates the blockchain index.
@@ -324,6 +329,24 @@ impl novai_node::consensus_node::CommitCallback for ExecutionCommitCallback {
         self.commit_metrics
             .total_txs_skipped
             .fetch_add(tally.skipped, Ordering::Relaxed);
+
+        // Gate G0: the block's encoded size on the wire. There was no byte
+        // metric anywhere in the node before this, so the throughput plan's
+        // capacity arithmetic had nothing to check itself against.
+        //
+        // `block_encoded_size` is the exact length `encode_block_v1` would
+        // produce, computed without encoding: one pass over the transactions
+        // reading a payload length each, no allocation, no lock, no I/O, no
+        // syscall. Encoding the block here to measure it would allocate once
+        // per transaction plus a buffer growing to the whole block, under the
+        // database lock.
+        let block_bytes = novai_consensus_types::codec::block_encoded_size(block) as u64;
+        self.commit_metrics
+            .block_bytes
+            .store(block_bytes, Ordering::Relaxed);
+        self.commit_metrics
+            .total_block_bytes
+            .fetch_add(block_bytes, Ordering::Relaxed);
 
         // H-07 (periodic purge of expired governance proposals) is intentionally
         // not wired here: purge_expired_proposals deletes rows the SMT root still
@@ -869,11 +892,33 @@ fn main() {
         default_hook(info);
     }));
 
-    // Initialize structured logging (controlled via RUST_LOG env var)
+    // Initialize structured logging.
+    //
+    // `novai=info` is a DEFAULT that RUST_LOG overrides, not a floor that
+    // outranks it. The previous form, `from_default_env().add_directive(...)`,
+    // did the opposite: `add_directive` inserts into the same directive set
+    // that RUST_LOG was parsed into, and that set replaces on an Ord-equal
+    // key whose ordering deliberately excludes the level. So `novai=info`
+    // and a RUST_LOG `novai=warn` compared equal and the later one, ours,
+    // silently overwrote the operator's.
+    //
+    // That cost real work. Per-block INFO lines were unconditional at about
+    // 18 journal lines per second across the fleet, which pulled journald
+    // retention down to roughly five hours, and three separate root-cause
+    // investigations were lost to the window closing before anyone read it.
+    // The operator could not turn the volume down, because the only knob was
+    // outranked, and could not turn per-block detail up either, for the same
+    // reason.
+    //
+    // With `from_env_lossy`, an empty or absent RUST_LOG uses the default and
+    // any valid RUST_LOG replaces it outright. `RUST_LOG=novai=warn` now
+    // quietens the node and `RUST_LOG=novai=debug` restores per-block tracing
+    // during an incident.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("novai=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive("novai=info".parse().unwrap())
+                .from_env_lossy(),
         )
         .init();
 
@@ -1698,6 +1743,11 @@ fn main() {
                 // novai_seconds_since_last_commit gauge, owned by the
                 // collector so the consensus path stays untouched.
                 let commit_clock = Mutex::new(metrics::CommitClock::new());
+                // Gate G0: the trailing-window block rate, owned by the
+                // collector for the same reason the commit clock is. The
+                // consensus path is not touched, so the block interval gauge
+                // costs the commit path exactly nothing.
+                let block_rate_clock = Mutex::new(metrics::BlockRateClock::new());
                 move || {
                     // Acquire state lock once for all state fields
                     let (committed_height, current_round, view_changes_total, highest_qc_height) = {
@@ -1711,6 +1761,7 @@ fn main() {
                     };
                     let seconds_since_last_commit =
                         commit_clock.lock_or_recover().observe(committed_height);
+                    let block_rate = block_rate_clock.lock_or_recover().observe(committed_height);
                     metrics::MetricsSnapshot {
                         committed_height,
                         highest_qc_height,
@@ -1739,6 +1790,30 @@ fn main() {
                         mempool_rejects_full: metrics::pool_metrics::REJ_FULL
                             .load(Ordering::Relaxed),
                         view_changes_total,
+                        // Gate G0: the four measurement gauges.
+                        block_interval_seconds: block_rate.interval_seconds,
+                        block_interval_window_seconds: block_rate.window_seconds,
+                        block_interval_window_blocks: block_rate.window_blocks,
+                        commit_latency_seconds:
+                            metrics::proposal_metrics::last_latency_seconds(),
+                        commit_latency_pending: metrics::proposal_metrics::pending(),
+                        block_bytes: commit_metrics.block_bytes.load(Ordering::Relaxed),
+                        total_block_bytes: commit_metrics
+                            .total_block_bytes
+                            .load(Ordering::Relaxed),
+                        // Read lock-free from the timer's cache; the sampler
+                        // itself is the arm next to the pool census.
+                        db_bytes_total: metrics::db_metrics::TOTAL.load(Ordering::Relaxed),
+                        db_bytes_smt_nodes: metrics::db_metrics::SMT_NODES
+                            .load(Ordering::Relaxed),
+                        db_bytes_straddling: metrics::db_metrics::STRADDLING
+                            .load(Ordering::Relaxed),
+                        #[allow(clippy::cast_precision_loss)]
+                        db_bytes_scan_seconds: metrics::db_metrics::SCAN_MICROS
+                            .load(Ordering::Relaxed)
+                            as f64
+                            / 1_000_000.0,
+                        db_bytes_age_seconds: metrics::db_metrics::age_seconds(),
                         block_tx_count: commit_metrics.block_tx_count.load(Ordering::Relaxed),
                         total_txs_committed: commit_metrics
                             .total_txs_committed
@@ -1903,6 +1978,12 @@ fn main() {
             let mut last_sync_trigger = std::time::Instant::now();
             let mut last_resource_log = std::time::Instant::now();
             let mut last_census = std::time::Instant::now();
+            // Gate G0: the db-size sampler runs on its own, much slower
+            // clock. Sixty seconds because the read needs the database lock,
+            // which is on the consensus critical path, and because a database
+            // that grows at 7 GB per applied TPS per day does not change
+            // meaningfully inside a minute.
+            let mut last_db_size = std::time::Instant::now();
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     tracing::info!("Shutting down gracefully...");
@@ -2011,6 +2092,44 @@ fn main() {
                     metrics::pool_metrics::publish_census(&census);
                 }
 
+                // Gate G0: sample the database size by key family.
+                //
+                // The question is how much of a node's disk is dead SMT
+                // versions. The SMT writes 256 nodes per state key updated,
+                // is content addressed so a changed subtree never overwrites
+                // its predecessor, and the 50k prune deletes only
+                // consensus/blocks/ and consensus/qcs/. Nothing collects the
+                // rest, and until now nothing measured it either.
+                //
+                // ON A TIMER, NEVER ON THE COMMIT PATH. This holds the
+                // database lock, so the hold is timed and published as
+                // novai_db_bytes_scan_seconds rather than assumed to be
+                // small. The lock is released before publishing.
+                if last_db_size.elapsed() >= Duration::from_secs(60) {
+                    last_db_size = std::time::Instant::now();
+                    let sample = {
+                        let db = node.db.lock_or_recover();
+                        let started = std::time::Instant::now();
+                        let sizes = db.live_bytes_in_range(
+                            novai_state::KEY_PREFIX_SMT_NODE,
+                            metrics::db_metrics::SMT_NODE_RANGE_END,
+                        );
+                        sizes.map(|s| (s, started.elapsed()))
+                    };
+                    // An in-memory backend has no files, so it publishes
+                    // nothing rather than a zero that would read as an empty
+                    // database.
+                    if let Some((sizes, held)) = sample {
+                        #[allow(clippy::cast_possible_truncation)]
+                        metrics::db_metrics::publish(
+                            sizes.total,
+                            sizes.in_range,
+                            sizes.straddling,
+                            held.as_micros() as u64,
+                        );
+                    }
+                }
+
                 // Gate SOAK A3: the 30 second / 120 second age purge that used
                 // to run here is gone. Eviction is event driven now: a
                 // transaction becomes provably dead at the commit that
@@ -2092,7 +2211,9 @@ fn main() {
 
                     let mut mempool_guard = mempool.lock_or_recover();
                     match node.try_propose_block(&mut mempool_guard, &*nonce_provider) {
-                        Ok(true) => tracing::info!("Proposed block successfully"),
+                        Ok(true) => tracing::debug!(
+                            "Proposed block successfully"
+                        ),
                         Ok(false) => {
                             // Only log status every 5 seconds to reduce noise
                             if last_status_log.elapsed() >= Duration::from_secs(5) {
@@ -2579,6 +2700,100 @@ mod tests {
             transfer(STRANGER, 0, 1),
         ];
         (storage, txs)
+    }
+
+    /// Gate G0: the commit path publishes the block's REAL encoded size.
+    ///
+    /// This is the pin that separates a wired gauge from a plausible one. The
+    /// expected value is not written as a literal, and it is not computed with
+    /// the same function the production code uses. It is the length of the
+    /// block ACTUALLY ENCODED by `encode_block_v1`, the bytes that get hashed
+    /// into the block hash and stored under the block key. If the commit path
+    /// published a per-transaction estimate, a count, a constant, or the size
+    /// of some other block, this fails.
+    ///
+    /// Non-vacuity: the fixture's transactions carry non-empty payloads of
+    /// DIFFERENT lengths, so an implementation that multiplied a fixed width
+    /// by the transaction count cannot pass, and the asserted size is checked
+    /// to be larger than both the bare header and a header-plus-empty-txs
+    /// block.
+    #[test]
+    fn on_commit_publishes_the_real_encoded_block_size() {
+        let commit_metrics = Arc::new(CommitMetrics::default());
+        let callback = ExecutionCommitCallback {
+            nonce_provider: Arc::new(InMemoryNonceProvider::new()),
+            blockchain_index: Arc::new(Mutex::new(rpc::BlockchainIndex::new())),
+            pending_mempool_removals: Arc::new(Mutex::new(Vec::new())),
+            commit_metrics: Arc::clone(&commit_metrics),
+            snapshot_producer: Arc::new(novai_node::snapshot::producer::SnapshotProducer::new(
+                std::path::PathBuf::from("unused-no-demand"),
+            )),
+        };
+
+        let (mut storage, txs) = mixed_outcome_fixture();
+        let exec = novai_execution::execute_block_to_root(&storage, &txs, 1).expect("execute");
+        let block = Block {
+            height: 1,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: exec.post_root,
+            txs,
+        };
+
+        // The independent instrument: the real encoder, run here in the test.
+        let truth = novai_consensus_types::codec::encode_block_v1(&block)
+            .expect("the fixture block must encode")
+            .len() as u64;
+
+        callback
+            .on_commit(&mut storage, &block, None)
+            .expect("on_commit");
+
+        assert_eq!(
+            commit_metrics.block_bytes.load(Ordering::Relaxed),
+            truth,
+            "novai_block_bytes must equal the length of the block as actually \
+             encoded on the wire",
+        );
+        assert_eq!(
+            commit_metrics.total_block_bytes.load(Ordering::Relaxed),
+            truth,
+            "novai_total_block_bytes must accumulate the same quantity",
+        );
+
+        // Non-vacuity: the number is neither the bare header nor a count.
+        assert!(
+            truth > 85 + 3,
+            "the fixture must carry real transaction bytes, got {truth}",
+        );
+        let payload_lens: Vec<usize> = block.txs.iter().map(|t| t.payload.len()).collect();
+        assert!(
+            payload_lens.iter().all(|l| *l > 0),
+            "the fixture transactions must have non-empty payloads: {payload_lens:?}",
+        );
+
+        // A second commit accumulates rather than overwriting, and the gauge
+        // tracks the LAST block while the counter tracks the sum.
+        let empty = Block {
+            height: 2,
+            round: 0,
+            parent_hash: [0u8; 32],
+            state_root: exec.post_root,
+            txs: vec![],
+        };
+        callback
+            .on_commit(&mut storage, &empty, None)
+            .expect("on_commit empty");
+        assert_eq!(
+            commit_metrics.block_bytes.load(Ordering::Relaxed),
+            85,
+            "the gauge must report the LAST committed block, an empty one here",
+        );
+        assert_eq!(
+            commit_metrics.total_block_bytes.load(Ordering::Relaxed),
+            truth + 85,
+            "the counter must accumulate across commits",
+        );
     }
 
     /// Gate ACCEL-Q8: the executed-work counters.

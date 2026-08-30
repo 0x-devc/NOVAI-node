@@ -488,6 +488,28 @@ impl Storage {
         }
     }
 
+    /// Live SST bytes attributed against the half-open key range
+    /// `[lo, hi)` (gate G0, the `novai_db_bytes` gauges).
+    ///
+    /// `None` on the in-memory backend, which has no files and therefore no
+    /// disk question to answer. Callers publish nothing rather than
+    /// publishing a zero that would read as an empty database.
+    ///
+    /// COST: metadata only, but it is a whole-database call and the caller
+    /// holds the database lock. It belongs on a timer, never on the commit
+    /// path.
+    #[must_use]
+    pub fn live_bytes_in_range(
+        &self,
+        lo: &[u8],
+        hi: &[u8],
+    ) -> Option<novai_state::DbSizeByRange> {
+        match self {
+            Storage::Memory(_) => None,
+            Storage::Rocks(kv) => kv.live_bytes_in_range(lo, hi).ok(),
+        }
+    }
+
     /// Synchronously flush the default-CF memtable.
     ///
     /// No-op on the in-memory backend. On RocksDB, delegates to
@@ -815,6 +837,14 @@ impl ConsensusNode {
         let total_txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
         for block in blocks {
             let hash = novai_consensus_types::codec::hash_block_v1(block).ok();
+            // Gate G0: resolve the commit end of the commit-latency
+            // measurement. Done here rather than in the commit callback
+            // because the block hash is already computed on this line and the
+            // callback would have to encode the whole block again to get it,
+            // which is an allocation per committed block on the commit path.
+            if let Some(hash) = hash {
+                crate::metrics::proposal_metrics::note_committed(hash, block.height);
+            }
             tracing::debug!(
                 height = block.height,
                 round = block.round,
@@ -830,7 +860,11 @@ impl ConsensusNode {
         );
         if total_txs > 0 {
             let block_count = blocks.len();
-            tracing::info!(block_count, total_txs, "Committed blocks with transactions");
+            // Gate G0: per-block WHENEVER THERE IS LOAD, and silent on an idle
+            // chain, which is why it survived two previous counts of the
+            // per-block log volume. A throughput run is precisely the
+            // condition that turns it on.
+            tracing::debug!(block_count, total_txs, "Committed blocks with transactions");
         }
         if let Some(ref cb) = self.commit_callback {
             let mut cached = cached.into_iter();
@@ -2230,6 +2264,19 @@ impl ConsensusNode {
         // proposal marks are already durable.
         self.proposal_wire_len(&signed_proposal)?;
 
+        // Gate G0: stamp the propose end of the commit-latency measurement.
+        //
+        // HERE, and not earlier or later. Earlier, and the F3 wire-cap guard
+        // above can still bail with an error after we have stamped a block
+        // nobody will ever receive, leaving a stamp that can never resolve.
+        // Later, and the happens-before argument weakens: stamping before the
+        // broadcast means no peer can vote for this block before the stamp
+        // exists, and a commit needs a QC two heights up, so the stamp is
+        // unconditionally visible to whichever peer-connection thread later
+        // observes the commit. It also correctly counts broadcast fan-out as
+        // part of commit latency, which it is.
+        crate::metrics::proposal_metrics::note_proposed(block_hash, block.height);
+
         self.broadcast(NetworkMessage::SignedProposal(signed_proposal))?;
         Ok(true)
     }
@@ -2564,7 +2611,12 @@ impl ConsensusNode {
             self.prune_qc_broadcast_cache(ch);
         }
 
-        tracing::info!(height = block.height, "Voting for block");
+        // Gate G0: per-block, so debug. At 4 bps across four nodes this line
+        // alone was about 4 lines per second of journal. The fact that a node
+        // voted for a block is derivable from novai_committed_height and
+        // novai_highest_qc_height; the per-block line is incident detail, and
+        // RUST_LOG=novai=debug now genuinely restores it.
+        tracing::debug!(height = block.height, "Voting for block");
 
         self.broadcast(NetworkMessage::Vote(vote))
     }

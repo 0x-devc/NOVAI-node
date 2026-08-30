@@ -116,6 +116,42 @@ pub fn encode_block_v1(block: &Block) -> Result<Vec<u8>, CodecError> {
     Ok(buf)
 }
 
+/// Byte length of the fixed-width `Block` header written by
+/// [`encode_block_v1`]: 1 version + 8 height + 8 round + 32 parent hash +
+/// 32 state root + 4 transaction count.
+pub const BLOCK_V1_HEADER_BYTES: usize = 85;
+
+/// Encoded byte length of `block` under [`encode_block_v1`], without encoding
+/// it (gate G0, the `novai_block_bytes` gauge).
+///
+/// Exact, not approximate. `encode_block_v1` writes a fixed-width header and
+/// then concatenates the signed transactions with no framing, separator,
+/// padding or trailer, and `Block` has no variable-length field other than
+/// `txs` (the justify QC lives on `Proposal`, not on `Block`). So the length
+/// is `BLOCK_V1_HEADER_BYTES` plus the sum of the per-transaction encoded
+/// sizes, and `block_encoded_size_equals_the_real_encoder_for_every_shape`
+/// pins that identity against the encoder itself.
+///
+/// It exists because the caller is the commit path. `encode_block_v1`
+/// allocates a fresh `Vec` per transaction plus a buffer that grows to the
+/// whole block, which is hundreds of allocations and a multi-megabyte memcpy
+/// under the database lock. This is one pass over `txs` reading a `Vec`
+/// length per element: no allocation, no lock, no I/O, no syscall, the
+/// standard the neighbouring outcome tally already holds.
+///
+/// Returns the length the encoder WOULD produce. `encode_block_v1` itself
+/// additionally refuses a block above `MAX_TXS_PER_BLOCK`; a committed block
+/// has already passed that check, so there is nothing to report here.
+#[must_use]
+pub fn block_encoded_size(block: &Block) -> usize {
+    BLOCK_V1_HEADER_BYTES
+        + block
+            .txs
+            .iter()
+            .map(novai_codec::tx_encoded_size)
+            .sum::<usize>()
+}
+
 /// Compute the hash of a Block.
 ///
 /// # Errors
@@ -1808,6 +1844,118 @@ mod tests {
         assert_eq!(
             encode_block_response_v2(&decoded),
             Err(CodecError::DuplicateVoter)
+        );
+    }
+
+    // ==========================================================================
+    // Gate G0: the block byte gauge's size function
+    //
+    // `block_encoded_size` exists so the commit path can report the encoded
+    // size of a committed block WITHOUT calling `encode_block_v1`, which
+    // allocates a fresh Vec per transaction plus a growing ~2 MiB buffer. The
+    // commit path holds the database lock and the ACCEL-Q8 work established
+    // the standard for it: no allocation, no lock, no I/O, no syscall.
+    //
+    // A size function that is merely close to the encoder is worse than no
+    // gauge at all, because the capacity arithmetic in the throughput plan is
+    // exactly what this metric is meant to settle. These pins compare it
+    // against the real encoder byte for byte, and they live in this file, next
+    // to the encoder, so that a change to the block layout trips them here
+    // rather than silently shifting a published metric.
+    // ==========================================================================
+
+    /// A transaction whose encoded length is driven by its payload, so the
+    /// pins below vary the one field the block encoding does not fix.
+    fn tx_with_payload(len: usize) -> TxV1 {
+        TxV1 {
+            version: TxVersion::V1,
+            from: [0x11; 32],
+            pubkey: [0x22; 32],
+            nonce: 9,
+            fee: 5,
+            payload: vec![0xcd; len],
+            sig: [0x33; 64],
+        }
+    }
+
+    #[test]
+    fn block_encoded_size_equals_the_real_encoder_for_every_shape() {
+        // Empty, single, many, and a ragged payload mix. The mix matters: a
+        // size function that multiplied a per-tx constant by the count would
+        // pass on uniform payloads and fail here.
+        let shapes: Vec<Vec<TxV1>> = vec![
+            vec![],
+            vec![tx_with_payload(0)],
+            vec![tx_with_payload(41)],
+            vec![tx_with_payload(41); 500],
+            vec![
+                tx_with_payload(0),
+                tx_with_payload(1),
+                tx_with_payload(41),
+                tx_with_payload(1024),
+                tx_with_payload(65_537),
+            ],
+        ];
+
+        for (i, txs) in shapes.into_iter().enumerate() {
+            let block = Block {
+                height: 1_900_001,
+                round: 3,
+                parent_hash: [0xaa; 32],
+                state_root: [0xbb; 32],
+                txs,
+            };
+            let encoded = encode_block_v1(&block).unwrap();
+            assert_eq!(
+                block_encoded_size(&block),
+                encoded.len(),
+                "shape {i}: block_encoded_size must equal the real encoding length exactly, \
+                 not approximately"
+            );
+        }
+    }
+
+    #[test]
+    fn block_encoded_size_header_is_the_fixed_85_bytes() {
+        // The header constant on its own, isolated from any transaction, so a
+        // wrong constant cannot be masked by a compensating error in the tx
+        // sum. 1 version + 8 height + 8 round + 32 parent + 32 root + 4 count.
+        let empty = Block {
+            height: 0,
+            round: 0,
+            parent_hash: [0; 32],
+            state_root: [0; 32],
+            txs: vec![],
+        };
+        assert_eq!(BLOCK_V1_HEADER_BYTES, 85);
+        assert_eq!(encode_block_v1(&empty).unwrap().len(), 85);
+        assert_eq!(block_encoded_size(&empty), 85);
+    }
+
+    #[test]
+    fn block_encoded_size_tracks_a_single_added_byte_of_payload() {
+        // One byte of payload must move the reported size by exactly one byte.
+        // A gauge that rounded, or that reported a tx count scaled by a fixed
+        // width, would survive the equality pins on uniform fixtures but fail
+        // this one.
+        let base = Block {
+            height: 7,
+            round: 0,
+            parent_hash: [0x01; 32],
+            state_root: [0x02; 32],
+            txs: vec![tx_with_payload(10)],
+        };
+        let mut bigger = base.clone();
+        bigger.txs[0].payload.push(0xff);
+
+        assert_eq!(
+            block_encoded_size(&bigger),
+            block_encoded_size(&base) + 1,
+            "one payload byte must move the reported size by exactly one byte"
+        );
+        assert_eq!(
+            block_encoded_size(&bigger),
+            encode_block_v1(&bigger).unwrap().len()
         );
     }
 }

@@ -22,6 +22,19 @@ use rocksdb::{
 #[cfg(feature = "rocksdb")]
 use std::path::Path;
 
+/// On-disk byte attribution of a database's live SST files against one
+/// half-open key range (gate G0, the `novai_db_bytes` gauges).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DbSizeByRange {
+    /// Every live SST file in every column family.
+    pub total: u64,
+    /// Files whose whole key span lies inside the queried range.
+    pub in_range: u64,
+    /// Files that cross a range boundary, or whose key span RocksDB did not
+    /// report, and so cannot be attributed to either side.
+    pub straddling: u64,
+}
+
 /// RocksDB KV store with column family support.
 ///
 /// Notes:
@@ -211,6 +224,74 @@ impl RocksKv {
         rocksdb::checkpoint::Checkpoint::new(&self.db)?.create_checkpoint(path)
     }
 
+    /// Attribute the live SST bytes against the half-open key range
+    /// `[lo, hi)` (gate G0, the `novai_db_bytes` gauges).
+    ///
+    /// Answers "how much of this database is family X", which for
+    /// `smt/node/` is the question of how much of a node's disk is dead SMT
+    /// versions. The SMT writes 256 nodes per state key updated, is content
+    /// addressed so a changed subtree never overwrites its predecessor, and
+    /// the 50k prune deletes only `consensus/blocks/` and `consensus/qcs/`.
+    /// Nothing collects the remainder, and until now nothing measured it
+    /// either: there is no disk metric in the node at all.
+    ///
+    /// Attribution is by SST file, not by key. RocksDB reports each live
+    /// file's exact size and its exact first and last key, so a file whose
+    /// whole key span lies inside the range is attributed exactly, with no
+    /// estimation anywhere. Only files that CROSS a boundary are ambiguous,
+    /// and those are reported separately as `straddling` rather than being
+    /// silently pushed to one side. At the configured 32 MiB target file
+    /// size a real database has hundreds of files and at most a couple can
+    /// straddle any one boundary, so the ambiguity is small and, more
+    /// importantly, visible.
+    ///
+    /// Sizes are compressed on-disk bytes, so they answer a `du`, not a
+    /// logical key-and-value sum. That is the number the disk question wants.
+    ///
+    /// LIVE SST FILES ONLY. Data still in a memtable or an unflushed WAL is
+    /// not counted, so a freshly started node reports 0 until its first
+    /// flush even though its directory is not empty. On a 25 GB node the SST
+    /// files are essentially all of it and the distinction does not matter,
+    /// but 0 here means "nothing flushed yet", not "no database".
+    ///
+    /// Cost is metadata only: no key-range estimation, no iteration, no data
+    /// block reads. It is nonetheless a whole-database call and belongs on a
+    /// timer, never on the commit path.
+    ///
+    /// # Errors
+    /// Returns the underlying RocksDB error if the file listing fails.
+    pub fn live_bytes_in_range(
+        &self,
+        lo: &[u8],
+        hi: &[u8],
+    ) -> Result<DbSizeByRange, rocksdb::Error> {
+        let mut sizes = DbSizeByRange::default();
+        for file in self.db.live_files()? {
+            let size = file.size as u64;
+            sizes.total += size;
+            // `end_key` is the file's LARGEST key and is inclusive, so a file
+            // sits wholly inside the half-open [lo, hi) when its first key is
+            // at or after lo and its last key is strictly before hi.
+            match (file.start_key.as_deref(), file.end_key.as_deref()) {
+                (Some(start), Some(end)) => {
+                    if end < lo || start >= hi {
+                        // Wholly outside: counted in the total and nowhere else.
+                    } else if start >= lo && end < hi {
+                        sizes.in_range += size;
+                    } else {
+                        sizes.straddling += size;
+                    }
+                }
+                // A file whose key span RocksDB did not report cannot be
+                // attributed. Call it ambiguous rather than guessing a side:
+                // guessing would put the error inside the number the gauge
+                // exists to produce, where nothing could see it.
+                _ => sizes.straddling += size,
+            }
+        }
+        Ok(sizes)
+    }
+
     /// Visit every `(key, value)` under `prefix` WITHOUT materialising them.
     ///
     /// [`Kv::scan_prefix`] collects into a `Vec`, which is fine for the small
@@ -341,6 +422,202 @@ impl KvBatch for RocksKv {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Fill a family with enough rows to make a flush produce a real SST.
+    fn fill(db: &mut RocksKv, prefix: &[u8], rows: usize) {
+        let mut ops = Vec::with_capacity(rows);
+        for i in 0..rows {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(&(i as u64).to_be_bytes());
+            // Incompressible-ish values, so LZ4 cannot collapse the two
+            // families to indistinguishable sizes.
+            let value: Vec<u8> = (0..96u32)
+                .map(|b| (b.wrapping_mul(2_654_435_761).wrapping_add(i as u32) % 251) as u8)
+                .collect();
+            ops.push(WriteOp::Put(key, value));
+        }
+        db.apply_batch(&ops).unwrap();
+        db.flush_default().unwrap();
+    }
+
+    // ==========================================================================
+    // Gate G0: the db-bytes split
+    //
+    // The question this gauge exists to answer is how much of a node's ~25 GB
+    // is dead SMT versions. `smt/node/` is content-addressed, so a changed
+    // subtree yields a NEW key and never overwrites the old one, and the 50k
+    // prune deletes only `consensus/blocks/` and `consensus/qcs/`. Nothing
+    // collects the rest.
+    //
+    // The failure mode these pins exist to catch is a gauge that reports the
+    // database total under a prefix label. That number looks entirely
+    // plausible on a dashboard, is wrong by exactly the amount anyone would
+    // want to know, and nothing else in the system would contradict it.
+    // ==========================================================================
+
+    #[test]
+    fn live_bytes_in_range_separates_smt_nodes_from_the_rest() {
+        let dir = tempdir().unwrap();
+        let mut db = RocksKv::open(dir.path().join("db_split")).unwrap();
+
+        // Each family is flushed on its own, so each lands in its own SST with
+        // a key span that does not cross the boundary. Ten times as many SMT
+        // rows as account rows, mirroring the real shape: 256 SMT nodes are
+        // written per state key updated.
+        fill(&mut db, b"accounts/", 400);
+        fill(&mut db, b"smt/node/", 4_000);
+
+        let sizes = db
+            .live_bytes_in_range(b"smt/node/", b"smt/node0")
+            .unwrap();
+        let other = sizes.total - sizes.in_range - sizes.straddling;
+
+        assert!(sizes.total > 0, "the database must have live SST files");
+        assert!(
+            sizes.in_range > 0,
+            "the smt/node/ family must be attributed, got 0 of {}",
+            sizes.total
+        );
+        // THE anti-relabelling assertion. A gauge that returns the total under
+        // the smt label leaves nothing outside it and fails right here.
+        assert!(
+            other > 0,
+            "attributing the whole database to smt/node/ is a relabelled total, \
+             not a split: total {} in_range {} straddling {}",
+            sizes.total,
+            sizes.in_range,
+            sizes.straddling
+        );
+        assert!(
+            sizes.in_range < sizes.total,
+            "the smt share must be a proper part of the total"
+        );
+        // The split must account for every byte, with nothing invented and
+        // nothing dropped.
+        assert_eq!(
+            sizes.in_range + sizes.straddling + other,
+            sizes.total,
+            "the three buckets must partition the total exactly"
+        );
+        // Ten times the rows must show up as the larger share, which is the
+        // directional claim the 25 GB question actually rests on.
+        assert!(
+            sizes.in_range > other,
+            "4,000 smt rows must outweigh 400 account rows: in_range {} other {}",
+            sizes.in_range,
+            other
+        );
+    }
+
+    #[test]
+    fn live_bytes_in_range_reports_zero_for_a_family_that_is_absent() {
+        let dir = tempdir().unwrap();
+        let mut db = RocksKv::open(dir.path().join("db_absent")).unwrap();
+
+        // Only accounts. Querying the SMT range must find nothing, rather than
+        // falling back to the total.
+        fill(&mut db, b"accounts/", 400);
+
+        let sizes = db
+            .live_bytes_in_range(b"smt/node/", b"smt/node0")
+            .unwrap();
+        assert!(sizes.total > 0, "the accounts family must be on disk");
+        assert_eq!(
+            sizes.in_range, 0,
+            "no smt/node/ rows exist, so no bytes may be attributed to it"
+        );
+        assert_eq!(sizes.straddling, 0);
+    }
+
+    #[test]
+    fn live_bytes_in_range_is_symmetric_under_the_complementary_query() {
+        let dir = tempdir().unwrap();
+        let mut db = RocksKv::open(dir.path().join("db_symmetric")).unwrap();
+
+        fill(&mut db, b"accounts/", 800);
+        fill(&mut db, b"smt/node/", 800);
+
+        let smt = db.live_bytes_in_range(b"smt/node/", b"smt/node0").unwrap();
+        let acct = db.live_bytes_in_range(b"accounts/", b"accounts0").unwrap();
+
+        assert_eq!(smt.total, acct.total, "the total cannot depend on the query");
+        // Querying the other family must move the attributed bytes to the other
+        // family. A stub keyed to the total reports the same in_range for both
+        // and fails here even if it somehow survived the partition assertions.
+        assert!(smt.in_range > 0 && acct.in_range > 0);
+        assert!(
+            smt.in_range + acct.in_range <= smt.total,
+            "two disjoint families cannot together exceed the total"
+        );
+    }
+
+    #[test]
+    fn live_bytes_in_range_reports_a_boundary_crossing_file_as_ambiguous() {
+        let dir = tempdir().unwrap();
+        let mut db = RocksKv::open(dir.path().join("db_straddle")).unwrap();
+
+        // ONE flush carrying both families, so the resulting SST spans from
+        // `accounts/` to `smt/node/` and crosses the queried boundary. This is
+        // not a contrived case: compaction merges families on a real node, so
+        // boundary-crossing files are the normal steady state and the honest
+        // answer for them is "cannot attribute", not a coin flip.
+        let mut ops = Vec::new();
+        for i in 0..400u64 {
+            let mut k = b"accounts/".to_vec();
+            k.extend_from_slice(&i.to_be_bytes());
+            ops.push(WriteOp::Put(k, vec![0xa5; 96]));
+            let mut k = b"smt/node/".to_vec();
+            k.extend_from_slice(&i.to_be_bytes());
+            ops.push(WriteOp::Put(k, vec![0x5a; 96]));
+        }
+        db.apply_batch(&ops).unwrap();
+        db.flush_default().unwrap();
+
+        let sizes = db.live_bytes_in_range(b"smt/node/", b"smt/node0").unwrap();
+        assert!(sizes.total > 0);
+        assert_eq!(
+            sizes.straddling, sizes.total,
+            "a file spanning the boundary must be reported as ambiguous"
+        );
+        assert_eq!(
+            sizes.in_range, 0,
+            "a boundary-crossing file must not be claimed as in-range: \
+             folding ambiguity into the answer hides the error inside the \
+             number the gauge exists to produce"
+        );
+    }
+
+    #[test]
+    fn live_bytes_total_matches_the_sst_files_on_disk() {
+        // The plan asks for the gauge to be checked against an independent du
+        // of the database directory. This is that check, read through the
+        // filesystem rather than through RocksDB's own metadata, so the two
+        // instruments are genuinely independent. SST files only: the total is
+        // defined as live SST bytes and deliberately excludes the WAL,
+        // MANIFEST, OPTIONS and LOG, which are neither state nor growing.
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db_du");
+        let mut db = RocksKv::open(&db_path).unwrap();
+        fill(&mut db, b"accounts/", 400);
+        fill(&mut db, b"smt/node/", 4_000);
+
+        let reported = db.live_bytes_in_range(b"smt/node/", b"smt/node0").unwrap();
+
+        let mut on_disk = 0u64;
+        for entry in std::fs::read_dir(&db_path).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().extension().is_some_and(|e| e == "sst") {
+                on_disk += entry.metadata().unwrap().len();
+            }
+        }
+
+        assert!(on_disk > 0, "the fixture must have produced SST files");
+        assert_eq!(
+            reported.total, on_disk,
+            "the reported total must equal the SST bytes an independent \
+             directory walk finds"
+        );
+    }
 
     #[test]
     fn rocks_kv_roundtrip_put_get_delete() {

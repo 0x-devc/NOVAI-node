@@ -2114,8 +2114,12 @@ impl ConsensusState {
             // Clear stale state for committed height
             self.block_cache.remove(&block.height);
 
-            // Log commit
-            tracing::info!(
+            // Gate G0: per-block, so debug. This was the single loudest
+            // line in the journal. The committed height is published
+            // continuously as novai_committed_height, so nothing is lost at
+            // the default level; RUST_LOG=novai=debug brings the per-height
+            // trace back when an investigation needs it.
+            tracing::debug!(
                 height = block.height,
                 state_root = ?&block.state_root[..4],
                 "COMMITTED block"

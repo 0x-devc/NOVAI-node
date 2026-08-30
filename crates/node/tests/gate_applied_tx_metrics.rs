@@ -55,6 +55,21 @@ fn snapshot() -> MetricsSnapshot {
         block_applied_tx_count: 7,
         total_txs_applied: 4_100,
         total_txs_skipped: 8_300,
+        // Gate G0 fields; compiler-forced constructor growth, zero like the
+        // rest of this fixture. The G0 surface is asserted with distinct
+        // values in gate_g0_metrics_surface.rs.
+        block_interval_seconds: 0.0,
+        block_interval_window_seconds: 0.0,
+        block_interval_window_blocks: 0,
+        commit_latency_seconds: 0.0,
+        commit_latency_pending: 0,
+        block_bytes: 0,
+        total_block_bytes: 0,
+        db_bytes_total: 0,
+        db_bytes_smt_nodes: 0,
+        db_bytes_straddling: 0,
+        db_bytes_scan_seconds: 0.0,
+        db_bytes_age_seconds: 0,
         copilot_observations_total: 52,
         anomaly_signals_total: 53,
         anomaly_signals_published: 54,

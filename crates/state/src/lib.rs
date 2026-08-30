@@ -615,7 +615,7 @@ pub use memkv::MemKv;
 pub mod rocksdb_kv;
 
 #[cfg(feature = "rocksdb")]
-pub use rocksdb_kv::RocksKv;
+pub use rocksdb_kv::{DbSizeByRange, RocksKv};
 
 /// State encoding version for AccountStateV1 and FeePoolV1.
 pub const STATE_CODEC_V1: u8 = 1;
