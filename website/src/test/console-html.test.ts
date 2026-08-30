@@ -1,12 +1,42 @@
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 
 const SCRIPT = resolve("scripts/generate-console-html.mjs");
-const HTML = resolve("console.html");
 const DATA = resolve("src/data/console-data.generated.json");
+
+/** Every console page on disk, keyed by its path relative to the web root. */
+const PAGE_FILES = [
+  "console.html",
+  "console/rpc.html",
+  "console/errors.html",
+  "console/transactions.html",
+  "console/entities.html",
+  "console/sdks.html",
+  "console/network.html",
+  "console/verify.html",
+];
+const GENERATED_FILES = ["console/all.html", "console/names.html"];
+
+const pages = new Map<string, string>(
+  [...PAGE_FILES, ...GENERATED_FILES].map((f) => [f, readFileSync(resolve(f), "utf8")])
+);
+
+/** The whole console as one string, for "does this appear anywhere" checks. */
+const committed = [...pages.values()].join("\n");
+/**
+ * The eight canonical pages only.
+ *
+ * all.html is a deliberate second copy of every section, so anything COUNTED
+ * has to be counted here or every total doubles. Anything merely looked up can
+ * use `committed`.
+ */
+const canonical = PAGE_FILES.map((f) => pages.get(f) as string).join("\n");
+/** The reference page, where the index, the methods and the record shapes live. */
+const rpc = pages.get("console/rpc.html") as string;
+const data = JSON.parse(readFileSync(DATA, "utf8"));
 
 function run(args: string[]): { status: number; output: string } {
   try {
@@ -21,20 +51,32 @@ function run(args: string[]): { status: number; output: string } {
   }
 }
 
-const committed = readFileSync(HTML, "utf8");
-const data = JSON.parse(readFileSync(DATA, "utf8"));
-
-/** A doctored copy of console.html, checked in isolation. */
-function withHtml(edit: (t: string) => string): { status: number; output: string } {
-  const dir = mkdtempSync(join(tmpdir(), "console-html-"));
-  const path = join(dir, "console.html");
-  const doctored = edit(committed);
-  expect(doctored, "the doctoring produced an identical file").not.toBe(committed);
-  writeFileSync(path, doctored);
-  const res = run(["--check", "--html", path, "--data", DATA]);
+/**
+ * A doctored copy of the whole page set, checked in isolation.
+ *
+ * The gates run across eight files now, so a single-file harness would only
+ * ever exercise one of them. The whole set is copied to a temp root, one page
+ * is edited, and --check runs against the copy: the working tree is never
+ * touched, and the global gates see a realistic page set.
+ */
+function withPages(file: string, edit: (t: string) => string): { status: number; output: string } {
+  const dir = mkdtempSync(join(tmpdir(), "console-pages-"));
+  for (const [rel, text] of pages) {
+    const target = join(dir, rel);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, rel === file ? edit(text) : text);
+  }
+  if (file !== "*") {
+    const before = pages.get(file) as string;
+    expect(readFileSync(join(dir, file), "utf8"), "the doctoring produced an identical file").not.toBe(before);
+  }
+  const res = run(["--check", "--web-root", dir, "--data", DATA]);
   rmSync(dir, { recursive: true, force: true });
   return res;
 }
+
+/** Backwards-compatible alias for the tests that doctor the landing page. */
+const withHtml = (edit: (t: string) => string) => withPages("console.html", edit);
 
 describe("generate-console-html: the marker machinery", () => {
   it("is green against the committed page", () => {
@@ -56,19 +98,19 @@ describe("generate-console-html: the marker machinery", () => {
   });
 
   it("fails when an opening marker has no closing pair", () => {
-    const res = withHtml((t) => t.replace("<!-- @@console-generated:/sdks@@ -->\n", ""));
+    const res = withPages("console/sdks.html", (t) => t.replace("<!-- @@console-generated:/sdks@@ -->\n", ""));
     expect(res.status).not.toBe(0);
     expect(res.output).toContain("marker pairing");
   });
 
   it("fails when a closing marker has no opening pair", () => {
-    const res = withHtml((t) => t.replace("<!-- @@console-generated:sdks@@ -->\n", ""));
+    const res = withPages("console/sdks.html", (t) => t.replace("<!-- @@console-generated:sdks@@ -->\n", ""));
     expect(res.status).not.toBe(0);
     expect(res.output).toContain("marker pairing");
   });
 
   it("fails when the page carries fewer regions than the script writes", () => {
-    const res = withHtml((t) => {
+    const res = withPages("console/network.html", (t) => {
       const open = "<!-- @@console-generated:gaps@@ -->";
       const close = "<!-- @@console-generated:/gaps@@ -->";
       const a = t.indexOf(open);
@@ -81,10 +123,10 @@ describe("generate-console-html: the marker machinery", () => {
   });
 
   it("fails when a region id appears twice", () => {
-    const res = withHtml((t) =>
+    const res = withPages("console/verify.html", (t) =>
       t.replace(
         "<!-- @@console-generated:verify@@ -->",
-        "<!-- @@console-generated:sdks@@ -->\n          <!-- @@console-generated:/sdks@@ -->\n          <!-- @@console-generated:verify@@ -->"
+        "<!-- @@console-generated:verify@@ -->\n          <!-- @@console-generated:/verify@@ -->\n          <!-- @@console-generated:verify@@ -->"
       )
     );
     expect(res.status).not.toBe(0);
@@ -92,10 +134,10 @@ describe("generate-console-html: the marker machinery", () => {
   });
 
   it("fails when regions are nested rather than sequential", () => {
-    const res = withHtml((t) =>
+    const res = withPages("console/verify.html", (t) =>
       t.replace(
         "<!-- @@console-generated:/verify@@ -->",
-        "<!-- @@console-generated:sdks@@ -->\n          <!-- @@console-generated:/verify@@ -->"
+        "<!-- @@console-generated:verify@@ -->\n          <!-- @@console-generated:/verify@@ -->"
       )
     );
     expect(res.status).not.toBe(0);
@@ -106,7 +148,7 @@ describe("generate-console-html: the marker machinery", () => {
     // The sigil is what makes a marker unforgeable by ordinary editing. A
     // comment that reads like one but lacks the @@ delimiters must be inert,
     // or a stray comment could silently capture a region.
-    const res = withHtml((t) =>
+    const res = withPages("console/verify.html", (t) =>
       t.replace(
         "<!-- @@console-generated:verify@@ -->",
         "<!-- console-generated:verify -->\n          <!-- @@console-generated:verify@@ -->"
@@ -245,7 +287,7 @@ describe("generate-console-html: what actually reached the page", () => {
   });
 
   it("strikes every false claim at the point the reader meets it", () => {
-    const struck = (committed.match(/<del /g) ?? []).length;
+    const struck = (canonical.match(/<del /g) ?? []).length;
     // Corrections land on methods and, for drift that belongs to the whole
     // surface rather than to one handler, on error codes.
     const withWrongText = [
@@ -303,7 +345,7 @@ describe("generate-console-html: what actually reached the page", () => {
       (m: { sampleResponse: string | null; withheld: unknown }) => m.sampleResponse && !m.withheld
     );
     expect(withSamples.length).toBeGreaterThan(10);
-    const labels = (committed.match(/Example response from the reference/g) ?? []).length;
+    const labels = (canonical.match(/Example response from the reference/g) ?? []).length;
     expect(labels).toBe(withSamples.length);
   });
 

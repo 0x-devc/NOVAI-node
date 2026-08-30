@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Removable in one edit once the console is announced. See NEEDS-OPERATOR.md. -->
+    <meta name="robots" content="noindex" />
+
+    <title>SDKs | NOVAI developer console</title>
+    <meta
+      name="description"
+      content="Build on NOVAI: the JSON-RPC reference, network parameters, SDK quickstarts and the AI entity model, generated from the source tree."
+    />
+    <meta property="og:title" content="SDKs | NOVAI developer console" />
+    <meta
+      property="og:description"
+      content="Build on NOVAI: the JSON-RPC reference, network parameters, SDK quickstarts and the AI entity model, generated from the source tree."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://novai.network/novai-symbol.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@NOVAInetwork" />
+    <meta name="twitter:image" content="https://novai.network/novai-symbol.png" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+
+    <script type="module" src="/src/console/console-main.ts"></script>
+  </head>
+
+  <body class="bg-surface-0 font-body text-ink-mid antialiased">
+    <a
+      href="#main"
+      class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:border focus:border-line-strong focus:bg-surface-1 focus:px-3 focus:py-2 focus:text-sm focus:text-ink-hi"
+      >Skip to content</a
+    >
+
+    <!-- Console header. Structurally familiar to the site header, monochrome by
+         construction: no gradient text, no glow, brand reserved for links. -->
+    <header class="sticky top-0 z-40 border-b border-line bg-surface-0/95 backdrop-blur">
+      <div class="flex items-center justify-between gap-4 px-4 py-2.5 sm:px-6">
+        <a href="/" class="flex shrink-0 items-baseline gap-2 no-underline">
+          <span class="font-display text-sm font-bold tracking-tight text-ink-hi">NOVAI</span>
+          <!-- The label is the first thing to go at narrow widths: the wordmark
+               plus the nav is what has to fit on one line at 360px. -->
+          <span class="hidden font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low sm:inline"
+            >developer console</span
+          >
+        </a>
+        <nav aria-label="Site" class="flex shrink-0 items-center gap-3 font-mono text-[11px] sm:gap-4">
+          <a href="/" class="whitespace-nowrap text-ink-low no-underline hover:text-ink-hi">main site</a>
+          <a
+            href="https://explorer.novai.network"
+            class="whitespace-nowrap text-ink-low no-underline hover:text-ink-hi"
+            >explorer</a
+          >
+          <a
+            href="https://github.com/NOVAInetwork"
+            class="whitespace-nowrap text-brand-text no-underline hover:underline"
+            >source</a
+          >
+        </nav>
+      </div>
+
+      <!-- @@console-generated:nav-chips@@ -->
+        <nav aria-label="Sections" class="flex gap-1.5 overflow-x-auto border-t border-line-subtle px-4 py-2 lg:hidden sm:px-6">
+        <a href="/console.html#connect" class="console-chip">01 connect</a>
+        <a href="/console.html#first-call" class="console-chip">02 first call</a>
+        <a href="/console/rpc.html#rpc" class="console-chip">03 rpc reference</a>
+        <a href="/console/errors.html#errors" class="console-chip">04 errors and limits</a>
+        <a href="/console/transactions.html#transactions" class="console-chip">05 transactions</a>
+        <a href="/console/entities.html#ai-entities" class="console-chip">06 ai entities</a>
+        <a href="#sdks" class="console-chip" aria-current="true">07 sdks</a>
+        <a href="/console/network.html#parameters" class="console-chip">08 network parameters</a>
+        <a href="/console/network.html#gaps" class="console-chip">09 known gaps</a>
+        <a href="/console/verify.html#verify" class="console-chip">10 verify it yourself</a>
+        <a href="/console/all.html" class="console-chip">everything</a>
+        <a href="/console/names.html" class="console-chip">names</a>
+      </nav>
+        <!-- @@console-generated:/nav-chips@@ -->
+    </header>
+
+    <!-- Capped and centred rather than filling the viewport. Every reference site
+         measured caps: Stripe at 110rem, ethereum.org at 1536px, Solana at 1440px.
+         Not one of eleven lets its layout grow past about 1760px, so at 2560px the
+         surplus is gutter. -->
+    <div class="mx-auto max-w-[110rem] lg:grid lg:grid-cols-[clamp(12.5rem,10rem_+_3vw,16rem)_minmax(0,1fr)]">
+      <!-- @@console-generated:nav-rail@@ -->
+        <nav aria-label="Sections" class="hidden lg:block border-r border-line">
+          <div class="sticky top-[3.25rem] py-6">
+            <p class="px-4 pb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">sections</p>
+            <ul class="list-none space-y-px p-0">
+            <li><a href="/console.html#connect" class="console-rail"><span class="console-rail-n">01</span> connect</a></li>
+            <li><a href="/console.html#first-call" class="console-rail"><span class="console-rail-n">02</span> first call</a></li>
+            <li><a href="/console/rpc.html#rpc" class="console-rail"><span class="console-rail-n">03</span> rpc reference</a></li>
+            <li><a href="/console/errors.html#errors" class="console-rail"><span class="console-rail-n">04</span> errors and limits</a></li>
+            <li><a href="/console/transactions.html#transactions" class="console-rail"><span class="console-rail-n">05</span> transactions</a></li>
+            <li><a href="/console/entities.html#ai-entities" class="console-rail"><span class="console-rail-n">06</span> ai entities</a></li>
+            <li><a href="#sdks" class="console-rail" aria-current="true"><span class="console-rail-n">07</span> sdks</a></li>
+            <li><a href="/console/network.html#parameters" class="console-rail"><span class="console-rail-n">08</span> network parameters</a></li>
+            <li><a href="/console/network.html#gaps" class="console-rail"><span class="console-rail-n">09</span> known gaps</a></li>
+            <li><a href="/console/verify.html#verify" class="console-rail"><span class="console-rail-n">10</span> verify it yourself</a></li>
+            </ul>
+            <p class="mt-4 border-t border-line-subtle px-4 pt-3 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">find</p>
+            <ul class="list-none space-y-px p-0">
+              <li><a href="/console/all.html" class="console-rail"><span class="console-rail-n">&#8942;</span> everything on one page</a></li>
+              <li><a href="/console/names.html" class="console-rail"><span class="console-rail-n">&#8942;</span> index of names</a></li>
+            </ul>
+          </div>
+        </nav>
+        <!-- @@console-generated:/nav-rail@@ -->
+
+      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+        <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
+          SDKs
+        </h1>
+
+        <section id="sdks" class="console-section">
+          <h2 class="console-h2"><span class="console-h2-n">07</span> sdks</h2>
+          <!-- @@console-generated:sdks@@ -->
+        <p class="console-lead">Three SDKs, and they are not equivalent. The distribution difference decides a language choice before the coverage difference does.</p>
+        <h3 class="console-h3">getting them</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">SDK</th><th scope="col">Install</th><th scope="col">Registry</th></tr></thead>
+            <tbody>
+            <tr><td>Python</td><td><code>pip install novai-sdk</code></td><td>PyPI, version 0.1.0</td></tr>
+            <tr><td>Rust</td><td><code>git clone</code> the repository and depend on <code>sdk/novai-sdk</code> by path</td><td>not on crates.io</td></tr>
+            <tr><td>TypeScript</td><td><code>git clone</code> the repository and build <code>sdk/novai-sdk-ts</code></td><td>not published to npm</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Only the Python SDK can be installed from a package registry. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0, published 2026-05-29, and the SDK source in this repository has not changed since that release. The Rust crate is not on crates.io and the npm package is not published.</p>
+        <p class="console-note">The Rust SDK depends on the workspace crates by path (novai-types, novai-crypto, novai-codec, novai-ai-entities), so there is no artifact a registry could carry.</p>
+        <h3 class="console-h3">coverage</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Surface</th><th scope="col" class="text-right">Chain</th><th scope="col" class="text-right">Rust</th><th scope="col" class="text-right">Python</th><th scope="col" class="text-right">TypeScript</th></tr></thead>
+            <tbody>
+            <tr><td>transaction builders</td><td class="num">11</td><td class="num">11</td><td class="num">11</td><td class="num">10</td></tr>
+            <tr><td>signal types</td><td class="num">23</td><td class="num">23</td><td class="num">23</td><td class="num">7</td></tr>
+            <tr><td>memory object types</td><td class="num">16</td><td class="num">16</td><td class="num">16</td><td class="num">5</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">The Rust SDK re-exports the chain's own type enumerations rather than redeclaring them, so its signal and memory coverage is complete by construction and cannot drift. The TypeScript SDK declares its own copies, which is why it can and does.</p>
+        <p class="console-note">The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated in numbers below rather than described, because the numbers are the fact.</p>
+        <details class="console-details">
+          <summary class="console-summary">transaction builders, per SDK</summary>
+          <div class="px-4 pb-3"><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Byte</th><th scope="col">Type</th><th scope="col">Rust</th><th scope="col">Python</th><th scope="col">TypeScript</th></tr></thead>
+            <tbody>
+            <tr><td class="num">1</td><td><code>transfer</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">2</td><td><code>signalCommitment</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">3</td><td><code>createMemoryObject</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">4</td><td><code>updateMemoryObject</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">5</td><td><code>deleteMemoryObject</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">6</td><td><code>submitProposal</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">7</td><td><code>executeProposal</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">8</td><td><code>registerAiEntity</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">9</td><td><code>creditAiEntity</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">10</td><td><code>registerAiEntityWithKey</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">11</td><td><code>entityUpgrade</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-low">no</span></td></tr>
+            </tbody>
+          </table>
+        </div></div>
+        </details>
+        <!-- @@console-generated:/sdks@@ -->
+        </section>
+
+        <footer class="mt-16 border-t border-line pt-4">
+          <p class="font-mono text-[11px] text-ink-low">
+            <a href="/" class="text-ink-low no-underline hover:text-ink-hi">novai.network</a>
+            <span aria-hidden="true" class="px-2 text-ink-low">/</span>
+            <a href="https://explorer.novai.network" class="text-ink-low no-underline hover:text-ink-hi">explorer</a>
+            <span aria-hidden="true" class="px-2 text-ink-low">/</span>
+            <a href="https://github.com/NOVAInetwork" class="text-ink-low no-underline hover:text-ink-hi">source</a>
+          </p>
+        </footer>
+      </main>
+    </div>
+
+    <!-- The only script on this page, and the only thing it does is add a copy
+         button to each code block.
+
+         It is inline and dependency-free on purpose: the reference sections are
+         static HTML and there is no bundle to join. The buttons are CREATED by
+         this script rather than rendered into the markup, so with JavaScript
+         disabled the page is exactly what it was before, with no dead control.
+         Feature-detected on navigator.clipboard, which is unavailable outside a
+         secure context, for the same reason: a button that cannot copy should
+         not exist. -->
+    <script>
+      (function () {
+        if (!navigator.clipboard || !window.isSecureContext) return;
+        var blocks = document.querySelectorAll("pre.console-pre, pre.console-pre-out");
+        for (var i = 0; i < blocks.length; i++) {
+          (function (pre) {
+            var wrap = document.createElement("div");
+            wrap.className = "console-copywrap";
+            pre.parentNode.insertBefore(wrap, pre);
+            wrap.appendChild(pre);
+            var button = document.createElement("button");
+            button.type = "button";
+            button.className = "console-copy";
+            button.textContent = "copy";
+            button.setAttribute("aria-label", "Copy this code block");
+            button.addEventListener("click", function () {
+              var code = pre.querySelector("code");
+              navigator.clipboard.writeText(code ? code.textContent : "").then(
+                function () { say("copied"); },
+                function () { say("copy failed"); }
+              );
+            });
+            function say(text) {
+              button.textContent = text;
+              button.setAttribute("aria-label", text === "copied" ? "Copied" : "Copy failed");
+              window.setTimeout(function () {
+                button.textContent = "copy";
+                button.setAttribute("aria-label", "Copy this code block");
+              }, 1400);
+            }
+            wrap.appendChild(button);
+          })(blocks[i]);
+        }
+      })();
+    </script>
+  </body>
+</html>

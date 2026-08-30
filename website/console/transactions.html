@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Removable in one edit once the console is announced. See NEEDS-OPERATOR.md. -->
+    <meta name="robots" content="noindex" />
+
+    <title>Transactions | NOVAI developer console</title>
+    <meta
+      name="description"
+      content="Build on NOVAI: the JSON-RPC reference, network parameters, SDK quickstarts and the AI entity model, generated from the source tree."
+    />
+    <meta property="og:title" content="Transactions | NOVAI developer console" />
+    <meta
+      property="og:description"
+      content="Build on NOVAI: the JSON-RPC reference, network parameters, SDK quickstarts and the AI entity model, generated from the source tree."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://novai.network/novai-symbol.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@NOVAInetwork" />
+    <meta name="twitter:image" content="https://novai.network/novai-symbol.png" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+
+    <script type="module" src="/src/console/console-main.ts"></script>
+  </head>
+
+  <body class="bg-surface-0 font-body text-ink-mid antialiased">
+    <a
+      href="#main"
+      class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:border focus:border-line-strong focus:bg-surface-1 focus:px-3 focus:py-2 focus:text-sm focus:text-ink-hi"
+      >Skip to content</a
+    >
+
+    <!-- Console header. Structurally familiar to the site header, monochrome by
+         construction: no gradient text, no glow, brand reserved for links. -->
+    <header class="sticky top-0 z-40 border-b border-line bg-surface-0/95 backdrop-blur">
+      <div class="flex items-center justify-between gap-4 px-4 py-2.5 sm:px-6">
+        <a href="/" class="flex shrink-0 items-baseline gap-2 no-underline">
+          <span class="font-display text-sm font-bold tracking-tight text-ink-hi">NOVAI</span>
+          <!-- The label is the first thing to go at narrow widths: the wordmark
+               plus the nav is what has to fit on one line at 360px. -->
+          <span class="hidden font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low sm:inline"
+            >developer console</span
+          >
+        </a>
+        <nav aria-label="Site" class="flex shrink-0 items-center gap-3 font-mono text-[11px] sm:gap-4">
+          <a href="/" class="whitespace-nowrap text-ink-low no-underline hover:text-ink-hi">main site</a>
+          <a
+            href="https://explorer.novai.network"
+            class="whitespace-nowrap text-ink-low no-underline hover:text-ink-hi"
+            >explorer</a
+          >
+          <a
+            href="https://github.com/NOVAInetwork"
+            class="whitespace-nowrap text-brand-text no-underline hover:underline"
+            >source</a
+          >
+        </nav>
+      </div>
+
+      <!-- @@console-generated:nav-chips@@ -->
+        <nav aria-label="Sections" class="flex gap-1.5 overflow-x-auto border-t border-line-subtle px-4 py-2 lg:hidden sm:px-6">
+        <a href="/console.html#connect" class="console-chip">01 connect</a>
+        <a href="/console.html#first-call" class="console-chip">02 first call</a>
+        <a href="/console/rpc.html#rpc" class="console-chip">03 rpc reference</a>
+        <a href="/console/errors.html#errors" class="console-chip">04 errors and limits</a>
+        <a href="#transactions" class="console-chip" aria-current="true">05 transactions</a>
+        <a href="/console/entities.html#ai-entities" class="console-chip">06 ai entities</a>
+        <a href="/console/sdks.html#sdks" class="console-chip">07 sdks</a>
+        <a href="/console/network.html#parameters" class="console-chip">08 network parameters</a>
+        <a href="/console/network.html#gaps" class="console-chip">09 known gaps</a>
+        <a href="/console/verify.html#verify" class="console-chip">10 verify it yourself</a>
+        <a href="/console/all.html" class="console-chip">everything</a>
+        <a href="/console/names.html" class="console-chip">names</a>
+      </nav>
+        <!-- @@console-generated:/nav-chips@@ -->
+    </header>
+
+    <!-- Capped and centred rather than filling the viewport. Every reference site
+         measured caps: Stripe at 110rem, ethereum.org at 1536px, Solana at 1440px.
+         Not one of eleven lets its layout grow past about 1760px, so at 2560px the
+         surplus is gutter. -->
+    <div class="mx-auto max-w-[110rem] lg:grid lg:grid-cols-[clamp(12.5rem,10rem_+_3vw,16rem)_minmax(0,1fr)]">
+      <!-- @@console-generated:nav-rail@@ -->
+        <nav aria-label="Sections" class="hidden lg:block border-r border-line">
+          <div class="sticky top-[3.25rem] py-6">
+            <p class="px-4 pb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">sections</p>
+            <ul class="list-none space-y-px p-0">
+            <li><a href="/console.html#connect" class="console-rail"><span class="console-rail-n">01</span> connect</a></li>
+            <li><a href="/console.html#first-call" class="console-rail"><span class="console-rail-n">02</span> first call</a></li>
+            <li><a href="/console/rpc.html#rpc" class="console-rail"><span class="console-rail-n">03</span> rpc reference</a></li>
+            <li><a href="/console/errors.html#errors" class="console-rail"><span class="console-rail-n">04</span> errors and limits</a></li>
+            <li><a href="#transactions" class="console-rail" aria-current="true"><span class="console-rail-n">05</span> transactions</a></li>
+            <li><a href="/console/entities.html#ai-entities" class="console-rail"><span class="console-rail-n">06</span> ai entities</a></li>
+            <li><a href="/console/sdks.html#sdks" class="console-rail"><span class="console-rail-n">07</span> sdks</a></li>
+            <li><a href="/console/network.html#parameters" class="console-rail"><span class="console-rail-n">08</span> network parameters</a></li>
+            <li><a href="/console/network.html#gaps" class="console-rail"><span class="console-rail-n">09</span> known gaps</a></li>
+            <li><a href="/console/verify.html#verify" class="console-rail"><span class="console-rail-n">10</span> verify it yourself</a></li>
+            </ul>
+            <p class="mt-4 border-t border-line-subtle px-4 pt-3 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">find</p>
+            <ul class="list-none space-y-px p-0">
+              <li><a href="/console/all.html" class="console-rail"><span class="console-rail-n">&#8942;</span> everything on one page</a></li>
+              <li><a href="/console/names.html" class="console-rail"><span class="console-rail-n">&#8942;</span> index of names</a></li>
+            </ul>
+          </div>
+        </nav>
+        <!-- @@console-generated:/nav-rail@@ -->
+
+      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+        <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
+          Transactions
+        </h1>
+
+        <section id="transactions" class="console-section">
+          <h2 class="console-h2"><span class="console-h2-n">05</span> transactions</h2>
+          <!-- @@console-generated:transactions@@ -->
+        <p class="console-lead">Eleven transaction types. The discriminant is the first byte of the payload and it is what decides the type.</p>
+        <h3 class="console-h3">types, discriminants and minimum fees</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Byte</th><th scope="col">Type</th><th scope="col" class="text-right">Min fee</th><th scope="col">Constant</th></tr></thead>
+            <tbody>
+            <tr><td class="num">1</td><td><code>transfer</code></td><td class="num">100</td><td><code>MIN_FEE_TRANSFER</code></td></tr>
+            <tr><td class="num">2</td><td><code>signalCommitment</code></td><td class="num">1,000</td><td><code>MIN_FEE_SIGNAL_COMMITMENT</code></td></tr>
+            <tr><td class="num">3</td><td><code>createMemoryObject</code></td><td class="num">500</td><td><code>MIN_FEE_MEMORY_OBJECT</code></td></tr>
+            <tr><td class="num">4</td><td><code>updateMemoryObject</code></td><td class="num">500</td><td><code>MIN_FEE_MEMORY_OBJECT</code></td></tr>
+            <tr><td class="num">5</td><td><code>deleteMemoryObject</code></td><td class="num">500</td><td><code>MIN_FEE_MEMORY_OBJECT</code></td></tr>
+            <tr><td class="num">6</td><td><code>submitProposal</code></td><td class="num">2,000</td><td><code>MIN_FEE_GOVERNANCE_SUBMIT</code></td></tr>
+            <tr><td class="num">7</td><td><code>executeProposal</code></td><td class="num">500</td><td><code>MIN_FEE_GOVERNANCE_EXECUTE</code></td></tr>
+            <tr><td class="num">8</td><td><code>registerAiEntity</code></td><td class="num">5,000</td><td><code>MIN_FEE_REGISTER_AI_ENTITY</code></td></tr>
+            <tr><td class="num">9</td><td><code>creditAiEntity</code></td><td class="num">100</td><td><code>MIN_FEE_CREDIT_AI_ENTITY</code></td></tr>
+            <tr><td class="num">10</td><td><code>registerAiEntityWithKey</code></td><td class="num">5,000</td><td><code>MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY</code></td></tr>
+            <tr><td class="num">11</td><td><code>entityUpgrade</code></td><td class="num">5,000</td><td><code>MIN_FEE_ENTITY_UPGRADE</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <figure class="console-figure">
+          <svg viewBox="0 0 544 258" width="544" height="258" role="img" aria-labelledby="fee-ladder-desc" class="console-chart">
+            <desc id="fee-ladder-desc">Minimum fee by transaction type, sorted high to low. The most expensive, entityUpgrade, costs 5,000, which is 50 times the cheapest, transfer, at 100. Every value is in the table above.</desc>
+            <text x="182" y="13" text-anchor="end" class="fee-label">entityUpgrade</text><rect x="190" y="0" width="300" height="18" rx="2" class="fee-bar" /><text x="496" y="13" class="fee-value">5,000</text>
+            <text x="182" y="37" text-anchor="end" class="fee-label">registerAiEntity</text><rect x="190" y="24" width="300" height="18" rx="2" class="fee-bar" /><text x="496" y="37" class="fee-value">5,000</text>
+            <text x="182" y="61" text-anchor="end" class="fee-label">registerAiEntityWithKey</text><rect x="190" y="48" width="300" height="18" rx="2" class="fee-bar" /><text x="496" y="61" class="fee-value">5,000</text>
+            <text x="182" y="85" text-anchor="end" class="fee-label">submitProposal</text><rect x="190" y="72" width="120" height="18" rx="2" class="fee-bar" /><text x="316" y="85" class="fee-value">2,000</text>
+            <text x="182" y="109" text-anchor="end" class="fee-label">signalCommitment</text><rect x="190" y="96" width="60" height="18" rx="2" class="fee-bar" /><text x="256" y="109" class="fee-value">1,000</text>
+            <text x="182" y="133" text-anchor="end" class="fee-label">createMemoryObject</text><rect x="190" y="120" width="30" height="18" rx="2" class="fee-bar" /><text x="226" y="133" class="fee-value">500</text>
+            <text x="182" y="157" text-anchor="end" class="fee-label">deleteMemoryObject</text><rect x="190" y="144" width="30" height="18" rx="2" class="fee-bar" /><text x="226" y="157" class="fee-value">500</text>
+            <text x="182" y="181" text-anchor="end" class="fee-label">executeProposal</text><rect x="190" y="168" width="30" height="18" rx="2" class="fee-bar" /><text x="226" y="181" class="fee-value">500</text>
+            <text x="182" y="205" text-anchor="end" class="fee-label">updateMemoryObject</text><rect x="190" y="192" width="30" height="18" rx="2" class="fee-bar" /><text x="226" y="205" class="fee-value">500</text>
+            <text x="182" y="229" text-anchor="end" class="fee-label">creditAiEntity</text><rect x="190" y="216" width="6" height="18" rx="2" class="fee-bar" /><text x="202" y="229" class="fee-value">100</text>
+            <text x="182" y="253" text-anchor="end" class="fee-label">transfer</text><rect x="190" y="240" width="6" height="18" rx="2" class="fee-bar" /><text x="202" y="253" class="fee-value">100</text>
+          </svg>
+          <figcaption class="console-note">Minimum fee by transaction type. entityUpgrade costs 50x transfer. Values from the table above.</figcaption>
+        </figure>
+        <p class="console-note">Minimum fees are per type. Percentage fees apply on top of the floor for the operations listed, so unit economics are the floor plus a percentage rather than the floor alone.</p>
+        <h3 class="console-h3">percentage fees</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Constant</th><th scope="col" class="text-right">Basis points</th><th scope="col" class="text-right">Share</th><th scope="col">Source</th></tr></thead>
+            <tbody>
+            <tr><td><code>PAYMENT_FEE_BPS</code></td><td class="num">200</td><td class="num">2%</td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1541">:1541</a></td></tr>
+            <tr><td><code>MARKETPLACE_FEE_BPS</code></td><td class="num">200</td><td class="num">2%</td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L12443">:12443</a></td></tr>
+            <tr><td><code>SUBSCRIPTION_CANCEL_FEE_BPS</code></td><td class="num">500</td><td class="num">5%</td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L12450">:12450</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Basis points are against a denominator of 10,000.</p>
+        <h3 class="console-h3">canonical unsigned encoding</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col" class="text-right">Bytes</th><th scope="col">Endianness</th><th scope="col" class="text-right">Offset</th></tr></thead>
+            <tbody>
+            <tr><td><code>version</code></td><td class="num">1</td><td>n/a</td><td class="num">0</td></tr>
+            <tr><td><code>from</code></td><td class="num">32</td><td>n/a</td><td class="num">1</td></tr>
+            <tr><td><code>pubkey</code></td><td class="num">32</td><td>n/a</td><td class="num">33</td></tr>
+            <tr><td><code>nonce</code></td><td class="num">8</td><td>little</td><td class="num">65</td></tr>
+            <tr><td><code>fee</code></td><td class="num">8</td><td>little</td><td class="num">73</td></tr>
+            <tr><td><code>payload_len</code></td><td class="num">4</td><td>little</td><td class="num">81</td></tr>
+            <tr><td><code>payload</code></td><td class="num">variable</td><td>n/a</td><td class="num">85</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">The signature is 64 bytes appended after the payload. Fixed overhead is 149 bytes, which is TX_V1_OVERHEAD.</p>
+        <h3 class="console-h3">signing</h3>
+        <p class="console-note">Two details a non-Rust client has to get exactly right. The envelope is little-endian while payload internals are big-endian. And the signing preimage and the transaction id are different preimages: the signature covers a domain tag followed by the unsigned encoding, while the id is a hash of the unsigned encoding alone. Trailing bytes after the signature are a decode error, not padding.</p>
+        <!-- @@console-generated:/transactions@@ -->
+        </section>
+
+        <footer class="mt-16 border-t border-line pt-4">
+          <p class="font-mono text-[11px] text-ink-low">
+            <a href="/" class="text-ink-low no-underline hover:text-ink-hi">novai.network</a>
+            <span aria-hidden="true" class="px-2 text-ink-low">/</span>
+            <a href="https://explorer.novai.network" class="text-ink-low no-underline hover:text-ink-hi">explorer</a>
+            <span aria-hidden="true" class="px-2 text-ink-low">/</span>
+            <a href="https://github.com/NOVAInetwork" class="text-ink-low no-underline hover:text-ink-hi">source</a>
+          </p>
+        </footer>
+      </main>
+    </div>
+
+    <!-- The only script on this page, and the only thing it does is add a copy
+         button to each code block.
+
+         It is inline and dependency-free on purpose: the reference sections are
+         static HTML and there is no bundle to join. The buttons are CREATED by
+         this script rather than rendered into the markup, so with JavaScript
+         disabled the page is exactly what it was before, with no dead control.
+         Feature-detected on navigator.clipboard, which is unavailable outside a
+         secure context, for the same reason: a button that cannot copy should
+         not exist. -->
+    <script>
+      (function () {
+        if (!navigator.clipboard || !window.isSecureContext) return;
+        var blocks = document.querySelectorAll("pre.console-pre, pre.console-pre-out");
+        for (var i = 0; i < blocks.length; i++) {
+          (function (pre) {
+            var wrap = document.createElement("div");
+            wrap.className = "console-copywrap";
+            pre.parentNode.insertBefore(wrap, pre);
+            wrap.appendChild(pre);
+            var button = document.createElement("button");
+            button.type = "button";
+            button.className = "console-copy";
+            button.textContent = "copy";
+            button.setAttribute("aria-label", "Copy this code block");
+            button.addEventListener("click", function () {
+              var code = pre.querySelector("code");
+              navigator.clipboard.writeText(code ? code.textContent : "").then(
+                function () { say("copied"); },
+                function () { say("copy failed"); }
+              );
+            });
+            function say(text) {
+              button.textContent = text;
+              button.setAttribute("aria-label", text === "copied" ? "Copied" : "Copy failed");
+              window.setTimeout(function () {
+                button.textContent = "copy";
+                button.setAttribute("aria-label", "Copy this code block");
+              }, 1400);
+            }
+            wrap.appendChild(button);
+          })(blocks[i]);
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -24,6 +24,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tokeniseSchema, tokeniseShell, assertLossless } from "./tokenise.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = resolve(SCRIPT_DIR, "..");
@@ -34,11 +35,15 @@ function fail(msg) {
 }
 
 function parseArgs(argv) {
-  const args = { check: false, html: join(WEB_ROOT, "console.html"), data: join(WEB_ROOT, "src/data/console-data.generated.json") };
+  // --web-root points the page reads and writes at another directory holding a
+  // copy of the page set. The marker gates are exercised by doctoring a page
+  // and re-running, and with eight pages that has to happen on a copy rather
+  // than in the working tree.
+  const args = { check: false, root: WEB_ROOT, data: join(WEB_ROOT, "src/data/console-data.generated.json") };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--check") args.check = true;
-    else if (a === "--html") args.html = resolve(argv[++i]);
+    else if (a === "--web-root") args.root = resolve(argv[++i]);
     else if (a === "--data") args.data = resolve(argv[++i]);
     else fail(`unknown argument ${a}`);
   }
@@ -319,8 +324,44 @@ fn main() -> Result<(), Box<dyn Error>> {
 // Section renderers
 // ---------------------------------------------------------------------------
 
-const pre = (body) => `<pre class="console-pre"><code>${esc(body)}</code></pre>`;
-const out = (body) => `<pre class="console-pre-out"><code>${esc(body)}</code></pre>`;
+// ---------------------------------------------------------------------------
+// CODE BLOCKS
+//
+// Every block is tokenised at build time and emitted as spans. No runtime
+// highlighter, no grammar dependency: see scripts/tokenise.mjs for why a real
+// JSON grammar is less accurate here than a hand-written scanner, and for the
+// losslessness invariant both of these assert on every block.
+//
+// Colour in these blocks is doing four jobs and no others: separating keys from
+// values, marking a placeholder the reader must substitute, marking a record
+// type that is defined elsewhere on the page, and dimming punctuation so it
+// stops competing with content. Stripe resolves 27 token classes to five
+// colours and leaves identifiers as body text; this follows that discipline
+// rather than colouring everything it can name.
+// ---------------------------------------------------------------------------
+
+/** One token as markup. A record reference is emitted as a link to its shape. */
+function tokenSpan(t, known) {
+  if (t.cls === "type" && known.has(t.text)) {
+    return `<a class="tok-type" href="#${esc(recordAnchor(t.text))}">${esc(t.text)}</a>`;
+  }
+  if (t.cls === "plain") return esc(t.text);
+  return `<span class="tok-${t.cls}">${esc(t.text)}</span>`;
+}
+
+function codeBlock(body, { lang = "schema", known = new Set(), cls = "console-pre" } = {}) {
+  const src = String(body ?? "");
+  const tokens = lang === "shell" ? tokeniseShell(src) : lang === "none" ? [{ cls: "plain", text: src }] : tokeniseSchema(src, known);
+  try {
+    assertLossless(src, tokens);
+  } catch (e) {
+    fail(`code block: ${e.message}`);
+  }
+  return `<pre class="${cls}" data-lang="${esc(lang)}"><code>${tokens.map((t) => tokenSpan(t, known)).join("")}</code></pre>`;
+}
+
+const pre = (body, opts) => codeBlock(body, { cls: "console-pre", ...opts });
+const out = (body, opts) => codeBlock(body, { cls: "console-pre-out", ...opts });
 const lead = (text) => `<p class="console-lead">${rich(text)}</p>`;
 // note() takes PROSE and escapes it. noteHtml() takes markup already built by
 // the helpers above and does not. Passing built markup to note() renders the
@@ -370,22 +411,167 @@ function details(summary, inner) {
  * notes, and several of the defects this gate fixed were exactly that content.
  * Saying what the check actually does is both true and still worth saying.
  */
-function renderIntro(d) {
+// ---------------------------------------------------------------------------
+// PAGES
+//
+// The console is eight pages, and all 29 methods stay together on one of them.
+//
+// The evidence for that shape: ethereum.org runs 38 methods and 86 code blocks
+// on a single server-rendered page with 38 stable anchors, so 29 is below
+// proven scale. NEAR groups its whole RPC API into eight topical pages rather
+// than one page per method. Alchemy is the counter-example, with 4,157
+// near-duplicate method pages that cannot be browsed at all. And Sui is the
+// other counter-example: its "single page" reference is a 22 KB JavaScript
+// shell whose server HTML contains no anchors and no method names, so it is
+// invisible to find-in-page, to deep links and to crawlers.
+//
+// What the split costs is cross-page find-in-page, and that is answered without
+// a byte of JavaScript by two generated pages: all.html, which is every section
+// concatenated with each heading linking to its canonical page anchor, and
+// names.html, an index of every constant, error code, method and record type.
+// Not one of the eleven sites surveyed has search that works with JavaScript
+// disabled; the industry's actual zero-JS answer is a flat concatenated corpus,
+// which every one of them ships as llms-full.txt.
+// ---------------------------------------------------------------------------
+
+const SECTIONS = [
+  { id: "connect", num: "01", title: "connect", regions: ["connect"] },
+  { id: "first-call", num: "02", title: "first call", regions: ["first-call"] },
+  { id: "rpc", num: "03", title: "rpc reference", regions: ["rpc-index", "rpc-methods"] },
+  { id: "errors", num: "04", title: "errors and limits", regions: ["errors"] },
+  { id: "transactions", num: "05", title: "transactions", regions: ["transactions"] },
+  { id: "ai-entities", num: "06", title: "ai entities", regions: ["ai-entities"] },
+  { id: "sdks", num: "07", title: "sdks", regions: ["sdks"] },
+  { id: "parameters", num: "08", title: "network parameters", regions: ["parameters"] },
+  { id: "gaps", num: "09", title: "known gaps", regions: ["gaps"] },
+  { id: "verify", num: "10", title: "verify it yourself", regions: ["verify"] },
+];
+
+const PAGES = [
+  { file: "console.html", href: "/console.html", label: "get started", sections: ["connect", "first-call"] },
+  { file: "console/rpc.html", href: "/console/rpc.html", label: "rpc reference", sections: ["rpc"] },
+  { file: "console/errors.html", href: "/console/errors.html", label: "errors and limits", sections: ["errors"] },
+  { file: "console/transactions.html", href: "/console/transactions.html", label: "transactions", sections: ["transactions"] },
+  { file: "console/entities.html", href: "/console/entities.html", label: "ai entities", sections: ["ai-entities"] },
+  { file: "console/sdks.html", href: "/console/sdks.html", label: "sdks", sections: ["sdks"] },
+  { file: "console/network.html", href: "/console/network.html", label: "network", sections: ["parameters", "gaps"] },
+  { file: "console/verify.html", href: "/console/verify.html", label: "verify", sections: ["verify"] },
+];
+
+// Regions every page carries, plus the ones its own sections bring. The intro
+// and the provenance tiles belong to the landing page only.
+function regionsForPage(page) {
+  const base = ["nav-chips", "nav-rail"];
+  const own = page.file === "console.html" ? ["intro", "provenance"] : [];
+  const sections = page.sections.flatMap((id) => {
+    const sec = SECTIONS.find((x) => x.id === id);
+    if (!sec) fail(`page gate: ${page.file} claims section "${id}", which does not exist`);
+    return sec.regions;
+  });
+  return [...base, ...own, ...sections];
+}
+
+const sectionById = new Map(SECTIONS.map((sec) => [sec.id, sec]));
+const pageOfSection = new Map(PAGES.flatMap((pg) => pg.sections.map((id) => [id, pg])));
+
+/**
+ * A link to a section, from any page. Same page and it is a fragment; another
+ * page and it is a path plus a fragment. Every cross-reference on the console
+ * goes through this, so the split cannot leave a dangling in-page anchor
+ * pointing at a section that now lives elsewhere.
+ */
+function hrefToSection(sectionId, fromPage) {
+  const target = pageOfSection.get(sectionId);
+  if (!target) fail(`link gate: no page owns section "${sectionId}"`);
+  return target.file === fromPage.file ? `#${sectionId}` : `${target.href}#${sectionId}`;
+}
+
+/** A link to a method anchor, which always lives on the rpc reference page. */
+function hrefToMethod(name, fromPage) {
+  const target = pageOfSection.get("rpc");
+  const frag = `#${anchorFor(name)}`;
+  return target.file === fromPage.file ? frag : `${target.href}${frag}`;
+}
+
+/** A link to a record shape, which lives beside the methods. */
+function hrefToRecord(type, fromPage) {
+  const target = pageOfSection.get("rpc");
+  const frag = `#${recordAnchor(type)}`;
+  return target.file === fromPage.file ? frag : `${target.href}${frag}`;
+}
+
+/**
+ * The section rail, and the same list as horizontally scrolling chips below the
+ * lg breakpoint. Generated rather than hand-written on each page, because eight
+ * hand-maintained copies of a ten-entry nav is eight chances for one of them to
+ * point at a section that moved.
+ *
+ * Every entry is a full cross-page link, so the rail is a site nav rather than
+ * a table of contents. The current page's entries stay fragments and carry
+ * aria-current, which is how a returning reader knows where they are.
+ */
+function navItems(page) {
+  return SECTIONS.map((sec) => ({
+    sec,
+    href: hrefToSection(sec.id, page),
+    here: pageOfSection.get(sec.id).file === page.file,
+  }));
+}
+
+function renderNavRail(d, page) {
+  const items = navItems(page)
+    .map(
+      ({ sec, href, here }) =>
+        `<li><a href="${esc(href)}" class="console-rail"${here ? ' aria-current="true"' : ""}>` +
+        `<span class="console-rail-n">${esc(sec.num)}</span> ${esc(sec.title)}</a></li>`
+    )
+    .join("\n            ");
+  return `<nav aria-label="Sections" class="hidden lg:block border-r border-line">
+          <div class="sticky top-[3.25rem] py-6">
+            <p class="px-4 pb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">sections</p>
+            <ul class="list-none space-y-px p-0">
+            ${items}
+            </ul>
+            <p class="mt-4 border-t border-line-subtle px-4 pt-3 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">find</p>
+            <ul class="list-none space-y-px p-0">
+              <li><a href="/console/all.html" class="console-rail"><span class="console-rail-n">&#8942;</span> everything on one page</a></li>
+              <li><a href="/console/names.html" class="console-rail"><span class="console-rail-n">&#8942;</span> index of names</a></li>
+            </ul>
+          </div>
+        </nav>`;
+}
+
+function renderNavChips(d, page) {
+  const items = navItems(page)
+    .map(
+      ({ sec, href, here }) =>
+        `<a href="${esc(href)}" class="console-chip"${here ? ' aria-current="true"' : ""}>${esc(`${sec.num} ${sec.title}`)}</a>`
+    )
+    .join("\n        ");
+  return `<nav aria-label="Sections" class="flex gap-1.5 overflow-x-auto border-t border-line-subtle px-4 py-2 lg:hidden sm:px-6">
+        ${items}
+        <a href="/console/all.html" class="console-chip">everything</a>
+        <a href="/console/names.html" class="console-chip">names</a>
+      </nav>`;
+}
+
+function renderIntro(d, page) {
   const exceptions = d.drift.value.knownExceptions.length;
   const signals = d.signalTypes.value.length;
   const objects = d.memoryObjectTypes.value.length;
-  const link = (href, text) => `<a class="text-brand-text no-underline hover:underline" href="${href}">${text}</a>`;
+  const link = (sectionId, text) =>
+    `<a class="text-brand-text no-underline hover:underline" href="${esc(hrefToSection(sectionId, page))}">${text}</a>`;
   return `<p class="mt-2 max-w-[70ch] text-sm leading-relaxed text-ink-low">
           Everything needed to build against the chain. The reference below is generated from the source tree at
           build time, and every method name in it is cross-checked across four independent sources, so the build
           fails when they disagree. That check is over names: where the reference and the implementation disagree
           about a parameter, an error code or a result, the difference is carried as an explicit exception and
-          corrected where you meet it. There are ${exceptions} of those today, listed in ${link("#gaps", "known gaps")}.
+          corrected where you meet it. There are ${exceptions} of those today, listed in ${link("gaps", "known gaps")}.
         </p>
         <p class="mt-2 max-w-[70ch] text-sm leading-relaxed text-ink-low">
           NOVAI treats AI entities as first-class on-chain actors: they hold balances and reputation, publish
           ${signals} kinds of signal, and own ${objects} kinds of memory object. That is what the
-          ${link("#transactions", "transaction")} and ${link("#ai-entities", "entity")} sections describe.
+          ${link("transactions", "transaction")} and ${link("ai-entities", "entity")} sections describe.
         </p>`;
 }
 
@@ -421,7 +607,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \\
     ["Authentication", "none"],
   ];
   return `${lead(PROSE.connect)}
-        ${pre(curl)}
+        ${pre(curl, { lang: "shell" })}
         ${table([{ label: "Property" }, { label: "Value" }], rows)}
         ${note(PROSE.connectRate)}
         <div class="mt-4 rounded-md border border-line bg-surface-1 px-4 py-3" data-island="network-status">
@@ -434,15 +620,15 @@ function renderFirstCall() {
   return `${lead(PROSE.firstCall)}
         ${h3("curl")}
         ${note(PROSE.firstCallCurl)}
-        ${pre(`curl -s -X POST ${ENDPOINT} -H 'Content-Type: application/json' \\\n  -d '{"jsonrpc":"2.0","method":"novai_getLatestBlock","params":{},"id":1}'`)}
+        ${pre(`curl -s -X POST ${ENDPOINT} -H 'Content-Type: application/json' \\\n  -d '{"jsonrpc":"2.0","method":"novai_getLatestBlock","params":{},"id":1}'`, { lang: "shell" })}
         ${out(CAPTURES.curl)}
         ${h3("python")}
         ${note(PROSE.firstCallPython)}
-        ${pre(PY_EXAMPLE)}
+        ${pre(PY_EXAMPLE, { lang: "none" })}
         ${out(CAPTURES.python)}
         ${h3("rust")}
         ${note(PROSE.firstCallRust)}
-        ${pre(RUST_EXAMPLE)}
+        ${pre(RUST_EXAMPLE, { lang: "none" })}
         ${out(CAPTURES.rust)}
         ${note(`${PROSE.firstCallCapture} Captured ${CAPTURES.at}.`)}`;
 }
@@ -589,52 +775,8 @@ function renderRpcIndex(d) {
 
 const recordAnchor = (type) => `record-${type.toLowerCase()}`;
 
-/**
- * Escape a shape fence and turn each bare record-type reference into a link.
- *
- * String- and comment-aware, because a type name inside a quoted default or a
- * jsonc comment is prose about the type, not a reference to it, and linking it
- * would put an anchor inside a code literal. The scan mirrors the data
- * generator's recordTypesIn, which is what decided these were references in the
- * first place, so the two cannot disagree about what counts.
- */
-function linkRecordTypes(text, known) {
-  const src = String(text ?? "");
-  let out = "";
-  let i = 0;
-  while (i < src.length) {
-    if (src[i] === '"') {
-      const end = src.indexOf('"', i + 1);
-      const stop = end === -1 ? src.length : end + 1;
-      out += esc(src.slice(i, stop));
-      i = stop;
-      continue;
-    }
-    if (src[i] === "/" && src[i + 1] === "/") {
-      const end = src.indexOf("\n", i);
-      const stop = end === -1 ? src.length : end;
-      out += esc(src.slice(i, stop));
-      i = stop;
-      continue;
-    }
-    const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i));
-    if (m) {
-      const word = m[0];
-      out += known.has(word)
-        ? `<a class="text-brand-text no-underline hover:underline" href="#${esc(recordAnchor(word))}">${esc(word)}</a>`
-        : esc(word);
-      i += word.length;
-      continue;
-    }
-    out += esc(src[i]);
-    i += 1;
-  }
-  return out;
-}
-
-/** A shape fence with its record-type references linked. */
-const preLinked = (body, known) =>
-  `<pre class="console-pre"><code>${linkRecordTypes(body, known)}</code></pre>`;
+/** A shape fence. Record-type references become links via the type token. */
+const preLinked = (body, known) => codeBlock(body, { lang: "schema", known });
 
 /** The one definition of a record type, emitted at its first reference. */
 function recordDefinition(type, shape, categoryTitle, known) {
@@ -772,15 +914,21 @@ function renderMethods(d) {
           ${head}
           <p class="console-lead">${descFix ? richStruck(descText, descFix.wrongText) : rich(descText)}</p>
           ${correctionsAt(m, "description").map(correctionNote).join("\n        ")}
-          ${renderParams(m)}
-          ${renderResult(m, known)}
-          ${renderErrors(m)}
-          ${h3("example")}
-          ${m.exampleNote ? note(plain(m.exampleNote)) : ""}
-          ${pre(m.curl)}
-          ${m.sampleResponse
-            ? out(m.sampleResponse) + note("Example response from the reference. Heights and hashes in it are illustrative, not a current reading.")
-            : note("The reference carries no sample response for this method.")}
+          <div class="console-panes">
+            <div class="console-pane-prose">
+              ${renderParams(m)}
+              ${renderErrors(m)}
+            </div>
+            <div class="console-pane-code">
+              ${renderResult(m, known)}
+              ${h3("example")}
+              ${m.exampleNote ? note(plain(m.exampleNote)) : ""}
+              ${pre(m.curl, { lang: "shell" })}
+              ${m.sampleResponse
+                ? out(m.sampleResponse) + note("Example response from the reference. Heights and hashes in it are illustrative, not a current reading.")
+                : note("The reference carries no sample response for this method.")}
+            </div>
+          </div>
         </div>`;
     })
     .join("\n        ");
@@ -857,6 +1005,72 @@ function renderErrorsSection(d) {
         ${note(PROSE.errorsBalance)}`;
 }
 
+// ---------------------------------------------------------------------------
+// THE FEE LADDER
+//
+// The only chart on this console, and the reason it earns a place is that the
+// fact it carries is a RATIO. Eleven transaction types share six distinct
+// minimum fees, from 100 to 5,000, so registering an entity costs fifty times a
+// transfer. A table states eleven numbers and leaves the reader to divide; a
+// sorted bar states the ratio directly, and it surfaces something the table
+// buries, which is that the three most expensive operations are all
+// entity-lifecycle and every memory-object operation costs the same.
+//
+// The other three candidate datasets were read and rejected. sdkCoverage is an
+// eleven-by-three matrix that is already a table and reads better as one.
+// signalPayloads is a 66-byte base with tails on a minority of 23 types, so a
+// bar chart would be a flat line saying "these are the same". errorCodes is 13
+// values in three classes, which a table with a class column says completely.
+//
+// Static SVG, generated, no JavaScript. Linear scale, not logarithmic: the
+// whole point is the 50x, and a log axis would flatten exactly the fact the
+// chart exists to show. The fee table above stays, so the numbers remain
+// readable to a screen reader and the chart is supplementary rather than
+// load-bearing.
+// ---------------------------------------------------------------------------
+
+function renderFeeLadder(fees) {
+  const rows = [...fees].sort((a, b) => b.minFee - a.minFee || a.name.localeCompare(b.name));
+  const max = Math.max(...rows.map((f) => f.minFee));
+  if (!Number.isFinite(max) || max <= 0) fail("fee ladder: no positive maximum fee, so the scale would be meaningless");
+  const barH = 18;
+  const gap = 6;
+  const labelW = 190;
+  const valueW = 54;
+  const plotW = 300;
+  const width = labelW + plotW + valueW;
+  const height = rows.length * (barH + gap) - gap;
+  const ratio = Math.round(max / Math.min(...rows.map((f) => f.minFee)));
+
+  const bars = rows
+    .map((f, i) => {
+      const y = i * (barH + gap);
+      const w = Math.max(1, Math.round((f.minFee / max) * plotW));
+      return `<text x="${labelW - 8}" y="${y + barH - 5}" text-anchor="end" class="fee-label">${esc(f.name)}</text>` +
+        `<rect x="${labelW}" y="${y}" width="${w}" height="${barH}" rx="2" class="fee-bar" />` +
+        `<text x="${labelW + w + 6}" y="${y + barH - 5}" class="fee-value">${esc(f.minFee.toLocaleString("en-US"))}</text>`;
+    })
+    .join("\n            ");
+
+  // The accessible name states the finding, not the shape. A reader who cannot
+  // see the bars gets the sentence the bars are there to make.
+  const desc =
+    `Minimum fee by transaction type, sorted high to low. The most expensive, ` +
+    `${rows[0].name}, costs ${rows[0].minFee.toLocaleString("en-US")}, which is ${ratio} times the cheapest, ` +
+    `${rows[rows.length - 1].name}, at ${rows[rows.length - 1].minFee.toLocaleString("en-US")}. ` +
+    `Every value is in the table above.`;
+
+  return `<figure class="console-figure">
+          <svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-labelledby="fee-ladder-desc" class="console-chart">
+            <desc id="fee-ladder-desc">${esc(desc)}</desc>
+            ${bars}
+          </svg>
+          <figcaption class="console-note">${esc(
+            `Minimum fee by transaction type. ${rows[0].name} costs ${ratio}x ${rows[rows.length - 1].name}. Values from the table above.`
+          )}</figcaption>
+        </figure>`;
+}
+
 function renderTransactions(d) {
   const feeRows = d.fees.value.map((f) => [
     String(f.discriminant),
@@ -881,6 +1095,7 @@ function renderTransactions(d) {
   return `${lead(PROSE.transactions)}
         ${h3("types, discriminants and minimum fees")}
         ${table([{ label: "Byte", num: true }, { label: "Type" }, { label: "Min fee", num: true }, { label: "Constant" }], feeRows)}
+        ${renderFeeLadder(d.fees.value)}
         ${note(PROSE.txFees)}
         ${h3("percentage fees")}
         ${table([{ label: "Constant" }, { label: "Basis points", num: true }, { label: "Share", num: true }, { label: "Source" }], bpsRows)}
@@ -1082,7 +1297,14 @@ function renderVerify() {
 // found in the file, so a region silently dropped from either side fails.
 // ---------------------------------------------------------------------------
 
+// `chrome: true` means the region belongs on EVERY page rather than on exactly
+// one. The distinction is load-bearing for the global gate below: content must
+// appear once across the page set, and chrome must appear on all of them, so a
+// nav missing from a single page fails just as loudly as a section rendered
+// twice.
 const REGIONS = [
+  { id: "nav-chips", chrome: true, render: renderNavChips },
+  { id: "nav-rail", chrome: true, render: renderNavRail },
   { id: "intro", render: renderIntro },
   { id: "provenance", render: renderProvenance },
   { id: "connect", render: renderConnect },
@@ -1120,45 +1342,44 @@ const SIGIL = "@@console-generated";
 const openMarker = (id) => `<!-- ${SIGIL}:${id}@@ -->`;
 const closeMarker = (id) => `<!-- ${SIGIL}:/${id}@@ -->`;
 
-function findRegions(html) {
+function findRegions(html, wantIds, label) {
   const all = [...html.matchAll(new RegExp(`<!-- ${SIGIL}:(\\/?)([a-z-]+)@@ -->`, "g"))];
   const opens = all.filter((m) => m[1] === "");
   const closes = all.filter((m) => m[1] === "/");
 
   if (opens.length !== closes.length) {
-    fail(`marker pairing: ${opens.length} opening marker(s) and ${closes.length} closing marker(s)`);
+    fail(`marker pairing in ${label}: ${opens.length} opening marker(s) and ${closes.length} closing marker(s)`);
   }
 
   const found = [];
   const stack = [];
   for (const m of all) {
     if (m[1] === "") {
-      if (stack.length) fail(`marker nesting: region ${m[2]} opens inside ${stack[stack.length - 1]}`);
+      if (stack.length) fail(`marker nesting in ${label}: region ${m[2]} opens inside ${stack[stack.length - 1]}`);
       stack.push(m[2]);
       found.push({ id: m[2], start: m.index, bodyStart: m.index + m[0].length });
     } else {
       const open = stack.pop();
-      if (open === undefined) fail(`marker pairing: region ${m[2]} closes without opening`);
-      if (open !== m[2]) fail(`marker pairing: region ${open} is closed by ${m[2]}`);
+      if (open === undefined) fail(`marker pairing in ${label}: region ${m[2]} closes without opening`);
+      if (open !== m[2]) fail(`marker pairing in ${label}: region ${open} is closed by ${m[2]}`);
       const region = found[found.length - 1];
       region.bodyEnd = m.index;
       region.end = m.index + m[0].length;
     }
   }
-  if (stack.length) fail(`marker pairing: region ${stack[0]} never closes`);
+  if (stack.length) fail(`marker pairing in ${label}: region ${stack[0]} never closes`);
 
   const foundIds = found.map((r) => r.id);
-  const wantIds = REGIONS.map((r) => r.id);
   const missing = wantIds.filter((id) => !foundIds.includes(id));
   const extra = foundIds.filter((id) => !wantIds.includes(id));
   if (missing.length || extra.length || foundIds.length !== wantIds.length) {
     fail(
-      `region count: console.html carries ${foundIds.length} marked region(s) and this script writes ${wantIds.length}. ` +
+      `region count: ${label} carries ${foundIds.length} marked region(s) and this page declares ${wantIds.length}. ` +
       `Missing from the page: ${missing.join(", ") || "none"}. On the page with no renderer: ${extra.join(", ") || "none"}.`
     );
   }
   const duplicates = foundIds.filter((id, i) => foundIds.indexOf(id) !== i);
-  if (duplicates.length) fail(`region count: duplicate region id(s) ${[...new Set(duplicates)].join(", ")}`);
+  if (duplicates.length) fail(`region count: ${label} has duplicate region id(s) ${[...new Set(duplicates)].join(", ")}`);
   return found;
 }
 
@@ -1342,50 +1563,305 @@ function assertProseIsAllUsed(scriptSource) {
   void declared;
 }
 
-function render(html, data) {
-  const regions = findRegions(html);
+function render(html, data, page) {
+  const want = regionsForPage(page);
+  const regions = findRegions(html, want, page.file);
   const byId = new Map(REGIONS.map((r) => [r.id, r]));
   // Rewrite from the end so earlier offsets stay valid.
   let out = html;
   const rendered = new Map();
   for (const region of [...regions].reverse()) {
-    const body = block(region.id, byId.get(region.id).render(data));
+    const body = block(region.id, byId.get(region.id).render(data, page));
     rendered.set(region.id, body);
     out = out.slice(0, region.bodyStart) + body + out.slice(region.bodyEnd);
   }
-  // Gates run on what was just rendered, before it is written or compared.
-  assertCaveatsAreDeclared(data, rendered.get("rpc-index") ?? "");
-  assertCorrectionsAreRendered(data, rendered.get("rpc-methods") ?? "");
-  assertRecordTypesAreDefined(data, rendered.get("rpc-methods") ?? "");
-  assertNullBadgeIsMeasured(data, rendered.get("rpc-index") ?? "");
-  return out;
+  if (rendered.has("rpc-index")) assertCaveatsAreDeclared(data, rendered.get("rpc-index"));
+  if (rendered.has("rpc-methods")) {
+    assertCorrectionsAreRendered(data, rendered.get("rpc-methods"));
+    assertRecordTypesAreDefined(data, rendered.get("rpc-methods"));
+  }
+  if (rendered.has("rpc-index")) assertNullBadgeIsMeasured(data, rendered.get("rpc-index"));
+  return { html: out, rendered, foundIds: regions.map((r) => r.id) };
+}
+
+/**
+ * THE GLOBAL REGION GATE.
+ *
+ * The per-file check above says each page carries the regions it declares. That
+ * is not enough on its own, and the gap is the whole reason this is written
+ * down: a naive port of the single-page gate makes every check per-file, and
+ * the guarantee that every region is rendered SOMEWHERE disappears without
+ * anything going red. Delete a page from PAGES, or drop a section from a page,
+ * and each surviving file still passes its own check while a section silently
+ * stops being published.
+ *
+ * So the union of the region ids found across all pages must equal the set of
+ * regions this script can render, with multiplicity exactly one. That catches
+ * a region rendered nowhere and a region rendered twice, and it is the only
+ * check that can.
+ */
+function assertGlobalRegionCoverage(found) {
+  const counts = new Map();
+  for (const [file, ids] of found) {
+    for (const id of ids) {
+      if (!counts.has(id)) counts.set(id, []);
+      counts.get(id).push(file);
+    }
+  }
+  const problems = [];
+  for (const r of REGIONS) {
+    const where = counts.get(r.id) ?? [];
+    if (r.chrome) {
+      const missing = PAGES.filter((pg) => !where.includes(pg.file)).map((pg) => pg.file);
+      if (missing.length) problems.push(`chrome region "${r.id}" is missing from ${missing.join(", ")}`);
+      continue;
+    }
+    if (where.length === 0) problems.push(`"${r.id}" is rendered on no page, so that content is simply gone`);
+    if (where.length > 1) problems.push(`"${r.id}" is rendered on ${where.join(" and ")}, so two copies can drift`);
+  }
+  for (const id of counts.keys()) {
+    if (!REGIONS.some((r) => r.id === id)) problems.push(`"${id}" is marked on a page and no renderer writes it`);
+  }
+  if (problems.length) {
+    console.error("console-html: the union of pages does not cover the regions exactly once:");
+    for (const pr of problems) console.error(`  ${pr}`);
+    fail("a region is rendered nowhere, or more than once, across the page set");
+  }
+}
+
+/**
+ * Every page's shell is the same shell.
+ *
+ * Eight files each carry their own head, header and footer. Nothing stops one
+ * of them drifting, and a drifted shell is invisible until someone opens that
+ * one page. So the bytes outside <main> are compared across every page, with
+ * only the title and the og:title allowed to differ.
+ */
+function assertShellsAgree(pages) {
+  const shellOf = (html, file) => {
+    const i = html.indexOf('<main id="main"');
+    const j = html.indexOf('<footer class="mt-16');
+    if (i === -1 || j === -1) fail(`shell gate: ${file} has no <main> or no footer, so its shell cannot be compared`);
+    let shell = html.slice(0, i) + html.slice(j);
+    // The nav regions live before <main> and are per-page by design: the
+    // current page's entries are fragments and carry aria-current. Their bodies
+    // are blanked so this compares the shell, not the navigation state.
+    for (const r of REGIONS.filter((x) => x.chrome)) {
+      const open = openMarker(r.id);
+      const close = closeMarker(r.id);
+      const a = shell.indexOf(open);
+      const b = shell.indexOf(close);
+      if (a === -1 || b === -1) fail(`shell gate: ${file} is missing the ${r.id} markers`);
+      shell = shell.slice(0, a + open.length) + shell.slice(b);
+    }
+    return shell
+      .replace(/<title>[^<]*<\/title>/, "<title>T</title>")
+      .replace(/(<meta property="og:title" content=")[^"]*(")/, "$1T$2");
+  };
+  const [first, ...rest] = pages;
+  const base = shellOf(first.html, first.file);
+  for (const pg of rest) {
+    if (shellOf(pg.html, pg.file) !== base) {
+      fail(
+        `shell gate: ${pg.file} does not share the shell that ${first.file} has. ` +
+        `Head, header, nav container and footer are the same on every console page by design; ` +
+        `a difference here is a copy that drifted.`
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// THE TWO FIND SURFACES
+//
+// Splitting eight ways costs one thing, and it is the property the single page
+// was best at: find-in-page across the whole surface in one keystroke. A reader
+// hunting MAX_SIGNAL_QUERY_RANGE with no idea which topic owns it could find it
+// instantly, and after a split has to guess a page.
+//
+// Building search would not recover it. Every search implementation across the
+// eleven reference sites surveyed is client-side only: docs.sui.io and
+// quicknode return a content-free shell with JavaScript disabled, solana and
+// near 404 the search route entirely, and DocSearch alone is 133 KB of script
+// plus 14 KB of CSS plus a hosted crawler. The industry's actual zero-JS answer
+// is a flat concatenated corpus, which seven of those eleven ship as
+// llms-full.txt, from 78 KB to 11.3 MB.
+//
+// So: all.html is that corpus with anchors. Every heading links to its canonical
+// page, so Ctrl-F finds the string and Enter goes to where it lives. And
+// names.html is an A-to-Z of every constant, error code, method and record type
+// with the page that holds it, which no site in the survey publishes and which
+// is a loop over content that already exists.
+//
+// Both are rendered from the SAME renderers as the pages, so there is one
+// rendering path and no second copy to drift, and both are byte-compared by
+// --check.
+// ---------------------------------------------------------------------------
+
+const ALL_PAGE = { file: "console/all.html", href: "/console/all.html", label: "everything", sections: [] };
+const NAMES_PAGE = { file: "console/names.html", href: "/console/names.html", label: "index of names", sections: [] };
+
+/** The shell of an already-rendered page, with a slot where <main>'s body was. */
+function shellFrom(html, file) {
+  const i = html.indexOf('<main id="main"');
+  const j = html.indexOf('<footer class="mt-16');
+  if (i === -1 || j === -1) fail(`find surface: cannot read the shell out of ${file}`);
+  const open = html.slice(i, html.indexOf(">", i) + 1);
+  return { head: html.slice(0, i) + open, tail: "        " + html.slice(j) };
+}
+
+function findSurface(base, title, h1, lead, body, { robots = null } = {}) {
+  const { head, tail } = base;
+  return (
+    head
+      .replace(/<title>[^<]*<\/title>/, `<title>${esc(title)} | NOVAI developer console</title>`)
+      .replace(/<meta name="robots" content="[^"]*" \/>/, robots ? `<meta name="robots" content="${esc(robots)}" />` : "$&")
+      .replace(/(<meta property="og:title" content=")[^"]*(")/, `$1${esc(title)} | NOVAI developer console$2`) +
+    `\n        <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">\n          ${esc(h1)}\n        </h1>\n` +
+    `        ${note(lead)}\n` +
+    body +
+    "\n" +
+    tail
+  );
+}
+
+function renderAllPage(d, results) {
+  const base = shellFrom(results[0].html, results[0].file);
+  const byId = new Map(REGIONS.map((r) => [r.id, r]));
+  const body = SECTIONS.map((sec) => {
+    const owner = pageOfSection.get(sec.id);
+    const inner = sec.regions.map((id) => byId.get(id).render(d, ALL_PAGE)).join("\n        ");
+    return `        <section id="${esc(sec.id)}" class="console-section">
+          <h2 class="console-h2"><span class="console-h2-n">${esc(sec.num)}</span> ${esc(sec.title)}
+            <a class="console-canonical" href="${esc(owner.href)}#${esc(sec.id)}">on its own page</a>
+          </h2>
+        ${inner}
+        </section>`;
+  }).join("\n\n");
+  return findSurface(
+    base,
+    "Everything on one page",
+    "Everything on one page",
+    "Every section of this console concatenated, so find-in-page reaches the whole surface in one keystroke. " +
+      "Each heading links to the page that section lives on. This page is a copy for finding things: the pages it " +
+      "links to are the ones to bookmark.",
+    body,
+    // Explicit and permanent, so the decision survives the day the site-wide
+    // noindex comes off. This page is an eight-to-one aggregate, so it has no
+    // single canonical target: rel=canonical expresses a one-to-one
+    // near-duplicate relationship and naming any one of the eight would be a
+    // false signal about the other seven. noindex with follow keeps the
+    // aggregate out of an index while its links still carry to the pages that
+    // own the content. See NEEDS-OPERATOR.md item 20.
+    { robots: "noindex, follow" }
+  );
+}
+
+function renderNamesPage(d, results) {
+  const base = shellFrom(results[0].html, results[0].file);
+
+  // Where a name lives is DERIVED by scanning what each page actually renders,
+  // not from a hand-kept table. A table would be a second copy of the page set
+  // and would go wrong the first time a section moved.
+  const pageOf = new Map();
+  const record = (name, file, href) => {
+    if (!pageOf.has(name)) pageOf.set(name, { file, href });
+  };
+  const CONSTANT = /\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/g;
+  for (const r of results) {
+    const text = r.html.replace(/<[^>]+>/g, " ");
+    for (const m of text.matchAll(CONSTANT)) record(m[0], r.file, r.href);
+  }
+
+  const rows = [];
+  const link = (text, href) => `<a class="text-brand-text no-underline hover:underline" href="${esc(href)}">${esc(text)}</a>`;
+
+  for (const m of d.methods.value) {
+    rows.push([link(m.name, hrefToMethod(m.name, NAMES_PAGE)), "method", esc(pageOfSection.get("rpc").label)]);
+  }
+  for (const t of [...new Set(d.methods.value.flatMap((m) => m.result?.recordTypes ?? []))].sort()) {
+    rows.push([link(t, hrefToRecord(t, NAMES_PAGE)), "record type", esc(pageOfSection.get("rpc").label)]);
+  }
+  for (const e of [...d.errorCodes.value].sort((a, b) => a.code - b.code)) {
+    rows.push([link(String(e.code), hrefToSection("errors", NAMES_PAGE)), "error code", esc(pageOfSection.get("errors").label)]);
+  }
+  for (const name of [...pageOf.keys()].sort()) {
+    const where = pageOf.get(name);
+    const pg = PAGES.find((x) => x.file === where.file);
+    rows.push([link(name, `${where.href}`), "constant", esc(pg ? pg.label : where.file)]);
+  }
+
+  const body = `        ${table([{ label: "Name" }, { label: "Kind" }, { label: "Page" }], rows)}`;
+  return findSurface(
+    base,
+    "Index of names",
+    "Index of names",
+    `Every method, record type, error code and named constant on this console, and the page that holds it. ` +
+      `${rows.length} entries. Built by scanning what each page renders, so a name cannot appear here and be ` +
+      `missing from the page it points at.`,
+    body
+  );
 }
 
 function main() {
   const args = parseArgs(process.argv);
   assertProseIsAllUsed(readFileSync(fileURLToPath(import.meta.url), "utf8"));
   if (!existsSync(args.data)) fail(`${args.data} not found; run npm run console:data first`);
-  if (!existsSync(args.html)) fail(`${args.html} not found`);
 
   const data = JSON.parse(readFileSync(args.data, "utf8"));
-  const html = readFileSync(args.html, "utf8");
-  const next = render(html, data);
+
+  const results = [];
+  for (const page of PAGES) {
+    const path = join(args.root, page.file);
+    if (!existsSync(path)) fail(`${page.file} not found. Every page in PAGES must exist as a file with its markers.`);
+    const html = readFileSync(path, "utf8");
+    const { html: next, foundIds } = render(html, data, page);
+    results.push({ ...page, path, before: html, html: next, foundIds });
+  }
+
+  assertGlobalRegionCoverage(results.map((r) => [r.file, r.foundIds]));
+  assertShellsAgree(results);
+
+  // The two generated find surfaces are written whole, so they carry no markers
+  // and cannot be hand-edited into disagreement with the pages they index.
+  const generated = [
+    { file: ALL_PAGE.file, html: renderAllPage(data, results) },
+    { file: NAMES_PAGE.file, html: renderNamesPage(data, results) },
+  ];
 
   if (args.check) {
-    if (next !== html) {
-      fail(
-        `--check: ${args.html} does not match a fresh render. Either the generated data changed or a generated ` +
-        `region was hand-edited. Run npm run console:html and commit the result.`
-      );
+    for (const r of results) {
+      if (r.html !== r.before) {
+        fail(
+          `--check: ${r.file} does not match a fresh render. Either the generated data changed or a generated ` +
+          `region was hand-edited. Run npm run console:html and commit the result.`
+        );
+      }
     }
-    console.log(`console-html: check ok (${REGIONS.length} regions match a fresh render)`);
+    for (const g of generated) {
+      const path = join(args.root, g.file);
+      if (!existsSync(path)) fail(`--check: ${g.file} does not exist; run npm run console:html and commit it`);
+      if (readFileSync(path, "utf8") !== g.html) {
+        fail(`--check: ${g.file} does not match a fresh render. Run npm run console:html and commit the result.`);
+      }
+    }
+    console.log(
+      `console-html: check ok (${REGIONS.length} regions across ${PAGES.length} pages, plus ${generated.length} generated find surfaces)`
+    );
     return;
   }
 
-  const tmp = args.html + ".tmp";
-  writeFileSync(tmp, next);
-  renameSync(tmp, args.html);
-  console.log(`console-html: wrote ${args.html} (${REGIONS.length} regions)`);
+  for (const r of results) writeAtomic(r.path, r.html);
+  for (const g of generated) writeAtomic(join(args.root, g.file), g.html);
+  console.log(
+    `console-html: wrote ${PAGES.length} page(s) and ${generated.length} find surface(s), ${REGIONS.length} regions total`
+  );
+}
+
+function writeAtomic(path, content) {
+  const tmp = path + ".tmp";
+  writeFileSync(tmp, content);
+  renameSync(tmp, path);
 }
 
 main();

@@ -29,6 +29,29 @@ const LEGACY_EXEMPT = new Set([
   "src/components/novai",
   "src/components/ui",
 ]);
+/**
+ * Source with comments removed, for rules that police what a file DOES.
+ *
+ * These rules match token names as bare substrings, so a comment explaining why
+ * a token was NOT used trips them: writing "text-low, not text-faint" in a CSS
+ * comment reads to the scanner exactly like using text-faint. That is the same
+ * defect as attaching a caveat by scanning an exception's prose, which this
+ * gate's own codebase spent a release fixing, and the same one the Rust
+ * dispatch scan already guards against by stripping comments "so a
+ * commented-out arm cannot count".
+ *
+ * Block comments are removed for both CSS and TypeScript. Line comments are
+ * removed only when the line STARTS with //, so a "https://" inside a string is
+ * never mistaken for one. A declaration inside a comment is inert, so nothing
+ * is weakened by this.
+ */
+const withoutComments = (text: string) =>
+  text
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .map((line) => (/^\s*\/\//.test(line) ? "" : line))
+    .join("\n");
+
 const isLegacy = (rel: string) => [...LEGACY_EXEMPT].some((e) => rel === e || rel.startsWith(e + "/"));
 
 describe("design rules", () => {
@@ -56,8 +79,9 @@ describe("design rules", () => {
       [/text-ink-faint|text-faint\b/, "the faint token, which fails contrast for content"],
     ];
     for (const f of consoleFiles) {
+      const code = withoutComments(f.text);
       for (const [re, what] of FORBIDDEN) {
-        expect(re.test(f.text), `${f.rel} uses ${what}`).toBe(false);
+        expect(re.test(code), `${f.rel} uses ${what}`).toBe(false);
       }
     }
   });
@@ -98,8 +122,20 @@ describe("design rules", () => {
     const ALLOW = new Set(["src/index.css", "tailwind.config.ts", "src/dev/SpecimenApp.tsx"]);
     for (const f of files) {
       if (ALLOW.has(f.rel) || isLegacy(f.rel)) continue;
-      expect(/text-ink-faint|text-faint\b/.test(f.text), `${f.rel} puts content on the faint token`).toBe(false);
+      expect(/text-ink-faint|text-faint\b/.test(withoutComments(f.text)), `${f.rel} puts content on the faint token`).toBe(false);
     }
+  });
+
+  it("stripping comments does not let a real violation hide behind one", () => {
+    // The rules above scan comment-free source. That is only safe if the
+    // stripper removes comments and nothing else, so it is checked directly
+    // rather than assumed: a declaration must survive, and a token named in a
+    // comment must not.
+    expect(withoutComments("/* text-faint */\n.a { color: red; }")).toContain("color: red");
+    expect(withoutComments("/* text-faint */\n.a { color: red; }")).not.toContain("text-faint");
+    expect(withoutComments("// text-faint\n.a { @apply text-ink-faint; }")).toContain("text-ink-faint");
+    expect(withoutComments('const u = "https://x/y";')).toContain("https://x/y");
+    expect(withoutComments(".a { @apply text-ink-faint; } /* why */")).toContain("text-ink-faint");
   });
 
   it("glow-3 is reserved for the hero and commit flash", () => {

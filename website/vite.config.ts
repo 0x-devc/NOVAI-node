@@ -30,9 +30,26 @@ export default defineConfig(({ mode }) => ({
   // dev server still serves it, the production build never sees it.
   build: {
     rollupOptions: {
+      // Every console page is a real entry. index.html must stay named: the
+      // moment `input` is set it stops being the implicit default, and omitting
+      // it silently deletes the marketing site from the build.
+      //
+      // all.html and names.html are generated whole by
+      // scripts/generate-console-html.mjs. They are listed here because they
+      // are pages a reader loads, so they need the stylesheet link Vite injects
+      // like any other entry.
       input: {
         main: path.resolve(__dirname, "index.html"),
         console: path.resolve(__dirname, "console.html"),
+        consoleRpc: path.resolve(__dirname, "console/rpc.html"),
+        consoleErrors: path.resolve(__dirname, "console/errors.html"),
+        consoleTransactions: path.resolve(__dirname, "console/transactions.html"),
+        consoleEntities: path.resolve(__dirname, "console/entities.html"),
+        consoleSdks: path.resolve(__dirname, "console/sdks.html"),
+        consoleNetwork: path.resolve(__dirname, "console/network.html"),
+        consoleVerify: path.resolve(__dirname, "console/verify.html"),
+        consoleAll: path.resolve(__dirname, "console/all.html"),
+        consoleNames: path.resolve(__dirname, "console/names.html"),
       },
     },
   },

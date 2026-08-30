@@ -208,14 +208,58 @@ section without reading the transaction section.
     and content inside a closed `<details>` is unreachable by find-in-page in
     Firefox and Safari. `<details>` is used only for the two long lookup
     enumerations in section 06.
-- **Gate C4, live panels.** Network status and verify panel as React islands,
+- **Gate C4, correctness and structure. LANDED 2026-08-30.** The gate was
+  renumbered by the operator at the start of that session: what this document
+  used to call C4 (live panels) is now C5. C4 became the correctness pass plus
+  the page split, because the C3 page was publishing wrong facts and those had
+  to go first.
+  - **Fifteen defect classes closed.** All of them were downstream of one thing:
+    the data generator computed the right per-method caveat, correction and role
+    reinterpretation, gated all three, and `payloadFor` then dropped `caveats`
+    and `corrections` from the emitted JSON while the renderer rebuilt the index
+    Notes column by regex-scanning exception PROSE for method names. That scan
+    failed in both directions on one page. `novai_getBalance` carried
+    `novai_getNonce`'s caveat, which is the reverse of the truth for getBalance;
+    `novai_submitTransaction`, the only state-mutating method, carried none.
+  - **The renderer now reads per-method declarations only.** `CAVEAT_LABELS` and
+    the prose regex are deleted and a test asserts they are gone, because every
+    other check passes on a renderer that still scans prose.
+  - **Corrections are struck at their own site** with the truth on the next line,
+    rather than listed 2,426 lines away. Struck rather than deleted: the
+    sentence is still in `docs/RPC_REFERENCE.md`, which every method row links
+    to, so silently dropping it would leave a reader unable to tell curation
+    from staleness.
+  - **Nine drift exceptions, up from five.** The four new ones are the vk-list
+    foreign field, `getNonce`'s unreachable `-32002`, `getBlockByHeight`'s null
+    path documented as unreachable, and the `-32600` trigger. `NEEDS-OPERATOR.md`
+    items 16 to 19.
+  - **Six record shapes now render.** Fifteen of 29 methods published a result
+    type the page never defined, while printing "Record shape declared once for
+    this category" seventeen times. `basis_points` appeared zero times on the
+    page. Each shape is declared once, every reference links to it, and a gate
+    refuses any type reference the page does not define.
+  - **Eight pages.** All 29 methods stay together on `console/rpc.html`. Plus two
+    generated find surfaces, `console/all.html` and `console/names.html`, which
+    are how the split keeps one-keystroke findability at zero JavaScript.
+  - **Build-time syntax highlighting**, `scripts/tokenise.mjs`, hand written. Not
+    a dependency question: `JSON.parse` fails on 29 of the 51 JSON fences because
+    they are a schema notation with type placeholders, bare record references and
+    comments. A real JSON grammar is less accurate here, and it cannot express a
+    record reference as a link, which is the construct that fixes the shape gap.
+  - **One chart**, the fee ladder, and three candidate datasets were read and
+    rejected. **Copy buttons**, injected by the only script on the page, so with
+    JavaScript off the page is what it was.
+
+- **Gate C5, live panels.** Network status and verify panel as React islands,
   mounted (not hydrated) into containers holding identical static markup, so
   hydration mismatch is not a possible failure mode. Needs a new RPC endpoint
   resolver module: none exists, `PUBLIC_RPC_URL` currently has exactly one call
-  site and it is the curl string builder.
-- **Gate C5.** Prerender, performance, accessibility, 360px, `noindex`,
-  `sitemap.xml`, `agents.json`, tests.
-- **Gate C6.** Adversarial verification, including the doctored-doc test that
+  site and it is the curl string builder. Was C4 before the 2026-08-30
+  renumbering.
+- **Gate C6.** Prerender, performance, accessibility, 360px, `noindex`,
+  `sitemap.xml`, `agents.json`, tests. The sitemap now has ten console URLs to
+  carry, not one.
+- **Gate C7.** Adversarial verification, including the doctored-doc test that
   must fail the build.
 
 #### The KNOWN_DRIFT exception mechanism, and why it must fail on a FIX
@@ -532,23 +576,47 @@ A hero that passes i, ii and iv while failing iii is still rejected.
 
 ## 9. Practical notes for a fresh session
 
-- Baseline gate state after C2: dash gate clean (and now actually running, see
-  section 10), typecheck clean, 82 tests of which 81 pass, lint 22 problems
-  (pre-existing, all in legacy files), `specimen.html` absent from `dist`. The
-  one failing test is `repo-stats`'s staleness gate. It is reporting truth: the
-  committed `repo-stats.generated.json` predates node work that has since landed
-  in `1842fb7`, so `linesOfRust` is 128,811 against a tree measuring 129,361 and
-  `tests` is 2,138 against 2,146.
-- **The reason for leaving that gate red has expired, and refreshing it is now a
-  one-command operator decision.** While the node work was uncommitted,
-  regenerating would have baked numbers derived from uncommitted work into a
-  file the public site publishes, which is why it was left alone. Now that
-  `1842fb7` has landed, `npm run stats` produces a file that describes committed
-  state and the suite goes green. That is a site-number change, so it is the
-  operator's call and not a side effect of a console commit.
-- `npm test` = dash gate, typecheck, suite. `npm run build` runs `prebuild`
-  first, which is the dash gate plus the repo-stats staleness check.
-  `npm run predeploy` is the full pre-deploy chain and writes the snapshot.
+- Baseline gate state after C4: dash gate clean, css-coverage clean, typecheck
+  clean, contrast audit zero gating failures, 149 tests of which 146 pass.
+  **All three failures are one root cause and none of them is a console defect:
+  a generated file describing a `crates/` tree that is being edited right now.**
+  1. `repo-stats` staleness. Refreshed during the C4 session and immediately
+     stale again: it was measured against a working tree carrying uncommitted
+     node work, so 130,785 lines and 2,175 tests describe code that is not in
+     the repository, and the tree moved again within minutes.
+  2. `console-data --check`. A fresh run puts `MAX_INDEX_ENTRIES` at
+     `crates/node/src/main.rs:362`; the committed data says 339. The difference
+     is uncommitted work above that line. **The committed 339 was kept
+     deliberately.** Source links point at `blob/main`, so they must match
+     committed code; regenerating would publish a link to a line that exists in
+     no commit.
+  3. `prints every exception on a successful run` fails only because it shells
+     out to `--check` and inherits failure 2.
+  None of these can be made green from inside `website/`. They go green when the
+  node work is committed and the two generated files are refreshed against it,
+  which is one command each and an operator decision because both publish
+  numbers.
+- **That warning came true on 2026-08-30 and is worth reading twice.** The
+  stats file was refreshed while node work was uncommitted, so it now publishes
+  `linesOfRust` and `tests` measured against a tree the repository does not
+  contain. Refreshing a derived file is only safe when the thing it derives from
+  is committed. Both generated files should be regenerated in the same commit
+  that lands the node work, not before it and not after.
+- `npm test` = dash gate, css-coverage config check, typecheck, suite.
+  `npm run build` runs `prebuild` first: dash gate, repo-stats check,
+  console-data check, console-html check, css-coverage config check.
+  `npm run predeploy` is the full chain and finishes with
+  `check-css-coverage --dist`, which is the only check that reads the BUILT
+  output rather than the config's intent. **`prebuild` is currently red for the
+  two reasons in the list above, so `npm run build` will not run until the node
+  work is committed; `npx vite build` builds fine.**
+- **`scripts/check-css-coverage.mjs` exists because the console is ten HTML
+  files now.** A page missing from Tailwind's content globs has every utility
+  class on it purged, and the failure is production-only: dev does not purge, so
+  it looks perfect locally and ships unstyled. The config half checks that every
+  HTML entry carrying its own classes is matched by a glob; the output half
+  checks that a class in each BUILT page resolves in a stylesheet that page
+  links. Only the second would have caught the original bug.
 - The design-rules test is the erosion guard. It walks `src/` for `.ts`, `.tsx`
   and `.css` only, so it does NOT see `console.html`; the console rule reads
   that file explicitly. Allowlists are keyed on exact relative paths, so moving

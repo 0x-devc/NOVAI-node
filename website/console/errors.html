@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Removable in one edit once the console is announced. See NEEDS-OPERATOR.md. -->
+    <meta name="robots" content="noindex" />
+
+    <title>Errors and limits | NOVAI developer console</title>
+    <meta
+      name="description"
+      content="Build on NOVAI: the JSON-RPC reference, network parameters, SDK quickstarts and the AI entity model, generated from the source tree."
+    />
+    <meta property="og:title" content="Errors and limits | NOVAI developer console" />
+    <meta
+      property="og:description"
+      content="Build on NOVAI: the JSON-RPC reference, network parameters, SDK quickstarts and the AI entity model, generated from the source tree."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://novai.network/novai-symbol.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@NOVAInetwork" />
+    <meta name="twitter:image" content="https://novai.network/novai-symbol.png" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+
+    <script type="module" src="/src/console/console-main.ts"></script>
+  </head>
+
+  <body class="bg-surface-0 font-body text-ink-mid antialiased">
+    <a
+      href="#main"
+      class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:border focus:border-line-strong focus:bg-surface-1 focus:px-3 focus:py-2 focus:text-sm focus:text-ink-hi"
+      >Skip to content</a
+    >
+
+    <!-- Console header. Structurally familiar to the site header, monochrome by
+         construction: no gradient text, no glow, brand reserved for links. -->
+    <header class="sticky top-0 z-40 border-b border-line bg-surface-0/95 backdrop-blur">
+      <div class="flex items-center justify-between gap-4 px-4 py-2.5 sm:px-6">
+        <a href="/" class="flex shrink-0 items-baseline gap-2 no-underline">
+          <span class="font-display text-sm font-bold tracking-tight text-ink-hi">NOVAI</span>
+          <!-- The label is the first thing to go at narrow widths: the wordmark
+               plus the nav is what has to fit on one line at 360px. -->
+          <span class="hidden font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low sm:inline"
+            >developer console</span
+          >
+        </a>
+        <nav aria-label="Site" class="flex shrink-0 items-center gap-3 font-mono text-[11px] sm:gap-4">
+          <a href="/" class="whitespace-nowrap text-ink-low no-underline hover:text-ink-hi">main site</a>
+          <a
+            href="https://explorer.novai.network"
+            class="whitespace-nowrap text-ink-low no-underline hover:text-ink-hi"
+            >explorer</a
+          >
+          <a
+            href="https://github.com/NOVAInetwork"
+            class="whitespace-nowrap text-brand-text no-underline hover:underline"
+            >source</a
+          >
+        </nav>
+      </div>
+
+      <!-- @@console-generated:nav-chips@@ -->
+        <nav aria-label="Sections" class="flex gap-1.5 overflow-x-auto border-t border-line-subtle px-4 py-2 lg:hidden sm:px-6">
+        <a href="/console.html#connect" class="console-chip">01 connect</a>
+        <a href="/console.html#first-call" class="console-chip">02 first call</a>
+        <a href="/console/rpc.html#rpc" class="console-chip">03 rpc reference</a>
+        <a href="#errors" class="console-chip" aria-current="true">04 errors and limits</a>
+        <a href="/console/transactions.html#transactions" class="console-chip">05 transactions</a>
+        <a href="/console/entities.html#ai-entities" class="console-chip">06 ai entities</a>
+        <a href="/console/sdks.html#sdks" class="console-chip">07 sdks</a>
+        <a href="/console/network.html#parameters" class="console-chip">08 network parameters</a>
+        <a href="/console/network.html#gaps" class="console-chip">09 known gaps</a>
+        <a href="/console/verify.html#verify" class="console-chip">10 verify it yourself</a>
+        <a href="/console/all.html" class="console-chip">everything</a>
+        <a href="/console/names.html" class="console-chip">names</a>
+      </nav>
+        <!-- @@console-generated:/nav-chips@@ -->
+    </header>
+
+    <!-- Capped and centred rather than filling the viewport. Every reference site
+         measured caps: Stripe at 110rem, ethereum.org at 1536px, Solana at 1440px.
+         Not one of eleven lets its layout grow past about 1760px, so at 2560px the
+         surplus is gutter. -->
+    <div class="mx-auto max-w-[110rem] lg:grid lg:grid-cols-[clamp(12.5rem,10rem_+_3vw,16rem)_minmax(0,1fr)]">
+      <!-- @@console-generated:nav-rail@@ -->
+        <nav aria-label="Sections" class="hidden lg:block border-r border-line">
+          <div class="sticky top-[3.25rem] py-6">
+            <p class="px-4 pb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">sections</p>
+            <ul class="list-none space-y-px p-0">
+            <li><a href="/console.html#connect" class="console-rail"><span class="console-rail-n">01</span> connect</a></li>
+            <li><a href="/console.html#first-call" class="console-rail"><span class="console-rail-n">02</span> first call</a></li>
+            <li><a href="/console/rpc.html#rpc" class="console-rail"><span class="console-rail-n">03</span> rpc reference</a></li>
+            <li><a href="#errors" class="console-rail" aria-current="true"><span class="console-rail-n">04</span> errors and limits</a></li>
+            <li><a href="/console/transactions.html#transactions" class="console-rail"><span class="console-rail-n">05</span> transactions</a></li>
+            <li><a href="/console/entities.html#ai-entities" class="console-rail"><span class="console-rail-n">06</span> ai entities</a></li>
+            <li><a href="/console/sdks.html#sdks" class="console-rail"><span class="console-rail-n">07</span> sdks</a></li>
+            <li><a href="/console/network.html#parameters" class="console-rail"><span class="console-rail-n">08</span> network parameters</a></li>
+            <li><a href="/console/network.html#gaps" class="console-rail"><span class="console-rail-n">09</span> known gaps</a></li>
+            <li><a href="/console/verify.html#verify" class="console-rail"><span class="console-rail-n">10</span> verify it yourself</a></li>
+            </ul>
+            <p class="mt-4 border-t border-line-subtle px-4 pt-3 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">find</p>
+            <ul class="list-none space-y-px p-0">
+              <li><a href="/console/all.html" class="console-rail"><span class="console-rail-n">&#8942;</span> everything on one page</a></li>
+              <li><a href="/console/names.html" class="console-rail"><span class="console-rail-n">&#8942;</span> index of names</a></li>
+            </ul>
+          </div>
+        </nav>
+        <!-- @@console-generated:/nav-rail@@ -->
+
+      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+        <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
+          Errors and limits
+        </h1>
+
+        <section id="errors" class="console-section">
+          <h2 class="console-h2"><span class="console-h2-n">04</span> errors and limits</h2>
+          <!-- @@console-generated:errors@@ -->
+        <p class="console-lead">Thirteen JSON-RPC error codes, four HTTP-level rejections that carry no JSON-RPC envelope at all, and six limits.</p>
+        <h3 class="console-h3">json-rpc error codes</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">Meaning</th><th scope="col">Trigger</th><th scope="col">Note</th><th scope="col">Source</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32700</code></td><td>Parse error</td><td>request body is not valid JSON</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1335">:1335</a></td></tr>
+            <tr><td><code>-32600</code></td><td>Invalid Request</td><td><del class="text-ink-low line-through decoration-ink-low">malformed JSON-RPC envelope (missing <code class="text-ink-mid">jsonrpc</code>/<code class="text-ink-mid">method</code>)</del></td><td><span class="console-pill">trigger documented wrongly</span></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1352">:1352</a></td></tr>
+            <tr><td><code>-32601</code></td><td>Method not found</td><td>unknown method name</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1922">:1922</a></td></tr>
+            <tr><td><code>-32602</code></td><td>Invalid params</td><td>wrong type, missing field, hex length wrong, range too large, height in the future</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1950">:1950</a></td></tr>
+            <tr><td><code>-32000</code></td><td>Application error</td><td>tx too large, tx decode/sig failure, faucet cooldown, faucet disabled</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1958">:1958</a></td></tr>
+            <tr><td><code>-32001</code></td><td>Mempool full</td><td>mempool at capacity; submitter must back off</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2045">:2045</a></td></tr>
+            <tr><td><code>-32002</code></td><td>Internal storage error</td><td>RocksDB read or codec failure during query</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2126">:2126</a></td></tr>
+            <tr><td><code>-32003</code></td><td>Response too large</td><td>assembled response exceeds 10 MiB</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L3677">:3677</a></td></tr>
+            <tr><td><code>-32010</code></td><td>Nonce too low</td><td>tx nonce is below the sender's expected nonce</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2046">:2046</a></td></tr>
+            <tr><td><code>-32011</code></td><td>Fee too low</td><td>tx fee is below the per-tx-type minimum</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2064">:2064</a></td></tr>
+            <tr><td><code>-32012</code></td><td>Sender limit exceeded</td><td>too many pending txs from this sender in the mempool</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2066">:2066</a></td></tr>
+            <tr><td><code>-32013</code></td><td>Other validation error</td><td>catch-all for additional mempool validation failures</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2070">:2070</a></td></tr>
+            <tr><td><code>-32014</code></td><td>NonceTooHigh</td><td>nonce is at or above the sender's admission horizon</td><td><span class="console-pill">not in the reference</span></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2059">:2059</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note"><span class="console-pill">correction</span> A missing <code class="text-ink-mid">jsonrpc</code> or <code class="text-ink-mid">method</code> field answers <code class="text-ink-mid">-32700</code>, not this code, because every field of the request struct is required and a missing one fails to deserialize. <code class="text-ink-mid">-32600</code> is what you get when <code class="text-ink-mid">jsonrpc</code> is present and is not <code class="text-ink-mid">&quot;2.0&quot;</code>. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 19.</span></p>
+        <p class="console-note">One of these thirteen is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.</p>
+        <h3 class="console-h3">http rejections with no json-rpc envelope</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Status</th><th scope="col">Body</th><th scope="col">Source</th></tr></thead>
+            <tbody>
+            <tr><td><code>400</code></td><td><code>Failed to read request: {e}</code> <span class="console-pill">template</span></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1312">:1312</a></td></tr>
+            <tr><td><code>413</code></td><td><code>Request body too large</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1321">:1321</a></td></tr>
+            <tr><td><code>429</code></td><td><code>Too Many Requests</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1297">:1297</a></td></tr>
+            <tr><td><code>503</code></td><td><code>Service Unavailable &#8212; too many concurrent requests</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1242">:1242</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">These four never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.</p>
+        <h3 class="console-h3">limits</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Limit</th><th scope="col" class="text-right">Value</th><th scope="col">Constant</th><th scope="col">Source</th></tr></thead>
+            <tbody>
+            <tr><td>requests per second per source IP</td><td class="num">100</td><td><code>MAX_RPC_REQUESTS_PER_SEC</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L65">:65</a></td></tr>
+            <tr><td>concurrent in-flight requests</td><td class="num">64</td><td><code>MAX_CONCURRENT_RPC</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L74">:74</a></td></tr>
+            <tr><td>bytes, request body</td><td class="num">524,288</td><td><code>MAX_RPC_BODY_SIZE</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L70">:70</a></td></tr>
+            <tr><td>bytes, response body</td><td class="num">10,485,760</td><td><code>MAX_RPC_RESPONSE_SIZE</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L3667">:3667</a></td></tr>
+            <tr><td>bytes, decoded transaction</td><td class="num">131,072</td><td><code>MAX_TX_SIZE</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/types/src/lib.rs#L19">:19</a></td></tr>
+            <tr><td>blocks, signal query height range</td><td class="num">10,000</td><td><code>MAX_SIGNAL_QUERY_RANGE</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L77">:77</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 class="console-h3">handling a rejected nonce</h3>
+        <p class="console-note">-32010 and -32014 look similar and need opposite handling. Too low means the transaction is dead and the client must resynchronise. Too high means it is merely early: the identical bytes succeed once the sender's earlier nonces commit, so retry rather than rebuild.</p>
+        <p class="console-note">A transfer to an address that has no account row yet is rejected below the minimum account balance. The error reports the transfer amount in its balance field, which reads as though the sender were short.</p>
+        <!-- @@console-generated:/errors@@ -->
+        </section>
+
+        <footer class="mt-16 border-t border-line pt-4">
+          <p class="font-mono text-[11px] text-ink-low">
+            <a href="/" class="text-ink-low no-underline hover:text-ink-hi">novai.network</a>
+            <span aria-hidden="true" class="px-2 text-ink-low">/</span>
+            <a href="https://explorer.novai.network" class="text-ink-low no-underline hover:text-ink-hi">explorer</a>
+            <span aria-hidden="true" class="px-2 text-ink-low">/</span>
+            <a href="https://github.com/NOVAInetwork" class="text-ink-low no-underline hover:text-ink-hi">source</a>
+          </p>
+        </footer>
+      </main>
+    </div>
+
+    <!-- The only script on this page, and the only thing it does is add a copy
+         button to each code block.
+
+         It is inline and dependency-free on purpose: the reference sections are
+         static HTML and there is no bundle to join. The buttons are CREATED by
+         this script rather than rendered into the markup, so with JavaScript
+         disabled the page is exactly what it was before, with no dead control.
+         Feature-detected on navigator.clipboard, which is unavailable outside a
+         secure context, for the same reason: a button that cannot copy should
+         not exist. -->
+    <script>
+      (function () {
+        if (!navigator.clipboard || !window.isSecureContext) return;
+        var blocks = document.querySelectorAll("pre.console-pre, pre.console-pre-out");
+        for (var i = 0; i < blocks.length; i++) {
+          (function (pre) {
+            var wrap = document.createElement("div");
+            wrap.className = "console-copywrap";
+            pre.parentNode.insertBefore(wrap, pre);
+            wrap.appendChild(pre);
+            var button = document.createElement("button");
+            button.type = "button";
+            button.className = "console-copy";
+            button.textContent = "copy";
+            button.setAttribute("aria-label", "Copy this code block");
+            button.addEventListener("click", function () {
+              var code = pre.querySelector("code");
+              navigator.clipboard.writeText(code ? code.textContent : "").then(
+                function () { say("copied"); },
+                function () { say("copy failed"); }
+              );
+            });
+            function say(text) {
+              button.textContent = text;
+              button.setAttribute("aria-label", text === "copied" ? "Copied" : "Copy failed");
+              window.setTimeout(function () {
+                button.textContent = "copy";
+                button.setAttribute("aria-label", "Copy this code block");
+              }, 1400);
+            }
+            wrap.appendChild(button);
+          })(blocks[i]);
+        }
+      })();
+    </script>
+  </body>
+</html>

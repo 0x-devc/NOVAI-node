@@ -18,7 +18,13 @@ function token(name) {
   return { h: Number(m[1]), s: Number(m[2]) / 100, l: Number(m[3]) / 100 };
 }
 
-function hslToRgb({ h, s, l }) {
+function hslToRgb(c) {
+  // A composited colour arrives as rgb already; everything else is HSL.
+  if (c.rgb) return c.rgb;
+  return hslFromTriplet(c);
+}
+
+function hslFromTriplet({ h, s, l }) {
   const c = (1 - Math.abs(2 * l - 1)) * s;
   const hp = (((h % 360) + 360) % 360) / 60;
   const x = c * (1 - Math.abs((hp % 2) - 1));
@@ -53,6 +59,22 @@ const t = {
   legacyMuted: token("muted-foreground"), legacyBg: token("background"), legacyCard: token("card"),
 };
 
+// The one colour the syntax tokens add that is not already in the palette.
+// Declared here as well as in console.css because this audit reads index.css,
+// and a token that lives only in a component stylesheet would go unchecked.
+const TOK_STRING = { h: 145, s: 0.45, l: 0.62 };
+
+/**
+ * A foreground drawn at partial alpha over a known background, as the browser
+ * composites it. Auditing the un-composited colour would report a contrast the
+ * reader never sees.
+ */
+function composite(fg, bg, alpha) {
+  const f = hslFromTriplet(fg);
+  const b = hslFromTriplet(bg);
+  return { rgb: f.map((v, i) => v * alpha + b[i] * (1 - alpha)) };
+}
+
 // [label, fg, bg, threshold, gating]
 const pairs = [
   ["text-hi on n0 (page)", t.hi, t.n0, 4.5, true],
@@ -74,6 +96,29 @@ const pairs = [
   ["warn-text on n1", t.warnText, t.n1, 4.5, true],
   ["error-text on n1", t.errorText, t.n1, 4.5, true],
   ["white on brand (button)", WHITE, t.brand, 4.5, true],
+  // SYNTAX TOKENS. Every one of these is CONTENT, not decoration: a key, a
+  // value, a placeholder the reader has to substitute, and a comment that
+  // explains what a field means. They are gated at 4.5 like body text.
+  //
+  // The code-block background is n1 for console-pre and n0 for console-pre-out,
+  // so both are checked. Punctuation is dimmed by TIER rather than by alpha:
+  // ethereum.org dims its most frequent token to 47 percent, and transferred to
+  // this palette that measures 2.47, below even the non-text threshold. The
+  // technique was right and the value was not transferable, so punctuation
+  // takes text-low at full opacity, which is 5.60 where keys are 10.56.
+  ["tok-string on n1 (code bg)", TOK_STRING, t.n1, 4.5, true],
+  ["tok-string on n0 (response bg)", TOK_STRING, t.n0, 4.5, true],
+  ["tok-prop = text-mid on n1", t.mid, t.n1, 4.5, true],
+  ["tok-num = warn-text on n0", t.warnText, t.n0, 4.5, true],
+  ["tok-comment = text-low on n1", t.low, t.n1, 4.5, true],
+  ["tok-comment = text-low on n0", t.low, t.n0, 4.5, true],
+  ["tok-type = brand-text on n1", t.brandText, t.n1, 4.5, true],
+  ["tok-punct = text-low on n1", t.low, t.n1, 4.5, true],
+  ["tok-punct = text-low on n0", t.low, t.n0, 4.5, true],
+  // The rejected option, kept as a measurement rather than a memory:
+  // ethereum.org dims punctuation with alpha, and transferred to this palette
+  // that lands at 2.47, below even the non-text threshold. See console.css.
+  ["REJECTED tok-punct alpha 55% on n1", composite(t.low, t.n1, 0.55), t.n1, 4.5, false],
   ["DECORATIVE text-faint on n0", t.faint, t.n0, 4.5, false],
   ["DECORATIVE text-faint on n2", t.faint, t.n2, 4.5, false],
   ["DIAGNOSTIC brand fill as text on n0", t.brand, t.n0, 4.5, false],

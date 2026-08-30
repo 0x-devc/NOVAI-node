@@ -10,6 +10,13 @@ export default {
     "./app/**/*.{ts,tsx}",
     "./src/**/*.{ts,tsx}",
     "./console.html",
+    // Every console page, not just the landing one. A page missing from this
+    // glob has every utility class on it purged, and the failure is
+    // production-only: dev does not purge, so it looks correct until it is
+    // deployed. A glob is not a guarantee either, which is why the build
+    // asserts that every entry in rollupOptions.input is matched by one of
+    // these and that a probe class from each page survives into the built CSS.
+    "./console/*.html",
   ],
   prefix: "",
   theme: {

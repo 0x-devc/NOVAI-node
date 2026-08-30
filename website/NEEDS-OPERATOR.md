@@ -340,6 +340,40 @@ A client matching `-32600` to detect a malformed envelope never sees it, and
 gets `-32700`, which the same table attributes to invalid JSON. Correcting the
 trigger cell retires the `invalid-request-trigger-is-wrong` exception.
 
+## 20. Console URL shape after the page split, and `/console/all.html` indexing
+
+Two things to decide, neither urgent, both recorded now so they are not
+discovered later.
+
+**URLs.** The console is now nine pages plus an index of names. The landing page
+stays at `/console.html` and the rest are `/console/rpc.html`,
+`/console/errors.html`, and so on. That shape needs no rewrite rules and works
+on plain static hosting, which is why I chose it while item 6 is still open. If
+you would rather have `/console/` and `/console/rpc`, that is a hosting decision
+and it changes every cross-page link the generator emits, so it should be made
+before the console is announced rather than after.
+
+**Indexing.** `/console/all.html` is a full duplicate of all eight pages, and
+`/console/names.html` is an index of every name on them. That is fine today
+because the whole console carries `noindex`, and it becomes a duplicate-content
+problem the moment that comes off.
+
+The decision, made now: **`/console/all.html` keeps `noindex, follow`
+permanently, including after the rest of the console is indexed.**
+
+Not a canonical link, and the reason is technical rather than preference.
+`rel="canonical"` expresses a near-duplicate relationship between one page and
+one other page. `all.html` is an eight-to-one aggregate, so there is no single
+URL it could name, and pointing it at any one of the eight would be a false
+signal about the other seven. `noindex, follow` is the mechanism for exactly
+this case: the aggregate is not indexed, its links are still followed, and every
+heading on it already links to the canonical page anchor, so nothing is
+stranded. It also keeps the page reachable, which matters because it is the
+single best URL to hand an agent, and the settled ruling is crawlable but not
+indexed rather than blocked.
+
+`names.html` is not a duplicate of anything and can be indexed normally.
+
 ---
 
 FYI, no action needed: the `rpc.novai.network` TLS certificate is valid until

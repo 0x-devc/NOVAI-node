@@ -92,6 +92,189 @@
   @apply mt-8 scroll-mt-28 border-t border-line-subtle pt-4 lg:scroll-mt-16;
 }
 
+/* On all.html, the link from each section heading back to the page that owns
+   it. Deliberately quiet: that page is a copy for finding things, and the link
+   is the way out of it. */
+.console-canonical {
+  @apply ml-2 align-middle font-mono text-[10px] font-normal uppercase tracking-[0.08em] text-ink-low no-underline;
+}
+.console-canonical:hover { @apply text-ink-hi underline; }
+
+/* The fee ladder. Sized to its content like every other data element here,
+   never stretched to the viewport. */
+.console-figure {
+  @apply mt-4 ml-0 w-max max-w-full overflow-x-auto;
+}
+
+.console-chart {
+  @apply block h-auto max-w-full;
+}
+
+.console-chart .fee-bar {
+  fill: hsl(var(--brand));
+}
+
+.console-chart .fee-label {
+  fill: hsl(var(--text-mid));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.console-chart .fee-value {
+  fill: hsl(var(--text-low));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+/* The copy button. The wrapper is created by the inline script at the bottom of
+   console.html, so none of this exists unless the script ran, and the page has
+   no dead control when it did not.
+
+   Anchored to the wrapper rather than to the <pre>, because the <pre> is an
+   overflow-x scroll container and an absolutely positioned child of it would
+   scroll away with the content. */
+.console-copywrap {
+  @apply relative w-max max-w-full;
+}
+
+.console-copy {
+  @apply absolute right-2 top-2 rounded border border-line bg-surface-2 px-2 py-0.5;
+  @apply font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low opacity-0;
+  transition: opacity 120ms linear;
+}
+
+/* Visible on hover, and always visible to a keyboard, which cannot hover. */
+.console-copywrap:hover .console-copy,
+.console-copy:focus-visible {
+  @apply opacity-100;
+}
+
+.console-copy:hover {
+  @apply text-ink-hi;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .console-copy { transition: none; }
+}
+
+/* Coarse pointers cannot hover at all, so the button is simply always there. */
+@media (hover: none) {
+  .console-copy { @apply opacity-100; }
+}
+
+/* ---------------------------------------------------------------------------
+   SYNTAX TOKENS
+
+   Colour in a code block is functional: it separates a key from a value, marks
+   a slot the reader has to fill, and marks a name that is defined elsewhere on
+   this page. That is colour carrying meaning, which is the only kind this
+   design allows.
+
+   Three hues and two neutrals, plus the existing link blue. Stripe declares 27
+   semantic token classes and resolves them to five colours, leaving function
+   names, class names and variables as plain body text; this follows that rather
+   than colouring everything that can be named. Punctuation is dimmed rather
+   than tinted, which is how ethereum.org spends nothing on its most frequent
+   token: 1,720 of its punctuation spans on one page are a single foreground
+   colour at 47 percent.
+
+   No new palette entry for numbers: they reuse the warn hue, which already
+   exists and already means "a value to look at". The string hue is the one
+   genuinely new colour, and it exists because separating strings from numbers
+   is the single most useful distinction in a JSON fence.
+   --------------------------------------------------------------------------- */
+
+.console-pre,
+.console-pre-out {
+  --tok-string: 145 45% 62%;
+}
+
+/* A property name is structure, so it takes the bright neutral, not a hue. */
+.tok-prop { @apply text-ink-mid; }
+
+.tok-str { color: hsl(var(--tok-string)); }
+
+/* A placeholder is a string-shaped instruction, not a value. Same hue as a
+   string so it reads as one, dotted underline so it reads as a slot. */
+.tok-ph {
+  color: hsl(var(--tok-string));
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  text-decoration-color: hsl(var(--tok-string) / 0.5);
+}
+
+.tok-num { @apply text-warnx-text; }
+/* text-low, not text-faint. A comment in a fence is content: "canonical hash
+   of this block" is the only place the page says what that field is. faint
+   measures 2.66 against the page and is audited as decorative-only, which a
+   sentence a reader has to read is not. */
+.tok-comment { @apply text-ink-low; }
+
+/* Dimmed, not tinted. Braces, commas, colons and quotes are the most frequent
+   thing in these blocks and the least worth reading.
+
+   ethereum.org does this with alpha: its most-applied token on the JSON-RPC
+   page is one foreground colour at 47 percent, used 1,720 times for
+   punctuation. Measured against THIS palette that does not survive the contrast
+   audit: text-low at 55 percent composites to 2.47 against the code background,
+   below even the 3.0 non-text threshold, and it needs 90 percent before it
+   clears 4.5. So the dimming comes from the tier rather than from alpha.
+   text-low is 5.60 against the code background where keys are 10.56, which is
+   the same recede-and-advance hierarchy at full opacity. The technique was
+   right; the alpha value was not transferable. */
+.tok-punct { @apply text-ink-low; }
+
+/* A record type is a link to the shape declared once for its category. */
+.tok-type {
+  @apply text-brand-text no-underline;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  text-decoration-color: hsl(var(--brand-text) / 0.4);
+}
+.tok-type:hover { @apply underline; }
+
+/* Shell. One command and four flags across the whole page, so the split is
+   command, flag, quoted argument, variable, URL, and nothing else. */
+.tok-cmd { @apply text-ink-hi; }
+.tok-flag { @apply text-brand-text; }
+.tok-var { @apply text-warnx-text; }
+.tok-url { color: hsl(var(--tok-string)); }
+
+/* ---------------------------------------------------------------------------
+   THE TWO PANES
+
+   A method entry is what it is: a description and its parameters on one side,
+   and what comes back plus the call that gets it on the other. Stacked, the
+   result fence sits a screen below the parameter table it belongs to and the
+   right half of the viewport is empty margin. That was the complaint.
+
+   Stripe's grid, measured off its served CSS: repeat(2, minmax(0, 1fr)) with
+   column-gap min(3rem, 5vw), align-items start, collapsing to one column at
+   1000px. The collapse here is at the xl breakpoint rather than 1000px because
+   the rail already takes up to 16rem before main gets any width.
+
+   The prose pane comes first in the DOM, so the reading order for a screen
+   reader and for a narrow viewport is the same order as before: description,
+   parameters, errors, result, example. The columns are a visual arrangement of
+   that order, never a reordering of it.
+   --------------------------------------------------------------------------- */
+.console-panes {
+  @apply xl:grid xl:items-start;
+  /* Unconditional on purpose. Only `display` is behind the breakpoint, so below
+     xl this element is a plain block and both of these are inert. Scoping them
+     to a media query would mean writing 1280px here by hand, and a breakpoint
+     copied out of tailwind.config.ts is a number that can drift from it. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: min(3rem, 5vw);
+}
+
+/* min-w-0 on both, or a wide code fence forces the grid track past its share
+   and pushes the prose column out of the viewport. */
+.console-pane-prose,
+.console-pane-code {
+  @apply min-w-0;
+}
+
 /* A record shape, declared once for a category and linked to from every result
    envelope that names it. Held a step in from the method entries and on a
    heavier rule, because it is the definition the methods below it point back

@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Removable in one edit once the console is announced. See NEEDS-OPERATOR.md. -->
+    <meta name="robots" content="noindex" />
+
+    <title>AI entities | NOVAI developer console</title>
+    <meta
+      name="description"
+      content="Build on NOVAI: the JSON-RPC reference, network parameters, SDK quickstarts and the AI entity model, generated from the source tree."
+    />
+    <meta property="og:title" content="AI entities | NOVAI developer console" />
+    <meta
+      property="og:description"
+      content="Build on NOVAI: the JSON-RPC reference, network parameters, SDK quickstarts and the AI entity model, generated from the source tree."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://novai.network/novai-symbol.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@NOVAInetwork" />
+    <meta name="twitter:image" content="https://novai.network/novai-symbol.png" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+
+    <script type="module" src="/src/console/console-main.ts"></script>
+  </head>
+
+  <body class="bg-surface-0 font-body text-ink-mid antialiased">
+    <a
+      href="#main"
+      class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:border focus:border-line-strong focus:bg-surface-1 focus:px-3 focus:py-2 focus:text-sm focus:text-ink-hi"
+      >Skip to content</a
+    >
+
+    <!-- Console header. Structurally familiar to the site header, monochrome by
+         construction: no gradient text, no glow, brand reserved for links. -->
+    <header class="sticky top-0 z-40 border-b border-line bg-surface-0/95 backdrop-blur">
+      <div class="flex items-center justify-between gap-4 px-4 py-2.5 sm:px-6">
+        <a href="/" class="flex shrink-0 items-baseline gap-2 no-underline">
+          <span class="font-display text-sm font-bold tracking-tight text-ink-hi">NOVAI</span>
+          <!-- The label is the first thing to go at narrow widths: the wordmark
+               plus the nav is what has to fit on one line at 360px. -->
+          <span class="hidden font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low sm:inline"
+            >developer console</span
+          >
+        </a>
+        <nav aria-label="Site" class="flex shrink-0 items-center gap-3 font-mono text-[11px] sm:gap-4">
+          <a href="/" class="whitespace-nowrap text-ink-low no-underline hover:text-ink-hi">main site</a>
+          <a
+            href="https://explorer.novai.network"
+            class="whitespace-nowrap text-ink-low no-underline hover:text-ink-hi"
+            >explorer</a
+          >
+          <a
+            href="https://github.com/NOVAInetwork"
+            class="whitespace-nowrap text-brand-text no-underline hover:underline"
+            >source</a
+          >
+        </nav>
+      </div>
+
+      <!-- @@console-generated:nav-chips@@ -->
+        <nav aria-label="Sections" class="flex gap-1.5 overflow-x-auto border-t border-line-subtle px-4 py-2 lg:hidden sm:px-6">
+        <a href="/console.html#connect" class="console-chip">01 connect</a>
+        <a href="/console.html#first-call" class="console-chip">02 first call</a>
+        <a href="/console/rpc.html#rpc" class="console-chip">03 rpc reference</a>
+        <a href="/console/errors.html#errors" class="console-chip">04 errors and limits</a>
+        <a href="/console/transactions.html#transactions" class="console-chip">05 transactions</a>
+        <a href="#ai-entities" class="console-chip" aria-current="true">06 ai entities</a>
+        <a href="/console/sdks.html#sdks" class="console-chip">07 sdks</a>
+        <a href="/console/network.html#parameters" class="console-chip">08 network parameters</a>
+        <a href="/console/network.html#gaps" class="console-chip">09 known gaps</a>
+        <a href="/console/verify.html#verify" class="console-chip">10 verify it yourself</a>
+        <a href="/console/all.html" class="console-chip">everything</a>
+        <a href="/console/names.html" class="console-chip">names</a>
+      </nav>
+        <!-- @@console-generated:/nav-chips@@ -->
+    </header>
+
+    <!-- Capped and centred rather than filling the viewport. Every reference site
+         measured caps: Stripe at 110rem, ethereum.org at 1536px, Solana at 1440px.
+         Not one of eleven lets its layout grow past about 1760px, so at 2560px the
+         surplus is gutter. -->
+    <div class="mx-auto max-w-[110rem] lg:grid lg:grid-cols-[clamp(12.5rem,10rem_+_3vw,16rem)_minmax(0,1fr)]">
+      <!-- @@console-generated:nav-rail@@ -->
+        <nav aria-label="Sections" class="hidden lg:block border-r border-line">
+          <div class="sticky top-[3.25rem] py-6">
+            <p class="px-4 pb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">sections</p>
+            <ul class="list-none space-y-px p-0">
+            <li><a href="/console.html#connect" class="console-rail"><span class="console-rail-n">01</span> connect</a></li>
+            <li><a href="/console.html#first-call" class="console-rail"><span class="console-rail-n">02</span> first call</a></li>
+            <li><a href="/console/rpc.html#rpc" class="console-rail"><span class="console-rail-n">03</span> rpc reference</a></li>
+            <li><a href="/console/errors.html#errors" class="console-rail"><span class="console-rail-n">04</span> errors and limits</a></li>
+            <li><a href="/console/transactions.html#transactions" class="console-rail"><span class="console-rail-n">05</span> transactions</a></li>
+            <li><a href="#ai-entities" class="console-rail" aria-current="true"><span class="console-rail-n">06</span> ai entities</a></li>
+            <li><a href="/console/sdks.html#sdks" class="console-rail"><span class="console-rail-n">07</span> sdks</a></li>
+            <li><a href="/console/network.html#parameters" class="console-rail"><span class="console-rail-n">08</span> network parameters</a></li>
+            <li><a href="/console/network.html#gaps" class="console-rail"><span class="console-rail-n">09</span> known gaps</a></li>
+            <li><a href="/console/verify.html#verify" class="console-rail"><span class="console-rail-n">10</span> verify it yourself</a></li>
+            </ul>
+            <p class="mt-4 border-t border-line-subtle px-4 pt-3 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">find</p>
+            <ul class="list-none space-y-px p-0">
+              <li><a href="/console/all.html" class="console-rail"><span class="console-rail-n">&#8942;</span> everything on one page</a></li>
+              <li><a href="/console/names.html" class="console-rail"><span class="console-rail-n">&#8942;</span> index of names</a></li>
+            </ul>
+          </div>
+        </nav>
+        <!-- @@console-generated:/nav-rail@@ -->
+
+      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+        <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
+          AI entities
+        </h1>
+
+        <section id="ai-entities" class="console-section">
+          <h2 class="console-h2"><span class="console-h2-n">06</span> ai entities</h2>
+          <!-- @@console-generated:ai-entities@@ -->
+        <p class="console-lead">AI entities are the part of this chain that has no equivalent elsewhere. Three worked flows first, then the full enumerations.</p>
+        <p class="console-note">These describe what the implementation does, with every constant cited to its declaration. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.</p>
+        <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
+          <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">a reputation oracle</p>
+          <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
+            <li>A reputation oracle issues <code>ReputationUpdate</code> signals, signal type 7. Each one moves a target entity's <code>reputation_score</code>, which the chain stores on the entity record and clamps to a 0 to 100 range. A newly registered entity starts at 50.</li>
+            <li>Issuing one requires the <code>submit_reputation_updates</code> capability, bit 5 of the entity's capability byte.</li>
+            <li>The payload is 101 bytes: the 66-byte signal commitment base plus a 35-byte tail carrying the target entity id, an event type and a signed two-byte delta.</li>
+            <li>The event type must be 0 to 12.</li>
+            <li>An entity cannot rate itself.</li>
+            <li>The fee is 1,000 base units, the signal commitment minimum.</li>
+            <li>The effect is checkable in one read: <code>novai_getAiEntity</code> returns <code>reputation_score</code> and <code>reputation_events_count</code>.</li>
+          </ul>
+        </div>
+        <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
+          <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">selling signals on the marketplace</p>
+          <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
+            <li>A seller publishes a <code>SignalCatalog</code> memory object, type 7, listing priced offerings. A catalog holds at most 10 offerings, each 10 bytes: a signal type, a price as a big-endian u64, and an active flag.</li>
+            <li>A buyer issues a <code>SignalPurchase</code> signal, type 8, naming the seller, the signal type wanted and a maximum price. The chain rejects the purchase if the catalog price is above that maximum.</li>
+            <li>On success the chain moves the price from the buyer's <code>economic_balance</code> to the seller's, less a 2% cut routed to the marketplace treasury.</li>
+            <li>The payload is 107 bytes: the 66-byte base plus a 41-byte tail.</li>
+            <li><strong>Publishing a catalog requires no stake.</strong> A listing is not a bond, and a buyer should not read it as one.</li>
+            <li>The marketplace treasury is not readable over RPC. No method returns it.</li>
+          </ul>
+        </div>
+        <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
+          <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">staking collateral</p>
+          <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
+            <li>A <code>StakeDeposit</code> signal, type 9, moves an amount from an entity's <code>economic_balance</code> into its <code>stake_balance</code>. The payload is 82 bytes: the 66-byte base plus a 16-byte big-endian u128 amount.</li>
+            <li>A deposit locks for 1,000 blocks. <code>stake_locked_until</code> is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time; the cadence in the network section converts it.</li>
+            <li>Withdrawal is a <code>StakeWithdraw</code> signal, type 10, with the same 82-byte layout. A partial withdrawal does not re-lock the remainder.</li>
+            <li>A <code>StakeSlash</code> signal, type 11, issued by an entity holding <code>submit_reputation_updates</code>, subtracts up to a named amount from the target's <code>stake_balance</code> and applies a bundled reputation event in the same operation. The payload is 117 bytes.</li>
+            <li>An entity cannot slash itself.</li>
+            <li><code>economic_balance</code>, <code>stake_balance</code> and <code>stake_locked_until</code> are all readable from <code>novai_getAiEntity</code>, and every stake operation appears in the signal index.</li>
+          </ul>
+        </div>
+        <h3 class="console-h3">capability bits</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Bit</th><th scope="col">Hex</th><th scope="col">Capability</th></tr></thead>
+            <tbody>
+            <tr><td class="num">0</td><td><code>0x01</code></td><td><code>read_public_chain</code></td></tr>
+            <tr><td class="num">1</td><td><code>0x02</code></td><td><code>read_memory_objects</code></td></tr>
+            <tr><td class="num">2</td><td><code>0x04</code></td><td><code>emit_proposals</code></td></tr>
+            <tr><td class="num">3</td><td><code>0x08</code></td><td><code>request_execution</code></td></tr>
+            <tr><td class="num">4</td><td><code>0x10</code></td><td><code>read_nnpx_derived</code></td></tr>
+            <tr><td class="num">5</td><td><code>0x20</code></td><td><code>submit_reputation_updates</code></td></tr>
+            <tr><td class="num">6</td><td><code>0x40</code></td><td><code>post_oracle_anchors</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Capabilities are one byte, set at registration, and immutable for the entity's life. The upgrade transaction changes the code hash and nothing else, and registering again mints a different entity id, which abandons the reputation, stake, agreements and memory objects attached to the old one. Set every bit you might need on day one.</p>
+        <details class="console-details">
+          <summary class="console-summary">signal types (23)</summary>
+          <div class="px-4 pb-3"><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Type</th><th scope="col">Variant</th><th scope="col">Payload</th><th scope="col">Description</th></tr></thead>
+            <tbody>
+            <tr><td class="num">0</td><td><code>Anomaly</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">1</td><td><code>Optimization</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">2</td><td><code>Prediction</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">3</td><td><code>RiskScore</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">4</td><td><code>AuditReport</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">5</td><td><code>SpamRisk</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">6</td><td><code>CongestionForecast</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">7</td><td><code>ReputationUpdate</code></td><td>base + 35 B tail; issuer needs bit 5</td><td>Reputation update emitted by an oracle entity (requires submit_reputation_updates capability).</td></tr>
+            <tr><td class="num">8</td><td><code>SignalPurchase</code></td><td>base + 41 B tail</td><td>Purchase of a priced signal listed in the seller's SignalCatalog memory object. Carries an inline 41-byte purchase tail (seller_entity_id || purchased_signal_type || max_price_be).</td></tr>
+            <tr><td class="num">9</td><td><code>StakeDeposit</code></td><td>base + 16 B tail</td><td>Stake-deposit signal moving funds from the issuer's economic_balance to its stake_balance. Locks the deposited amount until current_height + STAKE_LOCK_PERIOD. Carries a 16-byte amount tail.</td></tr>
+            <tr><td class="num">10</td><td><code>StakeWithdraw</code></td><td>base + 16 B tail</td><td>Stake-withdraw signal moving funds from the issuer's stake_balance back to its economic_balance. Rejected unless stake_locked_until &lt;= current_height. Carries a 16-byte amount tail.</td></tr>
+            <tr><td class="num">11</td><td><code>StakeSlash</code></td><td>base + 51 B tail; issuer needs bit 5</td><td>Slash signal emitted by an oracle entity (requires submit_reputation_updates capability). Deducts from a target entity's stake_balance, credits the slashed amount to KEY_SLASH_TREASURY, and applies a reputation update atomically. Carries a 51-byte tail: target_id:32 | slash_amount_be:16 | rep_event_type:1 | points_delta_be:2.</td></tr>
+            <tr><td class="num">12</td><td><code>CompositionCheck</code></td><td>base + 34 B tail; issuer needs bit 5</td><td>Composition health check emitted by an oracle entity (requires submit_reputation_updates capability). Validates a target entity's declared CompositionGraph dependency and, if the failure is corroborated by chain state and the dependency is marked required, auto-pauses the target by setting is_active = false. Always emits a REP_EVENT_COMPOSITION_FAILURE reputation event with delta -1. Carries a 34-byte tail: target_id:32 | failed_dependency_idx:1 | failure_reason:1.</td></tr>
+            <tr><td class="num">13</td><td><code>ProofSubmission</code></td><td>base + 65 B tail</td><td>AI entity submits a ZK proof attesting to off-chain computation integrity. Carries a 65-byte tail: proof_type:1 | code_hash:32 | computation_hash:32. The proof bytes themselves are NOT carried inline (the SignalCommitment tail is fixed-size); a real verifier would resolve them via the off-chain payload referenced by signal_hash. The execution handler verifies the proof via the ZkVerifier trait, and on success creates a VerificationRecord memory object owned by the issuer plus a REP_EVENT_PROOF_VERIFIED reputation event with delta +3.</td></tr>
+            <tr><td class="num">14</td><td><code>SubscriptionCreate</code></td><td>base + 49 B tail; locks `rate_per_block * duration_blocks` from the subscriber</td><td>Recurring payment subscription create: the issuing entity (the subscriber) locks rate_per_block * duration_blocks of its economic_balance to a producer for a fixed covered signal type. On success the handler creates a MemoryObjectType::Subscription memory object owned by the subscriber, recording the active agreement. Settlement is lazy and is performed when the subscriber emits a matching SubscriptionCancel signal. Carries a 49-byte tail: producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 | duration_blocks_be:8.</td></tr>
+            <tr><td class="num">15</td><td><code>SubscriptionCancel</code></td><td>base + 32 B tail; settles accrued payment and refunds the remainder</td><td>Recurring payment subscription cancel: the original subscriber terminates an active subscription early. The handler settles accrued payment to the producer (less the standard 2% marketplace fee), applies a 5% cancel fee on the remaining locked funds (paid to the producer with no marketplace cut as compensation for early termination), refunds the rest to the subscriber, and marks the subscription record is_active = false. Only the original subscriber may emit this signal. Carries a 32-byte tail: subscription_id:32 (the memory object id of the Subscription record being cancelled).</td></tr>
+            <tr><td class="num">16</td><td><code>PaymentRequest</code></td><td>base + 112 B tail; Week 28 native x402. Optional Week 33 splits and Week 36 condition trailers</td><td>Native x402-style per-request payment. The issuing entity (the payer) debits its economic_balance by amount + fee and credits the payee's economic_balance by amount; the fee is routed to KEY_MARKETPLACE_TREASURY. The handler also writes a PaymentRecord to b&quot;ai/payments/by_hash/&quot; || signal_hash plus two scan indexes (by-payer, by-payee). Replay protection is enforced by rejecting any payment whose signal_hash already has a by_hash record. Carries a 112-byte tail: payee_entity_id:32 | amount_be:8 | service_descriptor_hash:32 | request_hash:32 | max_block_height_be:8.</td></tr>
+            <tr><td class="num">17</td><td><code>ServiceAttestation</code></td><td>base + 65 B tail; Week 28 delivery attestation by the original payer</td><td>Service-delivery attestation issued by the payer of a prior PaymentRequest. The handler loads the referenced PaymentRecord from b&quot;ai/payments/by_hash/&quot; || payment_signal_hash, verifies the issuer of this signal equals the recorded payer, then applies either REP_EVENT_PAYMENT_DELIVERED or REP_EVENT_PAYMENT_FAILED to the payee depending on status. The payment record is rewritten in place with attested_status and attested_height; the record can be attested at most once. Carries a 65-byte tail: payment_signal_hash:32 | payee_entity_id:32 | status:1 (0 = Delivered, 1 = Failed).</td></tr>
+            <tr><td class="num">18</td><td><code>SlaAccept</code></td><td>base + 64 B tail; Week 31 SLA acceptance by the seller</td><td>SLA acceptance (Week 31): the issuing entity (the seller named in a previously proposed SlaAgreement memory object) accepts the agreement. The handler loads the SLA memory object via the embedded buyer entity id and SLA object id, verifies the signal issuer equals the SLA's seller, gates on the seller's current stake_balance &gt;= sla.slash_amount, then transitions the SLA from SLA_STATUS_PROPOSED to SLA_STATUS_ACTIVE and records the acceptance height. The acceptance must land BEFORE the SLA's start_height; the active-pair singleton index entry stays in place (it was written at create time). Carries a 64-byte tail: sla_object_id:32 | buyer_entity_id:32.</td></tr>
+            <tr><td class="num">19</td><td><code>ChannelAccept</code></td><td>base + 64 B tail; Week 32 channel acceptance by party B</td><td>Payment channel accept (Week 32): the issuing entity (party B, the counterparty named in a previously proposed PaymentChannel memory object) accepts the channel. The handler loads the channel memory object via the embedded party A entity id and channel object id, verifies the signal issuer equals the channel's party_b_entity_id, debits B's economic_balance by the channel's deposit_b, transitions the channel from PAYMENT_CHANNEL_STATUS_PROPOSED to _OPEN, sets accepted_at_height, and bumps balance_b to deposit_b. Carries a 64-byte tail: channel_object_id:32 | party_a_entity_id:32.</td></tr>
+            <tr><td class="num">20</td><td><code>ChannelClose</code></td><td>base + 233 B tail with both parties' signatures; Week 32 cooperative settle or unilateral close</td><td>Payment channel close (Week 32): handles both cooperative settle (instant) and unilateral close (opens a dispute window). Carries a 233-byte tail: channel_object_id:32 | party_a_entity_id:32 | nonce_be:8 | balance_a_be:16 | balance_b_be:16 | is_final:1 | sig_a:64 | sig_b:64. Both party signatures are always required (even on unilateral close); the is_final flag distinguishes cooperative settle (instant distribution + memory object delete) from unilateral close (status -&gt; CLOSING, dispute window opens). Inside the dispute window a strictly larger nonce overrides the recorded state. The submitter signs the enclosing TxV1 and pays the fee; either participant may submit.</td></tr>
+            <tr><td class="num">21</td><td><code>ChannelFinalize</code></td><td>base + 64 B tail; Week 32 permissionless finalize after the dispute window</td><td>Payment channel finalize (Week 32): credits the recorded balance_a / balance_b back to the parties' economic_balance and deletes the channel memory object plus its secondary indexes. Valid only when status == PAYMENT_CHANNEL_STATUS_CLOSING and current_height &gt; dispute_deadline_height. Permissionless: any active AI entity may submit (the parties have aligned incentives to submit themselves; allowing third parties means a finalize is never gated on a specific participant's liveness). Carries a 64-byte tail: channel_object_id:32 | party_a_entity_id:32.</td></tr>
+            <tr><td class="num">22</td><td><code>OracleAnchor</code></td><td>base + variable 82..=113 B tail; issuer needs bit 6 `post_oracle_anchors` (Week 35)</td><td>Oracle data anchor (Week 35): an entity holding the post_oracle_anchors capability publishes a commitment to external off-chain data (a price feed, an API response, an external timestamp) so other agents and future protocol mechanisms can reference it from a registered, reputation-bearing source. The handler writes an OracleAnchorRecord KV aux row under ai/oracle_anchors/by_hash/&lt;signal_hash&gt; (which doubles as the replay guard) plus by-entity and by-tag scan indexes, and bumps the issuer's total_transactions (reputation-neutral on post; accuracy challenges are deferred to a future week). Carries a variable-length tail: data_hash:32 | external_timestamp_be:8 | source_hash:32 | expiry_height_be:8 | data_tag_len:1 | data_tag:[1..=32].</td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note">7 of these carry no doc comment in the Rust source, so no description can be generated for them: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast. Their payload sizes are known and are shown.</p></div>
+        </details>
+        <details class="console-details">
+          <summary class="console-summary">memory object types (16)</summary>
+          <div class="px-4 pb-3"><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Type</th><th scope="col">Variant</th><th scope="col">Description</th></tr></thead>
+            <tbody>
+            <tr><td class="num">0</td><td><code>ChainSummary</code></td><td>Epoch summaries containing block ranges, transaction counts, fee totals.</td></tr>
+            <tr><td class="num">1</td><td><code>LabelIndex</code></td><td>Tags and categories for addresses (label → address mappings).</td></tr>
+            <tr><td class="num">2</td><td><code>EmbeddingCommitment</code></td><td>Commitment hash of an embedding vector (actual vector stored off-chain).</td></tr>
+            <tr><td class="num">3</td><td><code>AnomalyLog</code></td><td>Historical record of detected anomalies.</td></tr>
+            <tr><td class="num">4</td><td><code>StatisticsSnapshot</code></td><td>Periodic snapshot of chain statistics.</td></tr>
+            <tr><td class="num">5</td><td><code>ReputationEvent</code></td><td>Audit record of a reputation change applied to an entity.</td></tr>
+            <tr><td class="num">6</td><td><code>Rating</code></td><td>Counterparty rating (score, optional comment hash) feeding reputation.</td></tr>
+            <tr><td class="num">7</td><td><code>SignalCatalog</code></td><td>Marketplace pricing catalog: a list of priced signal offerings the owning entity makes available to buyers.</td></tr>
+            <tr><td class="num">8</td><td><code>CompositionGraph</code></td><td>Cross-entity composition graph: a list of source-entity dependencies the owning entity declares it consumes signals from. Used by oracle CompositionCheck signals to verify dependency health and auto-pause the owner when a required dependency has failed.</td></tr>
+            <tr><td class="num">9</td><td><code>VerificationRecord</code></td><td>On-chain audit record of a verified ZK proof submission. Created by the ProofSubmission signal handler when the verifier accepts a proof. Fixed 105-byte payload: proof_type:1 | code_hash:32 | computation_hash:32 | proof_hash:32 | height_be:8.</td></tr>
+            <tr><td class="num">10</td><td><code>DelegationGrant</code></td><td>On-chain delegation grant: an AI entity (the memory object owner / delegator) authorizes another AI entity (the delegate, identified by the embedded delegate_entity_id) to act with a subset of the delegator's capabilities for a bounded duration. Stored as a fixed 42-byte payload (DelegationGrantData). Revocation is performed by deleting the memory object via DELETE_MEMORY_OBJECT.</td></tr>
+            <tr><td class="num">11</td><td><code>Subscription</code></td><td>Recurring payment subscription record (Feature 9): the memory object owner is the SUBSCRIBER, who has locked rate_per_block * duration_blocks of economic_balance to a producer for a fixed covered signal type. Settlement is lazy and triggered by the subscriber's SubscriptionCancel signal; on cancel, accrued payment is transferred to the producer (less the 2% marketplace fee), the 5% cancel fee on remaining locked funds is paid to the producer, the rest is refunded to the subscriber, and is_active is set to false. Stored as a fixed 114-byte payload (SubscriptionData).</td></tr>
+            <tr><td class="num">12</td><td><code>ServiceDescriptor</code></td><td>Agent Discovery Registry entry (Week 29): the memory object owner is publishing a service description that other entities can discover on-chain. The data field carries a fixed 144-byte ServiceDescriptorData describing what the service is (category + off-chain name / URL / description hashes), what it charges (per-call price, optional subscription rate), and what callers must satisfy (minimum reputation score, minimum stake). category drives a dedicated by_category discovery index; updates may change any field except the category (a category change requires delete + recreate). The object's object_id is the canonical handle a payer puts in the service_descriptor_hash field of a Week 28 PaymentRequest.</td></tr>
+            <tr><td class="num">13</td><td><code>VkRegistration</code></td><td>VK Registry entry (Week 30): the memory object owner publishes a zero-knowledge proof verification key on-chain so that future ProofSubmission signals carrying PROOF_TYPE_GROTH16_REGISTERED can reference the VK by the containing memory object's 32-byte object_id instead of inlining the full ~500-byte VK every time. The data field carries a VkRegistrationData payload binding the VK to a code_hash (the computation it verifies) and a proof_type discriminant. The proof_type, code_hash, and vk_bytes fields are IMMUTABLE on UpdateMemoryObject; only the free-form label tag is mutable.</td></tr>
+            <tr><td class="num">14</td><td><code>SlaAgreement</code></td><td>On-chain Service Level Agreement between two AI entities (Week 31). The memory object owner is the BUYER who proposed the agreement; the embedded seller_entity_id is the counterparty that accepts (via the SlaAccept signal) and whose stake is at risk on threshold breach. Violations are counted from PAYMENT_ATTESTATION_STATUS_FAILED ServiceAttestation signals issued by the buyer while current_height is in [start_height, end_height]; when violation_count &gt;= violation_threshold the runtime auto- slashes slash_amount from the seller's stake_balance (saturating, mirroring StakeSlash), credits KEY_SLASH_TREASURY, applies an additional REP_DELTA_SLA_VIOLATION_TRIGGERED to the seller, and transitions the SLA to SLA_STATUS_VIOLATED. The agreement is binding once accepted: no mutual cancel signal in v1.</td></tr>
+            <tr><td class="num">15</td><td><code>PaymentChannel</code></td><td>Bidirectional payment channel between two AI entities (Week 32). The memory object owner is party A (the proposer who debits deposit_a at create time); the embedded party_b_entity_id is the counterparty who accepts via the ChannelAccept signal (and debits deposit_b at accept time). Off-chain state updates are signed by both parties and never touch the chain unless a cooperative settle, a unilateral close, a dispute, or a finalize signal is submitted. The channel's funds are held INSIDE the memory object payload (balance_a / balance_b); credits back to the parties' economic_balance happen only on cooperative settle, finalize after a dispute window, or buyer-initiated cancel while still in PAYMENT_CHANNEL_STATUS_PROPOSED. The optional sla_object_id is informational only in v1: the runtime does NOT couple channel lifecycle to SLA status.</td></tr>
+            </tbody>
+          </table>
+        </div></div>
+        </details>
+        <!-- @@console-generated:/ai-entities@@ -->
+        </section>
+
+        <footer class="mt-16 border-t border-line pt-4">
+          <p class="font-mono text-[11px] text-ink-low">
+            <a href="/" class="text-ink-low no-underline hover:text-ink-hi">novai.network</a>
+            <span aria-hidden="true" class="px-2 text-ink-low">/</span>
+            <a href="https://explorer.novai.network" class="text-ink-low no-underline hover:text-ink-hi">explorer</a>
+            <span aria-hidden="true" class="px-2 text-ink-low">/</span>
+            <a href="https://github.com/NOVAInetwork" class="text-ink-low no-underline hover:text-ink-hi">source</a>
+          </p>
+        </footer>
+      </main>
+    </div>
+
+    <!-- The only script on this page, and the only thing it does is add a copy
+         button to each code block.
+
+         It is inline and dependency-free on purpose: the reference sections are
+         static HTML and there is no bundle to join. The buttons are CREATED by
+         this script rather than rendered into the markup, so with JavaScript
+         disabled the page is exactly what it was before, with no dead control.
+         Feature-detected on navigator.clipboard, which is unavailable outside a
+         secure context, for the same reason: a button that cannot copy should
+         not exist. -->
+    <script>
+      (function () {
+        if (!navigator.clipboard || !window.isSecureContext) return;
+        var blocks = document.querySelectorAll("pre.console-pre, pre.console-pre-out");
+        for (var i = 0; i < blocks.length; i++) {
+          (function (pre) {
+            var wrap = document.createElement("div");
+            wrap.className = "console-copywrap";
+            pre.parentNode.insertBefore(wrap, pre);
+            wrap.appendChild(pre);
+            var button = document.createElement("button");
+            button.type = "button";
+            button.className = "console-copy";
+            button.textContent = "copy";
+            button.setAttribute("aria-label", "Copy this code block");
+            button.addEventListener("click", function () {
+              var code = pre.querySelector("code");
+              navigator.clipboard.writeText(code ? code.textContent : "").then(
+                function () { say("copied"); },
+                function () { say("copy failed"); }
+              );
+            });
+            function say(text) {
+              button.textContent = text;
+              button.setAttribute("aria-label", text === "copied" ? "Copied" : "Copy failed");
+              window.setTimeout(function () {
+                button.textContent = "copy";
+                button.setAttribute("aria-label", "Copy this code block");
+              }, 1400);
+            }
+            wrap.appendChild(button);
+          })(blocks[i]);
+        }
+      })();
+    </script>
+  </body>
+</html>
