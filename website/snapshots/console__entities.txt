@@ -1,0 +1,218 @@
+AI entities | NOVAI developer console
+
+ Skip to content
+
+ NOVAI
+
+ developer console
+
+ main site
+ explorer
+ source
+
+ 01 connect
+ 02 first call
+ 03 rpc reference
+ 04 errors and limits
+ 05 transactions
+ 06 ai entities
+ 07 sdks
+ 08 network parameters
+ 09 known gaps
+ 10 verify it yourself
+ everything
+ names
+
+ sections
+
+ 01 connect
+
+ 02 first call
+
+ 03 rpc reference
+
+ 04 errors and limits
+
+ 05 transactions
+
+ 06 ai entities
+
+ 07 sdks
+
+ 08 network parameters
+
+ 09 known gaps
+
+ 10 verify it yourself
+
+ find
+
+ &#8942; everything on one page
+
+ &#8942; index of names
+
+ AI entities
+
+ 06 ai entities
+
+ AI entities are the part of this chain that has no equivalent elsewhere. Three worked flows first, then the full enumerations.
+
+ These describe what the implementation does, with every constant cited to its declaration. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.
+
+ a reputation oracle
+
+ A reputation oracle issues ReputationUpdate signals, signal type 7. Each one moves a target entity's reputation_score, which the chain stores on the entity record and clamps to a 0 to 100 range. A newly registered entity starts at 50.
+
+ Issuing one requires the submit_reputation_updates capability, bit 5 of the entity's capability byte.
+
+ The payload is 101 bytes: the 66-byte signal commitment base plus a 35-byte tail carrying the target entity id, an event type and a signed two-byte delta.
+
+ The event type must be 0 to 12.
+
+ An entity cannot rate itself.
+
+ The fee is 1,000 base units, the signal commitment minimum.
+
+ The effect is checkable in one read: novai_getAiEntity returns reputation_score and reputation_events_count.
+
+ selling signals on the marketplace
+
+ A seller publishes a SignalCatalog memory object, type 7, listing priced offerings. A catalog holds at most 10 offerings, each 10 bytes: a signal type, a price as a big-endian u64, and an active flag.
+
+ A buyer issues a SignalPurchase signal, type 8, naming the seller, the signal type wanted and a maximum price. The chain rejects the purchase if the catalog price is above that maximum.
+
+ On success the chain moves the price from the buyer's economic_balance to the seller's, less a 2% cut routed to the marketplace treasury.
+
+ The payload is 107 bytes: the 66-byte base plus a 41-byte tail.
+
+ Publishing a catalog requires no stake. A listing is not a bond, and a buyer should not read it as one.
+
+ The marketplace treasury is not readable over RPC. No method returns it.
+
+ staking collateral
+
+ A StakeDeposit signal, type 9, moves an amount from an entity's economic_balance into its stake_balance. The payload is 82 bytes: the 66-byte base plus a 16-byte big-endian u128 amount.
+
+ A deposit locks for 1,000 blocks. stake_locked_until is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time; the cadence in the network section converts it.
+
+ Withdrawal is a StakeWithdraw signal, type 10, with the same 82-byte layout. A partial withdrawal does not re-lock the remainder.
+
+ A StakeSlash signal, type 11, issued by an entity holding submit_reputation_updates, subtracts up to a named amount from the target's stake_balance and applies a bundled reputation event in the same operation. The payload is 117 bytes.
+
+ An entity cannot slash itself.
+
+ economic_balance, stake_balance and stake_locked_until are all readable from novai_getAiEntity, and every stake operation appears in the signal index.
+
+ capability bits
+
+ Bit | Hex | Capability |
+
+ 0 | 0x01 | read_public_chain |
+
+ 1 | 0x02 | read_memory_objects |
+
+ 2 | 0x04 | emit_proposals |
+
+ 3 | 0x08 | request_execution |
+
+ 4 | 0x10 | read_nnpx_derived |
+
+ 5 | 0x20 | submit_reputation_updates |
+
+ 6 | 0x40 | post_oracle_anchors |
+
+ Capabilities are one byte, set at registration, and immutable for the entity's life. The upgrade transaction changes the code hash and nothing else, and registering again mints a different entity id, which abandons the reputation, stake, agreements and memory objects attached to the old one. Set every bit you might need on day one.
+
+ signal types (23)
+
+ Type | Variant | Payload | Description |
+
+ 0 | Anomaly | base 66 B payload | no source description |
+
+ 1 | Optimization | base 66 B payload | no source description |
+
+ 2 | Prediction | base 66 B payload | no source description |
+
+ 3 | RiskScore | base 66 B payload | no source description |
+
+ 4 | AuditReport | base 66 B payload | no source description |
+
+ 5 | SpamRisk | base 66 B payload | no source description |
+
+ 6 | CongestionForecast | base 66 B payload | no source description |
+
+ 7 | ReputationUpdate | base + 35 B tail; issuer needs bit 5 | Reputation update emitted by an oracle entity (requires submit_reputation_updates capability). |
+
+ 8 | SignalPurchase | base + 41 B tail | Purchase of a priced signal listed in the seller's SignalCatalog memory object. Carries an inline 41-byte purchase tail (seller_entity_id || purchased_signal_type || max_price_be). |
+
+ 9 | StakeDeposit | base + 16 B tail | Stake-deposit signal moving funds from the issuer's economic_balance to its stake_balance. Locks the deposited amount until current_height + STAKE_LOCK_PERIOD. Carries a 16-byte amount tail. |
+
+ 10 | StakeWithdraw | base + 16 B tail | Stake-withdraw signal moving funds from the issuer's stake_balance back to its economic_balance. Rejected unless stake_locked_until <= current_height. Carries a 16-byte amount tail. |
+
+ 11 | StakeSlash | base + 51 B tail; issuer needs bit 5 | Slash signal emitted by an oracle entity (requires submit_reputation_updates capability). Deducts from a target entity's stake_balance, credits the slashed amount to KEY_SLASH_TREASURY, and applies a reputation update atomically. Carries a 51-byte tail: target_id:32 | slash_amount_be:16 | rep_event_type:1 | points_delta_be:2. |
+
+ 12 | CompositionCheck | base + 34 B tail; issuer needs bit 5 | Composition health check emitted by an oracle entity (requires submit_reputation_updates capability). Validates a target entity's declared CompositionGraph dependency and, if the failure is corroborated by chain state and the dependency is marked required, auto-pauses the target by setting is_active = false. Always emits a REP_EVENT_COMPOSITION_FAILURE reputation event with delta -1. Carries a 34-byte tail: target_id:32 | failed_dependency_idx:1 | failure_reason:1. |
+
+ 13 | ProofSubmission | base + 65 B tail | AI entity submits a ZK proof attesting to off-chain computation integrity. Carries a 65-byte tail: proof_type:1 | code_hash:32 | computation_hash:32. The proof bytes themselves are NOT carried inline (the SignalCommitment tail is fixed-size); a real verifier would resolve them via the off-chain payload referenced by signal_hash. The execution handler verifies the proof via the ZkVerifier trait, and on success creates a VerificationRecord memory object owned by the issuer plus a REP_EVENT_PROOF_VERIFIED reputation event with delta +3. |
+
+ 14 | SubscriptionCreate | base + 49 B tail; locks `rate_per_block * duration_blocks` from the subscriber | Recurring payment subscription create: the issuing entity (the subscriber) locks rate_per_block * duration_blocks of its economic_balance to a producer for a fixed covered signal type. On success the handler creates a MemoryObjectType::Subscription memory object owned by the subscriber, recording the active agreement. Settlement is lazy and is performed when the subscriber emits a matching SubscriptionCancel signal. Carries a 49-byte tail: producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 | duration_blocks_be:8. |
+
+ 15 | SubscriptionCancel | base + 32 B tail; settles accrued payment and refunds the remainder | Recurring payment subscription cancel: the original subscriber terminates an active subscription early. The handler settles accrued payment to the producer (less the standard 2% marketplace fee), applies a 5% cancel fee on the remaining locked funds (paid to the producer with no marketplace cut as compensation for early termination), refunds the rest to the subscriber, and marks the subscription record is_active = false. Only the original subscriber may emit this signal. Carries a 32-byte tail: subscription_id:32 (the memory object id of the Subscription record being cancelled). |
+
+ 16 | PaymentRequest | base + 112 B tail; Week 28 native x402. Optional Week 33 splits and Week 36 condition trailers | Native x402-style per-request payment. The issuing entity (the payer) debits its economic_balance by amount + fee and credits the payee's economic_balance by amount; the fee is routed to KEY_MARKETPLACE_TREASURY. The handler also writes a PaymentRecord to b"ai/payments/by_hash/" || signal_hash plus two scan indexes (by-payer, by-payee). Replay protection is enforced by rejecting any payment whose signal_hash already has a by_hash record. Carries a 112-byte tail: payee_entity_id:32 | amount_be:8 | service_descriptor_hash:32 | request_hash:32 | max_block_height_be:8. |
+
+ 17 | ServiceAttestation | base + 65 B tail; Week 28 delivery attestation by the original payer | Service-delivery attestation issued by the payer of a prior PaymentRequest. The handler loads the referenced PaymentRecord from b"ai/payments/by_hash/" || payment_signal_hash, verifies the issuer of this signal equals the recorded payer, then applies either REP_EVENT_PAYMENT_DELIVERED or REP_EVENT_PAYMENT_FAILED to the payee depending on status. The payment record is rewritten in place with attested_status and attested_height; the record can be attested at most once. Carries a 65-byte tail: payment_signal_hash:32 | payee_entity_id:32 | status:1 (0 = Delivered, 1 = Failed). |
+
+ 18 | SlaAccept | base + 64 B tail; Week 31 SLA acceptance by the seller | SLA acceptance (Week 31): the issuing entity (the seller named in a previously proposed SlaAgreement memory object) accepts the agreement. The handler loads the SLA memory object via the embedded buyer entity id and SLA object id, verifies the signal issuer equals the SLA's seller, gates on the seller's current stake_balance >= sla.slash_amount, then transitions the SLA from SLA_STATUS_PROPOSED to SLA_STATUS_ACTIVE and records the acceptance height. The acceptance must land BEFORE the SLA's start_height; the active-pair singleton index entry stays in place (it was written at create time). Carries a 64-byte tail: sla_object_id:32 | buyer_entity_id:32. |
+
+ 19 | ChannelAccept | base + 64 B tail; Week 32 channel acceptance by party B | Payment channel accept (Week 32): the issuing entity (party B, the counterparty named in a previously proposed PaymentChannel memory object) accepts the channel. The handler loads the channel memory object via the embedded party A entity id and channel object id, verifies the signal issuer equals the channel's party_b_entity_id, debits B's economic_balance by the channel's deposit_b, transitions the channel from PAYMENT_CHANNEL_STATUS_PROPOSED to _OPEN, sets accepted_at_height, and bumps balance_b to deposit_b. Carries a 64-byte tail: channel_object_id:32 | party_a_entity_id:32. |
+
+ 20 | ChannelClose | base + 233 B tail with both parties' signatures; Week 32 cooperative settle or unilateral close | Payment channel close (Week 32): handles both cooperative settle (instant) and unilateral close (opens a dispute window). Carries a 233-byte tail: channel_object_id:32 | party_a_entity_id:32 | nonce_be:8 | balance_a_be:16 | balance_b_be:16 | is_final:1 | sig_a:64 | sig_b:64. Both party signatures are always required (even on unilateral close); the is_final flag distinguishes cooperative settle (instant distribution + memory object delete) from unilateral close (status -> CLOSING, dispute window opens). Inside the dispute window a strictly larger nonce overrides the recorded state. The submitter signs the enclosing TxV1 and pays the fee; either participant may submit. |
+
+ 21 | ChannelFinalize | base + 64 B tail; Week 32 permissionless finalize after the dispute window | Payment channel finalize (Week 32): credits the recorded balance_a / balance_b back to the parties' economic_balance and deletes the channel memory object plus its secondary indexes. Valid only when status == PAYMENT_CHANNEL_STATUS_CLOSING and current_height > dispute_deadline_height. Permissionless: any active AI entity may submit (the parties have aligned incentives to submit themselves; allowing third parties means a finalize is never gated on a specific participant's liveness). Carries a 64-byte tail: channel_object_id:32 | party_a_entity_id:32. |
+
+ 22 | OracleAnchor | base + variable 82..=113 B tail; issuer needs bit 6 `post_oracle_anchors` (Week 35) | Oracle data anchor (Week 35): an entity holding the post_oracle_anchors capability publishes a commitment to external off-chain data (a price feed, an API response, an external timestamp) so other agents and future protocol mechanisms can reference it from a registered, reputation-bearing source. The handler writes an OracleAnchorRecord KV aux row under ai/oracle_anchors/by_hash/<signal_hash> (which doubles as the replay guard) plus by-entity and by-tag scan indexes, and bumps the issuer's total_transactions (reputation-neutral on post; accuracy challenges are deferred to a future week). Carries a variable-length tail: data_hash:32 | external_timestamp_be:8 | source_hash:32 | expiry_height_be:8 | data_tag_len:1 | data_tag:[1..=32]. |
+
+7 of these carry no doc comment in the Rust source, so no description can be generated for them: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast. Their payload sizes are known and are shown.
+
+ memory object types (16)
+
+ Type | Variant | Description |
+
+ 0 | ChainSummary | Epoch summaries containing block ranges, transaction counts, fee totals. |
+
+ 1 | LabelIndex | Tags and categories for addresses (label → address mappings). |
+
+ 2 | EmbeddingCommitment | Commitment hash of an embedding vector (actual vector stored off-chain). |
+
+ 3 | AnomalyLog | Historical record of detected anomalies. |
+
+ 4 | StatisticsSnapshot | Periodic snapshot of chain statistics. |
+
+ 5 | ReputationEvent | Audit record of a reputation change applied to an entity. |
+
+ 6 | Rating | Counterparty rating (score, optional comment hash) feeding reputation. |
+
+ 7 | SignalCatalog | Marketplace pricing catalog: a list of priced signal offerings the owning entity makes available to buyers. |
+
+ 8 | CompositionGraph | Cross-entity composition graph: a list of source-entity dependencies the owning entity declares it consumes signals from. Used by oracle CompositionCheck signals to verify dependency health and auto-pause the owner when a required dependency has failed. |
+
+ 9 | VerificationRecord | On-chain audit record of a verified ZK proof submission. Created by the ProofSubmission signal handler when the verifier accepts a proof. Fixed 105-byte payload: proof_type:1 | code_hash:32 | computation_hash:32 | proof_hash:32 | height_be:8. |
+
+ 10 | DelegationGrant | On-chain delegation grant: an AI entity (the memory object owner / delegator) authorizes another AI entity (the delegate, identified by the embedded delegate_entity_id) to act with a subset of the delegator's capabilities for a bounded duration. Stored as a fixed 42-byte payload (DelegationGrantData). Revocation is performed by deleting the memory object via DELETE_MEMORY_OBJECT. |
+
+ 11 | Subscription | Recurring payment subscription record (Feature 9): the memory object owner is the SUBSCRIBER, who has locked rate_per_block * duration_blocks of economic_balance to a producer for a fixed covered signal type. Settlement is lazy and triggered by the subscriber's SubscriptionCancel signal; on cancel, accrued payment is transferred to the producer (less the 2% marketplace fee), the 5% cancel fee on remaining locked funds is paid to the producer, the rest is refunded to the subscriber, and is_active is set to false. Stored as a fixed 114-byte payload (SubscriptionData). |
+
+ 12 | ServiceDescriptor | Agent Discovery Registry entry (Week 29): the memory object owner is publishing a service description that other entities can discover on-chain. The data field carries a fixed 144-byte ServiceDescriptorData describing what the service is (category + off-chain name / URL / description hashes), what it charges (per-call price, optional subscription rate), and what callers must satisfy (minimum reputation score, minimum stake). category drives a dedicated by_category discovery index; updates may change any field except the category (a category change requires delete + recreate). The object's object_id is the canonical handle a payer puts in the service_descriptor_hash field of a Week 28 PaymentRequest. |
+
+ 13 | VkRegistration | VK Registry entry (Week 30): the memory object owner publishes a zero-knowledge proof verification key on-chain so that future ProofSubmission signals carrying PROOF_TYPE_GROTH16_REGISTERED can reference the VK by the containing memory object's 32-byte object_id instead of inlining the full ~500-byte VK every time. The data field carries a VkRegistrationData payload binding the VK to a code_hash (the computation it verifies) and a proof_type discriminant. The proof_type, code_hash, and vk_bytes fields are IMMUTABLE on UpdateMemoryObject; only the free-form label tag is mutable. |
+
+ 14 | SlaAgreement | On-chain Service Level Agreement between two AI entities (Week 31). The memory object owner is the BUYER who proposed the agreement; the embedded seller_entity_id is the counterparty that accepts (via the SlaAccept signal) and whose stake is at risk on threshold breach. Violations are counted from PAYMENT_ATTESTATION_STATUS_FAILED ServiceAttestation signals issued by the buyer while current_height is in [start_height, end_height]; when violation_count >= violation_threshold the runtime auto- slashes slash_amount from the seller's stake_balance (saturating, mirroring StakeSlash), credits KEY_SLASH_TREASURY, applies an additional REP_DELTA_SLA_VIOLATION_TRIGGERED to the seller, and transitions the SLA to SLA_STATUS_VIOLATED. The agreement is binding once accepted: no mutual cancel signal in v1. |
+
+ 15 | PaymentChannel | Bidirectional payment channel between two AI entities (Week 32). The memory object owner is party A (the proposer who debits deposit_a at create time); the embedded party_b_entity_id is the counterparty who accepts via the ChannelAccept signal (and debits deposit_b at accept time). Off-chain state updates are signed by both parties and never touch the chain unless a cooperative settle, a unilateral close, a dispute, or a finalize signal is submitted. The channel's funds are held INSIDE the memory object payload (balance_a / balance_b); credits back to the parties' economic_balance happen only on cooperative settle, finalize after a dispute window, or buyer-initiated cancel while still in PAYMENT_CHANNEL_STATUS_PROPOSED. The optional sla_object_id is informational only in v1: the runtime does NOT couple channel lifecycle to SLA status. |
+
+ novai.network
+ /
+ explorer
+ /
+ source

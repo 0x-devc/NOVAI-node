@@ -1,0 +1,2352 @@
+Everything on one page | NOVAI developer console
+
+ Skip to content
+
+ NOVAI
+
+ developer console
+
+ main site
+ explorer
+ source
+
+ 01 connect
+ 02 first call
+ 03 rpc reference
+ 04 errors and limits
+ 05 transactions
+ 06 ai entities
+ 07 sdks
+ 08 network parameters
+ 09 known gaps
+ 10 verify it yourself
+ everything
+ names
+
+ sections
+
+ 01 connect
+
+ 02 first call
+
+ 03 rpc reference
+
+ 04 errors and limits
+
+ 05 transactions
+
+ 06 ai entities
+
+ 07 sdks
+
+ 08 network parameters
+
+ 09 known gaps
+
+ 10 verify it yourself
+
+ find
+
+ &#8942; everything on one page
+
+ &#8942; index of names
+
+ Everything on one page
+
+ Every section of this console concatenated, so find-in-page reaches the whole surface in one keystroke. Each heading links to the page that section lives on. This page is a copy for finding things: the pages it links to are the ones to bookmark.
+
+ 01 connect
+ on its own page
+
+[CODE]
+URL=https://rpc.novai.network
+
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getLatestBlock","params":{},"id":1}'
+[/CODE]
+
+ Property | Value |
+
+ Protocol | JSON-RPC 2.0 over HTTP POST |
+
+ Content-Type | application/json |
+
+ Endpoint | https://rpc.novai.network |
+
+ Authentication | none |
+
+ Requests are rate limited per source IP. The limits, and the reply you get when you cross one, are in errors and limits.
+
+ network
+
+ Live height and cadence load here when JavaScript is available.
+
+ 02 first call
+ on its own page
+
+ Three ways to make the same call. The output under each was produced by running exactly the code shown.
+
+ curl
+
+ No install. Paste it.
+
+[CODE]
+curl -s -X POST https://rpc.novai.network -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getLatestBlock","params":{},"id":1}'
+[/CODE]
+
+[CODE]
+{"jsonrpc":"2.0","result":{"block_hash":"6b4ef2adc610656969ca65c94c057ddcb5eafa3c441de14d95b931aac066a8e9","height":5225248,"parent_hash":"0c6582e4ef81f793266ae8d46642f9acd9c314bc7947ef2e57142a2f3a0981c1","round":0,"state_root":"2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e","tx_count":0},"id":1}
+[/CODE]
+
+ python
+
+ Standard library only. No pip install.
+
+[CODE]
+import json, urllib.request
+
+req = urllib.request.Request(
+ "https://rpc.novai.network",
+ data=json.dumps({"jsonrpc": "2.0", "method": "novai_getLatestBlock",
+ "params": {}, "id": 1}).encode(),
+ headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req, timeout=10) as r:
+ print(json.dumps(json.load(r)["result"], indent=2))
+[/CODE]
+
+[CODE]
+{
+ "block_hash": "8cec80e8dc7b2e77b1e43314bda2f2570aaad82fb02c4afa9a1d35990177d802",
+ "height": 5225249,
+ "parent_hash": "6b4ef2adc610656969ca65c94c057ddcb5eafa3c441de14d95b931aac066a8e9",
+ "round": 0,
+ "state_root": "2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e",
+ "tx_count": 0
+}
+[/CODE]
+
+ rust
+
+ A standalone cargo project with one dependency. This needs a build step, which the two above do not, so it is the third path rather than the first. It does not use the NOVAI Rust SDK, because that SDK depends on the workspace crates by path and so cannot be built outside a clone of the repository.
+
+[CODE]
+// Cargo.toml
+// [dependencies]
+// reqwest = { version = "0.12", features = ["blocking", "json"] }
+// serde_json = "1"
+
+use std::error::Error;
+
+fn main() -> Result<(), Box<dyn Error>> {
+ let body = serde_json::json!({
+ "jsonrpc": "2.0",
+ "method": "novai_getLatestBlock",
+ "params": {},
+ "id": 1
+ });
+
+ let resp: serde_json::Value = reqwest::blocking::Client::new()
+ .post("https://rpc.novai.network")
+ .json(&body)
+ .send()?
+ .json()?;
+
+ println!("{}", serde_json::to_string_pretty(&resp["result"])?);
+ Ok(())
+}
+[/CODE]
+
+[CODE]
+{
+ "block_hash": "4c065392ab83658711dc3df2ade2bda953c33a1a4f5d0e884439b6a9548ed1a3",
+ "height": 5225251,
+ "parent_hash": "3399db3cd66c7185b2521d5ba7c8c58ddd84b59004024f475b7ed7fe16a79d27",
+ "round": 0,
+ "state_root": "2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e",
+ "tx_count": 0
+}
+[/CODE]
+
+ Captured by running each example against the live endpoint. Heights and hashes move every few hundred milliseconds, so yours will differ; the shape is what is being shown. Captured 2026-08-29T17:55:36Z.
+
+ 03 rpc reference
+ on its own page
+
+ All 29 methods. The notes column names the caveat that applies to a method before you open it.
+
+ Category | Method | Brief | Notes |
+
+ Block methods | novai_getLatestBlock | Latest committed block header | can answer null |
+
+ | novai_getBlockByHeight | Block header at a given height | reference calls the null path unreachable can answer null |
+
+ | novai_getBlockByHash | Block header by its hash | can answer null |
+
+ Account methods | novai_getBalance | Account balance and nonce | nonce here is the committed one |
+
+ | novai_getNonce | Account expected nonce | mempool cursor, not the account nonce inherits an error it cannot emit |
+
+ Transaction methods | novai_submitTransaction | Submit a signed tx | emits an undocumented code |
+
+ | novai_getTransaction | Tx receipt by txid | can answer null |
+
+ AI entity methods | novai_getAiEntity | AI entity record by id | |
+
+ Memory object methods | novai_getMemoryObjects | All memory objects owned by entity | |
+
+ Signal methods | novai_getSignalsByHeight | Signals at a height | |
+
+ | novai_getSignalsByIssuer | Signals from an entity (range) | |
+
+ | novai_getSignalsByType | Signals by type (range) | |
+
+ Payment methods (Week 28) | novai_getPaymentsByEntity | Payments where the entity is payer or payee (range) | |
+
+ Service discovery methods (Week 29) | novai_getServiceDescriptorsByCategory | Service descriptors filtered by category | |
+
+ VK registry methods (Week 30) | novai_getVkRegistration | A registered Groth16 verifying key by handle | |
+
+ | novai_listVkRegistrations | All VK registrations owned by an entity | error clause names the wrong field |
+
+ SLA methods (Week 31) | novai_getSlaAgreement | An SLA memory object by (owner, object_id) | |
+
+ | novai_getActiveSla | The currently active SLA between a buyer and seller | |
+
+ | novai_listSlasByBuyer | SLAs where the entity is the buyer (range) | |
+
+ | novai_listSlasBySeller | SLAs where the entity is the seller (range) | |
+
+ Payment channel methods (Week 32) | novai_getPaymentChannel | A payment channel by (owner, object_id) | |
+
+ | novai_listChannelsByPartyA | Channels where the entity is party A (range) | |
+
+ | novai_listChannelsByPartyB | Channels where the entity is party B (range) | |
+
+ | novai_getChannelDisputeStatus | Dispute window status with derived finalize_ready | |
+
+ Entity upgrade methods (Week 34) | novai_getUpgradeHistory | EntityUpgrade history for an entity (range) | |
+
+ Oracle anchor methods (Week 35) | novai_getOracleAnchor | An oracle anchor by signal_hash | |
+
+ | novai_getOracleAnchorsByEntity | Oracle anchors posted by an entity (range) | |
+
+ | novai_getOracleAnchorsByTag | Oracle anchors matching a data_tag (range) | |
+
+ Dev-only methods | novai_faucet | Mint test tokens | gating documented backwards disabled-path code differs not documented here |
+
+ Each entry links to the dispatch arm that implements it. Those line numbers are regenerated with the page, and the build fails when the committed page no longer matches the tree.
+
+ novai_getLatestBlock
+ crates/node/src/rpc.rs:1903
+
+ Returns the header of the most recently committed block.
+
+ params
+none. Pass {}.
+
+ errors
+only the global ones (-32600 malformed envelope, -32601 unknown method).
+
+ result
+
+[CODE]
+{
+ "block_hash": "<hex32>", // canonical hash of this block
+ "parent_hash": "<hex32>", // canonical hash of the parent block
+ "state_root": "<hex32>", // SMT root after applying this block
+ "height": <u64>,
+ "round": <u64>, // consensus round in which the block was committed
+ "tx_count": <u64> // number of transactions in this block
+}
+[/CODE]
+
+ Null case: this method answers with a top-level null result rather than an error when the record is not there, which for history includes anything below the pruning horizon. Measured at crates/node/src/rpc.rs:3606.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getLatestBlock","params":{},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "block_hash": "6358124aa37e167d9b0f1ba8c43b2b5b76595862694c36f413a9acd173512689",
+ "parent_hash": "f4224ed3b546ee33fc9006c406816bfc60bda5f33c650c30ff2f7f321f29120f",
+ "state_root": "be66f7485fc259ae01b6bd139b9fa26636660291d227cdb90aa9f7db6d3e97ee",
+ "height": 2574,
+ "round": 0,
+ "tx_count": 0
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getBlockByHeight
+ crates/node/src/rpc.rs:1869
+
+ Returns the header for a given height.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ height | u64 | required | must be ≤ committed height |
+
+ errors
+
+ Code | When |
+
+ -32602 | missing/non-numeric height |
+
+ -32602 | height exceeds the committed height (response includes the actual cap) |
+
+ -32002 | DB read failure |
+
+ result
+
+[CODE]
+{
+ "block_hash": "<hex32>", // canonical hash of this block
+ "parent_hash": "<hex32>", // canonical hash of the parent block
+ "state_root": "<hex32>", // SMT root after applying this block
+ "height": <u64>,
+ "round": <u64>, // consensus round in which the block was committed
+ "tx_count": <u64> // number of transactions in this block
+}
+[/CODE]
+
+ Null case: this method answers with a top-level null result rather than an error when the record is not there, which for history includes anything below the pruning horizon. Measured at crates/node/src/rpc.rs:3550.
+
+ correction The reference calls this null answer unreachable. It is not: the handler answers null for any height that is not on disk, which includes every height below the pruning horizon. Null-check this result. Tracked as NEEDS-OPERATOR.md item 18.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getBlockByHeight","params":{"height":377},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "block_hash": "f13b0fe415672bdbae53432bfffb7558ffa314db5824b321517230e2aea84084",
+ "parent_hash": "0a29f578d57abd845403b3cce8fae281da364dd015bb440192e41fcac2a8fec9",
+ "state_root": "be66f7485fc259ae01b6bd139b9fa26636660291d227cdb90aa9f7db6d3e97ee",
+ "height": 377,
+ "round": 0,
+ "tx_count": 1
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getBlockByHash
+ crates/node/src/rpc.rs:1886
+
+ Returns the header for a given block hash. Useful for following parent chains backwards.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ hash | hex32 | required | exactly 64 hex chars |
+
+ errors
+
+ Code | When |
+
+ -32602 | hash isn't 32 bytes |
+
+ -32002 | DB read failure |
+
+ result
+
+[CODE]
+{
+ "block_hash": "<hex32>", // canonical hash of this block
+ "parent_hash": "<hex32>", // canonical hash of the parent block
+ "state_root": "<hex32>", // SMT root after applying this block
+ "height": <u64>,
+ "round": <u64>, // consensus round in which the block was committed
+ "tx_count": <u64> // number of transactions in this block
+}
+[/CODE]
+
+ Null case: this method answers with a top-level null result rather than an error when the record is not there, which for history includes anything below the pruning horizon. Measured at crates/node/src/rpc.rs:3592.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getBlockByHash","params":{"hash":"f13b0fe415672bdbae53432bfffb7558ffa314db5824b321517230e2aea84084"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "block_hash": "f13b0fe415672bdbae53432bfffb7558ffa314db5824b321517230e2aea84084",
+ "parent_hash": "0a29f578d57abd845403b3cce8fae281da364dd015bb440192e41fcac2a8fec9",
+ "state_root": "be66f7485fc259ae01b6bd139b9fa26636660291d227cdb90aa9f7db6d3e97ee",
+ "height": 377,
+ "round": 0,
+ "tx_count": 1
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getBalance
+ crates/node/src/rpc.rs:1693
+
+ Returns an account's current balance (u128) and expected nonce.
+
+ correction The nonce in this result is the committed account nonce, and it is the one to sign against. getNonce answers a different question: the mempool admission cursor. Tracked as NEEDS-OPERATOR.md item 15.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ address | hex32 | required | 32-byte account address |
+
+ errors
+
+ Code | When |
+
+ -32602 | address isn't 32 bytes |
+
+ -32002 | DB read failure |
+
+ result
+
+[CODE]
+{
+ "balance": "<decimal-string>", // u128, returned as a string
+ "nonce": <u64> // next nonce a tx from this account must use
+}
+[/CODE]
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getBalance","params":{"address":"4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": { "balance": "9945000", "nonce": 1 },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getNonce
+ crates/node/src/rpc.rs:1385
+
+ Returns just the expected nonce for an account. Cheaper than getBalance if you don't need the balance.
+
+ correction The two are not interchangeable. This answers from the mempool admission cursor, which runs ahead of the committed account nonce once a transaction from that sender commits and fails, and stays ahead until the node restarts. Sign against the nonce field of getBalance. Tracked as NEEDS-OPERATOR.md item 15.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ address | hex32 | required | 32-byte account address |
+
+Same parameters as novai_getBalance.
+
+ errors
+
+ Code | When |
+
+ -32602 | address isn't 32 bytes |
+
+ -32002 | DB read failure |
+
+correction This method does not read the database. Its handler is passed the mempool nonce provider and nothing else, so -32002 is inherited from getBalance's table and cannot occur here. The only rejection this method produces is -32602 for an address that is not 32 bytes. Tracked as NEEDS-OPERATOR.md item 17.
+
+ result
+
+[CODE]
+{ "nonce": <u64> }
+[/CODE]
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getNonce","params":{"address":"4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee"},"id":1}'
+[/CODE]
+
+[CODE]
+{ "jsonrpc": "2.0", "result": { "nonce": 1 }, "id": 1 }
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_submitTransaction
+ crates/node/src/rpc.rs:1365
+
+ Submits a hex-encoded, signed TxV1 to the mempool. The node validates the signature, address derivation, fee minimum, and size, then broadcasts it via P2P. It does not wait for inclusion.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ tx | string | required | hex-encoded signed tx; max 262 144 chars (= 128 KiB binary) |
+
+ errors
+
+ Code | When |
+
+ -32602 | params malformed |
+
+ -32000 | tx hex too large; tx decode failed; tx exceeds binary size cap; signature invalid |
+
+ -32001 | mempool at capacity |
+
+ -32010 | nonce too low (message: NonceTooLow: expected N, got M) |
+
+ -32011 | fee too low (message: FeeTooLow: minimum N, got M) |
+
+ -32012 | per-sender pending limit exceeded (message: SenderLimitExceeded: max N pending per sender) |
+
+ -32013 | other validation error |
+
+ -32002 | DB read failure during validation |
+
+correction The mempool also rejects with -32014 NonceTooHigh, which this table does not list. It is not terminal: retry the same transaction unchanged once the sender's earlier nonces commit. Tracked as NEEDS-OPERATOR.md item 8.
+
+ result
+
+[CODE]
+{ "txid": "<hex32>" } // blake3 of the unsigned canonical encoding
+[/CODE]
+
+ example
+
+ request shown abridged. The tx value is a real ~300-byte hex blob built via the Rust SDK
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_submitTransaction","params":{"tx":"01<224 hex chars>"},"id":1}'
+[/CODE]
+
+[CODE]
+{ "jsonrpc": "2.0", "result": { "txid": "f5796d3963b94b59017fa9f2fa7b015956cbd082c32c04f69b1d88ae007f140e" }, "id": 1 }
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getTransaction
+ crates/node/src/rpc.rs:1852
+
+ Returns receipt metadata for a committed transaction. Returns null if the txid isn't known (either invalid, still in mempool, or evicted).
+
+ params
+
+ Field | Type | Required | Notes |
+
+ txid | hex32 | required | as returned by submitTransaction |
+
+ errors
+
+ Code | When |
+
+ -32602 | txid isn't 32 bytes |
+
+ -32002 | DB read failure |
+
+ result
+
+[CODE]
+{
+ "block_height": <u64>, // height of the block the tx landed in
+ "tx_index": <u64>, // 0-based index within that block's tx list
+ "from": "<hex32>",
+ "nonce": <u64>,
+ "fee": <u64>,
+ "payload_len": <u64> // length of the inner payload in bytes
+}
+[/CODE]
+
+ Null case: this method answers with a top-level null result rather than an error when the record is not there, which for history includes anything below the pruning horizon. Measured at crates/node/src/rpc.rs:3467.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getTransaction","params":{"txid":"f5796d3963b94b59017fa9f2fa7b015956cbd082c32c04f69b1d88ae007f140e"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "block_height": 377,
+ "tx_index": 0,
+ "from": "4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee",
+ "nonce": 0,
+ "fee": 5000,
+ "payload_len": 83
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getAiEntity
+ crates/node/src/rpc.rs:1711
+
+ Returns the full on-chain record for an AI entity. Returns { "entity": null } (note: not null at the top level) if the entity doesn't exist.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | the canonical entity id, `blake3("NOVAI_AI_ENTITY_ID_V1" \ |
+
+ errors
+
+ Code | When |
+
+ -32602 | entity_id isn't 32 bytes |
+
+ -32002 | DB read failure |
+
+ result
+
+[CODE]
+{
+ "entity": {
+ "id": "<hex32>", // canonical entity id (matches the param)
+ "code_hash": "<hex32>", // identifier supplied at registration
+ "creator": "<hex32>", // creator account address
+ "autonomy_mode": <u8>, // 0 = Advisory, 1 = Gated, 2 reserved
+ "capabilities": <u8>, // bitfield (see Capabilities)
+ "economic_balance": "<decimal-string>", // u128
+ "nonce": <u64>, // next nonce for entity-signed txs
+ "pubkey": "<hex32>", // ed25519 verifying key (zeros if registered without a key)
+ "memory_root": "<hex32>", // (reserved; currently zero)
+ "params_root": "<hex32>", // (reserved; currently zero)
+ "registered_at": <u64>, // block height of the register tx
+ "last_active_at": <u64>, // most recent height at which this entity sent a tx
+ "is_active": true, // false after a deactivation proposal OR auto-pause from a failed required composition dependency
+ "reputation_score": <u16>, // current reputation in [0, 100]; defaults to 50 for new entities
+ "total_transactions": <u32>, // count of transactions counted toward reputation (e.g., job completions)
+ "reputation_events_count": <u32>, // number of reputation events ever applied to this entity
+ "stake_balance": "<decimal-string>", // u128 stake locked as collateral
+ "stake_locked_until": <u64>, // block height until which stake cannot be withdrawn (0 = unlocked)
+ "upgrade_count": <u32>, // number of EntityUpgrade transactions applied to this entity (Week 34)
+ "last_upgrade_height": <u64> // block height of the most recent upgrade; 0 if never upgraded
+ }
+}
+[/CODE]
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getAiEntity","params":{"entity_id":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "entity": {
+ "id": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "code_hash": "0101010101010101010101010101010101010101010101010101010101010101",
+ "creator": "4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee",
+ "autonomy_mode": 0,
+ "capabilities": 7,
+ "economic_balance": "48500",
+ "nonce": 2,
+ "pubkey": "60356527146eacd35696afd3a8fd71d42312c2aa4262ede7afd2f879bf6dfa36",
+ "memory_root": "0000000000000000000000000000000000000000000000000000000000000000",
+ "params_root": "0000000000000000000000000000000000000000000000000000000000000000",
+ "registered_at": 377,
+ "last_active_at": 497,
+ "is_active": true
+ }
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getMemoryObjects
+ crates/node/src/rpc.rs:1805
+
+ Returns every memory object owned by an entity. Order is by object_id.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | canonical entity id (same value used in getAiEntity) |
+
+ errors
+
+ Code | When |
+
+ -32602 | entity_id isn't 32 bytes |
+
+ -32002 | DB read failure |
+
+ result
+
+[CODE]
+{
+ "objects": [
+ {
+ "object_id": "<hex32>",
+ "object_type": <u8>, // 0..=15 (see Memory types below)
+ "owner_entity": "<hex32>", // always equal to the param
+ "created_at": <u64>, // block height
+ "updated_at": <u64>, // block height
+ "data": "<hex>", // hex-encoded payload
+ "data_size": <u64> // payload length in bytes
+ }
+ ]
+}
+[/CODE]
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getMemoryObjects","params":{"entity_id":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "objects": [
+ {
+ "object_id": "ba6c5de5a537dd07f44389d7ea794969b96305fd7cea845d05be23e256561103",
+ "object_type": 0,
+ "owner_entity": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "created_at": 497,
+ "updated_at": 497,
+ "data": "64656d6f206461746120666f7220525043207265666572656e6365",
+ "data_size": 27
+ }
+ ]
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getSignalsByHeight
+ crates/node/src/rpc.rs:1404
+
+ Returns every signal published at a specific block height.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ height | u64 | required | |
+
+ errors
+
+ Code | When |
+
+ -32602 | param decode failure or invalid hex length |
+
+ -32602 | end_height - start_height > 10000 (range queries) |
+
+ -32002 | DB read failure |
+
+Shared by every method in Signal methods.
+
+ result
+
+[CODE]
+{
+ "signals": [
+ {
+ "commitment_hash": "<hex32>", // signed commitment to off-chain content
+ "signal_type": <u8>, // 0..=22 (see Signal types below)
+ "height": <u64>,
+ "issuer": "<hex32>" // canonical entity id
+ }
+ ]
+}
+[/CODE]
+
+ Record shape declared once for Signal methods and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getSignalsByHeight","params":{"height":453},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "signals": [
+ {
+ "commitment_hash": "0202020202020202020202020202020202020202020202020202020202020202",
+ "signal_type": 0,
+ "height": 453,
+ "issuer": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1"
+ }
+ ]
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getSignalsByIssuer
+ crates/node/src/rpc.rs:1424
+
+ Returns every signal published by a given entity within a height window.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ issuer | hex32 | required | canonical entity id |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+ errors
+
+ Code | When |
+
+ -32602 | param decode failure or invalid hex length |
+
+ -32602 | end_height - start_height > 10000 (range queries) |
+
+ -32002 | DB read failure |
+
+Shared by every method in Signal methods.
+
+ result
+
+[CODE]
+{
+ "signals": [
+ {
+ "commitment_hash": "<hex32>", // signed commitment to off-chain content
+ "signal_type": <u8>, // 0..=22 (see Signal types below)
+ "height": <u64>,
+ "issuer": "<hex32>" // canonical entity id
+ }
+ ]
+}
+[/CODE]
+
+ Record shape declared once for Signal methods and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getSignalsByIssuer","params":{"issuer":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","start_height":0,"end_height":1000},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ novai_getSignalsByType
+ crates/node/src/rpc.rs:1444
+
+ Returns every signal of a given type within a height window.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ signal_type | u8 | required | one of 0..=22 |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+ errors
+
+ Code | When |
+
+ -32602 | param decode failure or invalid hex length |
+
+ -32602 | end_height - start_height > 10000 (range queries) |
+
+ -32002 | DB read failure |
+
+Shared by every method in Signal methods.
+
+ result
+
+[CODE]
+{
+ "signals": [
+ {
+ "commitment_hash": "<hex32>", // signed commitment to off-chain content
+ "signal_type": <u8>, // 0..=22 (see Signal types below)
+ "height": <u64>,
+ "issuer": "<hex32>" // canonical entity id
+ }
+ ]
+}
+[/CODE]
+
+ Record shape declared once for Signal methods and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getSignalsByType","params":{"signal_type":0,"start_height":0,"end_height":1000},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ PaymentRecord record
+
+ Declared once for Payment methods (Week 28) and shared by every method in it.
+
+[CODE]
+{
+ "payer": "<hex32>", // payer entity id
+ "payee": "<hex32>", // payee entity id (= splits[0].recipient_entity_id for split payments)
+ "amount": "<decimal-string>", // u128, base units
+ "service_descriptor_hash": "<hex32>", // carried verbatim from the PaymentRequest tail
+ "request_hash": "<hex32>", // per-request commitment
+ "payment_height": <u64>, // block height the payment settled at
+ "max_block_height": <u64>, // expiry height bound at submission
+ "attested_status": "delivered" | "failed" | null,
+ "attested_height": <u64> | null,
+ "splits": null | [ // null for legacy single-recipient payments
+ {
+ "recipient_entity_id": "<hex32>",
+ "basis_points": <u16>,
+ "credited_amount": "<decimal-string>"
+ }
+ ],
+ "condition": null | { // null for unconditional payments
+ "kind": "anchor_exists" | "anchor_data_hash_equals" | "anchor_tag_equals" | "anchor_not_expired",
+ "anchor_signal_hash": "<hex32>",
+ "expected_data_hash": "<hex32>" | null, // populated for kind == anchor_data_hash_equals
+ "expected_tag": <string> | null, // populated for kind == anchor_tag_equals (lossy UTF-8)
+ "expected_tag_hex": "<hex>" | null // populated for kind == anchor_tag_equals (exact bytes)
+ }
+}
+[/CODE]
+
+ novai_getPaymentsByEntity
+ crates/node/src/rpc.rs:1463
+
+ Returns every PaymentRecord where the queried entity is the payer or the payee within a height window, joined with the optional Week 33 splits aux row and the optional Week 36 condition aux row.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | canonical entity id |
+
+ role | string | required | "payer" (outgoing) or "payee" (incoming) |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+ errors
+
+ Code | When |
+
+ -32602 | entity_id isn't 32 bytes; role not "payer" or "payee"; range too large |
+
+ -32002 | DB read failure |
+
+ result
+
+[CODE]
+{ "payments": [PaymentRecord, ...] }
+[/CODE]
+
+ Shape of PaymentRecord is declared once for Payment methods (Week 28) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getPaymentsByEntity","params":{"entity_id":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","role":"payee","start_height":0,"end_height":10000},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "payments": [
+ {
+ "payer": "f3b91eaa5e5f3a8b8b4c0c9f59f1c4d72c2f4ddf3a2a7f9c8a2c9b7d6e5f4a3b",
+ "payee": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "amount": "100000",
+ "service_descriptor_hash": "1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637383940",
+ "request_hash": "abababababababababababababababababababababababababababababababab",
+ "payment_height": 612,
+ "max_block_height": 700,
+ "attested_status": "delivered",
+ "attested_height": 615,
+ "splits": null,
+ "condition": null
+ }
+ ]
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ ServiceDescriptor record
+
+ Declared once for Service discovery methods (Week 29) and shared by every method in it.
+
+[CODE]
+{
+ "object_id": "<hex32>",
+ "owner_entity": "<hex32>",
+ "created_at": <u64>,
+ "updated_at": <u64>,
+ "version": <u8>,
+ "service_name_hash": "<hex32>", // off-chain canonical service name commitment
+ "service_url_hash": "<hex32>", // off-chain endpoint URL commitment
+ "description_hash": "<hex32>", // off-chain long-description commitment
+ "category": <u8>,
+ "category_label": "data-oracle" | "inference" | ... | "reserved" | "governance" | "unknown",
+ "price_per_call": "<decimal-string>", // u128 base units; "0" if free
+ "subscription_rate_per_block": "<decimal-string>", // u128; "0" if no subscription pricing
+ "min_reputation_score": <u16>,
+ "min_stake": "<decimal-string>", // u128
+ "capability_tags": <u32>, // off-chain-defined bitfield
+ "status": <u8>,
+ "status_label": "active" | "paused" | "deprecated" | "unknown"
+}
+[/CODE]
+
+ novai_getServiceDescriptorsByCategory
+ crates/node/src/rpc.rs:1484
+
+ Returns every ServiceDescriptor memory object whose category byte equals the queried value. Category 0..=15 is the well-known range; 16..=255 is reserved for governance allocation. No height windowing applies.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ category | u8 | required | service category discriminant |
+
+ errors
+
+ Code | When |
+
+ -32602 | category not in 0..=255 (i.e. malformed JSON number) |
+
+ -32002 | DB read failure |
+
+ result
+
+[CODE]
+{ "descriptors": [ServiceDescriptor, ...] }
+[/CODE]
+
+ Shape of ServiceDescriptor is declared once for Service discovery methods (Week 29) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getServiceDescriptorsByCategory","params":{"category":1},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "descriptors": [
+ {
+ "object_id": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+ "owner_entity": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "created_at": 720,
+ "updated_at": 720,
+ "version": 1,
+ "service_name_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+ "service_url_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+ "description_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+ "category": 1,
+ "category_label": "inference",
+ "price_per_call": "2500",
+ "subscription_rate_per_block": "0",
+ "min_reputation_score": 50,
+ "min_stake": "10000",
+ "capability_tags": 0,
+ "status": 1,
+ "status_label": "active"
+ }
+ ]
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ VkRegistration record
+
+ Declared once for VK registry methods (Week 30) and shared by every method in it.
+
+[CODE]
+{
+ "object_id": "<hex32>", // canonical registry handle
+ "owner_entity": "<hex32>",
+ "created_at": <u64>,
+ "updated_at": <u64>,
+ "version": <u8>,
+ "proof_type": <u8>,
+ "proof_type_label": "stub" | "groth16" | "plonk" | "groth16-registered" | "plonk-registered" | "unknown",
+ "code_hash": "<hex32>", // canonical code_hash this VK verifies
+ "label": "<string>", // lossy-UTF-8 free-form label
+ "vk_len": <usize>, // == len(hex::decode(vk_bytes_hex))
+ "vk_bytes_hex": "<hex>" // full compressed VK
+}
+[/CODE]
+
+ novai_getVkRegistration
+ crates/node/src/rpc.rs:1505
+
+ Point-resolves a single VkRegistration by its memory-object id (the canonical handle a ProofSubmission carries).
+
+ params
+
+ Field | Type | Required | Notes |
+
+ id | hex32 | required | the VK registry handle |
+
+ errors
+
+ Code | When |
+
+ -32602 | id isn't 32 bytes |
+
+ -32002 | DB read failure |
+
+ result
+
+[CODE]
+{ "registration": VkRegistration | null }
+[/CODE]
+
+ Shape of VkRegistration is declared once for VK registry methods (Week 30) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getVkRegistration","params":{"id":"9090909090909090909090909090909090909090909090909090909090909090"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "registration": {
+ "object_id": "9090909090909090909090909090909090909090909090909090909090909090",
+ "owner_entity": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "created_at": 820,
+ "updated_at": 820,
+ "version": 1,
+ "proof_type": 1,
+ "proof_type_label": "groth16",
+ "code_hash": "0101010101010101010101010101010101010101010101010101010101010101",
+ "label": "inference-vk-v1",
+ "vk_len": 280,
+ "vk_bytes_hex": "<560 hex chars>"
+ }
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_listVkRegistrations
+ crates/node/src/rpc.rs:1523
+
+ Returns every VkRegistration owned by the queried entity. Bounded by MAX_VK_REGISTRATIONS_PER_ENTITY (= 8 in v1).
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | owner entity id |
+
+ errors
+
+ Code | When |
+
+ -32602 | id isn't 32 bytes |
+
+ -32002 | DB read failure |
+
+correction This method's only parameter is entity_id, so the clause above is the one belonging to getVkRegistration, which the reference aliases here. The rejection you will actually see names entity_id. Tracked as NEEDS-OPERATOR.md item 16.
+
+ result
+
+[CODE]
+{ "registrations": [VkRegistration, ...] }
+[/CODE]
+
+ Shape of VkRegistration is declared once for VK registry methods (Week 30) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_listVkRegistrations","params":{"entity_id":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1"},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ SlaAgreement record
+
+ Declared once for SLA methods (Week 31) and shared by every method in it.
+
+[CODE]
+{
+ "object_id": "<hex32>",
+ "owner_entity": "<hex32>", // == buyer_entity_id for active SLAs
+ "created_at": <u64>,
+ "updated_at": <u64>,
+ "version": <u8>,
+ "buyer_entity_id": "<hex32>",
+ "seller_entity_id": "<hex32>",
+ "service_descriptor_hash": "<hex32>",
+ "status": <u8>,
+ "status_label": "proposed" | "active" | "completed" | "violated" | "cancelled" | "unknown",
+ "created_at_height": <u64>,
+ "accepted_at_height": <u64>,
+ "start_height": <u64>,
+ "end_height": <u64>,
+ "violation_count": <u32>,
+ "violation_threshold": <u32>,
+ "max_response_time_blocks": <u32>,
+ "min_uptime_bps": <u16>,
+ "min_delivery_success_bps": <u16>,
+ "price_per_call": "<decimal-string>", // u128
+ "slash_amount": "<decimal-string>", // u128; penalty on breach
+ "terminated_at_height": <u64>,
+ "slashed_amount": "<decimal-string>" // u128; actual debit applied
+}
+[/CODE]
+
+ novai_getSlaAgreement
+ crates/node/src/rpc.rs:1543
+
+ Point-resolves a single SLA memory object by the (owner, object_id) pair.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ owner | hex32 | required | buyer entity id (the SLA's memory-object owner) |
+
+ object_id | hex32 | required | SLA memory object id |
+
+ errors
+-32602 for malformed hex; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "agreement": SlaAgreement | null }
+[/CODE]
+
+ Shape of SlaAgreement is declared once for SLA methods (Week 31) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getSlaAgreement","params":{"owner":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","object_id":"7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "agreement": {
+ "object_id": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+ "owner_entity": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "created_at": 900,
+ "updated_at": 905,
+ "version": 1,
+ "buyer_entity_id": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "seller_entity_id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+ "service_descriptor_hash": "1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637383940",
+ "status": 1,
+ "status_label": "active",
+ "created_at_height": 900,
+ "accepted_at_height": 905,
+ "start_height": 910,
+ "end_height": 2000,
+ "violation_count": 0,
+ "violation_threshold": 3,
+ "max_response_time_blocks": 50,
+ "min_uptime_bps": 9500,
+ "min_delivery_success_bps": 9700,
+ "price_per_call": "1000",
+ "slash_amount": "50000",
+ "terminated_at_height": 0,
+ "slashed_amount": "0"
+ }
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getActiveSla
+ crates/node/src/rpc.rs:1561
+
+ Returns the SLA that is currently open between a given (buyer, seller) pair via the active-pair singleton index (max one active SLA per pair).
+
+ params
+
+ Field | Type | Required | Notes |
+
+ buyer | hex32 | required | buyer entity id |
+
+ seller | hex32 | required | seller entity id |
+
+ errors
+-32602 for malformed hex; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "agreement": SlaAgreement | null }
+[/CODE]
+
+ Shape of SlaAgreement is declared once for SLA methods (Week 31) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getActiveSla","params":{"buyer":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","seller":"5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ novai_listSlasByBuyer
+ crates/node/src/rpc.rs:1579
+
+ Returns every SLA where the queried entity is the buyer (memory-object owner) and the SLA's created_at falls within the height window.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | buyer entity id |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+ errors
+-32602 for malformed hex or range too large; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "agreements": [SlaAgreement, ...] }
+[/CODE]
+
+ Shape of SlaAgreement is declared once for SLA methods (Week 31) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_listSlasByBuyer","params":{"entity_id":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","start_height":0,"end_height":10000},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ novai_listSlasBySeller
+ crates/node/src/rpc.rs:1597
+
+ Returns every SLA where the queried entity is the seller and the SLA's created_at falls within the height window. Bounded internally by the per-buyer cap (= 8 in v1).
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | seller entity id |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+Same parameters as novai_listSlasByBuyer.
+
+ errors
+-32602 for malformed hex or range too large; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "agreements": [SlaAgreement, ...] }
+[/CODE]
+
+ Shape of SlaAgreement is declared once for SLA methods (Week 31) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_listSlasBySeller","params":{"entity_id":"5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b","start_height":0,"end_height":10000},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ PaymentChannel record
+
+ Declared once for Payment channel methods (Week 32) and shared by every method in it.
+
+[CODE]
+{
+ "object_id": "<hex32>",
+ "owner_entity": "<hex32>", // == party_a_entity_id
+ "created_at": <u64>,
+ "updated_at": <u64>,
+ "version": <u8>,
+ "party_a_entity_id": "<hex32>",
+ "party_b_entity_id": "<hex32>",
+ "sla_object_id": "<hex32>", // optional binding to an SlaAgreement (zero if unbound)
+ "status": <u8>,
+ "status_label": "proposed" | "open" | "closing" | "unknown",
+ "deposit_a": "<decimal-string>", // u128
+ "deposit_b": "<decimal-string>", // u128
+ "balance_a": "<decimal-string>", // u128, current recorded
+ "balance_b": "<decimal-string>", // u128, current recorded
+ "nonce": <u64>, // highest applied off-chain state nonce
+ "proposed_at_height": <u64>,
+ "accepted_at_height": <u64>,
+ "closing_at_height": <u64>,
+ "dispute_deadline_height": <u64>,
+ "dispute_window_blocks": <u32>
+}
+[/CODE]
+
+ novai_getPaymentChannel
+ crates/node/src/rpc.rs:1615
+
+ Point-resolves a payment channel by (owner, object_id). Owner is party A.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ owner | hex32 | required | party A entity id (memory-object owner) |
+
+ object_id | hex32 | required | channel memory object id |
+
+ errors
+-32602 for malformed hex; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "channel": PaymentChannel | null }
+[/CODE]
+
+ Shape of PaymentChannel is declared once for Payment channel methods (Week 32) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getPaymentChannel","params":{"owner":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","object_id":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "channel": {
+ "object_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+ "owner_entity": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "created_at": 1020,
+ "updated_at": 1025,
+ "version": 1,
+ "party_a_entity_id": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "party_b_entity_id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+ "sla_object_id": "0000000000000000000000000000000000000000000000000000000000000000",
+ "status": 1,
+ "status_label": "open",
+ "deposit_a": "200000",
+ "deposit_b": "200000",
+ "balance_a": "180000",
+ "balance_b": "220000",
+ "nonce": 7,
+ "proposed_at_height": 1020,
+ "accepted_at_height": 1025,
+ "closing_at_height": 0,
+ "dispute_deadline_height": 0,
+ "dispute_window_blocks": 100
+ }
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_listChannelsByPartyA
+ crates/node/src/rpc.rs:1633
+
+ Returns every PaymentChannel whose memory-object owner (party A) is the queried entity and whose created_at falls within the height window.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | party A entity id |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+ errors
+-32602 for malformed hex or range too large; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "channels": [PaymentChannel, ...] }
+[/CODE]
+
+ Shape of PaymentChannel is declared once for Payment channel methods (Week 32) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_listChannelsByPartyA","params":{"entity_id":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","start_height":0,"end_height":10000},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ novai_listChannelsByPartyB
+ crates/node/src/rpc.rs:1653
+
+ Returns every PaymentChannel where the queried entity is the embedded counterparty (party B). The by-party-B secondary index embeds party A so primary-record resolution is O(1) per match.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | party B entity id |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+Same parameters as novai_listChannelsByPartyA.
+
+ errors
+-32602 for malformed hex or range too large; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "channels": [PaymentChannel, ...] }
+[/CODE]
+
+ Shape of PaymentChannel is declared once for Payment channel methods (Week 32) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_listChannelsByPartyB","params":{"entity_id":"5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b","start_height":0,"end_height":10000},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ novai_getChannelDisputeStatus
+ crates/node/src/rpc.rs:1673
+
+ Returns the dispute-window fields for a channel plus the derived blocks_remaining and finalize_ready, so a client does not need to combine a separate latest-block read with the channel record. When the channel is not in the CLOSING state, blocks_remaining is 0 and finalize_ready is false. When the channel does not resolve (wrong type or missing), found is false and the other fields are placeholder zeros.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ owner | hex32 | required | party A entity id |
+
+ object_id | hex32 | required | channel memory object id |
+
+ errors
+-32602 for malformed hex; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{
+ "found": <bool>,
+ "status": <u8>,
+ "status_label": "proposed" | "open" | "closing" | "unknown",
+ "closing_at_height": <u64>,
+ "dispute_deadline_height": <u64>,
+ "current_height": <u64>,
+ "blocks_remaining": <u64>, // dispute_deadline_height.saturating_sub(current_height) when CLOSING, else 0
+ "finalize_ready": <bool> // true iff status == CLOSING && current_height > dispute_deadline_height
+}
+[/CODE]
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getChannelDisputeStatus","params":{"owner":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","object_id":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "found": true,
+ "status": 2,
+ "status_label": "closing",
+ "closing_at_height": 1100,
+ "dispute_deadline_height": 1200,
+ "current_height": 1180,
+ "blocks_remaining": 20,
+ "finalize_ready": false
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getUpgradeHistory
+ crates/node/src/rpc.rs:1729
+
+ Returns every UpgradeRecord for the entity whose upgrade_height falls within the height window, ordered ascending by height.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | the entity whose history to read |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+ errors
+-32602 for malformed entity_id or range too large; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{
+ "upgrades": [
+ {
+ "old_code_hash": "<hex32>", // pre-upgrade code hash
+ "new_code_hash": "<hex32>", // post-upgrade code hash
+ "upgrade_height": <u64>,
+ "upgrade_count": <u32>, // monotonic counter, 1 for the first upgrade
+ "reason_hash": "<hex32>" // optional off-chain reason commitment; zero if unused
+ }
+ ]
+}
+[/CODE]
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getUpgradeHistory","params":{"entity_id":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","start_height":0,"end_height":10000},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "upgrades": [
+ {
+ "old_code_hash": "0101010101010101010101010101010101010101010101010101010101010101",
+ "new_code_hash": "0202020202020202020202020202020202020202020202020202020202020202",
+ "upgrade_height": 1500,
+ "upgrade_count": 1,
+ "reason_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+ }
+ ]
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ OracleAnchor record
+
+ Declared once for Oracle anchor methods (Week 35) and shared by every method in it.
+
+[CODE]
+{
+ "issuer_entity_id": "<hex32>",
+ "data_hash": "<hex32>", // blake3 commitment to the off-chain data
+ "external_timestamp": <u64>, // opaque; no on-chain wall-clock binds it
+ "source_hash": "<hex32>", // optional source commitment; zero if unused
+ "expiry_height": <u64>, // advisory; 0 if unset
+ "anchor_height": <u64>, // block height the anchor was committed at
+ "data_tag": "<string>", // lossy UTF-8 view of the tag bytes
+ "data_tag_hex": "<hex>" // exact tag bytes (1..=32) hex-encoded
+}
+[/CODE]
+
+ novai_getOracleAnchor
+ crates/node/src/rpc.rs:1787
+
+ Point-resolves a single anchor by the wrapping signal's canonical signal_hash.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ signal_hash | hex32 | required | the 32-byte signal hash of the wrapping OracleAnchor signal |
+
+ errors
+-32602 for malformed hex; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "anchor": OracleAnchor | null }
+[/CODE]
+
+ Shape of OracleAnchor is declared once for Oracle anchor methods (Week 35) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getOracleAnchor","params":{"signal_hash":"e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"},"id":1}'
+[/CODE]
+
+[CODE]
+{
+ "jsonrpc": "2.0",
+ "result": {
+ "anchor": {
+ "issuer_entity_id": "44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1",
+ "data_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+ "external_timestamp": 1717000000,
+ "source_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+ "expiry_height": 0,
+ "anchor_height": 1800,
+ "data_tag": "price/ETH-USD",
+ "data_tag_hex": "70726963652f4554482d555344"
+ }
+ },
+ "id": 1
+}
+[/CODE]
+Example response from the reference. Heights and hashes in it are illustrative, not a current reading.
+
+ novai_getOracleAnchorsByEntity
+ crates/node/src/rpc.rs:1747
+
+ Returns every OracleAnchorRecord posted by the queried entity whose anchor_height falls within the chain-height window. The optional inclusive [ts_min, ts_max] filters by the anchor's external timestamp (post-filter, applied in memory).
+
+ params
+
+ Field | Type | Required | Notes |
+
+ entity_id | hex32 | required | issuer entity id |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+ ts_min | u64 | optional | lower bound on external_timestamp |
+
+ ts_max | u64 | optional | upper bound on external_timestamp |
+
+ errors
+-32602 for malformed hex or range too large; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "anchors": [OracleAnchor, ...] }
+[/CODE]
+
+ Shape of OracleAnchor is declared once for Oracle anchor methods (Week 35) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getOracleAnchorsByEntity","params":{"entity_id":"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1","start_height":0,"end_height":10000},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ novai_getOracleAnchorsByTag
+ crates/node/src/rpc.rs:1767
+
+ Returns every OracleAnchorRecord whose data_tag matches the queried tag (e.g. "price/ETH-USD") within the chain-height window. Matching is by the domain-separated blake3 hash of the tag bytes, so callers pass the raw tag string. The optional [ts_min, ts_max] filter behaves as in getOracleAnchorsByEntity.
+
+ params
+
+ Field | Type | Required | Notes |
+
+ data_tag | string | required | raw tag string, 1..=32 bytes |
+
+ start_height | u64 | required | inclusive |
+
+ end_height | u64 | required | inclusive; must satisfy end - start ≤ 10000 |
+
+ ts_min | u64 | optional | lower bound on external_timestamp |
+
+ ts_max | u64 | optional | upper bound on external_timestamp |
+
+ errors
+-32602 for empty / oversized data_tag or range too large; -32002 for DB read failure.
+
+ result
+
+[CODE]
+{ "anchors": [OracleAnchor, ...] }
+[/CODE]
+
+ Shape of OracleAnchor is declared once for Oracle anchor methods (Week 35) and shared by every method in it.
+
+ example
+
+[CODE]
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getOracleAnchorsByTag","params":{"data_tag":"price/ETH-USD","start_height":0,"end_height":10000},"id":1}'
+[/CODE]
+
+ The reference carries no sample response for this method.
+
+ novai_faucet
+ crates/node/src/rpc.rs:1823
+
+ Mint test tokens not documented here
+
+ This method mints tokens, and it is not documented here until the public testnet opens. Its parameters, result shape and error codes are in docs/RPC_REFERENCE.md, and the handler is linked above. Two of the carried exceptions are about this method, so the reference's account of its gating and of its disabled-path error code are both known to be wrong. The method is still counted in the 29 and still appears in openrpc.json: what is withheld is the runnable example, not the fact that the method exists.
+
+ correction handle_faucet prefers a loaded --faucet-key and falls back to the deterministic dev key only when there is none, so the method also answers on a node started with a faucet key and no dev keys. Tracked as NEEDS-OPERATOR.md item 13.
+
+ correction The disabled path returns -32000, not -32602. A client matching on -32602 to tell a malformed address from a disabled faucet takes the wrong branch. Tracked as NEEDS-OPERATOR.md item 10.
+
+ 04 errors and limits
+ on its own page
+
+ Thirteen JSON-RPC error codes, four HTTP-level rejections that carry no JSON-RPC envelope at all, and six limits.
+
+ json-rpc error codes
+
+ Code | Meaning | Trigger | Note | Source |
+
+ -32700 | Parse error | request body is not valid JSON | | :1335 |
+
+ -32600 | Invalid Request | malformed JSON-RPC envelope (missing jsonrpc/method) | trigger documented wrongly | :1352 |
+
+ -32601 | Method not found | unknown method name | | :1922 |
+
+ -32602 | Invalid params | wrong type, missing field, hex length wrong, range too large, height in the future | | :1950 |
+
+ -32000 | Application error | tx too large, tx decode/sig failure, faucet cooldown, faucet disabled | | :1958 |
+
+ -32001 | Mempool full | mempool at capacity; submitter must back off | | :2045 |
+
+ -32002 | Internal storage error | RocksDB read or codec failure during query | | :2126 |
+
+ -32003 | Response too large | assembled response exceeds 10 MiB | | :3677 |
+
+ -32010 | Nonce too low | tx nonce is below the sender's expected nonce | | :2046 |
+
+ -32011 | Fee too low | tx fee is below the per-tx-type minimum | | :2064 |
+
+ -32012 | Sender limit exceeded | too many pending txs from this sender in the mempool | | :2066 |
+
+ -32013 | Other validation error | catch-all for additional mempool validation failures | | :2070 |
+
+ -32014 | NonceTooHigh | nonce is at or above the sender's admission horizon | not in the reference | :2059 |
+
+ correction A missing jsonrpc or method field answers -32700, not this code, because every field of the request struct is required and a missing one fails to deserialize. -32600 is what you get when jsonrpc is present and is not "2.0". Tracked as NEEDS-OPERATOR.md item 19.
+
+ One of these thirteen is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.
+
+ http rejections with no json-rpc envelope
+
+ Status | Body | Source |
+
+ 400 | Failed to read request: {e} template | :1312 |
+
+ 413 | Request body too large | :1321 |
+
+ 429 | Too Many Requests | :1297 |
+
+ 503 | Service Unavailable &#8212; too many concurrent requests | :1242 |
+
+ These four never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.
+
+ limits
+
+ Limit | Value | Constant | Source |
+
+ requests per second per source IP | 100 | MAX_RPC_REQUESTS_PER_SEC | :65 |
+
+ concurrent in-flight requests | 64 | MAX_CONCURRENT_RPC | :74 |
+
+ bytes, request body | 524,288 | MAX_RPC_BODY_SIZE | :70 |
+
+ bytes, response body | 10,485,760 | MAX_RPC_RESPONSE_SIZE | :3667 |
+
+ bytes, decoded transaction | 131,072 | MAX_TX_SIZE | :19 |
+
+ blocks, signal query height range | 10,000 | MAX_SIGNAL_QUERY_RANGE | :77 |
+
+ handling a rejected nonce
+
+ -32010 and -32014 look similar and need opposite handling. Too low means the transaction is dead and the client must resynchronise. Too high means it is merely early: the identical bytes succeed once the sender's earlier nonces commit, so retry rather than rebuild.
+
+ A transfer to an address that has no account row yet is rejected below the minimum account balance. The error reports the transfer amount in its balance field, which reads as though the sender were short.
+
+ 05 transactions
+ on its own page
+
+ Eleven transaction types. The discriminant is the first byte of the payload and it is what decides the type.
+
+ types, discriminants and minimum fees
+
+ Byte | Type | Min fee | Constant |
+
+ 1 | transfer | 100 | MIN_FEE_TRANSFER |
+
+ 2 | signalCommitment | 1,000 | MIN_FEE_SIGNAL_COMMITMENT |
+
+ 3 | createMemoryObject | 500 | MIN_FEE_MEMORY_OBJECT |
+
+ 4 | updateMemoryObject | 500 | MIN_FEE_MEMORY_OBJECT |
+
+ 5 | deleteMemoryObject | 500 | MIN_FEE_MEMORY_OBJECT |
+
+ 6 | submitProposal | 2,000 | MIN_FEE_GOVERNANCE_SUBMIT |
+
+ 7 | executeProposal | 500 | MIN_FEE_GOVERNANCE_EXECUTE |
+
+ 8 | registerAiEntity | 5,000 | MIN_FEE_REGISTER_AI_ENTITY |
+
+ 9 | creditAiEntity | 100 | MIN_FEE_CREDIT_AI_ENTITY |
+
+ 10 | registerAiEntityWithKey | 5,000 | MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY |
+
+ 11 | entityUpgrade | 5,000 | MIN_FEE_ENTITY_UPGRADE |
+
+ Minimum fee by transaction type, sorted high to low. The most expensive, entityUpgrade, costs 5,000, which is 50 times the cheapest, transfer, at 100. Every value is in the table above.
+ entityUpgrade5,000
+ registerAiEntity5,000
+ registerAiEntityWithKey5,000
+ submitProposal2,000
+ signalCommitment1,000
+ createMemoryObject500
+ deleteMemoryObject500
+ executeProposal500
+ updateMemoryObject500
+ creditAiEntity100
+ transfer100
+
+ Minimum fee by transaction type. entityUpgrade costs 50x transfer. Values from the table above.
+
+ Minimum fees are per type. Percentage fees apply on top of the floor for the operations listed, so unit economics are the floor plus a percentage rather than the floor alone.
+
+ percentage fees
+
+ Constant | Basis points | Share | Source |
+
+ PAYMENT_FEE_BPS | 200 | 2% | :1541 |
+
+ MARKETPLACE_FEE_BPS | 200 | 2% | :12443 |
+
+ SUBSCRIPTION_CANCEL_FEE_BPS | 500 | 5% | :12450 |
+
+ Basis points are against a denominator of 10,000.
+
+ canonical unsigned encoding
+
+ Field | Bytes | Endianness | Offset |
+
+ version | 1 | n/a | 0 |
+
+ from | 32 | n/a | 1 |
+
+ pubkey | 32 | n/a | 33 |
+
+ nonce | 8 | little | 65 |
+
+ fee | 8 | little | 73 |
+
+ payload_len | 4 | little | 81 |
+
+ payload | variable | n/a | 85 |
+
+ The signature is 64 bytes appended after the payload. Fixed overhead is 149 bytes, which is TX_V1_OVERHEAD.
+
+ signing
+
+ Two details a non-Rust client has to get exactly right. The envelope is little-endian while payload internals are big-endian. And the signing preimage and the transaction id are different preimages: the signature covers a domain tag followed by the unsigned encoding, while the id is a hash of the unsigned encoding alone. Trailing bytes after the signature are a decode error, not padding.
+
+ 06 ai entities
+ on its own page
+
+ AI entities are the part of this chain that has no equivalent elsewhere. Three worked flows first, then the full enumerations.
+
+ These describe what the implementation does, with every constant cited to its declaration. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.
+
+ a reputation oracle
+
+ A reputation oracle issues ReputationUpdate signals, signal type 7. Each one moves a target entity's reputation_score, which the chain stores on the entity record and clamps to a 0 to 100 range. A newly registered entity starts at 50.
+
+ Issuing one requires the submit_reputation_updates capability, bit 5 of the entity's capability byte.
+
+ The payload is 101 bytes: the 66-byte signal commitment base plus a 35-byte tail carrying the target entity id, an event type and a signed two-byte delta.
+
+ The event type must be 0 to 12.
+
+ An entity cannot rate itself.
+
+ The fee is 1,000 base units, the signal commitment minimum.
+
+ The effect is checkable in one read: novai_getAiEntity returns reputation_score and reputation_events_count.
+
+ selling signals on the marketplace
+
+ A seller publishes a SignalCatalog memory object, type 7, listing priced offerings. A catalog holds at most 10 offerings, each 10 bytes: a signal type, a price as a big-endian u64, and an active flag.
+
+ A buyer issues a SignalPurchase signal, type 8, naming the seller, the signal type wanted and a maximum price. The chain rejects the purchase if the catalog price is above that maximum.
+
+ On success the chain moves the price from the buyer's economic_balance to the seller's, less a 2% cut routed to the marketplace treasury.
+
+ The payload is 107 bytes: the 66-byte base plus a 41-byte tail.
+
+ Publishing a catalog requires no stake. A listing is not a bond, and a buyer should not read it as one.
+
+ The marketplace treasury is not readable over RPC. No method returns it.
+
+ staking collateral
+
+ A StakeDeposit signal, type 9, moves an amount from an entity's economic_balance into its stake_balance. The payload is 82 bytes: the 66-byte base plus a 16-byte big-endian u128 amount.
+
+ A deposit locks for 1,000 blocks. stake_locked_until is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time; the cadence in the network section converts it.
+
+ Withdrawal is a StakeWithdraw signal, type 10, with the same 82-byte layout. A partial withdrawal does not re-lock the remainder.
+
+ A StakeSlash signal, type 11, issued by an entity holding submit_reputation_updates, subtracts up to a named amount from the target's stake_balance and applies a bundled reputation event in the same operation. The payload is 117 bytes.
+
+ An entity cannot slash itself.
+
+ economic_balance, stake_balance and stake_locked_until are all readable from novai_getAiEntity, and every stake operation appears in the signal index.
+
+ capability bits
+
+ Bit | Hex | Capability |
+
+ 0 | 0x01 | read_public_chain |
+
+ 1 | 0x02 | read_memory_objects |
+
+ 2 | 0x04 | emit_proposals |
+
+ 3 | 0x08 | request_execution |
+
+ 4 | 0x10 | read_nnpx_derived |
+
+ 5 | 0x20 | submit_reputation_updates |
+
+ 6 | 0x40 | post_oracle_anchors |
+
+ Capabilities are one byte, set at registration, and immutable for the entity's life. The upgrade transaction changes the code hash and nothing else, and registering again mints a different entity id, which abandons the reputation, stake, agreements and memory objects attached to the old one. Set every bit you might need on day one.
+
+ signal types (23)
+
+ Type | Variant | Payload | Description |
+
+ 0 | Anomaly | base 66 B payload | no source description |
+
+ 1 | Optimization | base 66 B payload | no source description |
+
+ 2 | Prediction | base 66 B payload | no source description |
+
+ 3 | RiskScore | base 66 B payload | no source description |
+
+ 4 | AuditReport | base 66 B payload | no source description |
+
+ 5 | SpamRisk | base 66 B payload | no source description |
+
+ 6 | CongestionForecast | base 66 B payload | no source description |
+
+ 7 | ReputationUpdate | base + 35 B tail; issuer needs bit 5 | Reputation update emitted by an oracle entity (requires submit_reputation_updates capability). |
+
+ 8 | SignalPurchase | base + 41 B tail | Purchase of a priced signal listed in the seller's SignalCatalog memory object. Carries an inline 41-byte purchase tail (seller_entity_id || purchased_signal_type || max_price_be). |
+
+ 9 | StakeDeposit | base + 16 B tail | Stake-deposit signal moving funds from the issuer's economic_balance to its stake_balance. Locks the deposited amount until current_height + STAKE_LOCK_PERIOD. Carries a 16-byte amount tail. |
+
+ 10 | StakeWithdraw | base + 16 B tail | Stake-withdraw signal moving funds from the issuer's stake_balance back to its economic_balance. Rejected unless stake_locked_until <= current_height. Carries a 16-byte amount tail. |
+
+ 11 | StakeSlash | base + 51 B tail; issuer needs bit 5 | Slash signal emitted by an oracle entity (requires submit_reputation_updates capability). Deducts from a target entity's stake_balance, credits the slashed amount to KEY_SLASH_TREASURY, and applies a reputation update atomically. Carries a 51-byte tail: target_id:32 | slash_amount_be:16 | rep_event_type:1 | points_delta_be:2. |
+
+ 12 | CompositionCheck | base + 34 B tail; issuer needs bit 5 | Composition health check emitted by an oracle entity (requires submit_reputation_updates capability). Validates a target entity's declared CompositionGraph dependency and, if the failure is corroborated by chain state and the dependency is marked required, auto-pauses the target by setting is_active = false. Always emits a REP_EVENT_COMPOSITION_FAILURE reputation event with delta -1. Carries a 34-byte tail: target_id:32 | failed_dependency_idx:1 | failure_reason:1. |
+
+ 13 | ProofSubmission | base + 65 B tail | AI entity submits a ZK proof attesting to off-chain computation integrity. Carries a 65-byte tail: proof_type:1 | code_hash:32 | computation_hash:32. The proof bytes themselves are NOT carried inline (the SignalCommitment tail is fixed-size); a real verifier would resolve them via the off-chain payload referenced by signal_hash. The execution handler verifies the proof via the ZkVerifier trait, and on success creates a VerificationRecord memory object owned by the issuer plus a REP_EVENT_PROOF_VERIFIED reputation event with delta +3. |
+
+ 14 | SubscriptionCreate | base + 49 B tail; locks `rate_per_block * duration_blocks` from the subscriber | Recurring payment subscription create: the issuing entity (the subscriber) locks rate_per_block * duration_blocks of its economic_balance to a producer for a fixed covered signal type. On success the handler creates a MemoryObjectType::Subscription memory object owned by the subscriber, recording the active agreement. Settlement is lazy and is performed when the subscriber emits a matching SubscriptionCancel signal. Carries a 49-byte tail: producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 | duration_blocks_be:8. |
+
+ 15 | SubscriptionCancel | base + 32 B tail; settles accrued payment and refunds the remainder | Recurring payment subscription cancel: the original subscriber terminates an active subscription early. The handler settles accrued payment to the producer (less the standard 2% marketplace fee), applies a 5% cancel fee on the remaining locked funds (paid to the producer with no marketplace cut as compensation for early termination), refunds the rest to the subscriber, and marks the subscription record is_active = false. Only the original subscriber may emit this signal. Carries a 32-byte tail: subscription_id:32 (the memory object id of the Subscription record being cancelled). |
+
+ 16 | PaymentRequest | base + 112 B tail; Week 28 native x402. Optional Week 33 splits and Week 36 condition trailers | Native x402-style per-request payment. The issuing entity (the payer) debits its economic_balance by amount + fee and credits the payee's economic_balance by amount; the fee is routed to KEY_MARKETPLACE_TREASURY. The handler also writes a PaymentRecord to b"ai/payments/by_hash/" || signal_hash plus two scan indexes (by-payer, by-payee). Replay protection is enforced by rejecting any payment whose signal_hash already has a by_hash record. Carries a 112-byte tail: payee_entity_id:32 | amount_be:8 | service_descriptor_hash:32 | request_hash:32 | max_block_height_be:8. |
+
+ 17 | ServiceAttestation | base + 65 B tail; Week 28 delivery attestation by the original payer | Service-delivery attestation issued by the payer of a prior PaymentRequest. The handler loads the referenced PaymentRecord from b"ai/payments/by_hash/" || payment_signal_hash, verifies the issuer of this signal equals the recorded payer, then applies either REP_EVENT_PAYMENT_DELIVERED or REP_EVENT_PAYMENT_FAILED to the payee depending on status. The payment record is rewritten in place with attested_status and attested_height; the record can be attested at most once. Carries a 65-byte tail: payment_signal_hash:32 | payee_entity_id:32 | status:1 (0 = Delivered, 1 = Failed). |
+
+ 18 | SlaAccept | base + 64 B tail; Week 31 SLA acceptance by the seller | SLA acceptance (Week 31): the issuing entity (the seller named in a previously proposed SlaAgreement memory object) accepts the agreement. The handler loads the SLA memory object via the embedded buyer entity id and SLA object id, verifies the signal issuer equals the SLA's seller, gates on the seller's current stake_balance >= sla.slash_amount, then transitions the SLA from SLA_STATUS_PROPOSED to SLA_STATUS_ACTIVE and records the acceptance height. The acceptance must land BEFORE the SLA's start_height; the active-pair singleton index entry stays in place (it was written at create time). Carries a 64-byte tail: sla_object_id:32 | buyer_entity_id:32. |
+
+ 19 | ChannelAccept | base + 64 B tail; Week 32 channel acceptance by party B | Payment channel accept (Week 32): the issuing entity (party B, the counterparty named in a previously proposed PaymentChannel memory object) accepts the channel. The handler loads the channel memory object via the embedded party A entity id and channel object id, verifies the signal issuer equals the channel's party_b_entity_id, debits B's economic_balance by the channel's deposit_b, transitions the channel from PAYMENT_CHANNEL_STATUS_PROPOSED to _OPEN, sets accepted_at_height, and bumps balance_b to deposit_b. Carries a 64-byte tail: channel_object_id:32 | party_a_entity_id:32. |
+
+ 20 | ChannelClose | base + 233 B tail with both parties' signatures; Week 32 cooperative settle or unilateral close | Payment channel close (Week 32): handles both cooperative settle (instant) and unilateral close (opens a dispute window). Carries a 233-byte tail: channel_object_id:32 | party_a_entity_id:32 | nonce_be:8 | balance_a_be:16 | balance_b_be:16 | is_final:1 | sig_a:64 | sig_b:64. Both party signatures are always required (even on unilateral close); the is_final flag distinguishes cooperative settle (instant distribution + memory object delete) from unilateral close (status -> CLOSING, dispute window opens). Inside the dispute window a strictly larger nonce overrides the recorded state. The submitter signs the enclosing TxV1 and pays the fee; either participant may submit. |
+
+ 21 | ChannelFinalize | base + 64 B tail; Week 32 permissionless finalize after the dispute window | Payment channel finalize (Week 32): credits the recorded balance_a / balance_b back to the parties' economic_balance and deletes the channel memory object plus its secondary indexes. Valid only when status == PAYMENT_CHANNEL_STATUS_CLOSING and current_height > dispute_deadline_height. Permissionless: any active AI entity may submit (the parties have aligned incentives to submit themselves; allowing third parties means a finalize is never gated on a specific participant's liveness). Carries a 64-byte tail: channel_object_id:32 | party_a_entity_id:32. |
+
+ 22 | OracleAnchor | base + variable 82..=113 B tail; issuer needs bit 6 `post_oracle_anchors` (Week 35) | Oracle data anchor (Week 35): an entity holding the post_oracle_anchors capability publishes a commitment to external off-chain data (a price feed, an API response, an external timestamp) so other agents and future protocol mechanisms can reference it from a registered, reputation-bearing source. The handler writes an OracleAnchorRecord KV aux row under ai/oracle_anchors/by_hash/<signal_hash> (which doubles as the replay guard) plus by-entity and by-tag scan indexes, and bumps the issuer's total_transactions (reputation-neutral on post; accuracy challenges are deferred to a future week). Carries a variable-length tail: data_hash:32 | external_timestamp_be:8 | source_hash:32 | expiry_height_be:8 | data_tag_len:1 | data_tag:[1..=32]. |
+
+7 of these carry no doc comment in the Rust source, so no description can be generated for them: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast. Their payload sizes are known and are shown.
+
+ memory object types (16)
+
+ Type | Variant | Description |
+
+ 0 | ChainSummary | Epoch summaries containing block ranges, transaction counts, fee totals. |
+
+ 1 | LabelIndex | Tags and categories for addresses (label → address mappings). |
+
+ 2 | EmbeddingCommitment | Commitment hash of an embedding vector (actual vector stored off-chain). |
+
+ 3 | AnomalyLog | Historical record of detected anomalies. |
+
+ 4 | StatisticsSnapshot | Periodic snapshot of chain statistics. |
+
+ 5 | ReputationEvent | Audit record of a reputation change applied to an entity. |
+
+ 6 | Rating | Counterparty rating (score, optional comment hash) feeding reputation. |
+
+ 7 | SignalCatalog | Marketplace pricing catalog: a list of priced signal offerings the owning entity makes available to buyers. |
+
+ 8 | CompositionGraph | Cross-entity composition graph: a list of source-entity dependencies the owning entity declares it consumes signals from. Used by oracle CompositionCheck signals to verify dependency health and auto-pause the owner when a required dependency has failed. |
+
+ 9 | VerificationRecord | On-chain audit record of a verified ZK proof submission. Created by the ProofSubmission signal handler when the verifier accepts a proof. Fixed 105-byte payload: proof_type:1 | code_hash:32 | computation_hash:32 | proof_hash:32 | height_be:8. |
+
+ 10 | DelegationGrant | On-chain delegation grant: an AI entity (the memory object owner / delegator) authorizes another AI entity (the delegate, identified by the embedded delegate_entity_id) to act with a subset of the delegator's capabilities for a bounded duration. Stored as a fixed 42-byte payload (DelegationGrantData). Revocation is performed by deleting the memory object via DELETE_MEMORY_OBJECT. |
+
+ 11 | Subscription | Recurring payment subscription record (Feature 9): the memory object owner is the SUBSCRIBER, who has locked rate_per_block * duration_blocks of economic_balance to a producer for a fixed covered signal type. Settlement is lazy and triggered by the subscriber's SubscriptionCancel signal; on cancel, accrued payment is transferred to the producer (less the 2% marketplace fee), the 5% cancel fee on remaining locked funds is paid to the producer, the rest is refunded to the subscriber, and is_active is set to false. Stored as a fixed 114-byte payload (SubscriptionData). |
+
+ 12 | ServiceDescriptor | Agent Discovery Registry entry (Week 29): the memory object owner is publishing a service description that other entities can discover on-chain. The data field carries a fixed 144-byte ServiceDescriptorData describing what the service is (category + off-chain name / URL / description hashes), what it charges (per-call price, optional subscription rate), and what callers must satisfy (minimum reputation score, minimum stake). category drives a dedicated by_category discovery index; updates may change any field except the category (a category change requires delete + recreate). The object's object_id is the canonical handle a payer puts in the service_descriptor_hash field of a Week 28 PaymentRequest. |
+
+ 13 | VkRegistration | VK Registry entry (Week 30): the memory object owner publishes a zero-knowledge proof verification key on-chain so that future ProofSubmission signals carrying PROOF_TYPE_GROTH16_REGISTERED can reference the VK by the containing memory object's 32-byte object_id instead of inlining the full ~500-byte VK every time. The data field carries a VkRegistrationData payload binding the VK to a code_hash (the computation it verifies) and a proof_type discriminant. The proof_type, code_hash, and vk_bytes fields are IMMUTABLE on UpdateMemoryObject; only the free-form label tag is mutable. |
+
+ 14 | SlaAgreement | On-chain Service Level Agreement between two AI entities (Week 31). The memory object owner is the BUYER who proposed the agreement; the embedded seller_entity_id is the counterparty that accepts (via the SlaAccept signal) and whose stake is at risk on threshold breach. Violations are counted from PAYMENT_ATTESTATION_STATUS_FAILED ServiceAttestation signals issued by the buyer while current_height is in [start_height, end_height]; when violation_count >= violation_threshold the runtime auto- slashes slash_amount from the seller's stake_balance (saturating, mirroring StakeSlash), credits KEY_SLASH_TREASURY, applies an additional REP_DELTA_SLA_VIOLATION_TRIGGERED to the seller, and transitions the SLA to SLA_STATUS_VIOLATED. The agreement is binding once accepted: no mutual cancel signal in v1. |
+
+ 15 | PaymentChannel | Bidirectional payment channel between two AI entities (Week 32). The memory object owner is party A (the proposer who debits deposit_a at create time); the embedded party_b_entity_id is the counterparty who accepts via the ChannelAccept signal (and debits deposit_b at accept time). Off-chain state updates are signed by both parties and never touch the chain unless a cooperative settle, a unilateral close, a dispute, or a finalize signal is submitted. The channel's funds are held INSIDE the memory object payload (balance_a / balance_b); credits back to the parties' economic_balance happen only on cooperative settle, finalize after a dispute window, or buyer-initiated cancel while still in PAYMENT_CHANNEL_STATUS_PROPOSED. The optional sla_object_id is informational only in v1: the runtime does NOT couple channel lifecycle to SLA status. |
+
+ 07 sdks
+ on its own page
+
+ Three SDKs, and they are not equivalent. The distribution difference decides a language choice before the coverage difference does.
+
+ getting them
+
+ SDK | Install | Registry |
+
+ Python | pip install novai-sdk | PyPI, version 0.1.0 |
+
+ Rust | git clone the repository and depend on sdk/novai-sdk by path | not on crates.io |
+
+ TypeScript | git clone the repository and build sdk/novai-sdk-ts | not published to npm |
+
+ Only the Python SDK can be installed from a package registry. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0, published 2026-05-29, and the SDK source in this repository has not changed since that release. The Rust crate is not on crates.io and the npm package is not published.
+
+ The Rust SDK depends on the workspace crates by path (novai-types, novai-crypto, novai-codec, novai-ai-entities), so there is no artifact a registry could carry.
+
+ coverage
+
+ Surface | Chain | Rust | Python | TypeScript |
+
+ transaction builders | 11 | 11 | 11 | 10 |
+
+ signal types | 23 | 23 | 23 | 7 |
+
+ memory object types | 16 | 16 | 16 | 5 |
+
+ The Rust SDK re-exports the chain's own type enumerations rather than redeclaring them, so its signal and memory coverage is complete by construction and cannot drift. The TypeScript SDK declares its own copies, which is why it can and does.
+
+ The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated in numbers below rather than described, because the numbers are the fact.
+
+ transaction builders, per SDK
+
+ Byte | Type | Rust | Python | TypeScript |
+
+ 1 | transfer | yes | yes | yes |
+
+ 2 | signalCommitment | yes | yes | yes |
+
+ 3 | createMemoryObject | yes | yes | yes |
+
+ 4 | updateMemoryObject | yes | yes | yes |
+
+ 5 | deleteMemoryObject | yes | yes | yes |
+
+ 6 | submitProposal | yes | yes | yes |
+
+ 7 | executeProposal | yes | yes | yes |
+
+ 8 | registerAiEntity | yes | yes | yes |
+
+ 9 | creditAiEntity | yes | yes | yes |
+
+ 10 | registerAiEntityWithKey | yes | yes | yes |
+
+ 11 | entityUpgrade | yes | yes | no |
+
+ 08 network parameters
+ on its own page
+
+ What the network is configured to do. Validator count is a configuration fact rather than a live reading.
+
+ Parameter | Value | How it is known |
+
+ Validators | 4 | configuration fact, set by hand |
+
+ Quorum | 3 | 2 * ((n - 1) / 3) + 1 evaluated at n=4 |
+
+ Faults tolerated | 1 | f, from the same rule |
+
+ Transaction types | 11 | payload discriminants |
+
+ Signal types | 23 | AiSignalType variants |
+
+ Memory object types | 16 | MemoryObjectType variants |
+
+ JSON-RPC methods | 29 | agreed across four sources |
+
+ Four validators. This is set by hand and deliberately excluded from the generator: the genesis file names five, and genesis is not what runs.
+
+ Quorum sites agree: crates/node/src/snapshot/valset.rs:28 and crates/consensus_types/src/leader.rs:115.
+
+ retention
+
+ Horizon | Blocks | Constant | Source |
+
+ blocks retained on disk | 50,000 | PRUNE_RETAIN_BLOCKS | :65 |
+
+ heights retained in the in-memory block index | 100,000 | MAX_INDEX_ENTRIES | :339 |
+
+ Retention is published in blocks and never converted to wall-clock time. Block cadence has moved by more than 4x inside a week on this chain, so any hours figure written here would be wrong within days. Divide by the rate you measure yourself.
+
+ deliberately omitted
+
+ Two parameters a reader might expect are deliberately absent. Chain id is omitted because the value that is live has not been confirmed and publishing the wrong one would be worse than publishing none. Genesis hash is omitted because block 0 has been pruned and is not retrievable, which is the more useful fact and is stated under known gaps.
+
+ 09 known gaps
+ on its own page
+
+ What this chain cannot do yet, what the documentation gets wrong, and the operating characteristics that will surprise you. This section exists because the failure it prevents is expensive and the disclosure is cheap.
+
+ history is pruned, and block 0 is gone
+
+ Measured against the live endpoint on 2026-08-29: a height 45,000 and 49,000 blocks back returned a block, and 51,000 and 55,000 blocks back returned result null. That places the boundary where the constant says it is. Two things follow for a client: a pruned height answers with a null result rather than an error, and a height above the tip answers -32602 with the committed height inside the message.
+
+ Read from the implementation and not verifiable from outside: within the band where the index still holds a transaction id but its block has been pruned from disk, the reply is -32002 rather than a null result. That cannot be demonstrated against a public node, because block headers carry no transaction ids and there is no way to obtain one whose block falls inside the band.
+
+ an indexer cannot backfill from an rpc node
+
+ The block index that resolves a transaction id or a block hash to a height is held in memory and is populated only as blocks commit. It is not backfilled from disk at startup. After a node restarts, a transaction committed before that restart resolves to null. An indexer therefore cannot backfill from an RPC node and has to tail from the point it starts.
+
+ getnonce and getbalance are different numbers
+
+ novai_getNonce and the nonce field of novai_getBalance are different numbers and are not substitutes. getNonce answers from the mempool admission cursor; getBalance answers from the committed account row. They agree until a transaction from that sender commits and then fails during execution, after which the cursor runs ahead until the node restarts and reseeds from state. Build plain-account transactions from the getBalance nonce, and use getNonce to predict whether the mempool will admit. Registered AI entities are unaffected: their path compares with greater-than-or-equal and self-heals.
+
+ surface that exists but is not reachable over rpc
+
+ Gap | Impact | Workaround |
+
+ No treasury balance method | treasury/ai, treasury/marketplace, treasury/slash accumulate value but are not addressable accounts | Direct KV inspection (string keys: treasury/ai, treasury/marketplace, treasury/slash) |
+
+ No mempool query | Cannot enumerate pending txs | Poll getTransaction(txid) for inclusion |
+
+ No event subscription | RPC is HTTP request/response only; no WebSocket or push | Poll getLatestBlock and the signal index |
+
+ No transaction logs / traces | Receipts carry only (block_height, tx_index, from, nonce, fee, payload_len) | For execution outcome, cross-check the relevant state read after getTransaction returns non-null |
+
+ Memory object filter by type | getMemoryObjects returns all objects for an entity; no per-type query | Filter client-side on object_type |
+
+ Signal payload tail not surfaced | Index returns only base header (commitment_hash, signal_type, height, issuer); the tail bytes for signals 7..=22 are not in the response | Read the wrapping tx via getTransaction, or use the dedicated aux-record methods (getPaymentsByEntity, getOracleAnchor, etc.) where the chain persists structured aux rows |
+
+ carried drift exceptions
+
+ The drift gate compares four independent sources and fails when they disagree. Five discrepancies are known and carried as named exceptions, each printed on every generator run. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted.
+
+ Exception | Summary | Tracked as |
+
+ error-code-32014-undocumented | -32014 NonceTooHigh is emitted by the node and appears nowhere in the RPC reference | NEEDS-OPERATOR.md item 8 |
+
+ getnonce-documented-as-interchangeable | novai_getNonce is documented as a cheaper substitute for novai_getBalance, but the two read different sources | NEEDS-OPERATOR.md item 15 |
+
+ public-faucet-gating-backwards | GET /faucet/<address> is documented as dev-mode only, but the handler gates on --faucet-key | NEEDS-OPERATOR.md item 9 |
+
+ faucet-rpc-gating-incomplete | novai_faucet is documented as dev-keys only, but the handler also accepts --faucet-key | NEEDS-OPERATOR.md item 13 |
+
+ invalid-request-trigger-is-wrong | -32600 is documented as the answer to a missing jsonrpc or method field, and a missing field answers -32700 | NEEDS-OPERATOR.md item 19 |
+
+ blockbyheight-null-called-unreachable | the reference calls novai_getBlockByHeight's null answer unreachable, and it is the normal answer for any pruned height | NEEDS-OPERATOR.md item 18 |
+
+ getnonce-inherits-unreachable-db-error | novai_getNonce inherits a -32002 DB read failure clause from novai_getBalance, and its handler is never handed the database | NEEDS-OPERATOR.md item 17 |
+
+ vk-list-error-clause-names-foreign-field | novai_listVkRegistrations inherits an error clause from novai_getVkRegistration that names id, a parameter it does not have | NEEDS-OPERATOR.md item 16 |
+
+ faucet-disabled-code-mismatch | novai_faucet's disabled path returns -32000, but the method's error table attributes it to -32602 | NEEDS-OPERATOR.md item 10 |
+
+ 10 verify it yourself
+ on its own page
+
+ The claims on this page are checkable from this browser. This panel calls the live chain and re-derives a consensus property: it walks consecutive block headers and checks that each one's parent hash is the previous block's hash.
+
+ hash linkage check
+
+ This panel needs JavaScript. With it disabled the page still renders in full; only this check is unavailable.
+
+ novai.network
+ /
+ explorer
+ /
+ source

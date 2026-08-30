@@ -92,6 +92,8 @@ deleted by `4e32c47`; it is the origin of the config-facts rule in section 4.
 | `dcc7488` | This handoff document |
 | (C2, this session) | C2: the console generation pipeline, the four-way drift gate and the four printed drift exceptions |
 | (C2, this session) | The dash gate fix, plus the audit of every other shared-regex site |
+| `c4a9f3b` | C3 render plus C4 correctness: 15 defect classes, 4 gates, 9 drift exceptions |
+| `2454da1` | C4 structure: 8 pages, 2 find surfaces, tokeniser, colour, chart, layout, 3 gates |
 
 ---
 
@@ -208,7 +210,7 @@ section without reading the transaction section.
     and content inside a closed `<details>` is unreachable by find-in-page in
     Firefox and Safari. `<details>` is used only for the two long lookup
     enumerations in section 06.
-- **Gate C4, correctness and structure. LANDED 2026-08-30.** The gate was
+- **Gate C4, correctness and structure. COMPLETE 2026-08-30, `c4a9f3b` and `2454da1`, neither pushed.** The gate was
   renumbered by the operator at the start of that session: what this document
   used to call C4 (live panels) is now C5. C4 became the correctness pass plus
   the page split, because the C3 page was publishing wrong facts and those had
@@ -249,6 +251,31 @@ section without reading the transaction section.
   - **One chart**, the fee ladder, and three candidate datasets were read and
     rejected. **Copy buttons**, injected by the only script on the page, so with
     JavaScript off the page is what it was.
+
+- **Gate C4b, the thirteen. PENDING. See `C4B-BRIEF.md` and `PHASE3-REPORTS.md`.**
+  C4's own adversarial pass attacked 341 claims and falsified 13. It re-found
+  none of the fifteen closed defects as still broken, and confirmed several of
+  the fixes against the running node. What it found instead: **three defects C4
+  introduced, three holes in gates C4 wrote, and eight cross-references the page
+  split broke.** The four priority items, in order:
+  1. The canonical `entity_id` derivation is published truncated at a dangling
+     backslash, because the table parser splits on the document's escaped pipes.
+     `code_hash || creator` occurs zero times on the whole console, and
+     `entity_id` is the required parameter of fourteen of the twenty-nine
+     methods.
+  2. `novai_getSignalsByHeight` publishes a range-check error its handler cannot
+     emit, behind two independent gate holes: category-common error tables carry
+     no `resolvedFrom` key so the inherited-meaning check skips them, and
+     `backtickedIdents` cannot parse the clause that carries the defect.
+  3. Eight cross-references that read correctly on one page and broke when it
+     became eight, including two promises the page makes about itself: a
+     conversion the target page states it will never do, and citations a page
+     claims to give and does not.
+  4. Two C4 fixes applied only half way: a second hardcoded "Five discrepancies"
+     inside a `PROSE` string against a derived nine, and four dead anchors on
+     `names.html` marked as the current page.
+  Nothing is public: the console carries `noindex` and the site does not link to
+  it. This is debt, not an incident.
 
 - **Gate C5, live panels.** Network status and verify panel as React islands,
   mounted (not hydrated) into containers holding identical static markup, so
@@ -582,20 +609,31 @@ A hero that passes i, ii and iv while failing iii is still rejected.
   a generated file describing a `crates/` tree that is being edited right now.**
   1. `repo-stats` staleness. Refreshed during the C4 session and immediately
      stale again: it was measured against a working tree carrying uncommitted
-     node work, so 130,785 lines and 2,175 tests describe code that is not in
-     the repository, and the tree moved again within minutes.
+     node work, so 130,785 lines and 2,175 tests described code that was not in
+     the repository at the time, and the tree moved again within minutes. Now
+     that `98d2e52` has landed, `npm run stats` describes committed state again.
+     It publishes site numbers, so it stays an operator decision.
   2. `console-data --check`. A fresh run puts `MAX_INDEX_ENTRIES` at
-     `crates/node/src/main.rs:362`; the committed data says 339. The difference
-     is uncommitted work above that line. **The committed 339 was kept
-     deliberately.** Source links point at `blob/main`, so they must match
-     committed code; regenerating would publish a link to a line that exists in
-     no commit.
+     `crates/node/src/main.rs:362`; the committed data says 339. **The committed
+     339 was kept deliberately while the node work was uncommitted**, because
+     source links point at `blob/main` and regenerating would have published a
+     link to a line that existed in no commit.
+     **That reason expired when `98d2e52` landed.** Line 362 is now the
+     committed line, verified with `git show HEAD:crates/node/src/main.rs`, so
+     `npm run console:data` is now correct rather than premature. It is one
+     command and it turns failures 2 and 3 green. It was left undone only
+     because the C4 session was told to stop, not because it is unsafe.
   3. `prints every exception on a successful run` fails only because it shells
      out to `--check` and inherits failure 2.
-  None of these can be made green from inside `website/`. They go green when the
-  node work is committed and the two generated files are refreshed against it,
-  which is one command each and an operator decision because both publish
-  numbers.
+  A fourth gate is red and is NOT in the suite: `snapshot:check` reports the
+  committed chain snapshot at height 4,354,701 against a live tip near
+  5,433,000, a gap of about 21 retention windows. It sits in `predeploy`, which
+  refreshes before checking, so it self-heals on the next deploy. Worth knowing
+  before one, not worth fixing now.
+  The node work landed as `98d2e52` at the close of the C4 session, so all three
+  are now refreshable with one command each. Both commands rewrite a generated
+  file that publishes numbers, so both stay an operator decision rather than a
+  side effect of a console commit.
 - **That warning came true on 2026-08-30 and is worth reading twice.** The
   stats file was refreshed while node work was uncommitted, so it now publishes
   `linesOfRust` and `tests` measured against a tree the repository does not

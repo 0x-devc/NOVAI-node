@@ -1,0 +1,134 @@
+Errors and limits | NOVAI developer console
+
+ Skip to content
+
+ NOVAI
+
+ developer console
+
+ main site
+ explorer
+ source
+
+ 01 connect
+ 02 first call
+ 03 rpc reference
+ 04 errors and limits
+ 05 transactions
+ 06 ai entities
+ 07 sdks
+ 08 network parameters
+ 09 known gaps
+ 10 verify it yourself
+ everything
+ names
+
+ sections
+
+ 01 connect
+
+ 02 first call
+
+ 03 rpc reference
+
+ 04 errors and limits
+
+ 05 transactions
+
+ 06 ai entities
+
+ 07 sdks
+
+ 08 network parameters
+
+ 09 known gaps
+
+ 10 verify it yourself
+
+ find
+
+ &#8942; everything on one page
+
+ &#8942; index of names
+
+ Errors and limits
+
+ 04 errors and limits
+
+ Thirteen JSON-RPC error codes, four HTTP-level rejections that carry no JSON-RPC envelope at all, and six limits.
+
+ json-rpc error codes
+
+ Code | Meaning | Trigger | Note | Source |
+
+ -32700 | Parse error | request body is not valid JSON | | :1335 |
+
+ -32600 | Invalid Request | malformed JSON-RPC envelope (missing jsonrpc/method) | trigger documented wrongly | :1352 |
+
+ -32601 | Method not found | unknown method name | | :1922 |
+
+ -32602 | Invalid params | wrong type, missing field, hex length wrong, range too large, height in the future | | :1950 |
+
+ -32000 | Application error | tx too large, tx decode/sig failure, faucet cooldown, faucet disabled | | :1958 |
+
+ -32001 | Mempool full | mempool at capacity; submitter must back off | | :2045 |
+
+ -32002 | Internal storage error | RocksDB read or codec failure during query | | :2126 |
+
+ -32003 | Response too large | assembled response exceeds 10 MiB | | :3677 |
+
+ -32010 | Nonce too low | tx nonce is below the sender's expected nonce | | :2046 |
+
+ -32011 | Fee too low | tx fee is below the per-tx-type minimum | | :2064 |
+
+ -32012 | Sender limit exceeded | too many pending txs from this sender in the mempool | | :2066 |
+
+ -32013 | Other validation error | catch-all for additional mempool validation failures | | :2070 |
+
+ -32014 | NonceTooHigh | nonce is at or above the sender's admission horizon | not in the reference | :2059 |
+
+ correction A missing jsonrpc or method field answers -32700, not this code, because every field of the request struct is required and a missing one fails to deserialize. -32600 is what you get when jsonrpc is present and is not "2.0". Tracked as NEEDS-OPERATOR.md item 19.
+
+ One of these thirteen is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.
+
+ http rejections with no json-rpc envelope
+
+ Status | Body | Source |
+
+ 400 | Failed to read request: {e} template | :1312 |
+
+ 413 | Request body too large | :1321 |
+
+ 429 | Too Many Requests | :1297 |
+
+ 503 | Service Unavailable &#8212; too many concurrent requests | :1242 |
+
+ These four never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.
+
+ limits
+
+ Limit | Value | Constant | Source |
+
+ requests per second per source IP | 100 | MAX_RPC_REQUESTS_PER_SEC | :65 |
+
+ concurrent in-flight requests | 64 | MAX_CONCURRENT_RPC | :74 |
+
+ bytes, request body | 524,288 | MAX_RPC_BODY_SIZE | :70 |
+
+ bytes, response body | 10,485,760 | MAX_RPC_RESPONSE_SIZE | :3667 |
+
+ bytes, decoded transaction | 131,072 | MAX_TX_SIZE | :19 |
+
+ blocks, signal query height range | 10,000 | MAX_SIGNAL_QUERY_RANGE | :77 |
+
+ handling a rejected nonce
+
+ -32010 and -32014 look similar and need opposite handling. Too low means the transaction is dead and the client must resynchronise. Too high means it is merely early: the identical bytes succeed once the sender's earlier nonces commit, so retry rather than rebuild.
+
+ A transfer to an address that has no account row yet is rejected below the minimum account balance. The error reports the transfer amount in its balance field, which reads as though the sender were short.
+
+ novai.network
+ /
+ explorer
+ /
+ source

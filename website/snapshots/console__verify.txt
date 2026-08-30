@@ -1,0 +1,68 @@
+Verify | NOVAI developer console
+
+ Skip to content
+
+ NOVAI
+
+ developer console
+
+ main site
+ explorer
+ source
+
+ 01 connect
+ 02 first call
+ 03 rpc reference
+ 04 errors and limits
+ 05 transactions
+ 06 ai entities
+ 07 sdks
+ 08 network parameters
+ 09 known gaps
+ 10 verify it yourself
+ everything
+ names
+
+ sections
+
+ 01 connect
+
+ 02 first call
+
+ 03 rpc reference
+
+ 04 errors and limits
+
+ 05 transactions
+
+ 06 ai entities
+
+ 07 sdks
+
+ 08 network parameters
+
+ 09 known gaps
+
+ 10 verify it yourself
+
+ find
+
+ &#8942; everything on one page
+
+ &#8942; index of names
+
+ Verify it yourself
+
+ 10 verify it yourself
+
+ The claims on this page are checkable from this browser. This panel calls the live chain and re-derives a consensus property: it walks consecutive block headers and checks that each one's parent hash is the previous block's hash.
+
+ hash linkage check
+
+ This panel needs JavaScript. With it disabled the page still renders in full; only this check is unavailable.
+
+ novai.network
+ /
+ explorer
+ /
+ source

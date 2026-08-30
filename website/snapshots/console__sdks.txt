@@ -1,0 +1,118 @@
+SDKs | NOVAI developer console
+
+ Skip to content
+
+ NOVAI
+
+ developer console
+
+ main site
+ explorer
+ source
+
+ 01 connect
+ 02 first call
+ 03 rpc reference
+ 04 errors and limits
+ 05 transactions
+ 06 ai entities
+ 07 sdks
+ 08 network parameters
+ 09 known gaps
+ 10 verify it yourself
+ everything
+ names
+
+ sections
+
+ 01 connect
+
+ 02 first call
+
+ 03 rpc reference
+
+ 04 errors and limits
+
+ 05 transactions
+
+ 06 ai entities
+
+ 07 sdks
+
+ 08 network parameters
+
+ 09 known gaps
+
+ 10 verify it yourself
+
+ find
+
+ &#8942; everything on one page
+
+ &#8942; index of names
+
+ SDKs
+
+ 07 sdks
+
+ Three SDKs, and they are not equivalent. The distribution difference decides a language choice before the coverage difference does.
+
+ getting them
+
+ SDK | Install | Registry |
+
+ Python | pip install novai-sdk | PyPI, version 0.1.0 |
+
+ Rust | git clone the repository and depend on sdk/novai-sdk by path | not on crates.io |
+
+ TypeScript | git clone the repository and build sdk/novai-sdk-ts | not published to npm |
+
+ Only the Python SDK can be installed from a package registry. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0, published 2026-05-29, and the SDK source in this repository has not changed since that release. The Rust crate is not on crates.io and the npm package is not published.
+
+ The Rust SDK depends on the workspace crates by path (novai-types, novai-crypto, novai-codec, novai-ai-entities), so there is no artifact a registry could carry.
+
+ coverage
+
+ Surface | Chain | Rust | Python | TypeScript |
+
+ transaction builders | 11 | 11 | 11 | 10 |
+
+ signal types | 23 | 23 | 23 | 7 |
+
+ memory object types | 16 | 16 | 16 | 5 |
+
+ The Rust SDK re-exports the chain's own type enumerations rather than redeclaring them, so its signal and memory coverage is complete by construction and cannot drift. The TypeScript SDK declares its own copies, which is why it can and does.
+
+ The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated in numbers below rather than described, because the numbers are the fact.
+
+ transaction builders, per SDK
+
+ Byte | Type | Rust | Python | TypeScript |
+
+ 1 | transfer | yes | yes | yes |
+
+ 2 | signalCommitment | yes | yes | yes |
+
+ 3 | createMemoryObject | yes | yes | yes |
+
+ 4 | updateMemoryObject | yes | yes | yes |
+
+ 5 | deleteMemoryObject | yes | yes | yes |
+
+ 6 | submitProposal | yes | yes | yes |
+
+ 7 | executeProposal | yes | yes | yes |
+
+ 8 | registerAiEntity | yes | yes | yes |
+
+ 9 | creditAiEntity | yes | yes | yes |
+
+ 10 | registerAiEntityWithKey | yes | yes | yes |
+
+ 11 | entityUpgrade | yes | yes | no |
+
+ novai.network
+ /
+ explorer
+ /
+ source

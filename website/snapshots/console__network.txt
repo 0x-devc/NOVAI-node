@@ -1,0 +1,156 @@
+Network | NOVAI developer console
+
+ Skip to content
+
+ NOVAI
+
+ developer console
+
+ main site
+ explorer
+ source
+
+ 01 connect
+ 02 first call
+ 03 rpc reference
+ 04 errors and limits
+ 05 transactions
+ 06 ai entities
+ 07 sdks
+ 08 network parameters
+ 09 known gaps
+ 10 verify it yourself
+ everything
+ names
+
+ sections
+
+ 01 connect
+
+ 02 first call
+
+ 03 rpc reference
+
+ 04 errors and limits
+
+ 05 transactions
+
+ 06 ai entities
+
+ 07 sdks
+
+ 08 network parameters
+
+ 09 known gaps
+
+ 10 verify it yourself
+
+ find
+
+ &#8942; everything on one page
+
+ &#8942; index of names
+
+ Network parameters and gaps
+
+ 08 network parameters
+
+ What the network is configured to do. Validator count is a configuration fact rather than a live reading.
+
+ Parameter | Value | How it is known |
+
+ Validators | 4 | configuration fact, set by hand |
+
+ Quorum | 3 | 2 * ((n - 1) / 3) + 1 evaluated at n=4 |
+
+ Faults tolerated | 1 | f, from the same rule |
+
+ Transaction types | 11 | payload discriminants |
+
+ Signal types | 23 | AiSignalType variants |
+
+ Memory object types | 16 | MemoryObjectType variants |
+
+ JSON-RPC methods | 29 | agreed across four sources |
+
+ Four validators. This is set by hand and deliberately excluded from the generator: the genesis file names five, and genesis is not what runs.
+
+ Quorum sites agree: crates/node/src/snapshot/valset.rs:28 and crates/consensus_types/src/leader.rs:115.
+
+ retention
+
+ Horizon | Blocks | Constant | Source |
+
+ blocks retained on disk | 50,000 | PRUNE_RETAIN_BLOCKS | :65 |
+
+ heights retained in the in-memory block index | 100,000 | MAX_INDEX_ENTRIES | :339 |
+
+ Retention is published in blocks and never converted to wall-clock time. Block cadence has moved by more than 4x inside a week on this chain, so any hours figure written here would be wrong within days. Divide by the rate you measure yourself.
+
+ deliberately omitted
+
+ Two parameters a reader might expect are deliberately absent. Chain id is omitted because the value that is live has not been confirmed and publishing the wrong one would be worse than publishing none. Genesis hash is omitted because block 0 has been pruned and is not retrievable, which is the more useful fact and is stated under known gaps.
+
+ 09 known gaps
+
+ What this chain cannot do yet, what the documentation gets wrong, and the operating characteristics that will surprise you. This section exists because the failure it prevents is expensive and the disclosure is cheap.
+
+ history is pruned, and block 0 is gone
+
+ Measured against the live endpoint on 2026-08-29: a height 45,000 and 49,000 blocks back returned a block, and 51,000 and 55,000 blocks back returned result null. That places the boundary where the constant says it is. Two things follow for a client: a pruned height answers with a null result rather than an error, and a height above the tip answers -32602 with the committed height inside the message.
+
+ Read from the implementation and not verifiable from outside: within the band where the index still holds a transaction id but its block has been pruned from disk, the reply is -32002 rather than a null result. That cannot be demonstrated against a public node, because block headers carry no transaction ids and there is no way to obtain one whose block falls inside the band.
+
+ an indexer cannot backfill from an rpc node
+
+ The block index that resolves a transaction id or a block hash to a height is held in memory and is populated only as blocks commit. It is not backfilled from disk at startup. After a node restarts, a transaction committed before that restart resolves to null. An indexer therefore cannot backfill from an RPC node and has to tail from the point it starts.
+
+ getnonce and getbalance are different numbers
+
+ novai_getNonce and the nonce field of novai_getBalance are different numbers and are not substitutes. getNonce answers from the mempool admission cursor; getBalance answers from the committed account row. They agree until a transaction from that sender commits and then fails during execution, after which the cursor runs ahead until the node restarts and reseeds from state. Build plain-account transactions from the getBalance nonce, and use getNonce to predict whether the mempool will admit. Registered AI entities are unaffected: their path compares with greater-than-or-equal and self-heals.
+
+ surface that exists but is not reachable over rpc
+
+ Gap | Impact | Workaround |
+
+ No treasury balance method | treasury/ai, treasury/marketplace, treasury/slash accumulate value but are not addressable accounts | Direct KV inspection (string keys: treasury/ai, treasury/marketplace, treasury/slash) |
+
+ No mempool query | Cannot enumerate pending txs | Poll getTransaction(txid) for inclusion |
+
+ No event subscription | RPC is HTTP request/response only; no WebSocket or push | Poll getLatestBlock and the signal index |
+
+ No transaction logs / traces | Receipts carry only (block_height, tx_index, from, nonce, fee, payload_len) | For execution outcome, cross-check the relevant state read after getTransaction returns non-null |
+
+ Memory object filter by type | getMemoryObjects returns all objects for an entity; no per-type query | Filter client-side on object_type |
+
+ Signal payload tail not surfaced | Index returns only base header (commitment_hash, signal_type, height, issuer); the tail bytes for signals 7..=22 are not in the response | Read the wrapping tx via getTransaction, or use the dedicated aux-record methods (getPaymentsByEntity, getOracleAnchor, etc.) where the chain persists structured aux rows |
+
+ carried drift exceptions
+
+ The drift gate compares four independent sources and fails when they disagree. Five discrepancies are known and carried as named exceptions, each printed on every generator run. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted.
+
+ Exception | Summary | Tracked as |
+
+ error-code-32014-undocumented | -32014 NonceTooHigh is emitted by the node and appears nowhere in the RPC reference | NEEDS-OPERATOR.md item 8 |
+
+ getnonce-documented-as-interchangeable | novai_getNonce is documented as a cheaper substitute for novai_getBalance, but the two read different sources | NEEDS-OPERATOR.md item 15 |
+
+ public-faucet-gating-backwards | GET /faucet/<address> is documented as dev-mode only, but the handler gates on --faucet-key | NEEDS-OPERATOR.md item 9 |
+
+ faucet-rpc-gating-incomplete | novai_faucet is documented as dev-keys only, but the handler also accepts --faucet-key | NEEDS-OPERATOR.md item 13 |
+
+ invalid-request-trigger-is-wrong | -32600 is documented as the answer to a missing jsonrpc or method field, and a missing field answers -32700 | NEEDS-OPERATOR.md item 19 |
+
+ blockbyheight-null-called-unreachable | the reference calls novai_getBlockByHeight's null answer unreachable, and it is the normal answer for any pruned height | NEEDS-OPERATOR.md item 18 |
+
+ getnonce-inherits-unreachable-db-error | novai_getNonce inherits a -32002 DB read failure clause from novai_getBalance, and its handler is never handed the database | NEEDS-OPERATOR.md item 17 |
+
+ vk-list-error-clause-names-foreign-field | novai_listVkRegistrations inherits an error clause from novai_getVkRegistration that names id, a parameter it does not have | NEEDS-OPERATOR.md item 16 |
+
+ faucet-disabled-code-mismatch | novai_faucet's disabled path returns -32000, but the method's error table attributes it to -32602 | NEEDS-OPERATOR.md item 10 |
+
+ novai.network
+ /
+ explorer
+ /
+ source

@@ -1,0 +1,143 @@
+Transactions | NOVAI developer console
+
+ Skip to content
+
+ NOVAI
+
+ developer console
+
+ main site
+ explorer
+ source
+
+ 01 connect
+ 02 first call
+ 03 rpc reference
+ 04 errors and limits
+ 05 transactions
+ 06 ai entities
+ 07 sdks
+ 08 network parameters
+ 09 known gaps
+ 10 verify it yourself
+ everything
+ names
+
+ sections
+
+ 01 connect
+
+ 02 first call
+
+ 03 rpc reference
+
+ 04 errors and limits
+
+ 05 transactions
+
+ 06 ai entities
+
+ 07 sdks
+
+ 08 network parameters
+
+ 09 known gaps
+
+ 10 verify it yourself
+
+ find
+
+ &#8942; everything on one page
+
+ &#8942; index of names
+
+ Transactions
+
+ 05 transactions
+
+ Eleven transaction types. The discriminant is the first byte of the payload and it is what decides the type.
+
+ types, discriminants and minimum fees
+
+ Byte | Type | Min fee | Constant |
+
+ 1 | transfer | 100 | MIN_FEE_TRANSFER |
+
+ 2 | signalCommitment | 1,000 | MIN_FEE_SIGNAL_COMMITMENT |
+
+ 3 | createMemoryObject | 500 | MIN_FEE_MEMORY_OBJECT |
+
+ 4 | updateMemoryObject | 500 | MIN_FEE_MEMORY_OBJECT |
+
+ 5 | deleteMemoryObject | 500 | MIN_FEE_MEMORY_OBJECT |
+
+ 6 | submitProposal | 2,000 | MIN_FEE_GOVERNANCE_SUBMIT |
+
+ 7 | executeProposal | 500 | MIN_FEE_GOVERNANCE_EXECUTE |
+
+ 8 | registerAiEntity | 5,000 | MIN_FEE_REGISTER_AI_ENTITY |
+
+ 9 | creditAiEntity | 100 | MIN_FEE_CREDIT_AI_ENTITY |
+
+ 10 | registerAiEntityWithKey | 5,000 | MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY |
+
+ 11 | entityUpgrade | 5,000 | MIN_FEE_ENTITY_UPGRADE |
+
+ Minimum fee by transaction type, sorted high to low. The most expensive, entityUpgrade, costs 5,000, which is 50 times the cheapest, transfer, at 100. Every value is in the table above.
+ entityUpgrade5,000
+ registerAiEntity5,000
+ registerAiEntityWithKey5,000
+ submitProposal2,000
+ signalCommitment1,000
+ createMemoryObject500
+ deleteMemoryObject500
+ executeProposal500
+ updateMemoryObject500
+ creditAiEntity100
+ transfer100
+
+ Minimum fee by transaction type. entityUpgrade costs 50x transfer. Values from the table above.
+
+ Minimum fees are per type. Percentage fees apply on top of the floor for the operations listed, so unit economics are the floor plus a percentage rather than the floor alone.
+
+ percentage fees
+
+ Constant | Basis points | Share | Source |
+
+ PAYMENT_FEE_BPS | 200 | 2% | :1541 |
+
+ MARKETPLACE_FEE_BPS | 200 | 2% | :12443 |
+
+ SUBSCRIPTION_CANCEL_FEE_BPS | 500 | 5% | :12450 |
+
+ Basis points are against a denominator of 10,000.
+
+ canonical unsigned encoding
+
+ Field | Bytes | Endianness | Offset |
+
+ version | 1 | n/a | 0 |
+
+ from | 32 | n/a | 1 |
+
+ pubkey | 32 | n/a | 33 |
+
+ nonce | 8 | little | 65 |
+
+ fee | 8 | little | 73 |
+
+ payload_len | 4 | little | 81 |
+
+ payload | variable | n/a | 85 |
+
+ The signature is 64 bytes appended after the payload. Fixed overhead is 149 bytes, which is TX_V1_OVERHEAD.
+
+ signing
+
+ Two details a non-Rust client has to get exactly right. The envelope is little-endian while payload internals are big-endian. And the signing preimage and the transaction id are different preimages: the signature covers a domain tag followed by the unsigned encoding, while the id is a hash of the unsigned encoding alone. Trailing bytes after the signature are a decode error, not padding.
+
+ novai.network
+ /
+ explorer
+ /
+ source

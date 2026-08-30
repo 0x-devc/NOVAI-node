@@ -1,0 +1,198 @@
+NOVAI developer console
+
+ Skip to content
+
+ NOVAI
+
+ developer console
+
+ main site
+ explorer
+ source
+
+ 01 connect
+ 02 first call
+ 03 rpc reference
+ 04 errors and limits
+ 05 transactions
+ 06 ai entities
+ 07 sdks
+ 08 network parameters
+ 09 known gaps
+ 10 verify it yourself
+ everything
+ names
+
+ sections
+
+ 01 connect
+
+ 02 first call
+
+ 03 rpc reference
+
+ 04 errors and limits
+
+ 05 transactions
+
+ 06 ai entities
+
+ 07 sdks
+
+ 08 network parameters
+
+ 09 known gaps
+
+ 10 verify it yourself
+
+ find
+
+ &#8942; everything on one page
+
+ &#8942; index of names
+
+ NOVAI developer console
+
+ Everything needed to build against the chain. The reference below is generated from the source tree at
+ build time, and every method name in it is cross-checked across four independent sources, so the build
+ fails when they disagree. That check is over names: where the reference and the implementation disagree
+ about a parameter, an error code or a result, the difference is carried as an explicit exception and
+ corrected where you meet it. There are 9 of those today, listed in known gaps.
+
+ NOVAI treats AI entities as first-class on-chain actors: they hold balances and reputation, publish
+ 23 kinds of signal, and own 16 kinds of memory object. That is what the
+ transaction and entity sections describe.
+
+ 29
+methods, agreed
+
+ 4
+sources cross-checked
+
+ 9
+carried exceptions
+
+ 11
+transaction types
+
+ Generated from the source tree at 2026-08-30 12:41:54 UTC. Sources: crates/node/src/rpc.rs, docs/RPC_REFERENCE.md, README.md, sdk/novai-python-sdk/novai_sdk.
+
+ 01 connect
+
+[CODE]
+URL=https://rpc.novai.network
+
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getLatestBlock","params":{},"id":1}'
+[/CODE]
+
+ Property | Value |
+
+ Protocol | JSON-RPC 2.0 over HTTP POST |
+
+ Content-Type | application/json |
+
+ Endpoint | https://rpc.novai.network |
+
+ Authentication | none |
+
+ Requests are rate limited per source IP. The limits, and the reply you get when you cross one, are in errors and limits.
+
+ network
+
+ Live height and cadence load here when JavaScript is available.
+
+ 02 first call
+
+ Three ways to make the same call. The output under each was produced by running exactly the code shown.
+
+ curl
+
+ No install. Paste it.
+
+[CODE]
+curl -s -X POST https://rpc.novai.network -H 'Content-Type: application/json' \
+ -d '{"jsonrpc":"2.0","method":"novai_getLatestBlock","params":{},"id":1}'
+[/CODE]
+
+[CODE]
+{"jsonrpc":"2.0","result":{"block_hash":"6b4ef2adc610656969ca65c94c057ddcb5eafa3c441de14d95b931aac066a8e9","height":5225248,"parent_hash":"0c6582e4ef81f793266ae8d46642f9acd9c314bc7947ef2e57142a2f3a0981c1","round":0,"state_root":"2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e","tx_count":0},"id":1}
+[/CODE]
+
+ python
+
+ Standard library only. No pip install.
+
+[CODE]
+import json, urllib.request
+
+req = urllib.request.Request(
+ "https://rpc.novai.network",
+ data=json.dumps({"jsonrpc": "2.0", "method": "novai_getLatestBlock",
+ "params": {}, "id": 1}).encode(),
+ headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req, timeout=10) as r:
+ print(json.dumps(json.load(r)["result"], indent=2))
+[/CODE]
+
+[CODE]
+{
+ "block_hash": "8cec80e8dc7b2e77b1e43314bda2f2570aaad82fb02c4afa9a1d35990177d802",
+ "height": 5225249,
+ "parent_hash": "6b4ef2adc610656969ca65c94c057ddcb5eafa3c441de14d95b931aac066a8e9",
+ "round": 0,
+ "state_root": "2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e",
+ "tx_count": 0
+}
+[/CODE]
+
+ rust
+
+ A standalone cargo project with one dependency. This needs a build step, which the two above do not, so it is the third path rather than the first. It does not use the NOVAI Rust SDK, because that SDK depends on the workspace crates by path and so cannot be built outside a clone of the repository.
+
+[CODE]
+// Cargo.toml
+// [dependencies]
+// reqwest = { version = "0.12", features = ["blocking", "json"] }
+// serde_json = "1"
+
+use std::error::Error;
+
+fn main() -> Result<(), Box<dyn Error>> {
+ let body = serde_json::json!({
+ "jsonrpc": "2.0",
+ "method": "novai_getLatestBlock",
+ "params": {},
+ "id": 1
+ });
+
+ let resp: serde_json::Value = reqwest::blocking::Client::new()
+ .post("https://rpc.novai.network")
+ .json(&body)
+ .send()?
+ .json()?;
+
+ println!("{}", serde_json::to_string_pretty(&resp["result"])?);
+ Ok(())
+}
+[/CODE]
+
+[CODE]
+{
+ "block_hash": "4c065392ab83658711dc3df2ade2bda953c33a1a4f5d0e884439b6a9548ed1a3",
+ "height": 5225251,
+ "parent_hash": "3399db3cd66c7185b2521d5ba7c8c58ddd84b59004024f475b7ed7fe16a79d27",
+ "round": 0,
+ "state_root": "2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e",
+ "tx_count": 0
+}
+[/CODE]
+
+ Captured by running each example against the live endpoint. Heights and hashes move every few hundred milliseconds, so yours will differ; the shape is what is being shown. Captured 2026-08-29T17:55:36Z.
+
+ novai.network
+ /
+ explorer
+ /
+ source
