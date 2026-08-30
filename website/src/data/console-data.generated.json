@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-29T13:09:38.855Z",
+  "generatedAt": "2026-08-30T12:41:54.710Z",
   "source": {
     "reference": "docs/RPC_REFERENCE.md",
     "dispatch": "crates/node/src/rpc.rs",
@@ -77,6 +77,30 @@
           "operatorRef": "NEEDS-OPERATOR.md item 13"
         },
         {
+          "id": "invalid-request-trigger-is-wrong",
+          "summary": "-32600 is documented as the answer to a missing jsonrpc or method field, and a missing field answers -32700",
+          "why": "Every field of RpcRequest is required, with no Option and no serde default, so a missing field fails deserialization and returns -32700 Parse error. -32600 is reachable only when jsonrpc is present and is not \"2.0\". A client matching -32600 to detect a malformed envelope therefore never sees it, and gets -32700, which this same table attributes to invalid JSON.",
+          "operatorRef": "NEEDS-OPERATOR.md item 19"
+        },
+        {
+          "id": "blockbyheight-null-called-unreachable",
+          "summary": "the reference calls novai_getBlockByHeight's null answer unreachable, and it is the normal answer for any pruned height",
+          "why": "The result block reads \"or `null` if no such height (this should be unreachable given the validation)\". The handler returns a top-level null whenever the block is not on disk, and a node retains PRUNE_RETAIN_BLOCKS = 50,000 blocks, so every height below the horizon answers null. This page's own known-gaps section already states that. A client written to the reference's parenthetical does not null-check, and breaks the first time it reads history.",
+          "operatorRef": "NEEDS-OPERATOR.md item 18"
+        },
+        {
+          "id": "getnonce-inherits-unreachable-db-error",
+          "summary": "novai_getNonce inherits a -32002 DB read failure clause from novai_getBalance, and its handler is never handed the database",
+          "why": "handle_get_nonce takes (request, nonce_provider) and its dispatch arm passes no db. Its whole body is a hex parse plus nonce_provider.expected_nonce, and -32002 appears nowhere in it, while handle_get_balance reads state and does emit it. A client writes a storage-retry branch that is dead code, and mis-attributes the failures it does see.",
+          "operatorRef": "NEEDS-OPERATOR.md item 17"
+        },
+        {
+          "id": "vk-list-error-clause-names-foreign-field",
+          "summary": "novai_listVkRegistrations inherits an error clause from novai_getVkRegistration that names `id`, a parameter it does not have",
+          "why": "The method's only parameter is `entity_id`, and its handler validates it as parse_hex32(&params.entity_id, \"entity_id\"), so the live -32602 message names entity_id. A reader debugging a rejection looks in their request for a field called `id` and does not find one. The method block contradicts itself: the params table says entity_id, the error clause says id, and the curl passes entity_id.",
+          "operatorRef": "NEEDS-OPERATOR.md item 16"
+        },
+        {
           "id": "faucet-disabled-code-mismatch",
           "summary": "novai_faucet's disabled path returns -32000, but the method's error table attributes it to -32602",
           "why": "A client matching on -32602 to distinguish a malformed address from a disabled faucet gets the wrong branch, and -32000 is a broad application-error code it cannot safely special-case.",
@@ -123,7 +147,14 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getLatestBlock\",\"params\":{},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"block_hash\":  \"6358124aa37e167d9b0f1ba8c43b2b5b76595862694c36f413a9acd173512689\",\n    \"parent_hash\": \"f4224ed3b546ee33fc9006c406816bfc60bda5f33c650c30ff2f7f321f29120f\",\n    \"state_root\":  \"be66f7485fc259ae01b6bd139b9fa26636660291d227cdb90aa9f7db6d3e97ee\",\n    \"height\": 2574,\n    \"round\": 0,\n    \"tx_count\": 0\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": {
+          "file": "crates/node/src/rpc.rs",
+          "line": 3606
+        },
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getBlockByHeight",
@@ -137,7 +168,7 @@
               "field": "height",
               "type": "u64",
               "optional": false,
-              "notes": "must be ≤ committed height"
+              "notes": "must be \u2264 committed height"
             }
           ]
         },
@@ -171,7 +202,28 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getBlockByHeight\",\"params\":{\"height\":377},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"block_hash\":  \"f13b0fe415672bdbae53432bfffb7558ffa314db5824b321517230e2aea84084\",\n    \"parent_hash\": \"0a29f578d57abd845403b3cce8fae281da364dd015bb440192e41fcac2a8fec9\",\n    \"state_root\":  \"be66f7485fc259ae01b6bd139b9fa26636660291d227cdb90aa9f7db6d3e97ee\",\n    \"height\": 377,\n    \"round\": 0,\n    \"tx_count\": 1\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": {
+          "file": "crates/node/src/rpc.rs",
+          "line": 3550
+        },
+        "caveats": [
+          {
+            "exceptionId": "blockbyheight-null-called-unreachable",
+            "label": "reference calls the null path unreachable",
+            "operatorRef": "NEEDS-OPERATOR.md item 18"
+          }
+        ],
+        "corrections": [
+          {
+            "exceptionId": "blockbyheight-null-called-unreachable",
+            "operatorRef": "NEEDS-OPERATOR.md item 18",
+            "site": "result",
+            "wrongText": null,
+            "correction": "The reference calls this null answer unreachable. It is not: the handler answers `null` for any height that is not on disk, which includes every height below the pruning horizon. Null-check this result."
+          }
+        ],
+        "withheld": null
       },
       {
         "name": "novai_getBlockByHash",
@@ -215,7 +267,14 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getBlockByHash\",\"params\":{\"hash\":\"f13b0fe415672bdbae53432bfffb7558ffa314db5824b321517230e2aea84084\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"block_hash\":  \"f13b0fe415672bdbae53432bfffb7558ffa314db5824b321517230e2aea84084\",\n    \"parent_hash\": \"0a29f578d57abd845403b3cce8fae281da364dd015bb440192e41fcac2a8fec9\",\n    \"state_root\":  \"be66f7485fc259ae01b6bd139b9fa26636660291d227cdb90aa9f7db6d3e97ee\",\n    \"height\": 377,\n    \"round\": 0,\n    \"tx_count\": 1\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": {
+          "file": "crates/node/src/rpc.rs",
+          "line": 3592
+        },
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getBalance",
@@ -258,7 +317,25 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getBalance\",\"params\":{\"address\":\"4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": { \"balance\": \"9945000\", \"nonce\": 1 },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [
+          {
+            "exceptionId": "getnonce-documented-as-interchangeable",
+            "label": "nonce here is the committed one",
+            "operatorRef": "NEEDS-OPERATOR.md item 15"
+          }
+        ],
+        "corrections": [
+          {
+            "exceptionId": "getnonce-documented-as-interchangeable",
+            "operatorRef": "NEEDS-OPERATOR.md item 15",
+            "site": "description",
+            "wrongText": null,
+            "correction": "The `nonce` in this result is the committed account nonce, and it is the one to sign against. `getNonce` answers a different question: the mempool admission cursor."
+          }
+        ],
+        "withheld": null
       },
       {
         "name": "novai_getNonce",
@@ -272,11 +349,13 @@
               "field": "address",
               "type": "hex32",
               "optional": false,
-              "notes": "32-byte account address"
+              "notes": "32-byte account address",
+              "notesFrom": "alias"
             }
           ],
           "resolvedFrom": "novai_getBalance",
-          "note": "same as `getBalance`."
+          "note": "same as `getBalance`.",
+          "reinterpreted": []
         },
         "result": {
           "kind": "fence",
@@ -304,7 +383,37 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getNonce\",\"params\":{\"address\":\"4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee\"},\"id\":1}'",
         "sampleResponse": "{ \"jsonrpc\": \"2.0\", \"result\": { \"nonce\": 1 }, \"id\": 1 }",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [
+          {
+            "exceptionId": "getnonce-documented-as-interchangeable",
+            "label": "mempool cursor, not the account nonce",
+            "operatorRef": "NEEDS-OPERATOR.md item 15"
+          },
+          {
+            "exceptionId": "getnonce-inherits-unreachable-db-error",
+            "label": "inherits an error it cannot emit",
+            "operatorRef": "NEEDS-OPERATOR.md item 17"
+          }
+        ],
+        "corrections": [
+          {
+            "exceptionId": "getnonce-documented-as-interchangeable",
+            "operatorRef": "NEEDS-OPERATOR.md item 15",
+            "site": "description",
+            "wrongText": "Cheaper than `getBalance` if you don't need the balance.",
+            "correction": "The two are not interchangeable. This answers from the mempool admission cursor, which runs ahead of the committed account nonce once a transaction from that sender commits and fails, and stays ahead until the node restarts. Sign against the `nonce` field of `getBalance`."
+          },
+          {
+            "exceptionId": "getnonce-inherits-unreachable-db-error",
+            "operatorRef": "NEEDS-OPERATOR.md item 17",
+            "site": "errors",
+            "wrongText": "DB read failure",
+            "correction": "This method does not read the database. Its handler is passed the mempool nonce provider and nothing else, so `-32002` is inherited from `getBalance`'s table and cannot occur here. The only rejection this method produces is `-32602` for an address that is not 32 bytes."
+          }
+        ],
+        "withheld": null
       },
       {
         "name": "novai_submitTransaction",
@@ -371,7 +480,25 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_submitTransaction\",\"params\":{\"tx\":\"01<224 hex chars>\"},\"id\":1}'",
         "sampleResponse": "{ \"jsonrpc\": \"2.0\", \"result\": { \"txid\": \"f5796d3963b94b59017fa9f2fa7b015956cbd082c32c04f69b1d88ae007f140e\" }, \"id\": 1 }",
-        "exampleNote": "request shown abridged. The `tx` value is a real ~300-byte hex blob built via the Rust SDK"
+        "exampleNote": "request shown abridged. The `tx` value is a real ~300-byte hex blob built via the Rust SDK",
+        "answersNull": null,
+        "caveats": [
+          {
+            "exceptionId": "error-code-32014-undocumented",
+            "label": "emits an undocumented code",
+            "operatorRef": "NEEDS-OPERATOR.md item 8"
+          }
+        ],
+        "corrections": [
+          {
+            "exceptionId": "error-code-32014-undocumented",
+            "operatorRef": "NEEDS-OPERATOR.md item 8",
+            "site": "errors",
+            "wrongText": null,
+            "correction": "The mempool also rejects with `-32014` NonceTooHigh, which this table does not list. It is not terminal: retry the same transaction unchanged once the sender's earlier nonces commit."
+          }
+        ],
+        "withheld": null
       },
       {
         "name": "novai_getTransaction",
@@ -414,7 +541,14 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getTransaction\",\"params\":{\"txid\":\"f5796d3963b94b59017fa9f2fa7b015956cbd082c32c04f69b1d88ae007f140e\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"block_height\": 377,\n    \"tx_index\": 0,\n    \"from\": \"4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee\",\n    \"nonce\": 0,\n    \"fee\": 5000,\n    \"payload_len\": 83\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": {
+          "file": "crates/node/src/rpc.rs",
+          "line": 3467
+        },
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getAiEntity",
@@ -457,7 +591,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getAiEntity\",\"params\":{\"entity_id\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"entity\": {\n      \"id\":               \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n      \"code_hash\":        \"0101010101010101010101010101010101010101010101010101010101010101\",\n      \"creator\":          \"4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee\",\n      \"autonomy_mode\":    0,\n      \"capabilities\":     7,\n      \"economic_balance\": \"48500\",\n      \"nonce\":            2,\n      \"pubkey\":           \"60356527146eacd35696afd3a8fd71d42312c2aa4262ede7afd2f879bf6dfa36\",\n      \"memory_root\":      \"0000000000000000000000000000000000000000000000000000000000000000\",\n      \"params_root\":      \"0000000000000000000000000000000000000000000000000000000000000000\",\n      \"registered_at\":    377,\n      \"last_active_at\":   497,\n      \"is_active\":        true\n    }\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getMemoryObjects",
@@ -500,7 +638,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getMemoryObjects\",\"params\":{\"entity_id\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"objects\": [\n      {\n        \"object_id\":    \"ba6c5de5a537dd07f44389d7ea794969b96305fd7cea845d05be23e256561103\",\n        \"object_type\":  0,\n        \"owner_entity\": \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n        \"created_at\":   497,\n        \"updated_at\":   497,\n        \"data\":         \"64656d6f206461746120666f7220525043207265666572656e6365\",\n        \"data_size\":    27\n      }\n    ]\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getSignalsByHeight",
@@ -546,7 +688,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getSignalsByHeight\",\"params\":{\"height\":453},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"signals\": [\n      {\n        \"commitment_hash\": \"0202020202020202020202020202020202020202020202020202020202020202\",\n        \"signal_type\": 0,\n        \"height\": 453,\n        \"issuer\": \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\"\n      }\n    ]\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getSignalsByIssuer",
@@ -572,7 +718,7 @@
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`"
             }
           ]
         },
@@ -604,7 +750,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getSignalsByIssuer\",\"params\":{\"issuer\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"start_height\":0,\"end_height\":1000},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getSignalsByType",
@@ -630,7 +780,7 @@
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`"
             }
           ]
         },
@@ -662,7 +812,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getSignalsByType\",\"params\":{\"signal_type\":0,\"start_height\":0,\"end_height\":1000},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getPaymentsByEntity",
@@ -694,7 +848,7 @@
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`"
             }
           ]
         },
@@ -725,7 +879,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getPaymentsByEntity\",\"params\":{\"entity_id\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"role\":\"payee\",\"start_height\":0,\"end_height\":10000},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"payments\": [\n      {\n        \"payer\":                   \"f3b91eaa5e5f3a8b8b4c0c9f59f1c4d72c2f4ddf3a2a7f9c8a2c9b7d6e5f4a3b\",\n        \"payee\":                   \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n        \"amount\":                  \"100000\",\n        \"service_descriptor_hash\": \"1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637383940\",\n        \"request_hash\":            \"abababababababababababababababababababababababababababababababab\",\n        \"payment_height\":          612,\n        \"max_block_height\":        700,\n        \"attested_status\":         \"delivered\",\n        \"attested_height\":         615,\n        \"splits\":                  null,\n        \"condition\":               null\n      }\n    ]\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getServiceDescriptorsByCategory",
@@ -770,7 +928,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getServiceDescriptorsByCategory\",\"params\":{\"category\":1},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"descriptors\": [\n      {\n        \"object_id\":                   \"5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e\",\n        \"owner_entity\":                \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n        \"created_at\":                  720,\n        \"updated_at\":                  720,\n        \"version\":                     1,\n        \"service_name_hash\":           \"1111111111111111111111111111111111111111111111111111111111111111\",\n        \"service_url_hash\":            \"2222222222222222222222222222222222222222222222222222222222222222\",\n        \"description_hash\":            \"3333333333333333333333333333333333333333333333333333333333333333\",\n        \"category\":                    1,\n        \"category_label\":              \"inference\",\n        \"price_per_call\":              \"2500\",\n        \"subscription_rate_per_block\": \"0\",\n        \"min_reputation_score\":        50,\n        \"min_stake\":                   \"10000\",\n        \"capability_tags\":             0,\n        \"status\":                      1,\n        \"status_label\":                \"active\"\n      }\n    ]\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getVkRegistration",
@@ -815,7 +977,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getVkRegistration\",\"params\":{\"id\":\"9090909090909090909090909090909090909090909090909090909090909090\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"registration\": {\n      \"object_id\":        \"9090909090909090909090909090909090909090909090909090909090909090\",\n      \"owner_entity\":     \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n      \"created_at\":       820,\n      \"updated_at\":       820,\n      \"version\":          1,\n      \"proof_type\":       1,\n      \"proof_type_label\": \"groth16\",\n      \"code_hash\":        \"0101010101010101010101010101010101010101010101010101010101010101\",\n      \"label\":            \"inference-vk-v1\",\n      \"vk_len\":           280,\n      \"vk_bytes_hex\":     \"<560 hex chars>\"\n    }\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_listVkRegistrations",
@@ -861,7 +1027,25 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_listVkRegistrations\",\"params\":{\"entity_id\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\"},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [
+          {
+            "exceptionId": "vk-list-error-clause-names-foreign-field",
+            "label": "error clause names the wrong field",
+            "operatorRef": "NEEDS-OPERATOR.md item 16"
+          }
+        ],
+        "corrections": [
+          {
+            "exceptionId": "vk-list-error-clause-names-foreign-field",
+            "operatorRef": "NEEDS-OPERATOR.md item 16",
+            "site": "errors",
+            "wrongText": "`id` isn't 32 bytes",
+            "correction": "This method's only parameter is `entity_id`, so the clause above is the one belonging to `getVkRegistration`, which the reference aliases here. The rejection you will actually see names `entity_id`."
+          }
+        ],
+        "withheld": null
       },
       {
         "name": "novai_getSlaAgreement",
@@ -913,7 +1097,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getSlaAgreement\",\"params\":{\"owner\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"object_id\":\"7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"agreement\": {\n      \"object_id\":                \"7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a\",\n      \"owner_entity\":             \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n      \"created_at\":               900,\n      \"updated_at\":               905,\n      \"version\":                  1,\n      \"buyer_entity_id\":          \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n      \"seller_entity_id\":         \"5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\",\n      \"service_descriptor_hash\":  \"1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637383940\",\n      \"status\":                   1,\n      \"status_label\":             \"active\",\n      \"created_at_height\":        900,\n      \"accepted_at_height\":       905,\n      \"start_height\":             910,\n      \"end_height\":               2000,\n      \"violation_count\":          0,\n      \"violation_threshold\":      3,\n      \"max_response_time_blocks\": 50,\n      \"min_uptime_bps\":           9500,\n      \"min_delivery_success_bps\": 9700,\n      \"price_per_call\":           \"1000\",\n      \"slash_amount\":             \"50000\",\n      \"terminated_at_height\":     0,\n      \"slashed_amount\":           \"0\"\n    }\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getActiveSla",
@@ -967,7 +1155,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getActiveSla\",\"params\":{\"buyer\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"seller\":\"5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\"},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_listSlasByBuyer",
@@ -993,7 +1185,7 @@
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`"
             }
           ]
         },
@@ -1025,7 +1217,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_listSlasByBuyer\",\"params\":{\"entity_id\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"start_height\":0,\"end_height\":10000},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_listSlasBySeller",
@@ -1039,23 +1235,33 @@
               "field": "entity_id",
               "type": "hex32",
               "optional": false,
-              "notes": "buyer entity id"
+              "notes": "seller entity id",
+              "notesFrom": "alias-reinterpreted"
             },
             {
               "field": "start_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive"
+              "notes": "inclusive",
+              "notesFrom": "alias"
             },
             {
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`",
+              "notesFrom": "alias"
             }
           ],
           "resolvedFrom": "novai_listSlasByBuyer",
-          "note": "same shape as `listSlasByBuyer`, with `entity_id` interpreted as the seller."
+          "note": "same shape as `listSlasByBuyer`, with `entity_id` interpreted as the seller.",
+          "reinterpreted": [
+            {
+              "field": "entity_id",
+              "was": "buyer entity id",
+              "now": "seller entity id"
+            }
+          ]
         },
         "result": {
           "kind": "inline",
@@ -1086,7 +1292,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_listSlasBySeller\",\"params\":{\"entity_id\":\"5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\",\"start_height\":0,\"end_height\":10000},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getPaymentChannel",
@@ -1138,7 +1348,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getPaymentChannel\",\"params\":{\"owner\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"object_id\":\"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"channel\": {\n      \"object_id\":               \"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n      \"owner_entity\":            \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n      \"created_at\":              1020,\n      \"updated_at\":              1025,\n      \"version\":                 1,\n      \"party_a_entity_id\":       \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n      \"party_b_entity_id\":       \"5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\",\n      \"sla_object_id\":           \"0000000000000000000000000000000000000000000000000000000000000000\",\n      \"status\":                  1,\n      \"status_label\":            \"open\",\n      \"deposit_a\":               \"200000\",\n      \"deposit_b\":               \"200000\",\n      \"balance_a\":               \"180000\",\n      \"balance_b\":               \"220000\",\n      \"nonce\":                   7,\n      \"proposed_at_height\":      1020,\n      \"accepted_at_height\":      1025,\n      \"closing_at_height\":       0,\n      \"dispute_deadline_height\": 0,\n      \"dispute_window_blocks\":   100\n    }\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_listChannelsByPartyA",
@@ -1164,7 +1378,7 @@
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`"
             }
           ]
         },
@@ -1196,7 +1410,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_listChannelsByPartyA\",\"params\":{\"entity_id\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"start_height\":0,\"end_height\":10000},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_listChannelsByPartyB",
@@ -1210,23 +1428,33 @@
               "field": "entity_id",
               "type": "hex32",
               "optional": false,
-              "notes": "party A entity id"
+              "notes": "party B entity id",
+              "notesFrom": "alias-reinterpreted"
             },
             {
               "field": "start_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive"
+              "notes": "inclusive",
+              "notesFrom": "alias"
             },
             {
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`",
+              "notesFrom": "alias"
             }
           ],
           "resolvedFrom": "novai_listChannelsByPartyA",
-          "note": "same shape as `listChannelsByPartyA`, with `entity_id` interpreted as party B."
+          "note": "same shape as `listChannelsByPartyA`, with `entity_id` interpreted as party B.",
+          "reinterpreted": [
+            {
+              "field": "entity_id",
+              "was": "party A entity id",
+              "now": "party B entity id"
+            }
+          ]
         },
         "result": {
           "kind": "inline",
@@ -1257,7 +1485,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_listChannelsByPartyB\",\"params\":{\"entity_id\":\"5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\",\"start_height\":0,\"end_height\":10000},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getChannelDisputeStatus",
@@ -1307,7 +1539,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getChannelDisputeStatus\",\"params\":{\"owner\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"object_id\":\"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"found\":                   true,\n    \"status\":                  2,\n    \"status_label\":            \"closing\",\n    \"closing_at_height\":       1100,\n    \"dispute_deadline_height\": 1200,\n    \"current_height\":          1180,\n    \"blocks_remaining\":        20,\n    \"finalize_ready\":          false\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getUpgradeHistory",
@@ -1333,7 +1569,7 @@
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`"
             }
           ]
         },
@@ -1363,7 +1599,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getUpgradeHistory\",\"params\":{\"entity_id\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"start_height\":0,\"end_height\":10000},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"upgrades\": [\n      {\n        \"old_code_hash\":  \"0101010101010101010101010101010101010101010101010101010101010101\",\n        \"new_code_hash\":  \"0202020202020202020202020202020202020202020202020202020202020202\",\n        \"upgrade_height\": 1500,\n        \"upgrade_count\":  1,\n        \"reason_hash\":    \"0000000000000000000000000000000000000000000000000000000000000000\"\n      }\n    ]\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getOracleAnchor",
@@ -1409,7 +1649,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getOracleAnchor\",\"params\":{\"signal_hash\":\"e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"anchor\": {\n      \"issuer_entity_id\":   \"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\n      \"data_hash\":          \"1111111111111111111111111111111111111111111111111111111111111111\",\n      \"external_timestamp\": 1717000000,\n      \"source_hash\":        \"0000000000000000000000000000000000000000000000000000000000000000\",\n      \"expiry_height\":      0,\n      \"anchor_height\":      1800,\n      \"data_tag\":           \"price/ETH-USD\",\n      \"data_tag_hex\":       \"70726963652f4554482d555344\"\n    }\n  },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getOracleAnchorsByEntity",
@@ -1435,7 +1679,7 @@
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`"
             },
             {
               "field": "ts_min",
@@ -1479,7 +1723,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getOracleAnchorsByEntity\",\"params\":{\"entity_id\":\"44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1\",\"start_height\":0,\"end_height\":10000},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_getOracleAnchorsByTag",
@@ -1505,7 +1753,7 @@
               "field": "end_height",
               "type": "u64",
               "optional": false,
-              "notes": "inclusive; must satisfy `end - start ≤ 10000`"
+              "notes": "inclusive; must satisfy `end - start \u2264 10000`"
             },
             {
               "field": "ts_min",
@@ -1549,7 +1797,11 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_getOracleAnchorsByTag\",\"params\":{\"data_tag\":\"price/ETH-USD\",\"start_height\":0,\"end_height\":10000},\"id\":1}'",
         "sampleResponse": null,
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [],
+        "corrections": [],
+        "withheld": null
       },
       {
         "name": "novai_faucet",
@@ -1596,7 +1848,41 @@
         },
         "curl": "curl -s -X POST $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"method\":\"novai_faucet\",\"params\":{\"address\":\"4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee\"},\"id\":1}'",
         "sampleResponse": "{\n  \"jsonrpc\": \"2.0\",\n  \"result\": { \"txid\": \"3e96a7b7de4bb62c90e0244732e3a238646a86c74f7725e41efd1ca9987ec557\", \"amount\": \"10000000\" },\n  \"id\": 1\n}",
-        "exampleNote": null
+        "exampleNote": null,
+        "answersNull": null,
+        "caveats": [
+          {
+            "exceptionId": "faucet-rpc-gating-incomplete",
+            "label": "gating documented backwards",
+            "operatorRef": "NEEDS-OPERATOR.md item 13"
+          },
+          {
+            "exceptionId": "faucet-disabled-code-mismatch",
+            "label": "disabled-path code differs",
+            "operatorRef": "NEEDS-OPERATOR.md item 10"
+          }
+        ],
+        "corrections": [
+          {
+            "exceptionId": "faucet-rpc-gating-incomplete",
+            "operatorRef": "NEEDS-OPERATOR.md item 13",
+            "site": "description",
+            "wrongText": null,
+            "correction": "`handle_faucet` prefers a loaded `--faucet-key` and falls back to the deterministic dev key only when there is none, so the method also answers on a node started with a faucet key and no dev keys."
+          },
+          {
+            "exceptionId": "faucet-disabled-code-mismatch",
+            "operatorRef": "NEEDS-OPERATOR.md item 10",
+            "site": "errors",
+            "wrongText": null,
+            "correction": "The disabled path returns `-32000`, not `-32602`. A client matching on `-32602` to tell a malformed address from a disabled faucet takes the wrong branch."
+          }
+        ],
+        "withheld": {
+          "brief": "Mint test tokens",
+          "reason": "This method mints tokens, and it is not documented here until the public testnet opens. Its parameters, result shape and error codes are in docs/RPC_REFERENCE.md, and the handler is linked above. Two of the carried exceptions are about this method, so the reference's account of its gating and of its disabled-path error code are both known to be wrong. The method is still counted in the 29 and still appears in openrpc.json: what is withheld is the runnable example, not the fact that the method exists.",
+          "ruling": "website/HANDOFF.md excluded-permanently list"
+        }
       }
     ],
     "method": "parsed from the labelled blocks under each ### heading in docs/RPC_REFERENCE.md"
@@ -1666,6 +1952,19 @@
     ],
     "method": "the two tables under ## Error codes in docs/RPC_REFERENCE.md"
   },
+  "codeCorrections": {
+    "value": [
+      {
+        "exceptionId": "invalid-request-trigger-is-wrong",
+        "operatorRef": "NEEDS-OPERATOR.md item 19",
+        "code": -32600,
+        "caveat": "trigger documented wrongly",
+        "wrongText": "malformed JSON-RPC envelope (missing `jsonrpc`/`method`)",
+        "correction": "A missing `jsonrpc` or `method` field answers `-32700`, not this code, because every field of the request struct is required and a missing one fails to deserialize. `-32600` is what you get when `jsonrpc` is present and is not `\"2.0\"`."
+      }
+    ],
+    "method": "KNOWN_DRIFT entries whose drift lands on an error code rather than on a method"
+  },
   "limits": {
     "value": [
       {
@@ -1691,7 +1990,7 @@
       {
         "Limit": "Tx hex (submit)",
         "Value": "256 KiB (= 128 KiB binary)",
-        "Source": "`MAX_TX_SIZE × 2`"
+        "Source": "`MAX_TX_SIZE \u00d7 2`"
       },
       {
         "Limit": "Signal query height range",
@@ -1909,7 +2208,7 @@
       {
         "variant": "LabelIndex",
         "discriminant": 1,
-        "description": "Tags and categories for addresses (label → address mappings)."
+        "description": "Tags and categories for addresses (label \u2192 address mappings)."
       },
       {
         "variant": "EmbeddingCommitment",
@@ -2385,7 +2684,7 @@
       },
       {
         "status": 503,
-        "body": "Service Unavailable - too many concurrent requests",
+        "body": "Service Unavailable \u2014 too many concurrent requests",
         "bodyIsTemplate": false,
         "file": "crates/node/src/rpc.rs",
         "line": 1242

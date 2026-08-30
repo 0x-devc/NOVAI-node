@@ -4,7 +4,7 @@
     "title": "NOVAI JSON-RPC",
     "version": "1.0.0",
     "description": "Generated from docs/RPC_REFERENCE.md and cross-checked against the node's dispatch table, the README method table and the Python SDK. Not hand-maintained.",
-    "x-generatedAt": "2026-08-29T13:09:38.855Z"
+    "x-generatedAt": "2026-08-30T12:41:54.710Z"
   },
   "methods": [
     {
@@ -48,7 +48,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "must be ≤ committed height"
+          "description": "must be \u2264 committed height"
         }
       ],
       "result": {
@@ -450,7 +450,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         }
       ],
       "result": {
@@ -515,7 +515,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         }
       ],
       "result": {
@@ -588,7 +588,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         }
       ],
       "result": {
@@ -869,7 +869,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         }
       ],
       "result": {
@@ -909,7 +909,7 @@
             "pattern": "^[0-9a-fA-F]{64}$",
             "x-novai-doc-type": "hex32"
           },
-          "description": "buyer entity id"
+          "description": "seller entity id"
         },
         {
           "name": "start_height",
@@ -929,7 +929,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         }
       ],
       "result": {
@@ -1039,7 +1039,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         }
       ],
       "result": {
@@ -1079,7 +1079,7 @@
             "pattern": "^[0-9a-fA-F]{64}$",
             "x-novai-doc-type": "hex32"
           },
-          "description": "party A entity id"
+          "description": "party B entity id"
         },
         {
           "name": "start_height",
@@ -1099,7 +1099,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         }
       ],
       "result": {
@@ -1208,7 +1208,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         }
       ],
       "result": {
@@ -1307,7 +1307,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         },
         {
           "name": "ts_min",
@@ -1386,7 +1386,7 @@
             "minimum": 0,
             "x-novai-doc-type": "u64"
           },
-          "description": "inclusive; must satisfy `end - start ≤ 10000`"
+          "description": "inclusive; must satisfy `end - start \u2264 10000`"
         },
         {
           "name": "ts_min",

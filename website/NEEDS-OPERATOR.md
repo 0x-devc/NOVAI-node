@@ -276,13 +276,86 @@ one. It is carried as the `getnonce-documented-as-interchangeable` entry in
 distinction in its known-gaps section. Fixing the doc's wording retires the
 exception, and the gate will then fail until it is deleted.
 
+## 16. `novai_listVkRegistrations` inherits an error clause naming `id`
+
+`docs/RPC_REFERENCE.md` aliases this method's Errors block onto
+`novai_getVkRegistration`, and the inherited `-32602` clause reads
+`` `id` isn't 32 bytes ``. This method declares no `id`. Its only parameter is
+`entity_id`, validated at `crates/node/src/rpc.rs:2371` as
+`parse_hex32(&params.entity_id, "entity_id")`, so the rejection a caller
+actually sees names `entity_id`.
+
+The method block used to contradict itself three ways: the params table said
+`entity_id`, the error clause said `id`, and the curl passed `entity_id`.
+
+Fixing the alias line so the clause names this method's own field retires the
+`vk-list-error-clause-names-foreign-field` exception, and the gate will then
+fail until it is deleted.
+
 ---
 
-FYI, no action needed unless renewal fails: the rpc.novai.network TLS
-certificate expires 2026-08-30 with certbot auto-renewal configured. That is
-close enough now to be worth a glance.
+## 17. `novai_getNonce` inherits a `-32002` it cannot emit
 
-**Update 2026-08-29: that is tomorrow.** Worth confirming renewal actually
-fired rather than assuming it did. Every runnable example on the console posts
-to `https://rpc.novai.network`, so an expired certificate does not degrade the
-page, it makes the whole first-call section fail in the visitor's terminal.
+The reference aliases this method's Errors block onto `novai_getBalance`, which
+brings a `-32002 DB read failure` row with it. `handle_get_nonce`
+(`crates/node/src/rpc.rs:2082`) takes `(request, nonce_provider)` and its
+dispatch arm passes no database. Its whole body is a hex parse plus
+`nonce_provider.expected_nonce`, and `-32002` appears nowhere in it, while
+`handle_get_balance` does read state and does emit it.
+
+A client writes a storage-retry branch that is dead code, and mis-attributes the
+failures it does see. Giving the method its own two-row Errors block retires the
+`getnonce-inherits-unreachable-db-error` exception.
+
+---
+
+## 18. `novai_getBlockByHeight`'s null answer is called unreachable
+
+The result block reads "or `null` if no such height (this should be unreachable
+given the validation)". The handler returns a top-level null whenever the block
+is not on disk, and a node retains `PRUNE_RETAIN_BLOCKS = 50,000` blocks, so
+every height below the horizon answers null. That is normal operation, and the
+console's own known-gaps section already says so.
+
+A client written to the parenthetical does not null-check and breaks the first
+time it reads history. Deleting the parenthetical retires the
+`blockbyheight-null-called-unreachable` exception.
+
+---
+
+## 19. `-32600` is documented with the wrong trigger
+
+The error table says `-32600` answers a "malformed JSON-RPC envelope (missing
+`jsonrpc`/`method`)". Every field of `RpcRequest`
+(`crates/node/src/rpc.rs:93-98`) is required, with no `Option` and no serde
+default, so a missing field fails deserialization and answers `-32700`.
+`-32600` is reachable only from `crates/node/src/rpc.rs:1348`, when `jsonrpc` is
+present and is not `"2.0"`.
+
+Verified live against the public endpoint: a request with no `method` answers
+`-32700`, a request with no `jsonrpc` answers `-32700`, and
+`"jsonrpc":"1.0"` answers `-32600`.
+
+A client matching `-32600` to detect a malformed envelope never sees it, and
+gets `-32700`, which the same table attributes to invalid JSON. Correcting the
+trigger cell retires the `invalid-request-trigger-is-wrong` exception.
+
+---
+
+FYI, no action needed: the `rpc.novai.network` TLS certificate is valid until
+**Oct 30 2026**, measured on 2026-08-30, and certbot last renewed it on Aug 1.
+
+This entry previously said the certificate expired on 2026-08-30 and carried an
+appended note reading "that is tomorrow". Both were wrong, and the second was
+the worse kind of wrong: an inference from a stale line in this document,
+written as though it were an observation. The measurement, which anyone can
+repeat:
+
+```
+echo | openssl s_client -servername rpc.novai.network -connect rpc.novai.network:443 2>/dev/null \
+  | openssl x509 -noout -dates
+```
+
+It matters because every runnable example on the console posts to
+`https://rpc.novai.network`. An expired certificate does not degrade the page,
+it makes the whole first-call section fail in the visitor's terminal.

@@ -8,7 +8,7 @@ import StatTile from "@/components/system/StatTile";
 import MonoLabel from "@/components/system/MonoLabel";
 import Reveal from "@/components/system/Reveal";
 import LiveChainStats from "@/components/system/LiveChainStats";
-import VerifyPanel from "@/components/system/VerifyPanel";
+import VerifyPanel from "@/components/console/VerifyPanel";
 import Panel, { Caption, PanelRow } from "@/components/console/Panel";
 import { STATS } from "@/data/stats";
 import repoStats from "@/data/repo-stats.generated.json";

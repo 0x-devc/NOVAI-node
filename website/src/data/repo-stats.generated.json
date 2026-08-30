@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-08-24T08:35:47.755Z",
+  "generatedAt": "2026-08-30T12:54:00.589Z",
   "linesOfRust": {
-    "value": 128811,
+    "value": 130785,
     "method": "newline count over crates/**/*.rs (target and build dirs excluded)"
   },
   "tests": {
-    "value": 2138,
+    "value": 2175,
     "method": "count of #[test] and #[tokio::test] attributes across crates/ and sdk/"
   },
   "crates": {

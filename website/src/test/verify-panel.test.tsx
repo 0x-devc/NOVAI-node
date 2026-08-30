@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
-import VerifyPanel from "@/components/system/VerifyPanel";
+import VerifyPanel from "@/components/console/VerifyPanel";
 import { curlFor, curlForHeightTemplate, HEIGHT_TOKEN } from "@/lib/rpc";
 import snapshot from "@/data/chain-snapshot.json";
 

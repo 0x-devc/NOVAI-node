@@ -184,10 +184,30 @@ section without reading the transaction section.
   to be 4 and 11; building to the believed figures would have shipped six
   methods showing a record type name with no definition behind it. Measure the
   document, never the memory of it.
-- **Gate C3, the reference content.** Sections 02 through 09. Deletes the layout
-  filler block currently in `console.html`. **The AI recipe list gets its own
-  short review BEFORE C3**, because those are public claims about what the chain
-  can do, which is the same class of statement that produced the 30M error.
+- **Gate C3, the reference content. LANDED 2026-08-29.** All ten sections are
+  filled and the layout filler block is deleted. Two commits: the source-derived
+  datasets and their gates, then the rendered sections.
+  - `website/scripts/generate-console-html.mjs` writes the section markup INTO
+    `console.html` between sentinel markers. It is written to the file rather
+    than injected by a Vite hook because `tailwind.config.ts` scans
+    `./console.html` from disk: markup injected at `transformIndexHtml` time is
+    invisible to that scan and every class in it would be purged, so the page
+    would look right in dev and render unstyled in production. Verified
+    empirically, not assumed: `list-disc` and `pl-5` appear in zero source
+    files, three times in the generated markup, and once each in the built CSS.
+  - The marker mechanism carries four gates of its own (unforgeable sigil,
+    paired markers, region count equals renderer count, and `--check`
+    re-renders and compares), each proven by doctoring.
+  - Fourteen new datasets are read from `crates/` and `sdk/` directly rather
+    than from the reference document, with cross-checks that fail the build.
+    There are now five `KNOWN_DRIFT` exceptions, not four.
+  - The AI recipe claim strings were approved individually before the section
+    was built, as the pre-C3 review required.
+  - Section 03 renders all 29 method entries EXPANDED. Collapsing was measured
+    and rejected: the whole page is 28 KiB gzipped, so collapse buys nothing,
+    and content inside a closed `<details>` is unreachable by find-in-page in
+    Firefox and Safari. `<details>` is used only for the two long lookup
+    enumerations in section 06.
 - **Gate C4, live panels.** Network status and verify panel as React islands,
   mounted (not hydrated) into containers holding identical static markup, so
   hydration mismatch is not a possible failure mode. Needs a new RPC endpoint
@@ -388,9 +408,11 @@ surface while looking complete.
   same 16 crates rendered as the layered dependency DAG answer the question a
   learner actually has, so the DAG replaces it and moves to the console, where a
   crate map is a LEARN artifact rather than a marketing number.
-- **Console table scroll affordance.** On narrow viewports a wide table scrolls
-  correctly inside its container and the document does not overflow, but a
-  reader cannot tell that it scrolls. Open for C3.
+- **Console table scroll affordance. CLOSED at C3.** Solved in pure CSS with the
+  background-attachment technique: two `local` layers scroll with the content
+  and cover two `scroll` shadow layers, so an edge shadow shows only while
+  there is more to reach in that direction, and it disappears by itself when
+  the table fits. No JavaScript, so it works on a page that ships none.
 - **TypeScript SDK is silently truncated:** 7 signal types against the chain's
   23, 5 memory object types against 16, 10 transaction builders against 11 with
   no `entityUpgrade`. Nothing in the type system catches this. It is published

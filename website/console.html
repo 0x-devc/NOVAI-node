@@ -105,114 +105,1914 @@
         <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
           NOVAI developer console
         </h1>
-        <p class="mt-2 max-w-[68ch] text-sm leading-relaxed text-ink-low">
-          Everything needed to build against the chain. Reference material is generated from the source tree at
-          build time, so it cannot drift from the implementation.
+        <!-- Generated. These two paragraphs used to be hand-written here, and they carried
+             hardcoded counts fifteen lines above the generated tiles reading the same numbers.
+             Nothing checked the two agreed, and they stopped agreeing. -->
+        <!-- @@console-generated:intro@@ -->
+        <p class="mt-2 max-w-[70ch] text-sm leading-relaxed text-ink-low">
+          Everything needed to build against the chain. The reference below is generated from the source tree at
+          build time, and every method name in it is cross-checked across four independent sources, so the build
+          fails when they disagree. That check is over names: where the reference and the implementation disagree
+          about a parameter, an error code or a result, the difference is carried as an explicit exception and
+          corrected where you meet it. There are 9 of those today, listed in <a class="text-brand-text no-underline hover:underline" href="#gaps">known gaps</a>.
         </p>
+        <p class="mt-2 max-w-[70ch] text-sm leading-relaxed text-ink-low">
+          NOVAI treats AI entities as first-class on-chain actors: they hold balances and reputation, publish
+          23 kinds of signal, and own 16 kinds of memory object. That is what the
+          <a class="text-brand-text no-underline hover:underline" href="#transactions">transaction</a> and <a class="text-brand-text no-underline hover:underline" href="#ai-entities">entity</a> sections describe.
+        </p>
+        <!-- @@console-generated:/intro@@ -->
 
-        <!-- LAYOUT FILLER. Deleted at gate C3, when generated content replaces it.
-             Present only so density and margins are judgeable against real rows. -->
-        <section aria-labelledby="filler-heading" class="mt-8">
-          <div class="rounded-md border border-dashed border-line-strong bg-surface-1">
-            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line-subtle px-4 py-2">
-              <span id="filler-heading" class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi"
-                >layout filler, deleted at gate C3</span
-              >
-              <span class="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low">not real data</span>
-            </div>
-            <div class="divide-y divide-line-subtle">
-              <div class="px-4 py-3 flex items-end justify-between gap-4">
-                <div>
-                  <div class="font-mono text-3xl sm:text-4xl font-light text-ink-hi tabular-nums leading-none">
-                    0,000,000
-                  </div>
-                  <div class="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low mt-1.5">
-                    headline figure, placeholder
-                  </div>
-                </div>
-                <div class="text-right pb-0.5">
-                  <span class="font-mono text-[11px] text-ink-low">right slot</span>
-                </div>
-              </div>
-
-              <div class="grid divide-y divide-line-subtle sm:w-max sm:max-w-full sm:grid-cols-4 sm:divide-y-0 sm:divide-x">
-                <div class="px-4 py-2.5">
-                  <div class="font-mono text-lg tabular-nums leading-none text-ink-hi">000</div>
-                  <div class="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low mt-1">first cell</div>
-                </div>
-                <div class="px-4 py-2.5">
-                  <div class="font-mono text-lg tabular-nums leading-none text-ink-hi">000</div>
-                  <div class="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low mt-1">second cell</div>
-                </div>
-                <div class="px-4 py-2.5">
-                  <div class="font-mono text-lg tabular-nums leading-none text-ink-hi">000</div>
-                  <div class="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low mt-1">third cell</div>
-                </div>
-                <div class="px-4 py-2.5">
-                  <div class="font-mono text-lg tabular-nums leading-none text-ink-hi">000</div>
-                  <div class="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low mt-1">fourth cell</div>
-                </div>
-              </div>
-
-              <div class="overflow-x-auto">
-                <table class="text-xs font-mono">
-                  <caption class="sr-only">Layout filler table, six placeholder rows</caption>
-                  <thead>
-                    <tr class="border-b border-line-subtle">
-                      <th scope="col" class="px-4 py-1.5 text-right font-medium text-[10px] uppercase tracking-[0.08em] text-ink-low">height</th>
-                      <th scope="col" class="px-4 py-1.5 text-left font-medium text-[10px] uppercase tracking-[0.08em] text-ink-low">block hash</th>
-                      <th scope="col" class="px-4 py-1.5 text-left font-medium text-[10px] uppercase tracking-[0.08em] text-ink-low">parent check</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-line-subtle">
-                    <tr><td class="px-4 py-1.5 text-right tabular-nums">0,000,006</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-low">000000000000..000000</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-mid">placeholder</td></tr>
-                    <tr><td class="px-4 py-1.5 text-right tabular-nums">0,000,005</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-low">000000000000..000000</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-mid">placeholder</td></tr>
-                    <tr><td class="px-4 py-1.5 text-right tabular-nums">0,000,004</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-low">000000000000..000000</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-mid">placeholder</td></tr>
-                    <tr><td class="px-4 py-1.5 text-right tabular-nums">0,000,003</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-low">000000000000..000000</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-mid">placeholder</td></tr>
-                    <tr><td class="px-4 py-1.5 text-right tabular-nums">0,000,002</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-low">000000000000..000000</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-mid">placeholder</td></tr>
-                    <tr><td class="px-4 py-1.5 text-right tabular-nums">0,000,001</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-low">000000000000..000000</td><td class="px-4 py-1.5 text-left tabular-nums text-ink-mid">placeholder</td></tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <div class="px-4 py-2">
-                <p class="text-[11px] leading-relaxed text-ink-low">
-                  This block exists to make density and margins judgeable. It is removed at gate C3.
-                </p>
-              </div>
-            </div>
+        <!-- @@console-generated:provenance@@ -->
+        <div class="console-prov">
+          <div class="console-prov-grid">
+            <div class="console-prov-cell"><div class="console-prov-value">29</div><div class="console-prov-label">methods, agreed</div></div>
+            <div class="console-prov-cell"><div class="console-prov-value">4</div><div class="console-prov-label">sources cross-checked</div></div>
+            <div class="console-prov-cell"><div class="console-prov-value">9</div><div class="console-prov-label">carried exceptions</div></div>
+            <div class="console-prov-cell"><div class="console-prov-value">11</div><div class="console-prov-label">transaction types</div></div>
           </div>
-        </section>
+          <div class="border-t border-line-subtle px-4 py-2">
+            <p class="console-note">Generated from the source tree at 2026-08-30 12:41:54 UTC. Sources: <code class="text-ink-mid">crates/node/src/rpc.rs</code>, <code class="text-ink-mid">docs/RPC_REFERENCE.md</code>, <code class="text-ink-mid">README.md</code>, <code class="text-ink-mid">sdk/novai-python-sdk/novai_sdk</code>.</p>
+          </div>
+        </div>
+        <!-- @@console-generated:/provenance@@ -->
 
         <section id="connect" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">01</span> connect</h2>
+          <!-- @@console-generated:connect@@ -->
+        <p class="console-lead"></p>
+        <pre class="console-pre"><code>URL=https://rpc.novai.network
+
+curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getLatestBlock&quot;,&quot;params&quot;:{},&quot;id&quot;:1}'</code></pre>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Property</th><th scope="col">Value</th></tr></thead>
+            <tbody>
+            <tr><td>Protocol</td><td>JSON-RPC 2.0 over HTTP POST</td></tr>
+            <tr><td>Content-Type</td><td><code>application/json</code></td></tr>
+            <tr><td>Endpoint</td><td><code>https://rpc.novai.network</code></td></tr>
+            <tr><td>Authentication</td><td>none</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Requests are rate limited per source IP. The limits, and the reply you get when you cross one, are in errors and limits.</p>
+        <div class="mt-4 rounded-md border border-line bg-surface-1 px-4 py-3" data-island="network-status">
+          <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-low">network</p>
+          <p class="console-note">Live height and cadence load here when JavaScript is available.</p>
+        </div>
+        <!-- @@console-generated:/connect@@ -->
         </section>
         <section id="first-call" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">02</span> first call</h2>
+          <!-- @@console-generated:first-call@@ -->
+        <p class="console-lead">Three ways to make the same call. The output under each was produced by running exactly the code shown.</p>
+        <h3 class="console-h3">curl</h3>
+        <p class="console-note">No install. Paste it.</p>
+        <pre class="console-pre"><code>curl -s -X POST https://rpc.novai.network -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getLatestBlock&quot;,&quot;params&quot;:{},&quot;id&quot;:1}'</code></pre>
+        <pre class="console-pre-out"><code>{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;result&quot;:{&quot;block_hash&quot;:&quot;6b4ef2adc610656969ca65c94c057ddcb5eafa3c441de14d95b931aac066a8e9&quot;,&quot;height&quot;:5225248,&quot;parent_hash&quot;:&quot;0c6582e4ef81f793266ae8d46642f9acd9c314bc7947ef2e57142a2f3a0981c1&quot;,&quot;round&quot;:0,&quot;state_root&quot;:&quot;2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e&quot;,&quot;tx_count&quot;:0},&quot;id&quot;:1}</code></pre>
+        <h3 class="console-h3">python</h3>
+        <p class="console-note">Standard library only. No pip install.</p>
+        <pre class="console-pre"><code>import json, urllib.request
+
+req = urllib.request.Request(
+    &quot;https://rpc.novai.network&quot;,
+    data=json.dumps({&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;method&quot;: &quot;novai_getLatestBlock&quot;,
+                     &quot;params&quot;: {}, &quot;id&quot;: 1}).encode(),
+    headers={&quot;Content-Type&quot;: &quot;application/json&quot;},
+)
+with urllib.request.urlopen(req, timeout=10) as r:
+    print(json.dumps(json.load(r)[&quot;result&quot;], indent=2))</code></pre>
+        <pre class="console-pre-out"><code>{
+  &quot;block_hash&quot;: &quot;8cec80e8dc7b2e77b1e43314bda2f2570aaad82fb02c4afa9a1d35990177d802&quot;,
+  &quot;height&quot;: 5225249,
+  &quot;parent_hash&quot;: &quot;6b4ef2adc610656969ca65c94c057ddcb5eafa3c441de14d95b931aac066a8e9&quot;,
+  &quot;round&quot;: 0,
+  &quot;state_root&quot;: &quot;2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e&quot;,
+  &quot;tx_count&quot;: 0
+}</code></pre>
+        <h3 class="console-h3">rust</h3>
+        <p class="console-note">A standalone cargo project with one dependency. This needs a build step, which the two above do not, so it is the third path rather than the first. It does not use the NOVAI Rust SDK, because that SDK depends on the workspace crates by path and so cannot be built outside a clone of the repository.</p>
+        <pre class="console-pre"><code>// Cargo.toml
+// [dependencies]
+// reqwest = { version = &quot;0.12&quot;, features = [&quot;blocking&quot;, &quot;json&quot;] }
+// serde_json = &quot;1&quot;
+
+use std::error::Error;
+
+fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
+    let body = serde_json::json!({
+        &quot;jsonrpc&quot;: &quot;2.0&quot;,
+        &quot;method&quot;: &quot;novai_getLatestBlock&quot;,
+        &quot;params&quot;: {},
+        &quot;id&quot;: 1
+    });
+
+    let resp: serde_json::Value = reqwest::blocking::Client::new()
+        .post(&quot;https://rpc.novai.network&quot;)
+        .json(&amp;body)
+        .send()?
+        .json()?;
+
+    println!(&quot;{}&quot;, serde_json::to_string_pretty(&amp;resp[&quot;result&quot;])?);
+    Ok(())
+}</code></pre>
+        <pre class="console-pre-out"><code>{
+  &quot;block_hash&quot;: &quot;4c065392ab83658711dc3df2ade2bda953c33a1a4f5d0e884439b6a9548ed1a3&quot;,
+  &quot;height&quot;: 5225251,
+  &quot;parent_hash&quot;: &quot;3399db3cd66c7185b2521d5ba7c8c58ddd84b59004024f475b7ed7fe16a79d27&quot;,
+  &quot;round&quot;: 0,
+  &quot;state_root&quot;: &quot;2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e&quot;,
+  &quot;tx_count&quot;: 0
+}</code></pre>
+        <p class="console-note">Captured by running each example against the live endpoint. Heights and hashes move every few hundred milliseconds, so yours will differ; the shape is what is being shown. Captured 2026-08-29T17:55:36Z.</p>
+        <!-- @@console-generated:/first-call@@ -->
         </section>
         <section id="rpc" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">03</span> rpc reference</h2>
+          <!-- @@console-generated:rpc-index@@ -->
+        <p class="console-lead">All 29 methods. The notes column names the caveat that applies to a method before you open it.</p>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Category</th><th scope="col">Method</th><th scope="col">Brief</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td>Block methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getlatestblock">novai_getLatestBlock</a></td><td>Latest committed block header</td><td><span class="console-pill">can answer null</span></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getblockbyheight">novai_getBlockByHeight</a></td><td>Block header at a given height</td><td><span class="console-pill">reference calls the null path unreachable</span> <span class="console-pill">can answer null</span></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getblockbyhash">novai_getBlockByHash</a></td><td>Block header by its hash</td><td><span class="console-pill">can answer null</span></td></tr>
+            <tr><td>Account methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getbalance">novai_getBalance</a></td><td>Account balance and nonce</td><td><span class="console-pill">nonce here is the committed one</span></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getnonce">novai_getNonce</a></td><td>Account expected nonce</td><td><span class="console-pill">mempool cursor, not the account nonce</span> <span class="console-pill">inherits an error it cannot emit</span></td></tr>
+            <tr><td>Transaction methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_submittransaction">novai_submitTransaction</a></td><td>Submit a signed tx</td><td><span class="console-pill">emits an undocumented code</span></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_gettransaction">novai_getTransaction</a></td><td>Tx receipt by txid</td><td><span class="console-pill">can answer null</span></td></tr>
+            <tr><td>AI entity methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getaientity">novai_getAiEntity</a></td><td>AI entity record by id</td><td></td></tr>
+            <tr><td>Memory object methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getmemoryobjects">novai_getMemoryObjects</a></td><td>All memory objects owned by entity</td><td></td></tr>
+            <tr><td>Signal methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getsignalsbyheight">novai_getSignalsByHeight</a></td><td>Signals at a height</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getsignalsbyissuer">novai_getSignalsByIssuer</a></td><td>Signals from an entity (range)</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getsignalsbytype">novai_getSignalsByType</a></td><td>Signals by type (range)</td><td></td></tr>
+            <tr><td>Payment methods (Week 28)</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getpaymentsbyentity">novai_getPaymentsByEntity</a></td><td>Payments where the entity is payer or payee (range)</td><td></td></tr>
+            <tr><td>Service discovery methods (Week 29)</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getservicedescriptorsbycategory">novai_getServiceDescriptorsByCategory</a></td><td>Service descriptors filtered by category</td><td></td></tr>
+            <tr><td>VK registry methods (Week 30)</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getvkregistration">novai_getVkRegistration</a></td><td>A registered Groth16 verifying key by handle</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listvkregistrations">novai_listVkRegistrations</a></td><td>All VK registrations owned by an entity</td><td><span class="console-pill">error clause names the wrong field</span></td></tr>
+            <tr><td>SLA methods (Week 31)</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getslaagreement">novai_getSlaAgreement</a></td><td>An SLA memory object by (owner, object_id)</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getactivesla">novai_getActiveSla</a></td><td>The currently active SLA between a buyer and seller</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listslasbybuyer">novai_listSlasByBuyer</a></td><td>SLAs where the entity is the buyer (range)</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listslasbyseller">novai_listSlasBySeller</a></td><td>SLAs where the entity is the seller (range)</td><td></td></tr>
+            <tr><td>Payment channel methods (Week 32)</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getpaymentchannel">novai_getPaymentChannel</a></td><td>A payment channel by (owner, object_id)</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listchannelsbypartya">novai_listChannelsByPartyA</a></td><td>Channels where the entity is party A (range)</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listchannelsbypartyb">novai_listChannelsByPartyB</a></td><td>Channels where the entity is party B (range)</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getchanneldisputestatus">novai_getChannelDisputeStatus</a></td><td>Dispute window status with derived finalize_ready</td><td></td></tr>
+            <tr><td>Entity upgrade methods (Week 34)</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getupgradehistory">novai_getUpgradeHistory</a></td><td>EntityUpgrade history for an entity (range)</td><td></td></tr>
+            <tr><td>Oracle anchor methods (Week 35)</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getoracleanchor">novai_getOracleAnchor</a></td><td>An oracle anchor by signal_hash</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getoracleanchorsbyentity">novai_getOracleAnchorsByEntity</a></td><td>Oracle anchors posted by an entity (range)</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getoracleanchorsbytag">novai_getOracleAnchorsByTag</a></td><td>Oracle anchors matching a data_tag (range)</td><td></td></tr>
+            <tr><td>Dev-only methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_faucet">novai_faucet</a></td><td>Mint test tokens</td><td><span class="console-pill">gating documented backwards</span> <span class="console-pill">disabled-path code differs</span> <span class="console-pill">not documented here</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Each entry links to the dispatch arm that implements it. Those line numbers are regenerated with the page, and the build fails when the committed page no longer matches the tree.</p>
+        <!-- @@console-generated:/rpc-index@@ -->
+          <!-- @@console-generated:rpc-methods@@ -->
+        <div class="console-method" id="novai_getlatestblock">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getLatestBlock</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1903">crates/node/src/rpc.rs:1903</a></span>
+          </div>
+          <p class="console-lead">Returns the header of the most recently committed block.</p>
+          
+          <h3 class="console-h3">params</h3><p class="console-note">none. Pass <code class="text-ink-mid">{}</code>.</p>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;block_hash&quot;:  &quot;&lt;hex32&gt;&quot;,   // canonical hash of this block
+  &quot;parent_hash&quot;: &quot;&lt;hex32&gt;&quot;,   // canonical hash of the parent block
+  &quot;state_root&quot;:  &quot;&lt;hex32&gt;&quot;,   // SMT root after applying this block
+  &quot;height&quot;:      &lt;u64&gt;,
+  &quot;round&quot;:       &lt;u64&gt;,       // consensus round in which the block was committed
+  &quot;tx_count&quot;:    &lt;u64&gt;        // number of transactions in this block
+}</code></pre>
+        <p class="console-note">Null case: this method answers with a top-level <code class="text-ink-mid">null</code> result rather than an error when the record is not there, which for history includes anything below the pruning horizon. Measured at <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L3606">crates/node/src/rpc.rs:3606</a>.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note">only the global ones (<code class="text-ink-mid">-32600</code> malformed envelope, <code class="text-ink-mid">-32601</code> unknown method).</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getLatestBlock&quot;,&quot;params&quot;:{},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;block_hash&quot;:  &quot;6358124aa37e167d9b0f1ba8c43b2b5b76595862694c36f413a9acd173512689&quot;,
+    &quot;parent_hash&quot;: &quot;f4224ed3b546ee33fc9006c406816bfc60bda5f33c650c30ff2f7f321f29120f&quot;,
+    &quot;state_root&quot;:  &quot;be66f7485fc259ae01b6bd139b9fa26636660291d227cdb90aa9f7db6d3e97ee&quot;,
+    &quot;height&quot;: 2574,
+    &quot;round&quot;: 0,
+    &quot;tx_count&quot;: 0
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getblockbyheight">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getBlockByHeight</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1869">crates/node/src/rpc.rs:1869</a></span>
+          </div>
+          <p class="console-lead">Returns the header for a given height.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>height</code></td><td><code>u64</code></td><td>required</td><td>must be ≤ committed height</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;block_hash&quot;:  &quot;&lt;hex32&gt;&quot;,   // canonical hash of this block
+  &quot;parent_hash&quot;: &quot;&lt;hex32&gt;&quot;,   // canonical hash of the parent block
+  &quot;state_root&quot;:  &quot;&lt;hex32&gt;&quot;,   // SMT root after applying this block
+  &quot;height&quot;:      &lt;u64&gt;,
+  &quot;round&quot;:       &lt;u64&gt;,       // consensus round in which the block was committed
+  &quot;tx_count&quot;:    &lt;u64&gt;        // number of transactions in this block
+}</code></pre>
+        <p class="console-note">Null case: this method answers with a top-level <code class="text-ink-mid">null</code> result rather than an error when the record is not there, which for history includes anything below the pruning horizon. Measured at <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L3550">crates/node/src/rpc.rs:3550</a>.</p>
+        <p class="console-note"><span class="console-pill">correction</span> The reference calls this null answer unreachable. It is not: the handler answers <code class="text-ink-mid">null</code> for any height that is not on disk, which includes every height below the pruning horizon. Null-check this result. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 18.</span></p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td>missing/non-numeric <code class="text-ink-mid">height</code></td></tr>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">height</code> exceeds the committed height (response includes the actual cap)</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getBlockByHeight&quot;,&quot;params&quot;:{&quot;height&quot;:377},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;block_hash&quot;:  &quot;f13b0fe415672bdbae53432bfffb7558ffa314db5824b321517230e2aea84084&quot;,
+    &quot;parent_hash&quot;: &quot;0a29f578d57abd845403b3cce8fae281da364dd015bb440192e41fcac2a8fec9&quot;,
+    &quot;state_root&quot;:  &quot;be66f7485fc259ae01b6bd139b9fa26636660291d227cdb90aa9f7db6d3e97ee&quot;,
+    &quot;height&quot;: 377,
+    &quot;round&quot;: 0,
+    &quot;tx_count&quot;: 1
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getblockbyhash">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getBlockByHash</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1886">crates/node/src/rpc.rs:1886</a></span>
+          </div>
+          <p class="console-lead">Returns the header for a given block hash. Useful for following parent chains backwards.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>hash</code></td><td><code>hex32</code></td><td>required</td><td>exactly 64 hex chars</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;block_hash&quot;:  &quot;&lt;hex32&gt;&quot;,   // canonical hash of this block
+  &quot;parent_hash&quot;: &quot;&lt;hex32&gt;&quot;,   // canonical hash of the parent block
+  &quot;state_root&quot;:  &quot;&lt;hex32&gt;&quot;,   // SMT root after applying this block
+  &quot;height&quot;:      &lt;u64&gt;,
+  &quot;round&quot;:       &lt;u64&gt;,       // consensus round in which the block was committed
+  &quot;tx_count&quot;:    &lt;u64&gt;        // number of transactions in this block
+}</code></pre>
+        <p class="console-note">Null case: this method answers with a top-level <code class="text-ink-mid">null</code> result rather than an error when the record is not there, which for history includes anything below the pruning horizon. Measured at <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L3592">crates/node/src/rpc.rs:3592</a>.</p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td>hash isn't 32 bytes</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getBlockByHash&quot;,&quot;params&quot;:{&quot;hash&quot;:&quot;f13b0fe415672bdbae53432bfffb7558ffa314db5824b321517230e2aea84084&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;block_hash&quot;:  &quot;f13b0fe415672bdbae53432bfffb7558ffa314db5824b321517230e2aea84084&quot;,
+    &quot;parent_hash&quot;: &quot;0a29f578d57abd845403b3cce8fae281da364dd015bb440192e41fcac2a8fec9&quot;,
+    &quot;state_root&quot;:  &quot;be66f7485fc259ae01b6bd139b9fa26636660291d227cdb90aa9f7db6d3e97ee&quot;,
+    &quot;height&quot;: 377,
+    &quot;round&quot;: 0,
+    &quot;tx_count&quot;: 1
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getbalance">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getBalance</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1693">crates/node/src/rpc.rs:1693</a></span>
+          </div>
+          <p class="console-lead">Returns an account's current balance (u128) and expected nonce.</p>
+          <p class="console-note"><span class="console-pill">correction</span> The <code class="text-ink-mid">nonce</code> in this result is the committed account nonce, and it is the one to sign against. <code class="text-ink-mid">getNonce</code> answers a different question: the mempool admission cursor. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 15.</span></p>
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>address</code></td><td><code>hex32</code></td><td>required</td><td>32-byte account address</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;balance&quot;: &quot;&lt;decimal-string&gt;&quot;,  // u128, returned as a string
+  &quot;nonce&quot;:   &lt;u64&gt;                // next nonce a tx from this account must use
+}</code></pre>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td>address isn't 32 bytes</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getBalance&quot;,&quot;params&quot;:{&quot;address&quot;:&quot;4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: { &quot;balance&quot;: &quot;9945000&quot;, &quot;nonce&quot;: 1 },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getnonce">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getNonce</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1385">crates/node/src/rpc.rs:1385</a></span>
+          </div>
+          <p class="console-lead">Returns just the expected nonce for an account. <del class="text-ink-low line-through decoration-ink-low">Cheaper than <code class="text-ink-mid">getBalance</code> if you don't need the balance.</del></p>
+          <p class="console-note"><span class="console-pill">correction</span> The two are not interchangeable. This answers from the mempool admission cursor, which runs ahead of the committed account nonce once a transaction from that sender commits and fails, and stays ahead until the node restarts. Sign against the <code class="text-ink-mid">nonce</code> field of <code class="text-ink-mid">getBalance</code>. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 15.</span></p>
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>address</code></td><td><code>hex32</code></td><td>required</td><td>32-byte account address</td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note">Same parameters as novai_getBalance.</p>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;nonce&quot;: &lt;u64&gt; }</code></pre>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td>address isn't 32 bytes</td></tr>
+            <tr><td><code>-32002</code></td><td><del class="text-ink-low line-through decoration-ink-low">DB read failure</del></td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note"><span class="console-pill">correction</span> This method does not read the database. Its handler is passed the mempool nonce provider and nothing else, so <code class="text-ink-mid">-32002</code> is inherited from <code class="text-ink-mid">getBalance</code>'s table and cannot occur here. The only rejection this method produces is <code class="text-ink-mid">-32602</code> for an address that is not 32 bytes. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 17.</span></p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getNonce&quot;,&quot;params&quot;:{&quot;address&quot;:&quot;4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{ &quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;result&quot;: { &quot;nonce&quot;: 1 }, &quot;id&quot;: 1 }</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_submittransaction">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_submitTransaction</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1365">crates/node/src/rpc.rs:1365</a></span>
+          </div>
+          <p class="console-lead">Submits a hex-encoded, signed <code class="text-ink-mid">TxV1</code> to the mempool. The node validates the signature, address derivation, fee minimum, and size, then broadcasts it via P2P. It does <strong>not</strong> wait for inclusion.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>tx</code></td><td><code>string</code></td><td>required</td><td>hex-encoded signed tx; max 262 144 chars (= 128 KiB binary)</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;txid&quot;: &quot;&lt;hex32&gt;&quot; }   // blake3 of the unsigned canonical encoding</code></pre>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td>params malformed</td></tr>
+            <tr><td><code>-32000</code></td><td>tx hex too large; tx decode failed; tx exceeds binary size cap; signature invalid</td></tr>
+            <tr><td><code>-32001</code></td><td>mempool at capacity</td></tr>
+            <tr><td><code>-32010</code></td><td>nonce too low (message: <code class="text-ink-mid">NonceTooLow: expected N, got M</code>)</td></tr>
+            <tr><td><code>-32011</code></td><td>fee too low (message: <code class="text-ink-mid">FeeTooLow: minimum N, got M</code>)</td></tr>
+            <tr><td><code>-32012</code></td><td>per-sender pending limit exceeded (message: <code class="text-ink-mid">SenderLimitExceeded: max N pending per sender</code>)</td></tr>
+            <tr><td><code>-32013</code></td><td>other validation error</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure during validation</td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note"><span class="console-pill">correction</span> The mempool also rejects with <code class="text-ink-mid">-32014</code> NonceTooHigh, which this table does not list. It is not terminal: retry the same transaction unchanged once the sender's earlier nonces commit. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 8.</span></p>
+          <h3 class="console-h3">example</h3>
+          <p class="console-note">request shown abridged. The tx value is a real ~300-byte hex blob built via the Rust SDK</p>
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_submitTransaction&quot;,&quot;params&quot;:{&quot;tx&quot;:&quot;01&lt;224 hex chars&gt;&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{ &quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;result&quot;: { &quot;txid&quot;: &quot;f5796d3963b94b59017fa9f2fa7b015956cbd082c32c04f69b1d88ae007f140e&quot; }, &quot;id&quot;: 1 }</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_gettransaction">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getTransaction</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1852">crates/node/src/rpc.rs:1852</a></span>
+          </div>
+          <p class="console-lead">Returns receipt metadata for a committed transaction. Returns <code class="text-ink-mid">null</code> if the txid isn't known (either invalid, still in mempool, or evicted).</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>txid</code></td><td><code>hex32</code></td><td>required</td><td>as returned by <code class="text-ink-mid">submitTransaction</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;block_height&quot;: &lt;u64&gt;,    // height of the block the tx landed in
+  &quot;tx_index&quot;:     &lt;u64&gt;,    // 0-based index within that block's tx list
+  &quot;from&quot;:         &quot;&lt;hex32&gt;&quot;,
+  &quot;nonce&quot;:        &lt;u64&gt;,
+  &quot;fee&quot;:          &lt;u64&gt;,
+  &quot;payload_len&quot;:  &lt;u64&gt;     // length of the inner payload in bytes
+}</code></pre>
+        <p class="console-note">Null case: this method answers with a top-level <code class="text-ink-mid">null</code> result rather than an error when the record is not there, which for history includes anything below the pruning horizon. Measured at <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L3467">crates/node/src/rpc.rs:3467</a>.</p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td>txid isn't 32 bytes</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getTransaction&quot;,&quot;params&quot;:{&quot;txid&quot;:&quot;f5796d3963b94b59017fa9f2fa7b015956cbd082c32c04f69b1d88ae007f140e&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;block_height&quot;: 377,
+    &quot;tx_index&quot;: 0,
+    &quot;from&quot;: &quot;4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee&quot;,
+    &quot;nonce&quot;: 0,
+    &quot;fee&quot;: 5000,
+    &quot;payload_len&quot;: 83
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getaientity">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getAiEntity</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1711">crates/node/src/rpc.rs:1711</a></span>
+          </div>
+          <p class="console-lead">Returns the full on-chain record for an AI entity. Returns <code class="text-ink-mid">{ &quot;entity&quot;: null }</code> (note: not <code class="text-ink-mid">null</code> at the top level) if the entity doesn't exist.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>the canonical entity id, `blake3(&quot;NOVAI_AI_ENTITY_ID_V1&quot; \</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;entity&quot;: {
+    &quot;id&quot;:                       &quot;&lt;hex32&gt;&quot;,          // canonical entity id (matches the param)
+    &quot;code_hash&quot;:                &quot;&lt;hex32&gt;&quot;,          // identifier supplied at registration
+    &quot;creator&quot;:                  &quot;&lt;hex32&gt;&quot;,          // creator account address
+    &quot;autonomy_mode&quot;:            &lt;u8&gt;,               // 0 = Advisory, 1 = Gated, 2 reserved
+    &quot;capabilities&quot;:             &lt;u8&gt;,               // bitfield (see Capabilities)
+    &quot;economic_balance&quot;:         &quot;&lt;decimal-string&gt;&quot;, // u128
+    &quot;nonce&quot;:                    &lt;u64&gt;,              // next nonce for entity-signed txs
+    &quot;pubkey&quot;:                   &quot;&lt;hex32&gt;&quot;,          // ed25519 verifying key (zeros if registered without a key)
+    &quot;memory_root&quot;:              &quot;&lt;hex32&gt;&quot;,          // (reserved; currently zero)
+    &quot;params_root&quot;:              &quot;&lt;hex32&gt;&quot;,          // (reserved; currently zero)
+    &quot;registered_at&quot;:            &lt;u64&gt;,              // block height of the register tx
+    &quot;last_active_at&quot;:           &lt;u64&gt;,              // most recent height at which this entity sent a tx
+    &quot;is_active&quot;:                true,               // false after a deactivation proposal OR auto-pause from a failed required composition dependency
+    &quot;reputation_score&quot;:         &lt;u16&gt;,              // current reputation in [0, 100]; defaults to 50 for new entities
+    &quot;total_transactions&quot;:       &lt;u32&gt;,              // count of transactions counted toward reputation (e.g., job completions)
+    &quot;reputation_events_count&quot;:  &lt;u32&gt;,              // number of reputation events ever applied to this entity
+    &quot;stake_balance&quot;:            &quot;&lt;decimal-string&gt;&quot;, // u128 stake locked as collateral
+    &quot;stake_locked_until&quot;:       &lt;u64&gt;,              // block height until which stake cannot be withdrawn (0 = unlocked)
+    &quot;upgrade_count&quot;:            &lt;u32&gt;,              // number of EntityUpgrade transactions applied to this entity (Week 34)
+    &quot;last_upgrade_height&quot;:      &lt;u64&gt;               // block height of the most recent upgrade; 0 if never upgraded
+  }
+}</code></pre>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">entity_id</code> isn't 32 bytes</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getAiEntity&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;entity&quot;: {
+      &quot;id&quot;:               &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+      &quot;code_hash&quot;:        &quot;0101010101010101010101010101010101010101010101010101010101010101&quot;,
+      &quot;creator&quot;:          &quot;4069c3445cdef6af7cfa421b9d0ebefa7b4f039ad2d74ad9c6af0e5e05cc71ee&quot;,
+      &quot;autonomy_mode&quot;:    0,
+      &quot;capabilities&quot;:     7,
+      &quot;economic_balance&quot;: &quot;48500&quot;,
+      &quot;nonce&quot;:            2,
+      &quot;pubkey&quot;:           &quot;60356527146eacd35696afd3a8fd71d42312c2aa4262ede7afd2f879bf6dfa36&quot;,
+      &quot;memory_root&quot;:      &quot;0000000000000000000000000000000000000000000000000000000000000000&quot;,
+      &quot;params_root&quot;:      &quot;0000000000000000000000000000000000000000000000000000000000000000&quot;,
+      &quot;registered_at&quot;:    377,
+      &quot;last_active_at&quot;:   497,
+      &quot;is_active&quot;:        true
+    }
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getmemoryobjects">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getMemoryObjects</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1805">crates/node/src/rpc.rs:1805</a></span>
+          </div>
+          <p class="console-lead">Returns every memory object owned by an entity. Order is by <code class="text-ink-mid">object_id</code>.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>canonical entity id (same value used in <code class="text-ink-mid">getAiEntity</code>)</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;objects&quot;: [
+    {
+      &quot;object_id&quot;:    &quot;&lt;hex32&gt;&quot;,
+      &quot;object_type&quot;:  &lt;u8&gt;,            // 0..=15 (see Memory types below)
+      &quot;owner_entity&quot;: &quot;&lt;hex32&gt;&quot;,       // always equal to the param
+      &quot;created_at&quot;:   &lt;u64&gt;,           // block height
+      &quot;updated_at&quot;:   &lt;u64&gt;,           // block height
+      &quot;data&quot;:         &quot;&lt;hex&gt;&quot;,         // hex-encoded payload
+      &quot;data_size&quot;:    &lt;u64&gt;            // payload length in bytes
+    }
+  ]
+}</code></pre>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">entity_id</code> isn't 32 bytes</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getMemoryObjects&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;objects&quot;: [
+      {
+        &quot;object_id&quot;:    &quot;ba6c5de5a537dd07f44389d7ea794969b96305fd7cea845d05be23e256561103&quot;,
+        &quot;object_type&quot;:  0,
+        &quot;owner_entity&quot;: &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+        &quot;created_at&quot;:   497,
+        &quot;updated_at&quot;:   497,
+        &quot;data&quot;:         &quot;64656d6f206461746120666f7220525043207265666572656e6365&quot;,
+        &quot;data_size&quot;:    27
+      }
+    ]
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getsignalsbyheight">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getSignalsByHeight</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1404">crates/node/src/rpc.rs:1404</a></span>
+          </div>
+          <p class="console-lead">Returns every signal published at a specific block height.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>height</code></td><td><code>u64</code></td><td>required</td><td></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;signals&quot;: [
+    {
+      &quot;commitment_hash&quot;: &quot;&lt;hex32&gt;&quot;,   // signed commitment to off-chain content
+      &quot;signal_type&quot;:     &lt;u8&gt;,        // 0..=22 (see Signal types below)
+      &quot;height&quot;:          &lt;u64&gt;,
+      &quot;issuer&quot;:          &quot;&lt;hex32&gt;&quot;    // canonical entity id
+    }
+  ]
+}</code></pre>
+        <p class="console-note">Record shape declared once for Signal methods and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td>param decode failure or invalid hex length</td></tr>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">end_height - start_height &gt; 10000</code> (range queries)</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note">Shared by every method in Signal methods.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getSignalsByHeight&quot;,&quot;params&quot;:{&quot;height&quot;:453},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;signals&quot;: [
+      {
+        &quot;commitment_hash&quot;: &quot;0202020202020202020202020202020202020202020202020202020202020202&quot;,
+        &quot;signal_type&quot;: 0,
+        &quot;height&quot;: 453,
+        &quot;issuer&quot;: &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;
+      }
+    ]
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getsignalsbyissuer">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getSignalsByIssuer</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1424">crates/node/src/rpc.rs:1424</a></span>
+          </div>
+          <p class="console-lead">Returns every signal published by a given entity within a height window.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>issuer</code></td><td><code>hex32</code></td><td>required</td><td>canonical entity id</td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;signals&quot;: [
+    {
+      &quot;commitment_hash&quot;: &quot;&lt;hex32&gt;&quot;,   // signed commitment to off-chain content
+      &quot;signal_type&quot;:     &lt;u8&gt;,        // 0..=22 (see Signal types below)
+      &quot;height&quot;:          &lt;u64&gt;,
+      &quot;issuer&quot;:          &quot;&lt;hex32&gt;&quot;    // canonical entity id
+    }
+  ]
+}</code></pre>
+        <p class="console-note">Record shape declared once for Signal methods and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td>param decode failure or invalid hex length</td></tr>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">end_height - start_height &gt; 10000</code> (range queries)</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note">Shared by every method in Signal methods.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getSignalsByIssuer&quot;,&quot;params&quot;:{&quot;issuer&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;start_height&quot;:0,&quot;end_height&quot;:1000},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-method" id="novai_getsignalsbytype">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getSignalsByType</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1444">crates/node/src/rpc.rs:1444</a></span>
+          </div>
+          <p class="console-lead">Returns every signal of a given type within a height window.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>signal_type</code></td><td><code>u8</code></td><td>required</td><td>one of <code class="text-ink-mid">0..=22</code></td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;signals&quot;: [
+    {
+      &quot;commitment_hash&quot;: &quot;&lt;hex32&gt;&quot;,   // signed commitment to off-chain content
+      &quot;signal_type&quot;:     &lt;u8&gt;,        // 0..=22 (see Signal types below)
+      &quot;height&quot;:          &lt;u64&gt;,
+      &quot;issuer&quot;:          &quot;&lt;hex32&gt;&quot;    // canonical entity id
+    }
+  ]
+}</code></pre>
+        <p class="console-note">Record shape declared once for Signal methods and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td>param decode failure or invalid hex length</td></tr>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">end_height - start_height &gt; 10000</code> (range queries)</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note">Shared by every method in Signal methods.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getSignalsByType&quot;,&quot;params&quot;:{&quot;signal_type&quot;:0,&quot;start_height&quot;:0,&quot;end_height&quot;:1000},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-record" id="record-paymentrecord">
+          <h3 class="console-h3">PaymentRecord record</h3>
+          <p class="console-note">Declared once for Payment methods (Week 28) and shared by every method in it.</p>
+          <pre class="console-pre"><code>{
+  &quot;payer&quot;:                   &quot;&lt;hex32&gt;&quot;,          // payer entity id
+  &quot;payee&quot;:                   &quot;&lt;hex32&gt;&quot;,          // payee entity id (= splits[0].recipient_entity_id for split payments)
+  &quot;amount&quot;:                  &quot;&lt;decimal-string&gt;&quot;, // u128, base units
+  &quot;service_descriptor_hash&quot;: &quot;&lt;hex32&gt;&quot;,          // carried verbatim from the PaymentRequest tail
+  &quot;request_hash&quot;:            &quot;&lt;hex32&gt;&quot;,          // per-request commitment
+  &quot;payment_height&quot;:          &lt;u64&gt;,              // block height the payment settled at
+  &quot;max_block_height&quot;:        &lt;u64&gt;,              // expiry height bound at submission
+  &quot;attested_status&quot;:         &quot;delivered&quot; | &quot;failed&quot; | null,
+  &quot;attested_height&quot;:         &lt;u64&gt; | null,
+  &quot;splits&quot;:                  null | [           // null for legacy single-recipient payments
+    {
+      &quot;recipient_entity_id&quot;: &quot;&lt;hex32&gt;&quot;,
+      &quot;basis_points&quot;:        &lt;u16&gt;,
+      &quot;credited_amount&quot;:     &quot;&lt;decimal-string&gt;&quot;
+    }
+  ],
+  &quot;condition&quot;:               null | {           // null for unconditional payments
+    &quot;kind&quot;:               &quot;anchor_exists&quot; | &quot;anchor_data_hash_equals&quot; | &quot;anchor_tag_equals&quot; | &quot;anchor_not_expired&quot;,
+    &quot;anchor_signal_hash&quot;: &quot;&lt;hex32&gt;&quot;,
+    &quot;expected_data_hash&quot;: &quot;&lt;hex32&gt;&quot; | null,    // populated for kind == anchor_data_hash_equals
+    &quot;expected_tag&quot;:       &lt;string&gt; | null,     // populated for kind == anchor_tag_equals (lossy UTF-8)
+    &quot;expected_tag_hex&quot;:   &quot;&lt;hex&gt;&quot;   | null     // populated for kind == anchor_tag_equals (exact bytes)
+  }
+}</code></pre>
+        </div>
+        <div class="console-method" id="novai_getpaymentsbyentity">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getPaymentsByEntity</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1463">crates/node/src/rpc.rs:1463</a></span>
+          </div>
+          <p class="console-lead">Returns every <code class="text-ink-mid">PaymentRecord</code> where the queried entity is the <code class="text-ink-mid">payer</code> or the <code class="text-ink-mid">payee</code> within a height window, joined with the optional Week 33 splits aux row and the optional Week 36 condition aux row.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>canonical entity id</td></tr>
+            <tr><td><code>role</code></td><td><code>string</code></td><td>required</td><td><code class="text-ink-mid">&quot;payer&quot;</code> (outgoing) or <code class="text-ink-mid">&quot;payee&quot;</code> (incoming)</td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;payments&quot;: [<a class="text-brand-text no-underline hover:underline" href="#record-paymentrecord">PaymentRecord</a>, ...] }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-paymentrecord">PaymentRecord</a> is declared once for Payment methods (Week 28) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">entity_id</code> isn't 32 bytes; <code class="text-ink-mid">role</code> not <code class="text-ink-mid">&quot;payer&quot;</code> or <code class="text-ink-mid">&quot;payee&quot;</code>; range too large</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getPaymentsByEntity&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;role&quot;:&quot;payee&quot;,&quot;start_height&quot;:0,&quot;end_height&quot;:10000},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;payments&quot;: [
+      {
+        &quot;payer&quot;:                   &quot;f3b91eaa5e5f3a8b8b4c0c9f59f1c4d72c2f4ddf3a2a7f9c8a2c9b7d6e5f4a3b&quot;,
+        &quot;payee&quot;:                   &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+        &quot;amount&quot;:                  &quot;100000&quot;,
+        &quot;service_descriptor_hash&quot;: &quot;1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637383940&quot;,
+        &quot;request_hash&quot;:            &quot;abababababababababababababababababababababababababababababababab&quot;,
+        &quot;payment_height&quot;:          612,
+        &quot;max_block_height&quot;:        700,
+        &quot;attested_status&quot;:         &quot;delivered&quot;,
+        &quot;attested_height&quot;:         615,
+        &quot;splits&quot;:                  null,
+        &quot;condition&quot;:               null
+      }
+    ]
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-record" id="record-servicedescriptor">
+          <h3 class="console-h3">ServiceDescriptor record</h3>
+          <p class="console-note">Declared once for Service discovery methods (Week 29) and shared by every method in it.</p>
+          <pre class="console-pre"><code>{
+  &quot;object_id&quot;:                   &quot;&lt;hex32&gt;&quot;,
+  &quot;owner_entity&quot;:                &quot;&lt;hex32&gt;&quot;,
+  &quot;created_at&quot;:                  &lt;u64&gt;,
+  &quot;updated_at&quot;:                  &lt;u64&gt;,
+  &quot;version&quot;:                     &lt;u8&gt;,
+  &quot;service_name_hash&quot;:           &quot;&lt;hex32&gt;&quot;,          // off-chain canonical service name commitment
+  &quot;service_url_hash&quot;:            &quot;&lt;hex32&gt;&quot;,          // off-chain endpoint URL commitment
+  &quot;description_hash&quot;:            &quot;&lt;hex32&gt;&quot;,          // off-chain long-description commitment
+  &quot;category&quot;:                    &lt;u8&gt;,
+  &quot;category_label&quot;:              &quot;data-oracle&quot; | &quot;inference&quot; | ... | &quot;reserved&quot; | &quot;governance&quot; | &quot;unknown&quot;,
+  &quot;price_per_call&quot;:              &quot;&lt;decimal-string&gt;&quot;, // u128 base units; &quot;0&quot; if free
+  &quot;subscription_rate_per_block&quot;: &quot;&lt;decimal-string&gt;&quot;, // u128; &quot;0&quot; if no subscription pricing
+  &quot;min_reputation_score&quot;:        &lt;u16&gt;,
+  &quot;min_stake&quot;:                   &quot;&lt;decimal-string&gt;&quot;, // u128
+  &quot;capability_tags&quot;:             &lt;u32&gt;,              // off-chain-defined bitfield
+  &quot;status&quot;:                      &lt;u8&gt;,
+  &quot;status_label&quot;:                &quot;active&quot; | &quot;paused&quot; | &quot;deprecated&quot; | &quot;unknown&quot;
+}</code></pre>
+        </div>
+        <div class="console-method" id="novai_getservicedescriptorsbycategory">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getServiceDescriptorsByCategory</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1484">crates/node/src/rpc.rs:1484</a></span>
+          </div>
+          <p class="console-lead">Returns every <code class="text-ink-mid">ServiceDescriptor</code> memory object whose <code class="text-ink-mid">category</code> byte equals the queried value. Category 0..=15 is the well-known range; 16..=255 is reserved for governance allocation. No height windowing applies.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>category</code></td><td><code>u8</code></td><td>required</td><td>service category discriminant</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;descriptors&quot;: [<a class="text-brand-text no-underline hover:underline" href="#record-servicedescriptor">ServiceDescriptor</a>, ...] }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-servicedescriptor">ServiceDescriptor</a> is declared once for Service discovery methods (Week 29) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">category</code> not in <code class="text-ink-mid">0..=255</code> (i.e. malformed JSON number)</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getServiceDescriptorsByCategory&quot;,&quot;params&quot;:{&quot;category&quot;:1},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;descriptors&quot;: [
+      {
+        &quot;object_id&quot;:                   &quot;5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e&quot;,
+        &quot;owner_entity&quot;:                &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+        &quot;created_at&quot;:                  720,
+        &quot;updated_at&quot;:                  720,
+        &quot;version&quot;:                     1,
+        &quot;service_name_hash&quot;:           &quot;1111111111111111111111111111111111111111111111111111111111111111&quot;,
+        &quot;service_url_hash&quot;:            &quot;2222222222222222222222222222222222222222222222222222222222222222&quot;,
+        &quot;description_hash&quot;:            &quot;3333333333333333333333333333333333333333333333333333333333333333&quot;,
+        &quot;category&quot;:                    1,
+        &quot;category_label&quot;:              &quot;inference&quot;,
+        &quot;price_per_call&quot;:              &quot;2500&quot;,
+        &quot;subscription_rate_per_block&quot;: &quot;0&quot;,
+        &quot;min_reputation_score&quot;:        50,
+        &quot;min_stake&quot;:                   &quot;10000&quot;,
+        &quot;capability_tags&quot;:             0,
+        &quot;status&quot;:                      1,
+        &quot;status_label&quot;:                &quot;active&quot;
+      }
+    ]
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-record" id="record-vkregistration">
+          <h3 class="console-h3">VkRegistration record</h3>
+          <p class="console-note">Declared once for VK registry methods (Week 30) and shared by every method in it.</p>
+          <pre class="console-pre"><code>{
+  &quot;object_id&quot;:        &quot;&lt;hex32&gt;&quot;,          // canonical registry handle
+  &quot;owner_entity&quot;:     &quot;&lt;hex32&gt;&quot;,
+  &quot;created_at&quot;:       &lt;u64&gt;,
+  &quot;updated_at&quot;:       &lt;u64&gt;,
+  &quot;version&quot;:          &lt;u8&gt;,
+  &quot;proof_type&quot;:       &lt;u8&gt;,
+  &quot;proof_type_label&quot;: &quot;stub&quot; | &quot;groth16&quot; | &quot;plonk&quot; | &quot;groth16-registered&quot; | &quot;plonk-registered&quot; | &quot;unknown&quot;,
+  &quot;code_hash&quot;:        &quot;&lt;hex32&gt;&quot;,          // canonical code_hash this VK verifies
+  &quot;label&quot;:            &quot;&lt;string&gt;&quot;,         // lossy-UTF-8 free-form label
+  &quot;vk_len&quot;:           &lt;usize&gt;,            // == len(hex::decode(vk_bytes_hex))
+  &quot;vk_bytes_hex&quot;:     &quot;&lt;hex&gt;&quot;             // full compressed VK
+}</code></pre>
+        </div>
+        <div class="console-method" id="novai_getvkregistration">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getVkRegistration</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1505">crates/node/src/rpc.rs:1505</a></span>
+          </div>
+          <p class="console-lead">Point-resolves a single <code class="text-ink-mid">VkRegistration</code> by its memory-object id (the canonical handle a <code class="text-ink-mid">ProofSubmission</code> carries).</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>id</code></td><td><code>hex32</code></td><td>required</td><td>the VK registry handle</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;registration&quot;: <a class="text-brand-text no-underline hover:underline" href="#record-vkregistration">VkRegistration</a> | null }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-vkregistration">VkRegistration</a> is declared once for VK registry methods (Week 30) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">id</code> isn't 32 bytes</td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getVkRegistration&quot;,&quot;params&quot;:{&quot;id&quot;:&quot;9090909090909090909090909090909090909090909090909090909090909090&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;registration&quot;: {
+      &quot;object_id&quot;:        &quot;9090909090909090909090909090909090909090909090909090909090909090&quot;,
+      &quot;owner_entity&quot;:     &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+      &quot;created_at&quot;:       820,
+      &quot;updated_at&quot;:       820,
+      &quot;version&quot;:          1,
+      &quot;proof_type&quot;:       1,
+      &quot;proof_type_label&quot;: &quot;groth16&quot;,
+      &quot;code_hash&quot;:        &quot;0101010101010101010101010101010101010101010101010101010101010101&quot;,
+      &quot;label&quot;:            &quot;inference-vk-v1&quot;,
+      &quot;vk_len&quot;:           280,
+      &quot;vk_bytes_hex&quot;:     &quot;&lt;560 hex chars&gt;&quot;
+    }
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_listvkregistrations">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_listVkRegistrations</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1523">crates/node/src/rpc.rs:1523</a></span>
+          </div>
+          <p class="console-lead">Returns every <code class="text-ink-mid">VkRegistration</code> owned by the queried entity. Bounded by <code class="text-ink-mid">MAX_VK_REGISTRATIONS_PER_ENTITY</code> (= 8 in v1).</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>owner entity id</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;registrations&quot;: [<a class="text-brand-text no-underline hover:underline" href="#record-vkregistration">VkRegistration</a>, ...] }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-vkregistration">VkRegistration</a> is declared once for VK registry methods (Week 30) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32602</code></td><td><del class="text-ink-low line-through decoration-ink-low"><code class="text-ink-mid">id</code> isn't 32 bytes</del></td></tr>
+            <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note"><span class="console-pill">correction</span> This method's only parameter is <code class="text-ink-mid">entity_id</code>, so the clause above is the one belonging to <code class="text-ink-mid">getVkRegistration</code>, which the reference aliases here. The rejection you will actually see names <code class="text-ink-mid">entity_id</code>. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 16.</span></p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_listVkRegistrations&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-record" id="record-slaagreement">
+          <h3 class="console-h3">SlaAgreement record</h3>
+          <p class="console-note">Declared once for SLA methods (Week 31) and shared by every method in it.</p>
+          <pre class="console-pre"><code>{
+  &quot;object_id&quot;:                &quot;&lt;hex32&gt;&quot;,
+  &quot;owner_entity&quot;:             &quot;&lt;hex32&gt;&quot;,          // == buyer_entity_id for active SLAs
+  &quot;created_at&quot;:               &lt;u64&gt;,
+  &quot;updated_at&quot;:               &lt;u64&gt;,
+  &quot;version&quot;:                  &lt;u8&gt;,
+  &quot;buyer_entity_id&quot;:          &quot;&lt;hex32&gt;&quot;,
+  &quot;seller_entity_id&quot;:         &quot;&lt;hex32&gt;&quot;,
+  &quot;service_descriptor_hash&quot;:  &quot;&lt;hex32&gt;&quot;,
+  &quot;status&quot;:                   &lt;u8&gt;,
+  &quot;status_label&quot;:             &quot;proposed&quot; | &quot;active&quot; | &quot;completed&quot; | &quot;violated&quot; | &quot;cancelled&quot; | &quot;unknown&quot;,
+  &quot;created_at_height&quot;:        &lt;u64&gt;,
+  &quot;accepted_at_height&quot;:       &lt;u64&gt;,
+  &quot;start_height&quot;:             &lt;u64&gt;,
+  &quot;end_height&quot;:               &lt;u64&gt;,
+  &quot;violation_count&quot;:          &lt;u32&gt;,
+  &quot;violation_threshold&quot;:      &lt;u32&gt;,
+  &quot;max_response_time_blocks&quot;: &lt;u32&gt;,
+  &quot;min_uptime_bps&quot;:           &lt;u16&gt;,
+  &quot;min_delivery_success_bps&quot;: &lt;u16&gt;,
+  &quot;price_per_call&quot;:           &quot;&lt;decimal-string&gt;&quot;, // u128
+  &quot;slash_amount&quot;:             &quot;&lt;decimal-string&gt;&quot;, // u128; penalty on breach
+  &quot;terminated_at_height&quot;:     &lt;u64&gt;,
+  &quot;slashed_amount&quot;:           &quot;&lt;decimal-string&gt;&quot;  // u128; actual debit applied
+}</code></pre>
+        </div>
+        <div class="console-method" id="novai_getslaagreement">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getSlaAgreement</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1543">crates/node/src/rpc.rs:1543</a></span>
+          </div>
+          <p class="console-lead">Point-resolves a single SLA memory object by the <code class="text-ink-mid">(owner, object_id)</code> pair.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>owner</code></td><td><code>hex32</code></td><td>required</td><td>buyer entity id (the SLA's memory-object owner)</td></tr>
+            <tr><td><code>object_id</code></td><td><code>hex32</code></td><td>required</td><td>SLA memory object id</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;agreement&quot;: <a class="text-brand-text no-underline hover:underline" href="#record-slaagreement">SlaAgreement</a> | null }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-slaagreement">SlaAgreement</a> is declared once for SLA methods (Week 31) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getSlaAgreement&quot;,&quot;params&quot;:{&quot;owner&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;object_id&quot;:&quot;7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;agreement&quot;: {
+      &quot;object_id&quot;:                &quot;7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a&quot;,
+      &quot;owner_entity&quot;:             &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+      &quot;created_at&quot;:               900,
+      &quot;updated_at&quot;:               905,
+      &quot;version&quot;:                  1,
+      &quot;buyer_entity_id&quot;:          &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+      &quot;seller_entity_id&quot;:         &quot;5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b&quot;,
+      &quot;service_descriptor_hash&quot;:  &quot;1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637383940&quot;,
+      &quot;status&quot;:                   1,
+      &quot;status_label&quot;:             &quot;active&quot;,
+      &quot;created_at_height&quot;:        900,
+      &quot;accepted_at_height&quot;:       905,
+      &quot;start_height&quot;:             910,
+      &quot;end_height&quot;:               2000,
+      &quot;violation_count&quot;:          0,
+      &quot;violation_threshold&quot;:      3,
+      &quot;max_response_time_blocks&quot;: 50,
+      &quot;min_uptime_bps&quot;:           9500,
+      &quot;min_delivery_success_bps&quot;: 9700,
+      &quot;price_per_call&quot;:           &quot;1000&quot;,
+      &quot;slash_amount&quot;:             &quot;50000&quot;,
+      &quot;terminated_at_height&quot;:     0,
+      &quot;slashed_amount&quot;:           &quot;0&quot;
+    }
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getactivesla">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getActiveSla</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1561">crates/node/src/rpc.rs:1561</a></span>
+          </div>
+          <p class="console-lead">Returns the SLA that is currently open between a given <code class="text-ink-mid">(buyer, seller)</code> pair via the active-pair singleton index (max one active SLA per pair).</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>buyer</code></td><td><code>hex32</code></td><td>required</td><td>buyer entity id</td></tr>
+            <tr><td><code>seller</code></td><td><code>hex32</code></td><td>required</td><td>seller entity id</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;agreement&quot;: <a class="text-brand-text no-underline hover:underline" href="#record-slaagreement">SlaAgreement</a> | null }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-slaagreement">SlaAgreement</a> is declared once for SLA methods (Week 31) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getActiveSla&quot;,&quot;params&quot;:{&quot;buyer&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;seller&quot;:&quot;5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b&quot;},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-method" id="novai_listslasbybuyer">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_listSlasByBuyer</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1579">crates/node/src/rpc.rs:1579</a></span>
+          </div>
+          <p class="console-lead">Returns every SLA where the queried entity is the buyer (memory-object owner) and the SLA's <code class="text-ink-mid">created_at</code> falls within the height window.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>buyer entity id</td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;agreements&quot;: [<a class="text-brand-text no-underline hover:underline" href="#record-slaagreement">SlaAgreement</a>, ...] }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-slaagreement">SlaAgreement</a> is declared once for SLA methods (Week 31) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex or range too large; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_listSlasByBuyer&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;start_height&quot;:0,&quot;end_height&quot;:10000},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-method" id="novai_listslasbyseller">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_listSlasBySeller</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1597">crates/node/src/rpc.rs:1597</a></span>
+          </div>
+          <p class="console-lead">Returns every SLA where the queried entity is the seller and the SLA's <code class="text-ink-mid">created_at</code> falls within the height window. Bounded internally by the per-buyer cap (= 8 in v1).</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>seller entity id</td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note">Same parameters as novai_listSlasByBuyer.</p>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;agreements&quot;: [<a class="text-brand-text no-underline hover:underline" href="#record-slaagreement">SlaAgreement</a>, ...] }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-slaagreement">SlaAgreement</a> is declared once for SLA methods (Week 31) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex or range too large; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_listSlasBySeller&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b&quot;,&quot;start_height&quot;:0,&quot;end_height&quot;:10000},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-record" id="record-paymentchannel">
+          <h3 class="console-h3">PaymentChannel record</h3>
+          <p class="console-note">Declared once for Payment channel methods (Week 32) and shared by every method in it.</p>
+          <pre class="console-pre"><code>{
+  &quot;object_id&quot;:               &quot;&lt;hex32&gt;&quot;,
+  &quot;owner_entity&quot;:            &quot;&lt;hex32&gt;&quot;,          // == party_a_entity_id
+  &quot;created_at&quot;:              &lt;u64&gt;,
+  &quot;updated_at&quot;:              &lt;u64&gt;,
+  &quot;version&quot;:                 &lt;u8&gt;,
+  &quot;party_a_entity_id&quot;:       &quot;&lt;hex32&gt;&quot;,
+  &quot;party_b_entity_id&quot;:       &quot;&lt;hex32&gt;&quot;,
+  &quot;sla_object_id&quot;:           &quot;&lt;hex32&gt;&quot;,          // optional binding to an SlaAgreement (zero if unbound)
+  &quot;status&quot;:                  &lt;u8&gt;,
+  &quot;status_label&quot;:            &quot;proposed&quot; | &quot;open&quot; | &quot;closing&quot; | &quot;unknown&quot;,
+  &quot;deposit_a&quot;:               &quot;&lt;decimal-string&gt;&quot;, // u128
+  &quot;deposit_b&quot;:               &quot;&lt;decimal-string&gt;&quot;, // u128
+  &quot;balance_a&quot;:               &quot;&lt;decimal-string&gt;&quot;, // u128, current recorded
+  &quot;balance_b&quot;:               &quot;&lt;decimal-string&gt;&quot;, // u128, current recorded
+  &quot;nonce&quot;:                   &lt;u64&gt;,              // highest applied off-chain state nonce
+  &quot;proposed_at_height&quot;:      &lt;u64&gt;,
+  &quot;accepted_at_height&quot;:      &lt;u64&gt;,
+  &quot;closing_at_height&quot;:       &lt;u64&gt;,
+  &quot;dispute_deadline_height&quot;: &lt;u64&gt;,
+  &quot;dispute_window_blocks&quot;:   &lt;u32&gt;
+}</code></pre>
+        </div>
+        <div class="console-method" id="novai_getpaymentchannel">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getPaymentChannel</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1615">crates/node/src/rpc.rs:1615</a></span>
+          </div>
+          <p class="console-lead">Point-resolves a payment channel by <code class="text-ink-mid">(owner, object_id)</code>. Owner is party A.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>owner</code></td><td><code>hex32</code></td><td>required</td><td>party A entity id (memory-object owner)</td></tr>
+            <tr><td><code>object_id</code></td><td><code>hex32</code></td><td>required</td><td>channel memory object id</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;channel&quot;: <a class="text-brand-text no-underline hover:underline" href="#record-paymentchannel">PaymentChannel</a> | null }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-paymentchannel">PaymentChannel</a> is declared once for Payment channel methods (Week 32) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getPaymentChannel&quot;,&quot;params&quot;:{&quot;owner&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;object_id&quot;:&quot;c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;channel&quot;: {
+      &quot;object_id&quot;:               &quot;c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1&quot;,
+      &quot;owner_entity&quot;:            &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+      &quot;created_at&quot;:              1020,
+      &quot;updated_at&quot;:              1025,
+      &quot;version&quot;:                 1,
+      &quot;party_a_entity_id&quot;:       &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+      &quot;party_b_entity_id&quot;:       &quot;5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b&quot;,
+      &quot;sla_object_id&quot;:           &quot;0000000000000000000000000000000000000000000000000000000000000000&quot;,
+      &quot;status&quot;:                  1,
+      &quot;status_label&quot;:            &quot;open&quot;,
+      &quot;deposit_a&quot;:               &quot;200000&quot;,
+      &quot;deposit_b&quot;:               &quot;200000&quot;,
+      &quot;balance_a&quot;:               &quot;180000&quot;,
+      &quot;balance_b&quot;:               &quot;220000&quot;,
+      &quot;nonce&quot;:                   7,
+      &quot;proposed_at_height&quot;:      1020,
+      &quot;accepted_at_height&quot;:      1025,
+      &quot;closing_at_height&quot;:       0,
+      &quot;dispute_deadline_height&quot;: 0,
+      &quot;dispute_window_blocks&quot;:   100
+    }
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_listchannelsbypartya">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_listChannelsByPartyA</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1633">crates/node/src/rpc.rs:1633</a></span>
+          </div>
+          <p class="console-lead">Returns every <code class="text-ink-mid">PaymentChannel</code> whose memory-object owner (party A) is the queried entity and whose <code class="text-ink-mid">created_at</code> falls within the height window.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>party A entity id</td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;channels&quot;: [<a class="text-brand-text no-underline hover:underline" href="#record-paymentchannel">PaymentChannel</a>, ...] }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-paymentchannel">PaymentChannel</a> is declared once for Payment channel methods (Week 32) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex or range too large; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_listChannelsByPartyA&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;start_height&quot;:0,&quot;end_height&quot;:10000},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-method" id="novai_listchannelsbypartyb">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_listChannelsByPartyB</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1653">crates/node/src/rpc.rs:1653</a></span>
+          </div>
+          <p class="console-lead">Returns every <code class="text-ink-mid">PaymentChannel</code> where the queried entity is the embedded counterparty (party B). The by-party-B secondary index embeds party A so primary-record resolution is O(1) per match.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>party B entity id</td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note">Same parameters as novai_listChannelsByPartyA.</p>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;channels&quot;: [<a class="text-brand-text no-underline hover:underline" href="#record-paymentchannel">PaymentChannel</a>, ...] }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-paymentchannel">PaymentChannel</a> is declared once for Payment channel methods (Week 32) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex or range too large; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_listChannelsByPartyB&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b&quot;,&quot;start_height&quot;:0,&quot;end_height&quot;:10000},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-method" id="novai_getchanneldisputestatus">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getChannelDisputeStatus</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1673">crates/node/src/rpc.rs:1673</a></span>
+          </div>
+          <p class="console-lead">Returns the dispute-window fields for a channel plus the derived <code class="text-ink-mid">blocks_remaining</code> and <code class="text-ink-mid">finalize_ready</code>, so a client does not need to combine a separate latest-block read with the channel record. When the channel is not in the <code class="text-ink-mid">CLOSING</code> state, <code class="text-ink-mid">blocks_remaining</code> is <code class="text-ink-mid">0</code> and <code class="text-ink-mid">finalize_ready</code> is <code class="text-ink-mid">false</code>. When the channel does not resolve (wrong type or missing), <code class="text-ink-mid">found</code> is <code class="text-ink-mid">false</code> and the other fields are placeholder zeros.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>owner</code></td><td><code>hex32</code></td><td>required</td><td>party A entity id</td></tr>
+            <tr><td><code>object_id</code></td><td><code>hex32</code></td><td>required</td><td>channel memory object id</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;found&quot;:                   &lt;bool&gt;,
+  &quot;status&quot;:                  &lt;u8&gt;,
+  &quot;status_label&quot;:            &quot;proposed&quot; | &quot;open&quot; | &quot;closing&quot; | &quot;unknown&quot;,
+  &quot;closing_at_height&quot;:       &lt;u64&gt;,
+  &quot;dispute_deadline_height&quot;: &lt;u64&gt;,
+  &quot;current_height&quot;:          &lt;u64&gt;,
+  &quot;blocks_remaining&quot;:        &lt;u64&gt;,   // dispute_deadline_height.saturating_sub(current_height) when CLOSING, else 0
+  &quot;finalize_ready&quot;:          &lt;bool&gt;   // true iff status == CLOSING &amp;&amp; current_height &gt; dispute_deadline_height
+}</code></pre>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getChannelDisputeStatus&quot;,&quot;params&quot;:{&quot;owner&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;object_id&quot;:&quot;c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;found&quot;:                   true,
+    &quot;status&quot;:                  2,
+    &quot;status_label&quot;:            &quot;closing&quot;,
+    &quot;closing_at_height&quot;:       1100,
+    &quot;dispute_deadline_height&quot;: 1200,
+    &quot;current_height&quot;:          1180,
+    &quot;blocks_remaining&quot;:        20,
+    &quot;finalize_ready&quot;:          false
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getupgradehistory">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getUpgradeHistory</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1729">crates/node/src/rpc.rs:1729</a></span>
+          </div>
+          <p class="console-lead">Returns every <code class="text-ink-mid">UpgradeRecord</code> for the entity whose <code class="text-ink-mid">upgrade_height</code> falls within the height window, ordered ascending by height.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>the entity whose history to read</td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{
+  &quot;upgrades&quot;: [
+    {
+      &quot;old_code_hash&quot;:  &quot;&lt;hex32&gt;&quot;,  // pre-upgrade code hash
+      &quot;new_code_hash&quot;:  &quot;&lt;hex32&gt;&quot;,  // post-upgrade code hash
+      &quot;upgrade_height&quot;: &lt;u64&gt;,
+      &quot;upgrade_count&quot;:  &lt;u32&gt;,      // monotonic counter, 1 for the first upgrade
+      &quot;reason_hash&quot;:    &quot;&lt;hex32&gt;&quot;   // optional off-chain reason commitment; zero if unused
+    }
+  ]
+}</code></pre>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed <code class="text-ink-mid">entity_id</code> or range too large; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getUpgradeHistory&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;start_height&quot;:0,&quot;end_height&quot;:10000},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;upgrades&quot;: [
+      {
+        &quot;old_code_hash&quot;:  &quot;0101010101010101010101010101010101010101010101010101010101010101&quot;,
+        &quot;new_code_hash&quot;:  &quot;0202020202020202020202020202020202020202020202020202020202020202&quot;,
+        &quot;upgrade_height&quot;: 1500,
+        &quot;upgrade_count&quot;:  1,
+        &quot;reason_hash&quot;:    &quot;0000000000000000000000000000000000000000000000000000000000000000&quot;
+      }
+    ]
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-record" id="record-oracleanchor">
+          <h3 class="console-h3">OracleAnchor record</h3>
+          <p class="console-note">Declared once for Oracle anchor methods (Week 35) and shared by every method in it.</p>
+          <pre class="console-pre"><code>{
+  &quot;issuer_entity_id&quot;:   &quot;&lt;hex32&gt;&quot;,
+  &quot;data_hash&quot;:          &quot;&lt;hex32&gt;&quot;,          // blake3 commitment to the off-chain data
+  &quot;external_timestamp&quot;: &lt;u64&gt;,              // opaque; no on-chain wall-clock binds it
+  &quot;source_hash&quot;:        &quot;&lt;hex32&gt;&quot;,          // optional source commitment; zero if unused
+  &quot;expiry_height&quot;:      &lt;u64&gt;,              // advisory; 0 if unset
+  &quot;anchor_height&quot;:      &lt;u64&gt;,              // block height the anchor was committed at
+  &quot;data_tag&quot;:           &quot;&lt;string&gt;&quot;,         // lossy UTF-8 view of the tag bytes
+  &quot;data_tag_hex&quot;:       &quot;&lt;hex&gt;&quot;             // exact tag bytes (1..=32) hex-encoded
+}</code></pre>
+        </div>
+        <div class="console-method" id="novai_getoracleanchor">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getOracleAnchor</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1787">crates/node/src/rpc.rs:1787</a></span>
+          </div>
+          <p class="console-lead">Point-resolves a single anchor by the wrapping signal's canonical <code class="text-ink-mid">signal_hash</code>.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>signal_hash</code></td><td><code>hex32</code></td><td>required</td><td>the 32-byte signal hash of the wrapping <code class="text-ink-mid">OracleAnchor</code> signal</td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;anchor&quot;: <a class="text-brand-text no-underline hover:underline" href="#record-oracleanchor">OracleAnchor</a> | null }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-oracleanchor">OracleAnchor</a> is declared once for Oracle anchor methods (Week 35) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getOracleAnchor&quot;,&quot;params&quot;:{&quot;signal_hash&quot;:&quot;e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0&quot;},&quot;id&quot;:1}'</code></pre>
+          <pre class="console-pre-out"><code>{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;result&quot;: {
+    &quot;anchor&quot;: {
+      &quot;issuer_entity_id&quot;:   &quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,
+      &quot;data_hash&quot;:          &quot;1111111111111111111111111111111111111111111111111111111111111111&quot;,
+      &quot;external_timestamp&quot;: 1717000000,
+      &quot;source_hash&quot;:        &quot;0000000000000000000000000000000000000000000000000000000000000000&quot;,
+      &quot;expiry_height&quot;:      0,
+      &quot;anchor_height&quot;:      1800,
+      &quot;data_tag&quot;:           &quot;price/ETH-USD&quot;,
+      &quot;data_tag_hex&quot;:       &quot;70726963652f4554482d555344&quot;
+    }
+  },
+  &quot;id&quot;: 1
+}</code></pre><p class="console-note">Example response from the reference. Heights and hashes in it are illustrative, not a current reading.</p>
+        </div>
+        <div class="console-method" id="novai_getoracleanchorsbyentity">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getOracleAnchorsByEntity</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1747">crates/node/src/rpc.rs:1747</a></span>
+          </div>
+          <p class="console-lead">Returns every <code class="text-ink-mid">OracleAnchorRecord</code> posted by the queried entity whose <code class="text-ink-mid">anchor_height</code> falls within the chain-height window. The optional inclusive <code class="text-ink-mid">[ts_min, ts_max]</code> filters by the anchor's external timestamp (post-filter, applied in memory).</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>issuer entity id</td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            <tr><td><code>ts_min</code></td><td><code>u64</code></td><td>optional</td><td>lower bound on <code class="text-ink-mid">external_timestamp</code></td></tr>
+            <tr><td><code>ts_max</code></td><td><code>u64</code></td><td>optional</td><td>upper bound on <code class="text-ink-mid">external_timestamp</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;anchors&quot;: [<a class="text-brand-text no-underline hover:underline" href="#record-oracleanchor">OracleAnchor</a>, ...] }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-oracleanchor">OracleAnchor</a> is declared once for Oracle anchor methods (Week 35) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for malformed hex or range too large; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getOracleAnchorsByEntity&quot;,&quot;params&quot;:{&quot;entity_id&quot;:&quot;44a2cb6444921083ca5c483c0ba809db0bc83e12c3a264d52400d7576aca2ac1&quot;,&quot;start_height&quot;:0,&quot;end_height&quot;:10000},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-method" id="novai_getoracleanchorsbytag">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_getOracleAnchorsByTag</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1767">crates/node/src/rpc.rs:1767</a></span>
+          </div>
+          <p class="console-lead">Returns every <code class="text-ink-mid">OracleAnchorRecord</code> whose <code class="text-ink-mid">data_tag</code> matches the queried tag (e.g. <code class="text-ink-mid">&quot;price/ETH-USD&quot;</code>) within the chain-height window. Matching is by the domain-separated blake3 hash of the tag bytes, so callers pass the raw tag string. The optional <code class="text-ink-mid">[ts_min, ts_max]</code> filter behaves as in <code class="text-ink-mid">getOracleAnchorsByEntity</code>.</p>
+          
+          <h3 class="console-h3">params</h3><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
+            <tbody>
+            <tr><td><code>data_tag</code></td><td><code>string</code></td><td>required</td><td>raw tag string, 1..=32 bytes</td></tr>
+            <tr><td><code>start_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive</td></tr>
+            <tr><td><code>end_height</code></td><td><code>u64</code></td><td>required</td><td>inclusive; must satisfy <code class="text-ink-mid">end - start ≤ 10000</code></td></tr>
+            <tr><td><code>ts_min</code></td><td><code>u64</code></td><td>optional</td><td>lower bound on <code class="text-ink-mid">external_timestamp</code></td></tr>
+            <tr><td><code>ts_max</code></td><td><code>u64</code></td><td>optional</td><td>upper bound on <code class="text-ink-mid">external_timestamp</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+          <h3 class="console-h3">result</h3>
+        <pre class="console-pre"><code>{ &quot;anchors&quot;: [<a class="text-brand-text no-underline hover:underline" href="#record-oracleanchor">OracleAnchor</a>, ...] }</code></pre>
+        <p class="console-note">Shape of <a class="text-brand-text no-underline hover:underline" href="#record-oracleanchor">OracleAnchor</a> is declared once for Oracle anchor methods (Week 35) and shared by every method in it.</p>
+          <h3 class="console-h3">errors</h3><p class="console-note"><code class="text-ink-mid">-32602</code> for empty / oversized <code class="text-ink-mid">data_tag</code> or range too large; <code class="text-ink-mid">-32002</code> for DB read failure.</p>
+          <h3 class="console-h3">example</h3>
+          
+          <pre class="console-pre"><code>curl -s -X POST $URL -H 'Content-Type: application/json' \
+  -d '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;novai_getOracleAnchorsByTag&quot;,&quot;params&quot;:{&quot;data_tag&quot;:&quot;price/ETH-USD&quot;,&quot;start_height&quot;:0,&quot;end_height&quot;:10000},&quot;id&quot;:1}'</code></pre>
+          <p class="console-note">The reference carries no sample response for this method.</p>
+        </div>
+        <div class="console-method" id="novai_faucet">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <span class="console-method-name">novai_faucet</span>
+            <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1823">crates/node/src/rpc.rs:1823</a></span>
+          </div>
+          <p class="console-lead">Mint test tokens <span class="console-pill">not documented here</span></p>
+          <p class="console-note">This method mints tokens, and it is not documented here until the public testnet opens. Its parameters, result shape and error codes are in docs/RPC_REFERENCE.md, and the handler is linked above. Two of the carried exceptions are about this method, so the reference's account of its gating and of its disabled-path error code are both known to be wrong. The method is still counted in the 29 and still appears in openrpc.json: what is withheld is the runnable example, not the fact that the method exists.</p>
+          <p class="console-note"><span class="console-pill">correction</span> <code class="text-ink-mid">handle_faucet</code> prefers a loaded <code class="text-ink-mid">--faucet-key</code> and falls back to the deterministic dev key only when there is none, so the method also answers on a node started with a faucet key and no dev keys. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 13.</span></p>
+        <p class="console-note"><span class="console-pill">correction</span> The disabled path returns <code class="text-ink-mid">-32000</code>, not <code class="text-ink-mid">-32602</code>. A client matching on <code class="text-ink-mid">-32602</code> to tell a malformed address from a disabled faucet takes the wrong branch. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 10.</span></p>
+        </div>
+        <!-- @@console-generated:/rpc-methods@@ -->
         </section>
         <section id="errors" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">04</span> errors and limits</h2>
+          <!-- @@console-generated:errors@@ -->
+        <p class="console-lead">Thirteen JSON-RPC error codes, four HTTP-level rejections that carry no JSON-RPC envelope at all, and six limits.</p>
+        <h3 class="console-h3">json-rpc error codes</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Code</th><th scope="col">Meaning</th><th scope="col">Trigger</th><th scope="col">Note</th><th scope="col">Source</th></tr></thead>
+            <tbody>
+            <tr><td><code>-32700</code></td><td>Parse error</td><td>request body is not valid JSON</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1335">:1335</a></td></tr>
+            <tr><td><code>-32600</code></td><td>Invalid Request</td><td><del class="text-ink-low line-through decoration-ink-low">malformed JSON-RPC envelope (missing <code class="text-ink-mid">jsonrpc</code>/<code class="text-ink-mid">method</code>)</del></td><td><span class="console-pill">trigger documented wrongly</span></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1352">:1352</a></td></tr>
+            <tr><td><code>-32601</code></td><td>Method not found</td><td>unknown method name</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1922">:1922</a></td></tr>
+            <tr><td><code>-32602</code></td><td>Invalid params</td><td>wrong type, missing field, hex length wrong, range too large, height in the future</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1950">:1950</a></td></tr>
+            <tr><td><code>-32000</code></td><td>Application error</td><td>tx too large, tx decode/sig failure, faucet cooldown, faucet disabled</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1958">:1958</a></td></tr>
+            <tr><td><code>-32001</code></td><td>Mempool full</td><td>mempool at capacity; submitter must back off</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2045">:2045</a></td></tr>
+            <tr><td><code>-32002</code></td><td>Internal storage error</td><td>RocksDB read or codec failure during query</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2126">:2126</a></td></tr>
+            <tr><td><code>-32003</code></td><td>Response too large</td><td>assembled response exceeds 10 MiB</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L3677">:3677</a></td></tr>
+            <tr><td><code>-32010</code></td><td>Nonce too low</td><td>tx nonce is below the sender's expected nonce</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2046">:2046</a></td></tr>
+            <tr><td><code>-32011</code></td><td>Fee too low</td><td>tx fee is below the per-tx-type minimum</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2064">:2064</a></td></tr>
+            <tr><td><code>-32012</code></td><td>Sender limit exceeded</td><td>too many pending txs from this sender in the mempool</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2066">:2066</a></td></tr>
+            <tr><td><code>-32013</code></td><td>Other validation error</td><td>catch-all for additional mempool validation failures</td><td></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2070">:2070</a></td></tr>
+            <tr><td><code>-32014</code></td><td>NonceTooHigh</td><td>nonce is at or above the sender's admission horizon</td><td><span class="console-pill">not in the reference</span></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L2059">:2059</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note"><span class="console-pill">correction</span> A missing <code class="text-ink-mid">jsonrpc</code> or <code class="text-ink-mid">method</code> field answers <code class="text-ink-mid">-32700</code>, not this code, because every field of the request struct is required and a missing one fails to deserialize. <code class="text-ink-mid">-32600</code> is what you get when <code class="text-ink-mid">jsonrpc</code> is present and is not <code class="text-ink-mid">&quot;2.0&quot;</code>. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 19.</span></p>
+        <p class="console-note">One of these thirteen is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.</p>
+        <h3 class="console-h3">http rejections with no json-rpc envelope</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Status</th><th scope="col">Body</th><th scope="col">Source</th></tr></thead>
+            <tbody>
+            <tr><td><code>400</code></td><td><code>Failed to read request: {e}</code> <span class="console-pill">template</span></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1312">:1312</a></td></tr>
+            <tr><td><code>413</code></td><td><code>Request body too large</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1321">:1321</a></td></tr>
+            <tr><td><code>429</code></td><td><code>Too Many Requests</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1297">:1297</a></td></tr>
+            <tr><td><code>503</code></td><td><code>Service Unavailable &#8212; too many concurrent requests</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1242">:1242</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">These four never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.</p>
+        <h3 class="console-h3">limits</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Limit</th><th scope="col" class="text-right">Value</th><th scope="col">Constant</th><th scope="col">Source</th></tr></thead>
+            <tbody>
+            <tr><td>requests per second per source IP</td><td class="num">100</td><td><code>MAX_RPC_REQUESTS_PER_SEC</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L65">:65</a></td></tr>
+            <tr><td>concurrent in-flight requests</td><td class="num">64</td><td><code>MAX_CONCURRENT_RPC</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L74">:74</a></td></tr>
+            <tr><td>bytes, request body</td><td class="num">524,288</td><td><code>MAX_RPC_BODY_SIZE</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L70">:70</a></td></tr>
+            <tr><td>bytes, response body</td><td class="num">10,485,760</td><td><code>MAX_RPC_RESPONSE_SIZE</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L3667">:3667</a></td></tr>
+            <tr><td>bytes, decoded transaction</td><td class="num">131,072</td><td><code>MAX_TX_SIZE</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/types/src/lib.rs#L19">:19</a></td></tr>
+            <tr><td>blocks, signal query height range</td><td class="num">10,000</td><td><code>MAX_SIGNAL_QUERY_RANGE</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L77">:77</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 class="console-h3">handling a rejected nonce</h3>
+        <p class="console-note">-32010 and -32014 look similar and need opposite handling. Too low means the transaction is dead and the client must resynchronise. Too high means it is merely early: the identical bytes succeed once the sender's earlier nonces commit, so retry rather than rebuild.</p>
+        <p class="console-note">A transfer to an address that has no account row yet is rejected below the minimum account balance. The error reports the transfer amount in its balance field, which reads as though the sender were short.</p>
+        <!-- @@console-generated:/errors@@ -->
         </section>
         <section id="transactions" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">05</span> transactions</h2>
+          <!-- @@console-generated:transactions@@ -->
+        <p class="console-lead">Eleven transaction types. The discriminant is the first byte of the payload and it is what decides the type.</p>
+        <h3 class="console-h3">types, discriminants and minimum fees</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Byte</th><th scope="col">Type</th><th scope="col" class="text-right">Min fee</th><th scope="col">Constant</th></tr></thead>
+            <tbody>
+            <tr><td class="num">1</td><td><code>transfer</code></td><td class="num">100</td><td><code>MIN_FEE_TRANSFER</code></td></tr>
+            <tr><td class="num">2</td><td><code>signalCommitment</code></td><td class="num">1,000</td><td><code>MIN_FEE_SIGNAL_COMMITMENT</code></td></tr>
+            <tr><td class="num">3</td><td><code>createMemoryObject</code></td><td class="num">500</td><td><code>MIN_FEE_MEMORY_OBJECT</code></td></tr>
+            <tr><td class="num">4</td><td><code>updateMemoryObject</code></td><td class="num">500</td><td><code>MIN_FEE_MEMORY_OBJECT</code></td></tr>
+            <tr><td class="num">5</td><td><code>deleteMemoryObject</code></td><td class="num">500</td><td><code>MIN_FEE_MEMORY_OBJECT</code></td></tr>
+            <tr><td class="num">6</td><td><code>submitProposal</code></td><td class="num">2,000</td><td><code>MIN_FEE_GOVERNANCE_SUBMIT</code></td></tr>
+            <tr><td class="num">7</td><td><code>executeProposal</code></td><td class="num">500</td><td><code>MIN_FEE_GOVERNANCE_EXECUTE</code></td></tr>
+            <tr><td class="num">8</td><td><code>registerAiEntity</code></td><td class="num">5,000</td><td><code>MIN_FEE_REGISTER_AI_ENTITY</code></td></tr>
+            <tr><td class="num">9</td><td><code>creditAiEntity</code></td><td class="num">100</td><td><code>MIN_FEE_CREDIT_AI_ENTITY</code></td></tr>
+            <tr><td class="num">10</td><td><code>registerAiEntityWithKey</code></td><td class="num">5,000</td><td><code>MIN_FEE_REGISTER_AI_ENTITY_WITH_KEY</code></td></tr>
+            <tr><td class="num">11</td><td><code>entityUpgrade</code></td><td class="num">5,000</td><td><code>MIN_FEE_ENTITY_UPGRADE</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Minimum fees are per type. Percentage fees apply on top of the floor for the operations listed, so unit economics are the floor plus a percentage rather than the floor alone.</p>
+        <h3 class="console-h3">percentage fees</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Constant</th><th scope="col" class="text-right">Basis points</th><th scope="col" class="text-right">Share</th><th scope="col">Source</th></tr></thead>
+            <tbody>
+            <tr><td><code>PAYMENT_FEE_BPS</code></td><td class="num">200</td><td class="num">2%</td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1541">:1541</a></td></tr>
+            <tr><td><code>MARKETPLACE_FEE_BPS</code></td><td class="num">200</td><td class="num">2%</td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L12443">:12443</a></td></tr>
+            <tr><td><code>SUBSCRIPTION_CANCEL_FEE_BPS</code></td><td class="num">500</td><td class="num">5%</td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L12450">:12450</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Basis points are against a denominator of 10,000.</p>
+        <h3 class="console-h3">canonical unsigned encoding</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Field</th><th scope="col" class="text-right">Bytes</th><th scope="col">Endianness</th><th scope="col" class="text-right">Offset</th></tr></thead>
+            <tbody>
+            <tr><td><code>version</code></td><td class="num">1</td><td>n/a</td><td class="num">0</td></tr>
+            <tr><td><code>from</code></td><td class="num">32</td><td>n/a</td><td class="num">1</td></tr>
+            <tr><td><code>pubkey</code></td><td class="num">32</td><td>n/a</td><td class="num">33</td></tr>
+            <tr><td><code>nonce</code></td><td class="num">8</td><td>little</td><td class="num">65</td></tr>
+            <tr><td><code>fee</code></td><td class="num">8</td><td>little</td><td class="num">73</td></tr>
+            <tr><td><code>payload_len</code></td><td class="num">4</td><td>little</td><td class="num">81</td></tr>
+            <tr><td><code>payload</code></td><td class="num">variable</td><td>n/a</td><td class="num">85</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">The signature is 64 bytes appended after the payload. Fixed overhead is 149 bytes, which is TX_V1_OVERHEAD.</p>
+        <h3 class="console-h3">signing</h3>
+        <p class="console-note">Two details a non-Rust client has to get exactly right. The envelope is little-endian while payload internals are big-endian. And the signing preimage and the transaction id are different preimages: the signature covers a domain tag followed by the unsigned encoding, while the id is a hash of the unsigned encoding alone. Trailing bytes after the signature are a decode error, not padding.</p>
+        <!-- @@console-generated:/transactions@@ -->
         </section>
         <section id="ai-entities" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">06</span> ai entities</h2>
+          <!-- @@console-generated:ai-entities@@ -->
+        <p class="console-lead">AI entities are the part of this chain that has no equivalent elsewhere. Three worked flows first, then the full enumerations.</p>
+        <p class="console-note">These describe what the implementation does, with every constant cited to its declaration. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.</p>
+        <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
+          <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">a reputation oracle</p>
+          <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
+            <li>A reputation oracle issues <code>ReputationUpdate</code> signals, signal type 7. Each one moves a target entity's <code>reputation_score</code>, which the chain stores on the entity record and clamps to a 0 to 100 range. A newly registered entity starts at 50.</li>
+            <li>Issuing one requires the <code>submit_reputation_updates</code> capability, bit 5 of the entity's capability byte.</li>
+            <li>The payload is 101 bytes: the 66-byte signal commitment base plus a 35-byte tail carrying the target entity id, an event type and a signed two-byte delta.</li>
+            <li>The event type must be 0 to 12.</li>
+            <li>An entity cannot rate itself.</li>
+            <li>The fee is 1,000 base units, the signal commitment minimum.</li>
+            <li>The effect is checkable in one read: <code>novai_getAiEntity</code> returns <code>reputation_score</code> and <code>reputation_events_count</code>.</li>
+          </ul>
+        </div>
+        <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
+          <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">selling signals on the marketplace</p>
+          <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
+            <li>A seller publishes a <code>SignalCatalog</code> memory object, type 7, listing priced offerings. A catalog holds at most 10 offerings, each 10 bytes: a signal type, a price as a big-endian u64, and an active flag.</li>
+            <li>A buyer issues a <code>SignalPurchase</code> signal, type 8, naming the seller, the signal type wanted and a maximum price. The chain rejects the purchase if the catalog price is above that maximum.</li>
+            <li>On success the chain moves the price from the buyer's <code>economic_balance</code> to the seller's, less a 2% cut routed to the marketplace treasury.</li>
+            <li>The payload is 107 bytes: the 66-byte base plus a 41-byte tail.</li>
+            <li><strong>Publishing a catalog requires no stake.</strong> A listing is not a bond, and a buyer should not read it as one.</li>
+            <li>The marketplace treasury is not readable over RPC. No method returns it.</li>
+          </ul>
+        </div>
+        <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
+          <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">staking collateral</p>
+          <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
+            <li>A <code>StakeDeposit</code> signal, type 9, moves an amount from an entity's <code>economic_balance</code> into its <code>stake_balance</code>. The payload is 82 bytes: the 66-byte base plus a 16-byte big-endian u128 amount.</li>
+            <li>A deposit locks for 1,000 blocks. <code>stake_locked_until</code> is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time; the cadence in the network section converts it.</li>
+            <li>Withdrawal is a <code>StakeWithdraw</code> signal, type 10, with the same 82-byte layout. A partial withdrawal does not re-lock the remainder.</li>
+            <li>A <code>StakeSlash</code> signal, type 11, issued by an entity holding <code>submit_reputation_updates</code>, subtracts up to a named amount from the target's <code>stake_balance</code> and applies a bundled reputation event in the same operation. The payload is 117 bytes.</li>
+            <li>An entity cannot slash itself.</li>
+            <li><code>economic_balance</code>, <code>stake_balance</code> and <code>stake_locked_until</code> are all readable from <code>novai_getAiEntity</code>, and every stake operation appears in the signal index.</li>
+          </ul>
+        </div>
+        <h3 class="console-h3">capability bits</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Bit</th><th scope="col">Hex</th><th scope="col">Capability</th></tr></thead>
+            <tbody>
+            <tr><td class="num">0</td><td><code>0x01</code></td><td><code>read_public_chain</code></td></tr>
+            <tr><td class="num">1</td><td><code>0x02</code></td><td><code>read_memory_objects</code></td></tr>
+            <tr><td class="num">2</td><td><code>0x04</code></td><td><code>emit_proposals</code></td></tr>
+            <tr><td class="num">3</td><td><code>0x08</code></td><td><code>request_execution</code></td></tr>
+            <tr><td class="num">4</td><td><code>0x10</code></td><td><code>read_nnpx_derived</code></td></tr>
+            <tr><td class="num">5</td><td><code>0x20</code></td><td><code>submit_reputation_updates</code></td></tr>
+            <tr><td class="num">6</td><td><code>0x40</code></td><td><code>post_oracle_anchors</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Capabilities are one byte, set at registration, and immutable for the entity's life. The upgrade transaction changes the code hash and nothing else, and registering again mints a different entity id, which abandons the reputation, stake, agreements and memory objects attached to the old one. Set every bit you might need on day one.</p>
+        <details class="console-details">
+          <summary class="console-summary">signal types (23)</summary>
+          <div class="px-4 pb-3"><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Type</th><th scope="col">Variant</th><th scope="col">Payload</th><th scope="col">Description</th></tr></thead>
+            <tbody>
+            <tr><td class="num">0</td><td><code>Anomaly</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">1</td><td><code>Optimization</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">2</td><td><code>Prediction</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">3</td><td><code>RiskScore</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">4</td><td><code>AuditReport</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">5</td><td><code>SpamRisk</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">6</td><td><code>CongestionForecast</code></td><td>base 66 B payload</td><td><span class="console-pill">no source description</span></td></tr>
+            <tr><td class="num">7</td><td><code>ReputationUpdate</code></td><td>base + 35 B tail; issuer needs bit 5</td><td>Reputation update emitted by an oracle entity (requires submit_reputation_updates capability).</td></tr>
+            <tr><td class="num">8</td><td><code>SignalPurchase</code></td><td>base + 41 B tail</td><td>Purchase of a priced signal listed in the seller's SignalCatalog memory object. Carries an inline 41-byte purchase tail (seller_entity_id || purchased_signal_type || max_price_be).</td></tr>
+            <tr><td class="num">9</td><td><code>StakeDeposit</code></td><td>base + 16 B tail</td><td>Stake-deposit signal moving funds from the issuer's economic_balance to its stake_balance. Locks the deposited amount until current_height + STAKE_LOCK_PERIOD. Carries a 16-byte amount tail.</td></tr>
+            <tr><td class="num">10</td><td><code>StakeWithdraw</code></td><td>base + 16 B tail</td><td>Stake-withdraw signal moving funds from the issuer's stake_balance back to its economic_balance. Rejected unless stake_locked_until &lt;= current_height. Carries a 16-byte amount tail.</td></tr>
+            <tr><td class="num">11</td><td><code>StakeSlash</code></td><td>base + 51 B tail; issuer needs bit 5</td><td>Slash signal emitted by an oracle entity (requires submit_reputation_updates capability). Deducts from a target entity's stake_balance, credits the slashed amount to KEY_SLASH_TREASURY, and applies a reputation update atomically. Carries a 51-byte tail: target_id:32 | slash_amount_be:16 | rep_event_type:1 | points_delta_be:2.</td></tr>
+            <tr><td class="num">12</td><td><code>CompositionCheck</code></td><td>base + 34 B tail; issuer needs bit 5</td><td>Composition health check emitted by an oracle entity (requires submit_reputation_updates capability). Validates a target entity's declared CompositionGraph dependency and, if the failure is corroborated by chain state and the dependency is marked required, auto-pauses the target by setting is_active = false. Always emits a REP_EVENT_COMPOSITION_FAILURE reputation event with delta -1. Carries a 34-byte tail: target_id:32 | failed_dependency_idx:1 | failure_reason:1.</td></tr>
+            <tr><td class="num">13</td><td><code>ProofSubmission</code></td><td>base + 65 B tail</td><td>AI entity submits a ZK proof attesting to off-chain computation integrity. Carries a 65-byte tail: proof_type:1 | code_hash:32 | computation_hash:32. The proof bytes themselves are NOT carried inline (the SignalCommitment tail is fixed-size); a real verifier would resolve them via the off-chain payload referenced by signal_hash. The execution handler verifies the proof via the ZkVerifier trait, and on success creates a VerificationRecord memory object owned by the issuer plus a REP_EVENT_PROOF_VERIFIED reputation event with delta +3.</td></tr>
+            <tr><td class="num">14</td><td><code>SubscriptionCreate</code></td><td>base + 49 B tail; locks `rate_per_block * duration_blocks` from the subscriber</td><td>Recurring payment subscription create: the issuing entity (the subscriber) locks rate_per_block * duration_blocks of its economic_balance to a producer for a fixed covered signal type. On success the handler creates a MemoryObjectType::Subscription memory object owned by the subscriber, recording the active agreement. Settlement is lazy and is performed when the subscriber emits a matching SubscriptionCancel signal. Carries a 49-byte tail: producer_entity_id:32 | covered_signal_type:1 | rate_per_block_be:8 | duration_blocks_be:8.</td></tr>
+            <tr><td class="num">15</td><td><code>SubscriptionCancel</code></td><td>base + 32 B tail; settles accrued payment and refunds the remainder</td><td>Recurring payment subscription cancel: the original subscriber terminates an active subscription early. The handler settles accrued payment to the producer (less the standard 2% marketplace fee), applies a 5% cancel fee on the remaining locked funds (paid to the producer with no marketplace cut as compensation for early termination), refunds the rest to the subscriber, and marks the subscription record is_active = false. Only the original subscriber may emit this signal. Carries a 32-byte tail: subscription_id:32 (the memory object id of the Subscription record being cancelled).</td></tr>
+            <tr><td class="num">16</td><td><code>PaymentRequest</code></td><td>base + 112 B tail; Week 28 native x402. Optional Week 33 splits and Week 36 condition trailers</td><td>Native x402-style per-request payment. The issuing entity (the payer) debits its economic_balance by amount + fee and credits the payee's economic_balance by amount; the fee is routed to KEY_MARKETPLACE_TREASURY. The handler also writes a PaymentRecord to b&quot;ai/payments/by_hash/&quot; || signal_hash plus two scan indexes (by-payer, by-payee). Replay protection is enforced by rejecting any payment whose signal_hash already has a by_hash record. Carries a 112-byte tail: payee_entity_id:32 | amount_be:8 | service_descriptor_hash:32 | request_hash:32 | max_block_height_be:8.</td></tr>
+            <tr><td class="num">17</td><td><code>ServiceAttestation</code></td><td>base + 65 B tail; Week 28 delivery attestation by the original payer</td><td>Service-delivery attestation issued by the payer of a prior PaymentRequest. The handler loads the referenced PaymentRecord from b&quot;ai/payments/by_hash/&quot; || payment_signal_hash, verifies the issuer of this signal equals the recorded payer, then applies either REP_EVENT_PAYMENT_DELIVERED or REP_EVENT_PAYMENT_FAILED to the payee depending on status. The payment record is rewritten in place with attested_status and attested_height; the record can be attested at most once. Carries a 65-byte tail: payment_signal_hash:32 | payee_entity_id:32 | status:1 (0 = Delivered, 1 = Failed).</td></tr>
+            <tr><td class="num">18</td><td><code>SlaAccept</code></td><td>base + 64 B tail; Week 31 SLA acceptance by the seller</td><td>SLA acceptance (Week 31): the issuing entity (the seller named in a previously proposed SlaAgreement memory object) accepts the agreement. The handler loads the SLA memory object via the embedded buyer entity id and SLA object id, verifies the signal issuer equals the SLA's seller, gates on the seller's current stake_balance &gt;= sla.slash_amount, then transitions the SLA from SLA_STATUS_PROPOSED to SLA_STATUS_ACTIVE and records the acceptance height. The acceptance must land BEFORE the SLA's start_height; the active-pair singleton index entry stays in place (it was written at create time). Carries a 64-byte tail: sla_object_id:32 | buyer_entity_id:32.</td></tr>
+            <tr><td class="num">19</td><td><code>ChannelAccept</code></td><td>base + 64 B tail; Week 32 channel acceptance by party B</td><td>Payment channel accept (Week 32): the issuing entity (party B, the counterparty named in a previously proposed PaymentChannel memory object) accepts the channel. The handler loads the channel memory object via the embedded party A entity id and channel object id, verifies the signal issuer equals the channel's party_b_entity_id, debits B's economic_balance by the channel's deposit_b, transitions the channel from PAYMENT_CHANNEL_STATUS_PROPOSED to _OPEN, sets accepted_at_height, and bumps balance_b to deposit_b. Carries a 64-byte tail: channel_object_id:32 | party_a_entity_id:32.</td></tr>
+            <tr><td class="num">20</td><td><code>ChannelClose</code></td><td>base + 233 B tail with both parties' signatures; Week 32 cooperative settle or unilateral close</td><td>Payment channel close (Week 32): handles both cooperative settle (instant) and unilateral close (opens a dispute window). Carries a 233-byte tail: channel_object_id:32 | party_a_entity_id:32 | nonce_be:8 | balance_a_be:16 | balance_b_be:16 | is_final:1 | sig_a:64 | sig_b:64. Both party signatures are always required (even on unilateral close); the is_final flag distinguishes cooperative settle (instant distribution + memory object delete) from unilateral close (status -&gt; CLOSING, dispute window opens). Inside the dispute window a strictly larger nonce overrides the recorded state. The submitter signs the enclosing TxV1 and pays the fee; either participant may submit.</td></tr>
+            <tr><td class="num">21</td><td><code>ChannelFinalize</code></td><td>base + 64 B tail; Week 32 permissionless finalize after the dispute window</td><td>Payment channel finalize (Week 32): credits the recorded balance_a / balance_b back to the parties' economic_balance and deletes the channel memory object plus its secondary indexes. Valid only when status == PAYMENT_CHANNEL_STATUS_CLOSING and current_height &gt; dispute_deadline_height. Permissionless: any active AI entity may submit (the parties have aligned incentives to submit themselves; allowing third parties means a finalize is never gated on a specific participant's liveness). Carries a 64-byte tail: channel_object_id:32 | party_a_entity_id:32.</td></tr>
+            <tr><td class="num">22</td><td><code>OracleAnchor</code></td><td>base + variable 82..=113 B tail; issuer needs bit 6 `post_oracle_anchors` (Week 35)</td><td>Oracle data anchor (Week 35): an entity holding the post_oracle_anchors capability publishes a commitment to external off-chain data (a price feed, an API response, an external timestamp) so other agents and future protocol mechanisms can reference it from a registered, reputation-bearing source. The handler writes an OracleAnchorRecord KV aux row under ai/oracle_anchors/by_hash/&lt;signal_hash&gt; (which doubles as the replay guard) plus by-entity and by-tag scan indexes, and bumps the issuer's total_transactions (reputation-neutral on post; accuracy challenges are deferred to a future week). Carries a variable-length tail: data_hash:32 | external_timestamp_be:8 | source_hash:32 | expiry_height_be:8 | data_tag_len:1 | data_tag:[1..=32].</td></tr>
+            </tbody>
+          </table>
+        </div><p class="console-note">7 of these carry no doc comment in the Rust source, so no description can be generated for them: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast. Their payload sizes are known and are shown.</p></div>
+        </details>
+        <details class="console-details">
+          <summary class="console-summary">memory object types (16)</summary>
+          <div class="px-4 pb-3"><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Type</th><th scope="col">Variant</th><th scope="col">Description</th></tr></thead>
+            <tbody>
+            <tr><td class="num">0</td><td><code>ChainSummary</code></td><td>Epoch summaries containing block ranges, transaction counts, fee totals.</td></tr>
+            <tr><td class="num">1</td><td><code>LabelIndex</code></td><td>Tags and categories for addresses (label → address mappings).</td></tr>
+            <tr><td class="num">2</td><td><code>EmbeddingCommitment</code></td><td>Commitment hash of an embedding vector (actual vector stored off-chain).</td></tr>
+            <tr><td class="num">3</td><td><code>AnomalyLog</code></td><td>Historical record of detected anomalies.</td></tr>
+            <tr><td class="num">4</td><td><code>StatisticsSnapshot</code></td><td>Periodic snapshot of chain statistics.</td></tr>
+            <tr><td class="num">5</td><td><code>ReputationEvent</code></td><td>Audit record of a reputation change applied to an entity.</td></tr>
+            <tr><td class="num">6</td><td><code>Rating</code></td><td>Counterparty rating (score, optional comment hash) feeding reputation.</td></tr>
+            <tr><td class="num">7</td><td><code>SignalCatalog</code></td><td>Marketplace pricing catalog: a list of priced signal offerings the owning entity makes available to buyers.</td></tr>
+            <tr><td class="num">8</td><td><code>CompositionGraph</code></td><td>Cross-entity composition graph: a list of source-entity dependencies the owning entity declares it consumes signals from. Used by oracle CompositionCheck signals to verify dependency health and auto-pause the owner when a required dependency has failed.</td></tr>
+            <tr><td class="num">9</td><td><code>VerificationRecord</code></td><td>On-chain audit record of a verified ZK proof submission. Created by the ProofSubmission signal handler when the verifier accepts a proof. Fixed 105-byte payload: proof_type:1 | code_hash:32 | computation_hash:32 | proof_hash:32 | height_be:8.</td></tr>
+            <tr><td class="num">10</td><td><code>DelegationGrant</code></td><td>On-chain delegation grant: an AI entity (the memory object owner / delegator) authorizes another AI entity (the delegate, identified by the embedded delegate_entity_id) to act with a subset of the delegator's capabilities for a bounded duration. Stored as a fixed 42-byte payload (DelegationGrantData). Revocation is performed by deleting the memory object via DELETE_MEMORY_OBJECT.</td></tr>
+            <tr><td class="num">11</td><td><code>Subscription</code></td><td>Recurring payment subscription record (Feature 9): the memory object owner is the SUBSCRIBER, who has locked rate_per_block * duration_blocks of economic_balance to a producer for a fixed covered signal type. Settlement is lazy and triggered by the subscriber's SubscriptionCancel signal; on cancel, accrued payment is transferred to the producer (less the 2% marketplace fee), the 5% cancel fee on remaining locked funds is paid to the producer, the rest is refunded to the subscriber, and is_active is set to false. Stored as a fixed 114-byte payload (SubscriptionData).</td></tr>
+            <tr><td class="num">12</td><td><code>ServiceDescriptor</code></td><td>Agent Discovery Registry entry (Week 29): the memory object owner is publishing a service description that other entities can discover on-chain. The data field carries a fixed 144-byte ServiceDescriptorData describing what the service is (category + off-chain name / URL / description hashes), what it charges (per-call price, optional subscription rate), and what callers must satisfy (minimum reputation score, minimum stake). category drives a dedicated by_category discovery index; updates may change any field except the category (a category change requires delete + recreate). The object's object_id is the canonical handle a payer puts in the service_descriptor_hash field of a Week 28 PaymentRequest.</td></tr>
+            <tr><td class="num">13</td><td><code>VkRegistration</code></td><td>VK Registry entry (Week 30): the memory object owner publishes a zero-knowledge proof verification key on-chain so that future ProofSubmission signals carrying PROOF_TYPE_GROTH16_REGISTERED can reference the VK by the containing memory object's 32-byte object_id instead of inlining the full ~500-byte VK every time. The data field carries a VkRegistrationData payload binding the VK to a code_hash (the computation it verifies) and a proof_type discriminant. The proof_type, code_hash, and vk_bytes fields are IMMUTABLE on UpdateMemoryObject; only the free-form label tag is mutable.</td></tr>
+            <tr><td class="num">14</td><td><code>SlaAgreement</code></td><td>On-chain Service Level Agreement between two AI entities (Week 31). The memory object owner is the BUYER who proposed the agreement; the embedded seller_entity_id is the counterparty that accepts (via the SlaAccept signal) and whose stake is at risk on threshold breach. Violations are counted from PAYMENT_ATTESTATION_STATUS_FAILED ServiceAttestation signals issued by the buyer while current_height is in [start_height, end_height]; when violation_count &gt;= violation_threshold the runtime auto- slashes slash_amount from the seller's stake_balance (saturating, mirroring StakeSlash), credits KEY_SLASH_TREASURY, applies an additional REP_DELTA_SLA_VIOLATION_TRIGGERED to the seller, and transitions the SLA to SLA_STATUS_VIOLATED. The agreement is binding once accepted: no mutual cancel signal in v1.</td></tr>
+            <tr><td class="num">15</td><td><code>PaymentChannel</code></td><td>Bidirectional payment channel between two AI entities (Week 32). The memory object owner is party A (the proposer who debits deposit_a at create time); the embedded party_b_entity_id is the counterparty who accepts via the ChannelAccept signal (and debits deposit_b at accept time). Off-chain state updates are signed by both parties and never touch the chain unless a cooperative settle, a unilateral close, a dispute, or a finalize signal is submitted. The channel's funds are held INSIDE the memory object payload (balance_a / balance_b); credits back to the parties' economic_balance happen only on cooperative settle, finalize after a dispute window, or buyer-initiated cancel while still in PAYMENT_CHANNEL_STATUS_PROPOSED. The optional sla_object_id is informational only in v1: the runtime does NOT couple channel lifecycle to SLA status.</td></tr>
+            </tbody>
+          </table>
+        </div></div>
+        </details>
+        <!-- @@console-generated:/ai-entities@@ -->
         </section>
         <section id="sdks" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">07</span> sdks</h2>
+          <!-- @@console-generated:sdks@@ -->
+        <p class="console-lead">Three SDKs, and they are not equivalent. The distribution difference decides a language choice before the coverage difference does.</p>
+        <h3 class="console-h3">getting them</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">SDK</th><th scope="col">Install</th><th scope="col">Registry</th></tr></thead>
+            <tbody>
+            <tr><td>Python</td><td><code>pip install novai-sdk</code></td><td>PyPI, version 0.1.0</td></tr>
+            <tr><td>Rust</td><td><code>git clone</code> the repository and depend on <code>sdk/novai-sdk</code> by path</td><td>not on crates.io</td></tr>
+            <tr><td>TypeScript</td><td><code>git clone</code> the repository and build <code>sdk/novai-sdk-ts</code></td><td>not published to npm</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Only the Python SDK can be installed from a package registry. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0, published 2026-05-29, and the SDK source in this repository has not changed since that release. The Rust crate is not on crates.io and the npm package is not published.</p>
+        <p class="console-note">The Rust SDK depends on the workspace crates by path (novai-types, novai-crypto, novai-codec, novai-ai-entities), so there is no artifact a registry could carry.</p>
+        <h3 class="console-h3">coverage</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Surface</th><th scope="col" class="text-right">Chain</th><th scope="col" class="text-right">Rust</th><th scope="col" class="text-right">Python</th><th scope="col" class="text-right">TypeScript</th></tr></thead>
+            <tbody>
+            <tr><td>transaction builders</td><td class="num">11</td><td class="num">11</td><td class="num">11</td><td class="num">10</td></tr>
+            <tr><td>signal types</td><td class="num">23</td><td class="num">23</td><td class="num">23</td><td class="num">7</td></tr>
+            <tr><td>memory object types</td><td class="num">16</td><td class="num">16</td><td class="num">16</td><td class="num">5</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">The Rust SDK re-exports the chain's own type enumerations rather than redeclaring them, so its signal and memory coverage is complete by construction and cannot drift. The TypeScript SDK declares its own copies, which is why it can and does.</p>
+        <p class="console-note">The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated in numbers below rather than described, because the numbers are the fact.</p>
+        <details class="console-details">
+          <summary class="console-summary">transaction builders, per SDK</summary>
+          <div class="px-4 pb-3"><div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col" class="text-right">Byte</th><th scope="col">Type</th><th scope="col">Rust</th><th scope="col">Python</th><th scope="col">TypeScript</th></tr></thead>
+            <tbody>
+            <tr><td class="num">1</td><td><code>transfer</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">2</td><td><code>signalCommitment</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">3</td><td><code>createMemoryObject</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">4</td><td><code>updateMemoryObject</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">5</td><td><code>deleteMemoryObject</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">6</td><td><code>submitProposal</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">7</td><td><code>executeProposal</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">8</td><td><code>registerAiEntity</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">9</td><td><code>creditAiEntity</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">10</td><td><code>registerAiEntityWithKey</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td></tr>
+            <tr><td class="num">11</td><td><code>entityUpgrade</code></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-hi">yes</span></td><td><span class="text-ink-low">no</span></td></tr>
+            </tbody>
+          </table>
+        </div></div>
+        </details>
+        <!-- @@console-generated:/sdks@@ -->
         </section>
         <section id="parameters" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">08</span> network parameters</h2>
+          <!-- @@console-generated:parameters@@ -->
+        <p class="console-lead">What the network is configured to do. Validator count is a configuration fact rather than a live reading.</p>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Parameter</th><th scope="col" class="text-right">Value</th><th scope="col">How it is known</th></tr></thead>
+            <tbody>
+            <tr><td>Validators</td><td class="num">4</td><td>configuration fact, set by hand</td></tr>
+            <tr><td>Quorum</td><td class="num">3</td><td><code>2 * ((n - 1) / 3) + 1</code> evaluated at n=4</td></tr>
+            <tr><td>Faults tolerated</td><td class="num">1</td><td>f, from the same rule</td></tr>
+            <tr><td>Transaction types</td><td class="num">11</td><td>payload discriminants</td></tr>
+            <tr><td>Signal types</td><td class="num">23</td><td>AiSignalType variants</td></tr>
+            <tr><td>Memory object types</td><td class="num">16</td><td>MemoryObjectType variants</td></tr>
+            <tr><td>JSON-RPC methods</td><td class="num">29</td><td>agreed across four sources</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Four validators. This is set by hand and deliberately excluded from the generator: the genesis file names five, and genesis is not what runs.</p>
+        <p class="console-note">Quorum sites agree: <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/snapshot/valset.rs#L28">crates/node/src/snapshot/valset.rs:28</a> and <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/consensus_types/src/leader.rs#L115">crates/consensus_types/src/leader.rs:115</a>.</p>
+        <h3 class="console-h3">retention</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Horizon</th><th scope="col" class="text-right">Blocks</th><th scope="col">Constant</th><th scope="col">Source</th></tr></thead>
+            <tbody>
+            <tr><td>blocks retained on disk</td><td class="num">50,000</td><td><code>PRUNE_RETAIN_BLOCKS</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/consensus/src/lib.rs#L65">:65</a></td></tr>
+            <tr><td>heights retained in the in-memory block index</td><td class="num">100,000</td><td><code>MAX_INDEX_ENTRIES</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/main.rs#L339">:339</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="console-note">Retention is published in blocks and never converted to wall-clock time. Block cadence has moved by more than 4x inside a week on this chain, so any hours figure written here would be wrong within days. Divide by the rate you measure yourself.</p>
+        <h3 class="console-h3">deliberately omitted</h3>
+        <p class="console-note">Two parameters a reader might expect are deliberately absent. Chain id is omitted because the value that is live has not been confirmed and publishing the wrong one would be worse than publishing none. Genesis hash is omitted because block 0 has been pruned and is not retrievable, which is the more useful fact and is stated under known gaps.</p>
+        <!-- @@console-generated:/parameters@@ -->
         </section>
         <section id="gaps" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">09</span> known gaps</h2>
+          <!-- @@console-generated:gaps@@ -->
+        <p class="console-lead">What this chain cannot do yet, what the documentation gets wrong, and the operating characteristics that will surprise you. This section exists because the failure it prevents is expensive and the disclosure is cheap.</p>
+        <h3 class="console-h3">history is pruned, and block 0 is gone</h3>
+        <p class="console-note">Measured against the live endpoint on 2026-08-29: a height 45,000 and 49,000 blocks back returned a block, and 51,000 and 55,000 blocks back returned result null. That places the boundary where the constant says it is. Two things follow for a client: a pruned height answers with a null result rather than an error, and a height above the tip answers -32602 with the committed height inside the message.</p>
+        <p class="console-note">Read from the implementation and not verifiable from outside: within the band where the index still holds a transaction id but its block has been pruned from disk, the reply is -32002 rather than a null result. That cannot be demonstrated against a public node, because block headers carry no transaction ids and there is no way to obtain one whose block falls inside the band.</p>
+        <h3 class="console-h3">an indexer cannot backfill from an rpc node</h3>
+        <p class="console-note">The block index that resolves a transaction id or a block hash to a height is held in memory and is populated only as blocks commit. It is not backfilled from disk at startup. After a node restarts, a transaction committed before that restart resolves to null. An indexer therefore cannot backfill from an RPC node and has to tail from the point it starts.</p>
+        <h3 class="console-h3">getnonce and getbalance are different numbers</h3>
+        <p class="console-note">novai_getNonce and the nonce field of novai_getBalance are different numbers and are not substitutes. getNonce answers from the mempool admission cursor; getBalance answers from the committed account row. They agree until a transaction from that sender commits and then fails during execution, after which the cursor runs ahead until the node restarts and reseeds from state. Build plain-account transactions from the getBalance nonce, and use getNonce to predict whether the mempool will admit. Registered AI entities are unaffected: their path compares with greater-than-or-equal and self-heals.</p>
+        <h3 class="console-h3">surface that exists but is not reachable over rpc</h3>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Gap</th><th scope="col">Impact</th><th scope="col">Workaround</th></tr></thead>
+            <tbody>
+            <tr><td>No treasury balance method</td><td><code class="text-ink-mid">treasury/ai</code>, <code class="text-ink-mid">treasury/marketplace</code>, <code class="text-ink-mid">treasury/slash</code> accumulate value but are not addressable accounts</td><td>Direct KV inspection (string keys: <code class="text-ink-mid">treasury/ai</code>, <code class="text-ink-mid">treasury/marketplace</code>, <code class="text-ink-mid">treasury/slash</code>)</td></tr>
+            <tr><td>No mempool query</td><td>Cannot enumerate pending txs</td><td>Poll <code class="text-ink-mid">getTransaction(txid)</code> for inclusion</td></tr>
+            <tr><td>No event subscription</td><td>RPC is HTTP request/response only; no WebSocket or push</td><td>Poll <code class="text-ink-mid">getLatestBlock</code> and the signal index</td></tr>
+            <tr><td>No transaction logs / traces</td><td>Receipts carry only <code class="text-ink-mid">(block_height, tx_index, from, nonce, fee, payload_len)</code></td><td>For execution outcome, cross-check the relevant state read after <code class="text-ink-mid">getTransaction</code> returns non-null</td></tr>
+            <tr><td>Memory object filter by type</td><td><code class="text-ink-mid">getMemoryObjects</code> returns all objects for an entity; no per-type query</td><td>Filter client-side on <code class="text-ink-mid">object_type</code></td></tr>
+            <tr><td>Signal payload tail not surfaced</td><td>Index returns only base header (commitment_hash, signal_type, height, issuer); the tail bytes for signals 7..=22 are not in the response</td><td>Read the wrapping tx via <code class="text-ink-mid">getTransaction</code>, or use the dedicated aux-record methods (<code class="text-ink-mid">getPaymentsByEntity</code>, <code class="text-ink-mid">getOracleAnchor</code>, etc.) where the chain persists structured aux rows</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 class="console-h3">carried drift exceptions</h3>
+        <p class="console-note">The drift gate compares four independent sources and fails when they disagree. Five discrepancies are known and carried as named exceptions, each printed on every generator run. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted.</p>
+        <div class="console-scroll">
+          <table class="console-table">
+            <thead><tr><th scope="col">Exception</th><th scope="col">Summary</th><th scope="col">Tracked as</th></tr></thead>
+            <tbody>
+            <tr><td><code>error-code-32014-undocumented</code></td><td>-32014 NonceTooHigh is emitted by the node and appears nowhere in the RPC reference</td><td>NEEDS-OPERATOR.md item 8</td></tr>
+            <tr><td><code>getnonce-documented-as-interchangeable</code></td><td>novai_getNonce is documented as a cheaper substitute for novai_getBalance, but the two read different sources</td><td>NEEDS-OPERATOR.md item 15</td></tr>
+            <tr><td><code>public-faucet-gating-backwards</code></td><td>GET /faucet/&lt;address&gt; is documented as dev-mode only, but the handler gates on --faucet-key</td><td>NEEDS-OPERATOR.md item 9</td></tr>
+            <tr><td><code>faucet-rpc-gating-incomplete</code></td><td>novai_faucet is documented as dev-keys only, but the handler also accepts --faucet-key</td><td>NEEDS-OPERATOR.md item 13</td></tr>
+            <tr><td><code>invalid-request-trigger-is-wrong</code></td><td>-32600 is documented as the answer to a missing jsonrpc or method field, and a missing field answers -32700</td><td>NEEDS-OPERATOR.md item 19</td></tr>
+            <tr><td><code>blockbyheight-null-called-unreachable</code></td><td>the reference calls novai_getBlockByHeight's null answer unreachable, and it is the normal answer for any pruned height</td><td>NEEDS-OPERATOR.md item 18</td></tr>
+            <tr><td><code>getnonce-inherits-unreachable-db-error</code></td><td>novai_getNonce inherits a -32002 DB read failure clause from novai_getBalance, and its handler is never handed the database</td><td>NEEDS-OPERATOR.md item 17</td></tr>
+            <tr><td><code>vk-list-error-clause-names-foreign-field</code></td><td>novai_listVkRegistrations inherits an error clause from novai_getVkRegistration that names id, a parameter it does not have</td><td>NEEDS-OPERATOR.md item 16</td></tr>
+            <tr><td><code>faucet-disabled-code-mismatch</code></td><td>novai_faucet's disabled path returns -32000, but the method's error table attributes it to -32602</td><td>NEEDS-OPERATOR.md item 10</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- @@console-generated:/gaps@@ -->
         </section>
         <section id="verify" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">10</span> verify it yourself</h2>
+          <!-- @@console-generated:verify@@ -->
+        <p class="console-lead">The claims on this page are checkable from this browser. This panel calls the live chain and re-derives a consensus property: it walks consecutive block headers and checks that each one's parent hash is the previous block's hash.</p>
+        <div class="mt-4 rounded-md border border-line bg-surface-1 px-4 py-3" data-island="verify-panel">
+          <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-low">hash linkage check</p>
+          <p class="console-note">This panel needs JavaScript. With it disabled the page still renders in full; only this check is unavailable.</p>
+        </div>
+        <!-- @@console-generated:/verify@@ -->
         </section>
 
         <footer class="mt-16 border-t border-line pt-4">

@@ -40,3 +40,131 @@
 .console-h2-n {
   @apply tabular-nums text-ink-low;
 }
+
+/* Section lead: one or two lines under the heading, never a wall of prose. */
+.console-lead {
+  @apply mt-2 max-w-[70ch] text-sm leading-relaxed text-ink-low;
+}
+
+/* Sub-heading inside a section. */
+.console-h3 {
+  @apply mt-6 font-mono text-[11px] uppercase tracking-[0.1em] text-ink-mid;
+}
+
+/* Terminal block. Scrolls on its own axis so the document never does. */
+.console-pre {
+  /* w-max so the block hugs its longest line rather than stretching across the
+   * column, matching the tables. max-w-full keeps that from overflowing, and
+   * overflow-x-auto then scrolls the genuinely wide ones. */
+  @apply mt-2 w-max max-w-full overflow-x-auto rounded-md border border-line bg-surface-1 px-4 py-3;
+  @apply font-mono text-xs leading-relaxed text-ink-mid;
+}
+
+.console-pre-out {
+  @apply mt-2 w-max max-w-full overflow-x-auto rounded-md border border-line-subtle bg-surface-0 px-4 py-3;
+  @apply font-mono text-xs leading-relaxed text-ink-low;
+}
+
+/* Dense table. Sizes to content, never w-full, and scrolls inside its wrapper. */
+.console-scroll {
+  @apply mt-3 overflow-x-auto;
+}
+
+.console-table {
+  @apply font-mono text-xs;
+}
+
+.console-table th {
+  @apply whitespace-nowrap border-b border-line-subtle px-3 py-1.5 text-left;
+  @apply font-medium text-[10px] uppercase tracking-[0.08em] text-ink-low;
+}
+
+.console-table td {
+  @apply border-b border-line-subtle px-3 py-1.5 align-top text-ink-mid;
+}
+
+.console-table td.num {
+  @apply text-right tabular-nums;
+}
+
+/* Method entry in the reference. */
+.console-method {
+  @apply mt-8 scroll-mt-28 border-t border-line-subtle pt-4 lg:scroll-mt-16;
+}
+
+/* A record shape, declared once for a category and linked to from every result
+   envelope that names it. Held a step in from the method entries and on a
+   heavier rule, because it is the definition the methods below it point back
+   to rather than another method. */
+.console-record {
+  @apply mt-8 scroll-mt-28 rounded-md border border-line bg-surface-1 px-4 py-3 lg:scroll-mt-16;
+}
+
+.console-method-name {
+  @apply font-mono text-sm text-ink-hi;
+}
+
+/* Small provenance or caveat note. */
+.console-note {
+  @apply mt-2 max-w-[70ch] text-[11px] leading-relaxed text-ink-low;
+}
+
+/* Inline label chip, for a discriminant or a status word. */
+.console-pill {
+  @apply inline-block rounded border border-line px-1.5 py-0.5;
+  @apply font-mono text-[10px] uppercase tracking-[0.06em] text-ink-low;
+}
+
+/* Collapsed enumeration. Used only for lookup tables, never for the reference
+   spine: closed details are unreachable by find-in-page in Firefox and Safari. */
+.console-details {
+  @apply mt-4 rounded-md border border-line bg-surface-1;
+}
+
+.console-summary {
+  @apply cursor-pointer px-4 py-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-mid;
+  @apply hover:text-ink-hi focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-line-focus;
+}
+
+/* Provenance strip under the page title. */
+.console-prov {
+  @apply mt-6 w-max max-w-full rounded-md border border-line bg-surface-1;
+}
+
+.console-prov-grid {
+  @apply grid divide-y divide-line-subtle sm:w-max sm:max-w-full sm:grid-cols-4 sm:divide-y-0 sm:divide-x;
+}
+
+.console-prov-cell {
+  @apply px-4 py-2.5;
+}
+
+.console-prov-value {
+  @apply font-mono text-lg tabular-nums leading-none text-ink-hi;
+}
+
+.console-prov-label {
+  @apply mt-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-low;
+}
+
+/* Scroll affordance, carried open from gate C2: a wide table scrolls correctly
+ * inside its container and the document does not overflow, but a reader has no
+ * way to tell that it scrolls. This is the background-attachment technique: the
+ * two "local" layers scroll with the content and cover the shadows when the
+ * table is at rest against an edge, so a shadow is visible only while there is
+ * more to reach in that direction. Pure CSS, no JavaScript, and it disappears
+ * by itself when the table fits.
+ *
+ * The cover colour must match what sits behind the table, which is the page
+ * surface, or the covers would show as blocks. */
+.console-scroll {
+  background-image:
+    linear-gradient(to right, hsl(var(--n0)) 40%, hsl(var(--n0) / 0)),
+    linear-gradient(to left, hsl(var(--n0)) 40%, hsl(var(--n0) / 0)),
+    linear-gradient(to right, hsl(var(--n4) / 0.9), hsl(var(--n4) / 0)),
+    linear-gradient(to left, hsl(var(--n4) / 0.9), hsl(var(--n4) / 0));
+  background-position: left center, right center, left center, right center;
+  background-repeat: no-repeat;
+  background-size: 28px 100%, 28px 100%, 10px 100%, 10px 100%;
+  background-attachment: local, local, scroll, scroll;
+}

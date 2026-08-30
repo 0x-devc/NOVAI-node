@@ -126,6 +126,31 @@ function normaliseDashes(text, label) {
 // the substitution log would count reads rather than occurrences, which is
 // exactly the kind of instrument error that makes a measurement worthless.
 const textCache = new Map();
+const rawCache = new Map();
+
+/**
+ * A source file with NO dash normalisation.
+ *
+ * Normalising is right for prose: this repository forbids em and en dashes in
+ * its own writing, and doc text copied onto the page has to obey that. It is
+ * wrong for a value the reader is told to match on. crates/node/src/rpc.rs:1241
+ * answers an over-capacity request with the body
+ * "Service Unavailable <em dash> too many concurrent requests", the console
+ * published it with an ASCII hyphen, and a client string-matching that body
+ * never matched. Nothing on the page said the string had been rewritten.
+ *
+ * So a wire value is read raw and rendered with the forbidden character as an
+ * HTML entity: console.html stays ASCII and passes the dash gate, and the
+ * browser receives the byte the server actually sends.
+ */
+function readVerbatim(root, rel) {
+  const path = join(root, rel);
+  if (rawCache.has(path)) return rawCache.get(path);
+  if (!existsSync(path)) fail(`${rel} not found under root ${root}`);
+  const text = readFileSync(path, "utf8");
+  rawCache.set(path, text);
+  return text;
+}
 
 function readText(root, rel) {
   const path = join(root, rel);
@@ -620,6 +645,370 @@ function resolveAlias(text, known, context) {
   return full;
 }
 
+// ---------------------------------------------------------------------------
+// ALIAS RESOLUTION: SHAPE IS SHARED, MEANING IS NOT
+//
+// The document aliases one method's Params or Errors block onto another's. What
+// those two methods genuinely share is the SHAPE: the field names, their types,
+// and whether each is required. What they do NOT share is the MEANING of a
+// positional field, because the reason the second method exists at all is that
+// the same field addresses the other side of the pair. Copying a source row's
+// note therefore publishes an exact inversion: listSlasBySeller inherited
+// "buyer entity id" for a field that is the seller, and listChannelsByPartyB
+// inherited "party A entity id" for a field that is party B. The same class
+// appears on error clauses, where an inherited clause names the SOURCE method's
+// parameter (listVkRegistrations inherited "`id` isn't 32 bytes" for a method
+// whose only parameter is `entity_id`).
+//
+// Two repairs, both driven by measured facts rather than by a hand-written
+// table of corrections, and one gate that refuses anything they cannot repair:
+//
+//   1. The document states the reinterpretation in the alias line itself
+//      ("same shape as `listSlasByBuyer`, with `entity_id` interpreted as the
+//      seller"). That clause is parsed, and the role word in the inherited note
+//      is rewritten to the role the document names.
+//   2. An inherited error clause naming a field this method does not declare is
+//      rewritten to this method's own field when exactly one of its fields has
+//      the same type, so the substitution is forced rather than guessed.
+//   3. assertInheritedMeaningIsTrue then re-reads the resolved methods and
+//      fails the build on anything still contradicting the method it landed on.
+//      The gate runs on the final data, so it also polices the two repairs.
+// ---------------------------------------------------------------------------
+
+const ROLE_PAIRS = [
+  ["buyer", "seller"],
+  ["party a", "party b"],
+  ["sender", "recipient"],
+  ["payer", "payee"],
+];
+
+// Word-bounded, and tolerant of the "party A" / "party-a" spellings the doc
+// uses. Deliberately NOT tolerant of "party_a_entity_id": an underscore is a
+// word character, so the boundary fails and a record field name inside a shape
+// fence can never be mistaken for a role claim about a parameter.
+const roleRe = (phrase) => new RegExp(`\\b${phrase.replace(/ /g, "[ -]?")}\\b`, "i");
+
+const ROLE_TERMS = ROLE_PAIRS.flatMap(([a, b]) => [
+  { phrase: a, counter: b, re: roleRe(a) },
+  { phrase: b, counter: a, re: roleRe(b) },
+]);
+
+const roleTerm = (phrase) => ROLE_TERMS.find((r) => r.phrase === phrase) ?? null;
+
+/**
+ * The role a method's own NAME commits it to: listSlasBySeller is about the
+ * seller and listChannelsByPartyB is about party B. Derived from the name
+ * rather than from prose, so it cannot be talked out of by the same prose the
+ * gate is checking. Methods whose By-suffix is not a role (ByHeight, ByType)
+ * return null and are not role-checked at all.
+ */
+function roleOfMethodName(name) {
+  const m = /By([A-Z][A-Za-z]*)$/.exec(name);
+  if (!m) return null;
+  return roleTerm(m[1].replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase());
+}
+
+/** "with `entity_id` interpreted as the seller" -> Map { entity_id => "seller" } */
+function reinterpretationsIn(text) {
+  const out = new Map();
+  for (const m of String(text ?? "").matchAll(/`([A-Za-z_][A-Za-z0-9_]*)`\s+interpreted as\s+([^.,;]+)/gi)) {
+    out.set(m[1], m[2].trim().replace(/^the\s+/i, ""));
+  }
+  return out;
+}
+
+/**
+ * Rewrite the one role word in an inherited note to the role the document says
+ * this method's field carries. Exactly one role word, or the note is replaced
+ * outright: a note naming two roles is not a substitution problem.
+ */
+function reinterpretNote(note, role, context) {
+  const hits = ROLE_TERMS.filter((r) => r.re.test(note));
+  if (hits.length === 1) return note.replace(hits[0].re, role);
+  // The old fallback returned `interpreted as ${role}` and threw away every
+  // non-role fact in the note: types, bounds, encoding. A note is not a role
+  // label, and silently shortening published reference text to four words is a
+  // worse outcome than a build that stops and asks.
+  fail(
+    `${context}: the inherited note "${note}" names ${hits.length} role words, so rewriting it to "${role}" ` +
+    `is not a substitution. Give the method its own params block in docs/RPC_REFERENCE.md.`
+  );
+}
+
+/** Every backticked identifier in a clause, in order. */
+const backtickedIdents = (text) =>
+  [...String(text ?? "").matchAll(/`([A-Za-z_][A-Za-z0-9_]*)`/g)].map((m) => m[1]);
+
+// rewriteForeignFields used to live here. It substituted this method's own
+// field for the source method's when exactly one field had the same type, and
+// its comment claimed the rewrite was "forced by the shape rather than chosen".
+// It was not forced: for any single-parameter method that condition is always
+// satisfied, so the guard was unique-by-arity, not a deduction. Worse, it
+// edited a quotation of docs/RPC_REFERENCE.md and logged the edit into a field
+// no renderer read, so the page would have published doctored reference prose
+// with no indication the console had changed the document's words. On a page
+// whose whole argument is "here is where the source is wrong", that is a new
+// dishonesty traded for a silent fix.
+//
+// The detection is kept, in assertInheritedMeaningIsTrue check (b). The repair
+// is gone. A foreign field now fails the build, and the honest resolutions are
+// to fix the document or to carry it as a KNOWN_DRIFT exception with a
+// published correction, which is the mechanism that already exists for exactly
+// this.
+
+/**
+ * The params object out of a method's own curl example, or null.
+ *
+ * The curl is a single-quoted shell argument holding the JSON-RPC envelope, so
+ * the params object is read out of the envelope rather than by parsing shell.
+ */
+function curlParams(curl) {
+  const m = /"params"\s*:\s*(\{[\s\S]*?\})\s*,\s*"id"/.exec(String(curl ?? ""));
+  if (!m) return null;
+  try {
+    return JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+}
+
+/** The single role term a note commits to, or null when it names none or two. */
+function soleRoleIn(text) {
+  const hits = ROLE_TERMS.filter((r) => r.re.test(String(text ?? "")));
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/** The unordered pair a role term belongs to, as a stable key. */
+const pairKey = (term) => [term.phrase, term.counter].sort().join("/");
+
+/**
+ * THE CURL GATE.
+ *
+ * Every method carries a runnable example, and the example is the one part of a
+ * method's block that a person had to think about concretely. That makes it an
+ * independent witness to what the parameters mean, and it is a better witness
+ * than the role heuristic: the heuristic only fires when the METHOD NAME
+ * implies a role, so a wrong note on a method with no role word in its name is
+ * invisible to it, which is exactly the limitation that made a hand audit of
+ * all seven aliased methods necessary.
+ *
+ * Two checks:
+ *
+ *   (1) The example passes exactly the declared required fields and no
+ *       undeclared ones. A params table and an example that disagree about
+ *       which fields exist cannot both be right.
+ *   (2) The example does not pass a value into a field whose note names the
+ *       OTHER side of that value's role pair. Bindings are learned only from
+ *       methods that declare their own params block, because those are the
+ *       anchors an alias is resolved against; every method is then checked
+ *       against them, aliased or not.
+ *
+ * Check (2) is what would have caught the two role inversions without any
+ * knowledge of method names: listSlasBySeller's example passed the value the
+ * reference uses for the SELLER into a field its table called the buyer.
+ */
+function assertCurlAgreesWithParams(built) {
+  const problems = [];
+
+  // (1) shape
+  const examples = new Map();
+  for (const m of built) {
+    const passed = curlParams(m.curl);
+    if (passed === null) {
+      problems.push(`${m.name}: the curl example carries no readable params object, so it cannot witness anything`);
+      continue;
+    }
+    examples.set(m.name, passed);
+    const declared = m.params?.list ?? [];
+    if (m.params?.kind === "none") {
+      if (Object.keys(passed).length) {
+        problems.push(`${m.name}: params are documented as none and the example passes ${Object.keys(passed).join(", ")}`);
+      }
+      continue;
+    }
+    if (!declared.length) continue;
+    const names = new Set(declared.map((f) => f.field));
+    for (const f of declared) {
+      if (!f.optional && !(f.field in passed)) {
+        problems.push(`${m.name}: \`${f.field}\` is documented as required and the curl example does not pass it`);
+      }
+    }
+    for (const k of Object.keys(passed)) {
+      if (!names.has(k)) {
+        problems.push(`${m.name}: the curl example passes \`${k}\`, which the params table does not declare`);
+      }
+    }
+  }
+
+  // (2) role bindings, learned from own-block methods only
+  const bindings = new Map(); // value -> Map(pairKey -> {role, method, field})
+  for (const m of built) {
+    if (m.params?.resolvedFrom) continue;
+    const passed = examples.get(m.name);
+    if (!passed) continue;
+    for (const f of m.params?.list ?? []) {
+      const term = soleRoleIn(f.notes);
+      const v = passed[f.field];
+      if (!term || typeof v !== "string" || !v) continue;
+      if (!bindings.has(v)) bindings.set(v, new Map());
+      const byPair = bindings.get(v);
+      const key = pairKey(term);
+      const prior = byPair.get(key);
+      if (prior && prior.role !== term.phrase) {
+        problems.push(
+          `the example value used for \`${prior.method}.${prior.field}\` is the ${prior.role} and the same value is ` +
+          `used for \`${m.name}.${f.field}\`, which the reference calls the ${term.phrase}. One of the two notes is wrong.`
+        );
+        continue;
+      }
+      if (!prior) byPair.set(key, { role: term.phrase, method: m.name, field: f.field });
+    }
+  }
+
+  // (2) applied to every method
+  for (const m of built) {
+    const passed = examples.get(m.name);
+    if (!passed) continue;
+    for (const f of m.params?.list ?? []) {
+      const term = soleRoleIn(f.notes);
+      const v = passed[f.field];
+      if (!term || typeof v !== "string") continue;
+      const bound = bindings.get(v)?.get(pairKey(term));
+      if (bound && bound.role !== term.phrase) {
+        problems.push(
+          `${m.name}: the params note for \`${f.field}\` calls it the ${term.phrase}, and the curl example passes the ` +
+          `value this reference uses for the ${bound.role} (see \`${bound.method}.${bound.field}\`). ` +
+          `The table and the example cannot both be right.`
+        );
+      }
+    }
+  }
+
+  // (3) An aliased params block whose note names the SAME role as its source
+  // while its example passes a DIFFERENT value.
+  //
+  // Check (2) needs an anchor binding for the value in question, and it only
+  // has one where the reference happens to declare both sides of a pair in one
+  // own-params method. getActiveSla does that for buyer and seller, so check
+  // (2) catches listSlasBySeller; nothing declares both party A and party B, so
+  // listChannelsByPartyB slipped through. This check needs no anchor at all: it
+  // compares an aliased method directly against the method it inherited from,
+  // which is the exact relationship where an uncorrected copy is the risk.
+  for (const m of built) {
+    const from = m.params?.resolvedFrom;
+    if (!from) continue;
+    const source = built.find((x) => x.name === from);
+    const mine = examples.get(m.name);
+    const theirs = examples.get(from);
+    if (!source || !mine || !theirs) continue;
+    for (const f of m.params?.list ?? []) {
+      const term = soleRoleIn(f.notes);
+      if (!term) continue;
+      const sourceField = (source.params?.list ?? []).find((x) => x.field === f.field);
+      const sourceTerm = soleRoleIn(sourceField?.notes);
+      if (!sourceTerm || sourceTerm.phrase !== term.phrase) continue;
+      if (mine[f.field] !== undefined && theirs[f.field] !== undefined && mine[f.field] !== theirs[f.field]) {
+        problems.push(
+          `${m.name}: the params note for \`${f.field}\` calls it the ${term.phrase}, which is the same role ` +
+          `${from} claims for that field, and the two examples pass different values. An aliased note has to be ` +
+          `reinterpreted for the side this method addresses, or the example is wrong.`
+        );
+      }
+    }
+  }
+
+  if (problems.length) {
+    console.error("console-data: a method's curl example contradicts its own params table:");
+    for (const pr of problems) console.error(`  ${pr}`);
+    fail("a runnable example disagrees with the parameters it is an example of");
+  }
+}
+
+/**
+ * The gate. Runs over the RESOLVED methods, so it sees exactly what the page
+ * would publish, and it does not care how a note got there.
+ */
+function assertInheritedMeaningIsTrue(built, byName) {
+  const problems = [];
+  /**
+   * True when this method already carries a published correction for exactly
+   * this text. A carried exception is a decision to ship the defect visibly
+   * with the truth beside it, which is a strictly better outcome than a build
+   * that cannot run; it is not a way to silence the gate, because the drift
+   * gate fails the moment the exception stops applying.
+   */
+  const isCarried = (m, text) =>
+    (m.corrections ?? []).some((c) => c.wrongText && String(text ?? "").includes(c.wrongText));
+  for (const m of built) {
+    const inherited = [];
+    if (m.params?.resolvedFrom) {
+      for (const p of m.params.list ?? []) {
+        if (p.notes) inherited.push({ where: `the params note for \`${p.field}\``, text: p.notes, from: m.params.resolvedFrom });
+      }
+    }
+    if (m.errors?.resolvedFrom) {
+      for (const e of m.errors.list ?? []) {
+        if (e.when) inherited.push({ where: `the ${e.code} error clause`, text: e.when, from: m.errors.resolvedFrom });
+      }
+      if (m.errors.text) inherited.push({ where: "the errors prose", text: m.errors.text, from: m.errors.resolvedFrom });
+    }
+    if (m.result?.resolvedFrom && m.result.note) {
+      inherited.push({ where: "the result note", text: m.result.note, from: m.result.resolvedFrom });
+    }
+
+    // (a) An inherited claim naming the other side of this method's own pair.
+    const role = roleOfMethodName(m.name);
+    if (role) {
+      const counter = roleTerm(role.counter);
+      for (const item of inherited) {
+        if (isCarried(m, item.text)) continue;
+        if (counter.re.test(item.text) && !role.re.test(item.text)) {
+          problems.push(
+            `${m.name}: ${item.where}, inherited from ${item.from}, reads "${item.text}". ` +
+            `It names the ${role.counter} while this method is the ${role.phrase} side. ` +
+            `Either the alias line in docs/RPC_REFERENCE.md must state the reinterpretation ` +
+            `("with \`<field>\` interpreted as the ${role.phrase}"), or the method needs its own block.`
+          );
+        }
+      }
+    }
+
+    // (b) An inherited clause naming a field this method does not declare.
+    //
+    // Each item is checked against the field set of ITS OWN source, not against
+    // the errors source's. The earlier version guarded the whole loop on
+    // m.errors?.resolvedFrom and then compared params- and result-sourced text
+    // to the ERRORS source's fields, which is invisible today only because the
+    // three methods that alias both alias both from the same place. A method
+    // aliasing params from A and errors from B would have been checked against
+    // the wrong set, and a method with only params.resolvedFrom, such as
+    // novai_getBlockByHeight, was not checked at all.
+    {
+      const mine = new Set((m.params?.list ?? []).map((p) => p.field));
+      for (const item of inherited) {
+        if (isCarried(m, item.text)) continue;
+        const theirs = new Set((byName.get(item.from)?.params?.list ?? []).map((p) => p.field));
+        for (const ident of backtickedIdents(item.text)) {
+          if (mine.has(ident) || !theirs.has(ident)) continue;
+          problems.push(
+            `${m.name}: ${item.where}, inherited from ${item.from}, names \`${ident}\`, ` +
+            `which is a parameter of ${item.from} and not of ${m.name} (${[...mine].join(", ") || "no parameters"}). ` +
+            `Resolve it by hand: fix the alias in docs/RPC_REFERENCE.md so the clause names this method's own ` +
+            `field, or carry it as a KNOWN_DRIFT entry whose affects record corrects it at the point of the ` +
+            `error. It is not rewritten automatically, because guessing which field was meant is how a ` +
+            `quotation of the reference gets silently doctored.`
+          );
+        }
+      }
+    }
+  }
+  if (problems.length) {
+    console.error("console-data: alias resolution copied a position-specific meaning:");
+    for (const p of problems) console.error(`  ${p}`);
+    fail("an alias inherited a meaning that is false of the method it landed on");
+  }
+}
+
 // A factory, not a shared object. Reusing one /g/ regex across calls is how the
 // dash gate silently stopped working: matchAll inherits lastIndex from the
 // regex it is handed. This site is safe today because nothing advances it, but
@@ -861,6 +1250,26 @@ function setDiff(a, b) {
 // Each entry carries a predicate over measured facts. The gate fails when new
 // drift appears AND when a listed entry's predicate stops holding, naming the
 // entry to delete. The list can only shrink.
+//
+// Each entry also carries `affects`: the methods it makes wrong, one record per
+// method. That list is what puts the correction at the point of the error
+// instead of only in a table at the bottom of the page, and it is why a caveat
+// can no longer be smeared across every method an exception happens to name in
+// its prose. A record is:
+//
+//   method      the method this exception is actually about
+//   caveat      the short true-of-THIS-method label for the index Notes column
+//   wrongText   optional: the exact published prose that is false. Located in
+//               the parsed method (description, error clause or param note) and
+//               the build fails if it is not there, so a reworded document
+//               cannot leave a correction pointing at nothing.
+//   correction  optional: what is true instead, published next to the error.
+//   site        optional: which block the correction belongs under when there
+//               is no wrongText to locate it by.
+//
+// `affects: []` is a statement, not an omission: the drift is real but lands on
+// no JSON-RPC method (the HTTP-route entry below is the case). The list is
+// mandatory, so a new exception has to decide.
 // ---------------------------------------------------------------------------
 
 const KNOWN_DRIFT = [
@@ -872,6 +1281,16 @@ const KNOWN_DRIFT = [
       "Client-breaking rather than cosmetic. A client following the documented codes treats an " +
       "unknown rejection as terminal and resyncs, when the correct handling for NonceTooHigh is to " +
       "retry the same transaction unchanged once the sender's earlier nonces commit.",
+    affects: [
+      {
+        method: "novai_submitTransaction",
+        caveat: "emits an undocumented code",
+        site: "errors",
+        correction:
+          "The mempool also rejects with `-32014` NonceTooHigh, which this table does not list. It is not " +
+          "terminal: retry the same transaction unchanged once the sender's earlier nonces commit.",
+      },
+    ],
     codes: [-32014],
     holds: (f) => f.emittedErrorCodes.includes(-32014) && !f.documentedErrorCodes.includes(-32014),
   },
@@ -886,6 +1305,27 @@ const KNOWN_DRIFT = [
       "sender, after which the cursor runs ahead until the node restarts and reseeds from state. A client that " +
       "builds plain-account transactions from getNonce, as the wording invites, then signs a nonce that " +
       "execution will not accept.",
+    affects: [
+      {
+        method: "novai_getNonce",
+        caveat: "mempool cursor, not the account nonce",
+        wrongText: "Cheaper than `getBalance` if you don't need the balance.",
+        correction:
+          "The two are not interchangeable. This answers from the mempool admission cursor, which runs ahead of " +
+          "the committed account nonce once a transaction from that sender commits and fails, and stays ahead " +
+          "until the node restarts. Sign against the `nonce` field of `getBalance`.",
+      },
+      {
+        // The caveat here has to be true of getBalance, not of the pair. This
+        // method is the one that answers correctly, and that is the fact a
+        // reader picking between the two needs in the index.
+        method: "novai_getBalance",
+        caveat: "nonce here is the committed one",
+        correction:
+          "The `nonce` in this result is the committed account nonce, and it is the one to sign against. " +
+          "`getNonce` answers a different question: the mempool admission cursor.",
+      },
+    ],
     holds: (f) => f.getNonceDocClaimsInterchangeable && f.getNonceReadsMempoolCursor,
   },
   {
@@ -895,6 +1335,11 @@ const KNOWN_DRIFT = [
     why:
       "Backwards in both directions. The route runs in production when --faucet-key is set, and does " +
       "NOT run on a plain --dev-keys devnet, which is the opposite of what the transport section says.",
+    // Deliberately empty. This drift is in the transport section's HTTP route,
+    // which is not one of the 29 JSON-RPC methods. Attaching it to novai_faucet
+    // because both sentences contain the word faucet is exactly the mistake
+    // `affects` exists to prevent.
+    affects: [],
     holds: (f) => f.publicFaucetGatesOnKeyOnly && f.httpRouteDocClaimsDevMode,
   },
   {
@@ -906,7 +1351,118 @@ const KNOWN_DRIFT = [
       "--faucet-key and only falls back to the deterministic dev key, so the method runs on a " +
       "production node with a faucet key set. A reader of the doc concludes the method is " +
       "self-limiting to devnets when it is not.",
+    affects: [
+      {
+        method: "novai_faucet",
+        caveat: "gating documented backwards",
+        wrongText: "Available **only** when the node was launched with `--dev-keys --allow-insecure-dev-keys`",
+        correction:
+          "`handle_faucet` prefers a loaded `--faucet-key` and falls back to the deterministic dev key only when " +
+          "there is none, so the method also answers on a node started with a faucet key and no dev keys.",
+      },
+    ],
     holds: (f) => f.faucetRpcAcceptsFaucetKey && f.faucetDocClaimsDevKeysOnly,
+  },
+  {
+    id: "invalid-request-trigger-is-wrong",
+    operatorRef: "NEEDS-OPERATOR.md item 19",
+    summary:
+      "-32600 is documented as the answer to a missing jsonrpc or method field, and a missing field answers -32700",
+    why:
+      "Every field of RpcRequest is required, with no Option and no serde default, so a missing field fails " +
+      "deserialization and returns -32700 Parse error. -32600 is reachable only when jsonrpc is present and is " +
+      "not \"2.0\". A client matching -32600 to detect a malformed envelope therefore never sees it, and gets " +
+      "-32700, which this same table attributes to invalid JSON.",
+    // Deliberately empty. This drift is in the global error table, not in any
+    // one handler: -32600 is answered by the envelope check before dispatch
+    // ever picks a method. It lands on the code, below.
+    affects: [],
+    affectsCodes: [
+      {
+        code: -32600,
+        caveat: "trigger documented wrongly",
+        // The whole cell, not just the word "missing": "malformed JSON-RPC
+        // envelope" is itself the description of -32700, so striking a fragment
+        // would leave the other half of the same wrong idea standing.
+        wrongText: "malformed JSON-RPC envelope (missing `jsonrpc`/`method`)",
+        correction:
+          "A missing `jsonrpc` or `method` field answers `-32700`, not this code, because every field of the " +
+          "request struct is required and a missing one fails to deserialize. `-32600` is what you get when " +
+          "`jsonrpc` is present and is not `\"2.0\"`.",
+      },
+    ],
+    holds: (f) => f.invalidRequestDocClaimsMissingField,
+  },
+  {
+    id: "blockbyheight-null-called-unreachable",
+    operatorRef: "NEEDS-OPERATOR.md item 18",
+    summary:
+      "the reference calls novai_getBlockByHeight's null answer unreachable, and it is the normal answer for any pruned height",
+    why:
+      "The result block reads \"or `null` if no such height (this should be unreachable given the validation)\". " +
+      "The handler returns a top-level null whenever the block is not on disk, and a node retains " +
+      "PRUNE_RETAIN_BLOCKS = 50,000 blocks, so every height below the horizon answers null. This page's own " +
+      "known-gaps section already states that. A client written to the reference's parenthetical does not " +
+      "null-check, and breaks the first time it reads history.",
+    affects: [
+      {
+        method: "novai_getBlockByHeight",
+        caveat: "reference calls the null path unreachable",
+        site: "result",
+        correction:
+          "The reference calls this null answer unreachable. It is not: the handler answers `null` for any height " +
+          "that is not on disk, which includes every height below the pruning horizon. Null-check this result.",
+      },
+    ],
+    holds: (f) => f.blockByHeightNullCalledUnreachable,
+  },
+  {
+    id: "getnonce-inherits-unreachable-db-error",
+    operatorRef: "NEEDS-OPERATOR.md item 17",
+    summary:
+      "novai_getNonce inherits a -32002 DB read failure clause from novai_getBalance, and its handler is never handed the database",
+    why:
+      "handle_get_nonce takes (request, nonce_provider) and its dispatch arm passes no db. Its whole body is a " +
+      "hex parse plus nonce_provider.expected_nonce, and -32002 appears nowhere in it, while handle_get_balance " +
+      "reads state and does emit it. A client writes a storage-retry branch that is dead code, and mis-attributes " +
+      "the failures it does see.",
+    affects: [
+      {
+        method: "novai_getNonce",
+        caveat: "inherits an error it cannot emit",
+        wrongText: "DB read failure",
+        correction:
+          "This method does not read the database. Its handler is passed the mempool nonce provider and nothing " +
+          "else, so `-32002` is inherited from `getBalance`'s table and cannot occur here. The only rejection " +
+          "this method produces is `-32602` for an address that is not 32 bytes.",
+      },
+    ],
+    holds: (f) =>
+      f.inheritedUnreachableCodes.some((h) => h.method === "novai_getNonce" && h.code === -32002),
+  },
+  {
+    id: "vk-list-error-clause-names-foreign-field",
+    operatorRef: "NEEDS-OPERATOR.md item 16",
+    summary:
+      "novai_listVkRegistrations inherits an error clause from novai_getVkRegistration that names `id`, a parameter it does not have",
+    why:
+      "The method's only parameter is `entity_id`, and its handler validates it as parse_hex32(&params.entity_id, " +
+      "\"entity_id\"), so the live -32602 message names entity_id. A reader debugging a rejection looks in their " +
+      "request for a field called `id` and does not find one. The method block contradicts itself: the params " +
+      "table says entity_id, the error clause says id, and the curl passes entity_id.",
+    affects: [
+      {
+        method: "novai_listVkRegistrations",
+        caveat: "error clause names the wrong field",
+        wrongText: "`id` isn't 32 bytes",
+        correction:
+          "This method's only parameter is `entity_id`, so the clause above is the one belonging to " +
+          "`getVkRegistration`, which the reference aliases here. The rejection you will actually see names " +
+          "`entity_id`.",
+      },
+    ],
+    holds: (f) =>
+      f.inheritedForeignFields.some((h) => h.method === "novai_listVkRegistrations" && h.field === "id"),
   },
   {
     id: "faucet-disabled-code-mismatch",
@@ -915,9 +1471,242 @@ const KNOWN_DRIFT = [
     why:
       "A client matching on -32602 to distinguish a malformed address from a disabled faucet gets the " +
       "wrong branch, and -32000 is a broad application-error code it cannot safely special-case.",
+    affects: [
+      {
+        method: "novai_faucet",
+        caveat: "disabled-path code differs",
+        wrongText: "node not in dev-mode",
+        correction:
+          "The disabled path returns `-32000`, not `-32602`. A client matching on `-32602` to tell a malformed " +
+          "address from a disabled faucet takes the wrong branch.",
+      },
+    ],
     holds: (f) => f.faucetDisabledCode === -32000 && f.faucetDocDevModeCode === -32602,
   },
 ];
+
+// ---------------------------------------------------------------------------
+// WITHHELD
+//
+// One hand-written list, in one place, of what the console declines to document
+// and why. It withholds CONTENT. It never withholds a method's existence,
+// because the page claims to cover 29 methods and that claim has to stay true.
+//
+// novai_faucet mints tokens. The page currently publishes a parameter table, a
+// result fence naming the amount, a runnable curl against the public endpoint
+// and a sample response with a real txid, which is a funding path printed step
+// by step. Whether the live node runs with --faucet-key is not known to me, and
+// two of the carried exceptions say the reference's account of this method's
+// gating and its disabled-path code are both wrong, so the one method I am
+// least able to describe correctly is the one I would be describing in most
+// operational detail.
+//
+// The brief is replaced rather than inherited: the reference's brief is "Mint
+// test tokens (dev mode only)", and that parenthetical is the same false gating
+// claim as the description, sitting in an index cell no correction reaches.
+// ---------------------------------------------------------------------------
+
+const WITHHELD = new Map([
+  [
+    "novai_faucet",
+    {
+      brief: "Mint test tokens",
+      reason:
+        "This method mints tokens, and it is not documented here until the public testnet opens. Its " +
+        "parameters, result shape and error codes are in docs/RPC_REFERENCE.md, and the handler is linked " +
+        "above. Two of the carried exceptions are about this method, so the reference's account of its " +
+        "gating and of its disabled-path error code are both known to be wrong. The method is still counted " +
+        "in the 29 and still appears in openrpc.json: what is withheld is the runnable example, not the fact " +
+        "that the method exists.",
+      ruling: "website/HANDOFF.md excluded-permanently list",
+    },
+  ],
+]);
+
+/**
+ * Attach the withholding decision, and drop any wrongText on a withheld
+ * method's corrections. The correction itself still publishes; what stops is
+ * the claim to be striking a sentence, because the sentence is no longer on the
+ * page to strike. Leaving wrongText in place would make the renderer's
+ * every-wrongText-is-struck assertion fail on text that was deliberately
+ * removed, and the honest repair is for the data to stop claiming it.
+ */
+function attachWithheld(byName) {
+  for (const [name, w] of WITHHELD) {
+    const m = byName.get(name);
+    if (!m) {
+      fail(`WITHHELD names "${name}", which is not one of the documented methods. Delete the entry or fix the name.`);
+    }
+    if (!w.brief || !w.brief.trim()) fail(`WITHHELD ${name}: no brief, so the index row would be empty`);
+    if (!w.reason || !w.reason.trim()) fail(`WITHHELD ${name}: no reason, so the page would withhold silently`);
+    m.withheld = w;
+    for (const c of m.corrections ?? []) c.wrongText = null;
+  }
+}
+
+// Where a correction's wrongText may live. Ordered, and exactly one site may
+// match: prose that appears in two blocks would leave the renderer guessing
+// which one to strike through.
+const CORRECTION_SITES = [
+  { site: "description", textOf: (m) => [m.description] },
+  { site: "errors", textOf: (m) => [...(m.errors?.list ?? []).map((e) => e.when), m.errors?.text] },
+  { site: "params", textOf: (m) => (m.params?.list ?? []).map((p) => p.notes) },
+];
+
+const occurrencesOf = (texts, needle) =>
+  texts.filter(Boolean).reduce((n, t) => n + String(t).split(needle).length - 1, 0);
+
+/**
+ * Hang each active exception on the methods it makes wrong. Two things come out
+ * of this and both are used at the point of the error rather than in a list at
+ * the bottom of the page: `caveats`, the index labels, and `corrections`, the
+ * false prose paired with what is true instead.
+ *
+ * Every claim here is checked against the parsed document, so the both-ways
+ * discipline of the drift gate extends to the corrections: an exception cannot
+ * name a method that does not exist, cannot go unlabelled, and cannot correct
+ * prose that is no longer published.
+ */
+/**
+ * Some drift lands on an ERROR CODE rather than on a method. -32600 is
+ * documented with a trigger that is wrong for the whole surface, not for one
+ * handler, so `affects` has nowhere to put it and the correction would end up
+ * only in the list at the bottom, which is the arrangement this whole gate
+ * exists to stop. `affectsCodes` is the same idea keyed on the code.
+ */
+function attachCodeExceptions(active, catalogue) {
+  const byCode = new Map(catalogue.map((e) => [e.code, e]));
+  const out = [];
+  for (const e of active) {
+    for (const a of e.affectsCodes ?? []) {
+      const row = byCode.get(a.code);
+      if (!row) fail(`KNOWN_DRIFT ${e.id}: affectsCodes names ${a.code}, which the reference's error table does not list`);
+      if (a.wrongText && !String(row.trigger ?? "").includes(a.wrongText)) {
+        fail(
+          `KNOWN_DRIFT ${e.id}: the trigger it corrects is not published for ${a.code} any more. ` +
+          `Looked for "${a.wrongText}" in "${row.trigger}". Update wrongText or drop the correction.`
+        );
+      }
+      out.push({
+        exceptionId: e.id,
+        operatorRef: e.operatorRef,
+        code: a.code,
+        caveat: a.caveat,
+        wrongText: a.wrongText ?? null,
+        correction: a.correction,
+      });
+    }
+  }
+  return out;
+}
+
+function attachExceptions(active, byName) {
+  for (const e of active) {
+    if (!Array.isArray(e.affects)) {
+      fail(`KNOWN_DRIFT ${e.id}: no affects list. Name the methods it makes wrong, or state affects: [].`);
+    }
+    for (const a of e.affects) {
+      const m = byName.get(a.method);
+      if (!m) fail(`KNOWN_DRIFT ${e.id}: affects "${a.method}", which is not one of the documented methods`);
+      if (!a.caveat || !a.caveat.trim()) {
+        fail(`KNOWN_DRIFT ${e.id}: ${a.method} carries no caveat label, so the index would print a raw id`);
+      }
+      (m.caveats ??= []).push({ exceptionId: e.id, label: a.caveat, operatorRef: e.operatorRef });
+      if (!a.correction) continue;
+
+      let site = a.site ?? "description";
+      if (a.wrongText) {
+        const hits = CORRECTION_SITES.filter((s) => occurrencesOf(s.textOf(m), a.wrongText) > 0);
+        if (hits.length === 0) {
+          fail(
+            `KNOWN_DRIFT ${e.id}: the prose it corrects is not published by ${a.method} any more. ` +
+            `Looked for "${a.wrongText}". Re-read the section and update wrongText, or drop the correction.`
+          );
+        }
+        if (hits.length > 1) {
+          fail(`KNOWN_DRIFT ${e.id}: "${a.wrongText}" appears in ${hits.map((h) => h.site).join(" and ")} of ${a.method}`);
+        }
+        const n = occurrencesOf(hits[0].textOf(m), a.wrongText);
+        if (n !== 1) fail(`KNOWN_DRIFT ${e.id}: "${a.wrongText}" appears ${n} times in the ${hits[0].site} of ${a.method}`);
+        site = hits[0].site;
+      }
+      (m.corrections ??= []).push({
+        exceptionId: e.id,
+        operatorRef: e.operatorRef,
+        site,
+        wrongText: a.wrongText ?? null,
+        correction: a.correction,
+      });
+    }
+  }
+}
+
+/**
+ * Which methods answer with a top-level `null` result, measured from the
+ * handler rather than from the document's punctuation.
+ *
+ * The badge this feeds used to be gated on m.result.nullable, which the parser
+ * sets from the parenthesis in a "**Result** (`null` if ...)" heading. Where
+ * the reference writes the same fact as prose instead, no parenthesis exists
+ * and no badge appeared. So the Notes column was tracking markdown punctuation,
+ * and the result was the worst possible distribution: the badge sat on
+ * getLatestBlock, which is null only before any block has committed and is
+ * therefore unreachable on a live chain, and was missing from getBlockByHeight
+ * and getBlockByHash, which answer null for every height below the prune
+ * horizon and for every hash after a restart. That is normal operation.
+ *
+ * `Value::Null` in the handler body is the top-level null. A result shape of
+ * the form `{ "agreement": SlaAgreement | null }` is a null FIELD inside an
+ * object, is not this, and correctly does not match.
+ */
+function measureNullAnswers(root) {
+  const rel = "crates/node/src/rpc.rs";
+  const src = readFileSync(join(root, rel), "utf8");
+  const { code } = scanRust(src, rel);
+  const handlerFor = new Map(
+    [...code.matchAll(/"(novai_[A-Za-z]+)"\s*=>\s*\{?\s*(?:match\s+)?([a-z_][a-z0-9_]*)\s*\(/g)].map((h) => [h[1], h[2]])
+  );
+  const out = new Map();
+  for (const [method, fn] of handlerFor) {
+    const m = new RegExp(`\\bfn\\s+${fn}\\s*\\(`).exec(code);
+    if (!m) continue;
+    const open = code.indexOf("{", m.index + m[0].length);
+    if (open === -1) continue;
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < code.length; i++) {
+      if (code[i] === "{") depth += 1;
+      else if (code[i] === "}") {
+        depth -= 1;
+        if (depth === 0) { end = i; break; }
+      }
+    }
+    if (end === -1) continue;
+    const body = code.slice(open, end + 1);
+    const hit = /Value::Null/.exec(body);
+    if (!hit) continue;
+    out.set(method, {
+      file: rel,
+      line: code.slice(0, open + hit.index).split("\n").length,
+      handler: fn,
+    });
+  }
+  return out;
+}
+
+/**
+ * True when every field of RpcRequest is required: no Option, no
+ * #[serde(default)], no #[serde(skip_deserializing)]. That is what makes a
+ * missing field a parse error rather than an Invalid Request.
+ */
+function rpcRequestHasNoOptionalFields(code) {
+  const m = /struct\s+RpcRequest\s*\{([\s\S]*?)\}/.exec(code);
+  if (!m) fail("crates/node/src/rpc.rs: struct RpcRequest was not found, so its required fields cannot be measured");
+  const body = m[1];
+  const fields = [...body.matchAll(/^\s*(?:pub\s+)?([a-z_][a-z0-9_]*)\s*:\s*([^,]+),/gm)];
+  if (fields.length === 0) fail("crates/node/src/rpc.rs: RpcRequest parsed to zero fields, so the scan is broken");
+  return !/Option\s*</.test(body) && !/serde\s*\(\s*default/.test(body) && fields.length >= 4;
+}
 
 function measureDriftFacts(root, doc, methodsByName) {
   const rel = "crates/node/src/rpc.rs";
@@ -927,6 +1716,13 @@ function measureDriftFacts(root, doc, methodsByName) {
 
   const docText = readText(root, "docs/RPC_REFERENCE.md");
   const documented = [...new Set([...docText.matchAll(/`(-3\d{4})`/g)].map((m) => Number(m[1])))].sort((a, b) => b - a);
+
+  /** The Trigger cell the reference's error table gives one code. */
+  const docTriggerFor = (wanted) => {
+    const row = new RegExp(`^\\|\\s*\`${wanted}\`\\s*\\|([^|]*)\\|([^|]*)\\|`, "m").exec(docText);
+    if (!row) fail(`docs/RPC_REFERENCE.md: no error-table row for ${wanted}, so its trigger cannot be measured`);
+    return row[2].trim();
+  };
 
   // handle_public_faucet's signature: does it take a dev-mode flag at all?
   const sigStart = code.indexOf("fn handle_public_faucet(");
@@ -997,9 +1793,99 @@ function measureDriftFacts(root, doc, methodsByName) {
     );
   }
 
+  // An inherited error clause naming a code this method's handler cannot reach.
+  //
+  // Measured COMPARATIVELY rather than absolutely: the code is reported only
+  // when it appears in the SOURCE method's handler body and not in this one's.
+  // An absolute "this handler never emits -32002" test would be unsound,
+  // because a code can be produced by a helper the handler calls; the
+  // comparative form asks the much safer question of whether the two handlers
+  // differ on a code one of them lent the other, and it applies to the seven
+  // aliased methods rather than to all 29.
+  const handlerFor = new Map(
+    // Two arm shapes exist: `=> match handle_x(` and `=> { match handle_x(`.
+    [...code.matchAll(/"(novai_[A-Za-z]+)"\s*=>\s*\{?\s*(?:match\s+)?([a-z_][a-z0-9_]*)\s*\(/g)].map((h) => [h[1], h[2]])
+  );
+  // A scan that finds nothing reports "no defect" indistinguishably from "the
+  // pattern stopped matching". The first version of this regex expected the
+  // handler call to follow => directly, and every arm is actually
+  // `=> match handle_x(`, so it matched zero arms and the check silently passed
+  // on a defect I had already confirmed by hand. Assert the scan saw the whole
+  // dispatch table, so the next shape change fails here instead of going quiet.
+  if (handlerFor.size !== methodsByName.size) {
+    fail(
+      `${rel}: the handler scan resolved ${handlerFor.size} of ${methodsByName.size} methods to a handler function. ` +
+      `The dispatch arm shape has changed and the unreachable-code check would silently find nothing.`
+    );
+  }
+  const bodyOf = (fn) => {
+    const m = new RegExp(`\\bfn\\s+${fn}\\s*\\(`).exec(code);
+    if (!m) return null;
+    const open = code.indexOf("{", m.index + m[0].length);
+    if (open === -1) return null;
+    let depth = 0;
+    for (let i = open; i < code.length; i++) {
+      if (code[i] === "{") depth += 1;
+      else if (code[i] === "}") {
+        depth -= 1;
+        if (depth === 0) return code.slice(open, i + 1);
+      }
+    }
+    return null;
+  };
+  const codesIn = (fn) => {
+    const b = fn ? bodyOf(fn) : null;
+    return b === null ? null : new Set([...b.matchAll(/-3\d{4}/g)].map((h) => Number(h[0])));
+  };
+  const inheritedUnreachableCodes = [];
+  for (const m of methodsByName.values()) {
+    if (!m.errors?.resolvedFrom) continue;
+    const mine = codesIn(handlerFor.get(m.name));
+    const theirs = codesIn(handlerFor.get(m.errors.resolvedFrom));
+    if (!mine || !theirs) continue;
+    for (const e of m.errors.list ?? []) {
+      if (theirs.has(e.code) && !mine.has(e.code)) {
+        inheritedUnreachableCodes.push({ method: m.name, from: m.errors.resolvedFrom, code: e.code, when: e.when });
+      }
+    }
+  }
+
+  // The inherited-clause defect, measured rather than asserted: an error clause
+  // this method inherited names a backticked identifier that is a parameter of
+  // the SOURCE method and not of this one. Derived from the resolved methods,
+  // so it stops holding the moment the document's alias is fixed.
+  const inheritedForeignFields = [];
+  for (const m of methodsByName.values()) {
+    if (!m.errors?.resolvedFrom) continue;
+    const source = methodsByName.get(m.errors.resolvedFrom);
+    const mine = new Set((m.params?.list ?? []).map((f) => f.field));
+    const theirs = new Set((source?.params?.list ?? []).map((f) => f.field));
+    for (const e of m.errors.list ?? []) {
+      for (const ident of backtickedIdents(e.when)) {
+        if (!mine.has(ident) && theirs.has(ident)) {
+          inheritedForeignFields.push({ method: m.name, from: m.errors.resolvedFrom, field: ident, code: e.code });
+        }
+      }
+    }
+  }
+
   return {
     emittedErrorCodes: emitted,
     documentedErrorCodes: documented,
+    inheritedForeignFields,
+    inheritedUnreachableCodes,
+    // The reference calls getBlockByHeight's null path unreachable while the
+    // handler returns Value::Null for every height below the prune horizon,
+    // which is normal operation on a chain retaining 50,000 blocks.
+    // -32600 is documented as the code for a missing jsonrpc or method field.
+    // Every field of RpcRequest is required with no serde default, so a missing
+    // field fails deserialization and answers -32700; -32600 is reachable only
+    // when jsonrpc is PRESENT and is not "2.0".
+    invalidRequestDocClaimsMissingField:
+      /missing/i.test(docTriggerFor(-32600)) && rpcRequestHasNoOptionalFields(code),
+    blockByHeightNullCalledUnreachable:
+      /unreachable/i.test(methodsByName.get("novai_getBlockByHeight")?.result?.note ?? "") &&
+      Boolean(methodsByName.get("novai_getBlockByHeight")?.answersNull),
     getNonceDocClaimsInterchangeable,
     getNonceReadsMempoolCursor,
     publicFaucetGatesOnKeyOnly,
@@ -1221,7 +2107,8 @@ function errorCodesFromSource(root) {
  */
 function httpRejectionsFromSource(root) {
   const rel = "crates/node/src/rpc.rs";
-  const { code } = scanRust(readText(root, rel), rel);
+  // Verbatim: these bodies are values a client matches on, not prose.
+  const { code } = scanRust(readVerbatim(root, rel), rel);
   const out = [];
   for (const m of code.matchAll(/StatusCode\((\d{3})\)/g)) {
     const before = code.slice(Math.max(0, m.index - 400), m.index);
@@ -1804,7 +2691,26 @@ function compute(root) {
     if (m.params && m.params.kind === "alias") {
       const t = byName.get(m.params.alias);
       if (!t.params || t.params.kind === "alias") fail(`${m.name}: params alias chain does not terminate`);
-      m.params = { ...t.params, resolvedFrom: m.params.alias, note: m.params.note };
+      // Shape is copied. Meaning is copied only where it carries no role, and
+      // rewritten where the alias line says which side of the pair this
+      // method's field is. See ALIAS RESOLUTION above.
+      const reinterp = reinterpretationsIn(m.params.note);
+      for (const field of reinterp.keys()) {
+        if (!(t.params.list ?? []).some((r) => r.field === field)) {
+          fail(`${m.name}: the params alias reinterprets \`${field}\`, which ${m.params.alias} does not declare`);
+        }
+      }
+      const reinterpreted = [];
+      const list = (t.params.list ?? []).map((row) => {
+        const role = reinterp.get(row.field);
+        if (!role) return { ...row, notesFrom: "alias" };
+        const notes = row.notes
+          ? reinterpretNote(row.notes, role, `${m.name}: the params note for \`${row.field}\``)
+          : `interpreted as ${role}`;
+        reinterpreted.push({ field: row.field, was: row.notes ?? null, now: notes });
+        return { ...row, notes, notesFrom: "alias-reinterpreted" };
+      });
+      m.params = { ...t.params, list, resolvedFrom: m.params.alias, note: m.params.note, reinterpreted };
     }
     if (m.result && m.result.kind === "alias") {
       const t = byName.get(m.result.alias);
@@ -1814,7 +2720,12 @@ function compute(root) {
     if (m.errors && m.errors.kind === "alias") {
       const t = byName.get(m.errors.alias);
       if (!t.errors || t.errors.kind === "alias") fail(`${m.name}: errors alias chain does not terminate`);
-      m.errors = { ...t.errors, resolvedFrom: m.errors.alias };
+      // An inherited clause names the source method's parameter, which this
+      // method may not have. It is NOT silently rewritten to this method's
+      // field: see ALIAS RESOLUTION above. It is copied verbatim, and
+      // assertInheritedMeaningIsTrue refuses it unless it is carried as an
+      // explicit exception with a published correction.
+      m.errors = { ...t.errors, list: (t.errors.list ?? []).map((e) => ({ ...e })), resolvedFrom: m.errors.alias };
     }
     m.errorList = m.errors ? (m.errors.list ?? []) : [];
     m.inheritsRecordShape = Boolean(m.result && (m.result.kind === "categoryResult" || m.result.recordShape));
@@ -1844,6 +2755,13 @@ function compute(root) {
     if (missing.length) disagreements.push({ source: s.key, missing });
   }
 
+  // Nullability, measured from the handler and attached to the method.
+  const nullAnswers = measureNullAnswers(root);
+  for (const m of built) {
+    const hit = nullAnswers.get(m.name);
+    m.answersNull = hit ? { file: hit.file, line: hit.line } : null;
+  }
+
   const facts = measureDriftFacts(root, doc, byName);
 
   // KNOWN_DRIFT, evaluated in both directions.
@@ -1853,6 +2771,20 @@ function compute(root) {
     if (entry.holds(facts)) active.push(entry);
     else stale.push(entry);
   }
+
+  // An exception knows which methods it makes wrong. Attach it there, so the
+  // page can correct the prose where the reader meets it.
+  attachExceptions(active, byName);
+  attachWithheld(byName);
+
+  // Nothing may publish an inherited meaning that is false of the method it
+  // landed on. Run on the resolved view, so it polices the reinterpretation
+  // repair too, and run it AFTER the exceptions are attached so a defect that
+  // is already carried and corrected on the page does not also halt the build.
+  // The both-ways discipline still holds: fix the document and the exception
+  // stops applying, the drift gate names it, and the correction has to go.
+  assertInheritedMeaningIsTrue(built, byName);
+  assertCurlAgreesWithParams(built);
 
   // Doc constants and network parameters.
   const limitsHeading = lines.findIndex((l) => /^##\s+Limits\s*$/.test(l));
@@ -1978,6 +2910,9 @@ function compute(root) {
   // Cross-check 1: the error codes the node emits against the codes the
   // document lists. KNOWN_DRIFT carries the accepted difference, so a NEW
   // undocumented code fails the build rather than appearing unannounced.
+  // Code-level corrections, attached once the catalogue exists.
+  const codeCorrections = attachCodeExceptions(active, errorCatalogue);
+
   const docCodes = new Set(errorCatalogue.map((e) => e.code));
   const srcCodes = new Set(errorCodes.map((e) => e.code));
   const exceptedCodes = new Set(KNOWN_DRIFT.flatMap((e) => e.codes ?? []));
@@ -2071,6 +3006,7 @@ function compute(root) {
     methods: built,
     drift: { sources: sources.map((s) => ({ key: s.key, source: s.source, count: s.names.size })), union: [...union].sort(), disagreements, active, stale, facts },
     errorCatalogue,
+    codeCorrections,
     limits: limitsTable.rows,
     signals,
     undocumentedSignals,
@@ -2138,10 +3074,27 @@ function payloadFor(c) {
         curl: m.curl,
         sampleResponse: m.sampleResponse,
         exampleNote: m.exampleNote,
+        // The three fields the renderer reads to put a caveat on the right row
+        // and a correction at the point of the error. They were computed and
+        // gated by attachExceptions and then dropped here, which is why every
+        // one of those gates policed a value no reader could ever see: the
+        // index built its Notes column by regex-scanning exception prose
+        // instead, and labelled novai_getBalance with a caveat that is true of
+        // novai_getNonce and is the exact reverse of the truth for getBalance.
+        //
+        // Always arrays, never absent. A method with no caveat serialises [] so
+        // the renderer can assert "every rendered pill was declared here", which
+        // is the direction that makes the smearing impossible to reintroduce.
+        // `undefined` would make "none" and "not computed" the same value.
+        answersNull: m.answersNull ?? null,
+        caveats: m.caveats ?? [],
+        corrections: m.corrections ?? [],
+        withheld: m.withheld ?? null,
       })),
       method: "parsed from the labelled blocks under each ### heading in docs/RPC_REFERENCE.md",
     },
     errorCatalogue: { value: c.errorCatalogue, method: "the two tables under ## Error codes in docs/RPC_REFERENCE.md" },
+    codeCorrections: { value: c.codeCorrections, method: "KNOWN_DRIFT entries whose drift lands on an error code rather than on a method" },
     limits: { value: c.limits, method: "the table under ## Limits in docs/RPC_REFERENCE.md" },
     networkParameters: {
       value: { blockRetention: { blocks: c.retentionBlocks, constant: "PRUNE_RETAIN_BLOCKS" } },
@@ -2240,8 +3193,75 @@ function payloadFor(c) {
   };
 }
 
+/**
+ * The payload, serialised ASCII-only.
+ *
+ * A wire value read verbatim can contain a character this repository forbids in
+ * its own prose: the 503 body carries an em dash. Escaping every non-ASCII
+ * character as \\uXXXX keeps the generated file free of those characters, so the
+ * dash gate stays green without being weakened or given an exemption, while
+ * JSON.parse restores the exact bytes for the renderer. The value is preserved
+ * and the check is not.
+ *
+ * It also makes the file byte-stable across editors and locales, which matters
+ * because determinism here is checked with a byte compare.
+ */
+/**
+ * NO NORMALISED COPY OF A SOURCE STRING LITERAL MAY BE PUBLISHED.
+ *
+ * The 503 defect was not a one-off typo, it was a class: readText normalises
+ * every dash character in everything it reads, and any Rust string literal that
+ * passes through it arrives on the page rewritten, silently, with the
+ * substitution logged as ordinary house-style tidying.
+ *
+ * This gate is deliberately NOT a list of known wire strings. Checking the one
+ * string we already found would be the same shape as the dash gate that passed
+ * for weeks: it would re-verify the fixed case and see nothing new. Instead it
+ * enumerates every substitution that actually fired inside a Rust string
+ * literal, and asks whether the rewritten form reached the payload. A new
+ * quotation of any of the other dash-bearing literals in crates/ trips it with
+ * no edit here at all.
+ *
+ * Markdown prose is out of scope on purpose: normalising doc prose to the
+ * repository's house style is the intended behaviour. A Rust string literal is
+ * a message or a wire value, and rewriting one is not.
+ */
+function assertNoNormalisedSourceLiteralIsPublished(root, payload) {
+  const problems = [];
+  let inspected = 0;
+  for (const entry of substitutionLog) {
+    if (!entry.source.endsWith(".rs")) continue;
+    const line = readVerbatim(root, entry.source).split("\n")[entry.line - 1];
+    if (line === undefined) continue;
+    // The string literal containing the substituted character, if it is in one.
+    let literal = null;
+    for (const m of line.matchAll(/"((?:[^"\\\\]|\\\\.)*)"/g)) {
+      const start = m.index + 1;
+      if (entry.column - 1 >= start && entry.column - 1 < start + m[1].length) literal = m[1];
+    }
+    if (literal === null) continue;
+    inspected += 1;
+    const normalised = literal.replace(subPattern(), (c) => SUBSTITUTIONS.get(c).to);
+    if (normalised !== literal && payload.includes(JSON.stringify(normalised).slice(1, -1))) {
+      problems.push(
+        `${entry.source}:${entry.line} the literal "${literal}" is published as "${normalised}". ` +
+        `A ${entry.from} was rewritten to "${entry.to}", so a client matching the published string never matches ` +
+        `what the node sends. Read this value with readVerbatim and render it with escWire.`
+      );
+    }
+  }
+  if (problems.length) {
+    console.error("console-data: a source string literal is published in rewritten form:");
+    for (const pr of problems) console.error(`  ${pr}`);
+    fail("a normalised copy of a source string literal reached the page");
+  }
+  return inspected;
+}
+
 function stableRender(obj) {
-  return JSON.stringify(obj, null, 2) + "\n";
+  const json = JSON.stringify(obj, null, 2);
+  const escaped = json.replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return escaped + "\n";
 }
 
 function main() {
@@ -2308,6 +3328,7 @@ function main() {
   const generatedAt = dataUnchanged && rpcUnchanged && previousStamp ? previousStamp : new Date().toISOString();
 
   const dataOut = stableRender({ generatedAt, ...payload });
+  const inspectedLiterals = assertNoNormalisedSourceLiteralIsPublished(args.root, dataOut);
   const rpcOut = stableRender({ ...openrpcBase, info: { ...openrpcBase.info, "x-generatedAt": generatedAt } });
 
   if (args.check) {

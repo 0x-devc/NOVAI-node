@@ -186,16 +186,26 @@ describe("generate-console-data: the KNOWN_DRIFT exception list", () => {
   it("carries exactly the exceptions that still apply, each with an operator reference", () => {
     const ids = data.drift.value.knownExceptions.map((e: { id: string }) => e.id).sort();
     expect(ids).toEqual([
+      "blockbyheight-null-called-unreachable",
       "error-code-32014-undocumented",
       "faucet-disabled-code-mismatch",
       "faucet-rpc-gating-incomplete",
       "getnonce-documented-as-interchangeable",
+      "getnonce-inherits-unreachable-db-error",
+      "invalid-request-trigger-is-wrong",
       "public-faucet-gating-backwards",
+      "vk-list-error-clause-names-foreign-field",
     ]);
     for (const e of data.drift.value.knownExceptions) {
       expect(e.operatorRef).toMatch(/NEEDS-OPERATOR\.md item \d+/);
       expect(e.why.length).toBeGreaterThan(40);
     }
+    // Every exception that names methods must land on them, and only on them.
+    // The list can only shrink, so an id added here without a NEEDS-OPERATOR
+    // entry and a measured predicate is a test edit rather than a decision.
+    const labelled = new Set<string>();
+    for (const m of data.methods.value) for (const c of m.caveats) labelled.add(c.exceptionId);
+    for (const id of labelled) expect(ids).toContain(id);
   });
 
   it("prints every exception on a successful run, not only on failure", () => {
