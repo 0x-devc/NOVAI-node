@@ -14,16 +14,37 @@
 // still on disk in the pages themselves if a finding needs it.
 //
 // Usage:
-//   node scripts/freeze-console.mjs           write the snapshots
-//   node scripts/freeze-console.mjs --check    fail if they are stale
+//   node scripts/freeze-console.mjs                    write the snapshots
+//   node scripts/freeze-console.mjs --check            fail if they are stale
+//   node scripts/freeze-console.mjs [--web-root <dir>] [--out <dir>]
+//
+// --web-root and --out exist so this gate can be exercised against a doctored
+// copy of the page set rather than only against the working tree. Every other
+// generator here already takes them; this one did not, which is precisely why
+// it was the one gate with no test proving it can fail.
 //
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const OUT = join(WEB_ROOT, "snapshots");
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+
+function parseArgs(argv) {
+  const args = { webRoot: resolve(SCRIPT_DIR, ".."), out: null, check: false };
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === "--web-root") args.webRoot = resolve(argv[++i]);
+    else if (argv[i] === "--out") args.out = resolve(argv[++i]);
+    else if (argv[i] === "--check") args.check = true;
+    else fail(`unknown argument: ${argv[i]}`);
+  }
+  if (!args.out) args.out = join(args.webRoot, "snapshots");
+  return args;
+}
+
+const ARGS = parseArgs(process.argv);
+const WEB_ROOT = ARGS.webRoot;
+const OUT = ARGS.out;
 
 const PAGES = [
   "console.html",
@@ -87,7 +108,7 @@ function toText(html) {
 const snapshotFor = (rel) => join(OUT, rel.replace(/\//g, "__").replace(/\.html$/, ".txt"));
 
 function main() {
-  const check = process.argv.includes("--check");
+  const check = ARGS.check;
   if (!check) mkdirSync(OUT, { recursive: true });
   let stale = 0;
   let lines = 0;

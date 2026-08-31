@@ -12,7 +12,7 @@
     "preview": "vite preview",
     "check:dashes": "node scripts/check-dashes.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
-    "test": "node scripts/check-dashes.mjs && node scripts/check-css-coverage.mjs && npm run typecheck && vitest run",
+    "test": "node scripts/check-dashes.mjs && node scripts/check-css-coverage.mjs && node scripts/freeze-console.mjs --check && npm run typecheck && vitest run",
     "test:watch": "vitest",
     "stats": "node scripts/generate-repo-stats.mjs",
     "console:data": "node scripts/generate-console-data.mjs",

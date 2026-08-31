@@ -54,6 +54,32 @@ const withoutComments = (text: string) =>
 
 const isLegacy = (rel: string) => [...LEGACY_EXEMPT].some((e) => rel === e || rel.startsWith(e + "/"));
 
+/**
+ * An allowlist that can only shrink.
+ *
+ * An exemption that no longer suppresses anything is furniture. It stays in the
+ * file, reads as a considered decision, and silences nothing. check-dashes.mjs
+ * already fails when a definition site stops carrying its marker; these lists
+ * had no equivalent, and two entries naming tailwind.config.ts had been
+ * unreachable for as long as they had existed, because walk() is rooted at src/
+ * and that file is not under src/ at all. Nothing reported it.
+ *
+ * An entry earns its place on two conditions, not one: the file must actually
+ * be walked by this rule, AND it must actually trip the rule without the
+ * exemption. Checking mere presence would let an entry outlive the violation it
+ * was written to cover, which is the same way the list rots, just more slowly.
+ */
+function assertAllowlistEarnsItsPlace(rule: string, allow: Set<string>, trips: (text: string) => boolean) {
+  for (const rel of allow) {
+    const f = files.find((x) => x.rel === rel);
+    expect(f, `${rule}: "${rel}" is allowlisted but this rule never walks it. Remove it from the allowlist.`).toBeDefined();
+    expect(
+      trips(f!.text),
+      `${rule}: "${rel}" is allowlisted but no longer trips the rule, so the exemption suppresses nothing. Remove it.`
+    ).toBe(true);
+  }
+}
+
 describe("design rules", () => {
   // The console is monochrome by construction rather than by discipline. Its
   // markup lives in console.html, which is static rather than React, plus
@@ -93,6 +119,7 @@ describe("design rules", () => {
       "src/components/system/StatusDot.tsx", // the canonical live-state indicator
     ]);
     const cyanRe = /(?:text|bg|border|fill|stroke|ring)-live\b|--live\b|hsl\(\s*192[,\s]/;
+    assertAllowlistEarnsItsPlace("cyan", ALLOW, (t) => cyanRe.test(t));
     for (const f of files) {
       if (ALLOW.has(f.rel) || isLegacy(f.rel)) continue;
       expect(cyanRe.test(f.text), `${f.rel} uses the live/cyan accent outside the allowlist`).toBe(false);
@@ -119,10 +146,12 @@ describe("design rules", () => {
   });
 
   it("text-faint is decorative only: barred from new components", () => {
-    const ALLOW = new Set(["src/index.css", "tailwind.config.ts", "src/dev/SpecimenApp.tsx"]);
+    const ALLOW = new Set(["src/index.css", "src/dev/SpecimenApp.tsx"]);
+    const faintRe = /text-ink-faint|text-faint\b/;
+    assertAllowlistEarnsItsPlace("text-faint", ALLOW, (t) => faintRe.test(withoutComments(t)));
     for (const f of files) {
       if (ALLOW.has(f.rel) || isLegacy(f.rel)) continue;
-      expect(/text-ink-faint|text-faint\b/.test(withoutComments(f.text)), `${f.rel} puts content on the faint token`).toBe(false);
+      expect(faintRe.test(withoutComments(f.text)), `${f.rel} puts content on the faint token`).toBe(false);
     }
   });
 
@@ -139,12 +168,43 @@ describe("design rules", () => {
   });
 
   it("glow-3 is reserved for the hero and commit flash", () => {
-    const ALLOW = new Set(["src/index.css", "tailwind.config.ts", "src/dev/SpecimenApp.tsx"]);
+    const ALLOW = new Set(["src/index.css", "src/dev/SpecimenApp.tsx"]);
+    const glowRe = /glow-?3/;
+    assertAllowlistEarnsItsPlace("glow-3", ALLOW, (t) => glowRe.test(t));
     for (const f of files) {
       if (ALLOW.has(f.rel) || isLegacy(f.rel)) continue;
       if (f.rel.startsWith("src/hero/")) continue;
-      expect(/glow-?3/.test(f.text), `${f.rel} uses glow-3 outside the hero`).toBe(false);
+      expect(glowRe.test(f.text), `${f.rel} uses glow-3 outside the hero`).toBe(false);
     }
+  });
+
+  it("every legacy exemption still names something that exists", () => {
+    // LEGACY_EXEMPT is a prefix list rather than a rule-specific allowlist, so
+    // the two-condition test above does not fit: a legacy file is exempt from
+    // every rule, including ones it happens not to trip today. What can be
+    // checked is that the path still resolves. A renamed or deleted entry stops
+    // exempting anything and becomes a false record of a decision.
+    for (const e of LEGACY_EXEMPT) {
+      const hit = files.some((f) => f.rel === e || f.rel.startsWith(e + "/"));
+      expect(hit, `LEGACY_EXEMPT names "${e}", which matches no walked file. Remove it.`).toBe(true);
+    }
+  });
+
+  it("the allowlist shrink-check fails on an exemption that suppresses nothing", () => {
+    // A gate that has only ever been observed passing has not been shown to
+    // work. Two probes: a path this rule never walks, and a real walked file
+    // that does not trip the rule it would be exempted from. Both are the shapes
+    // that actually occurred, the first being the tailwind.config.ts entries
+    // this check was written to find.
+    const neverWalked = new Set(["tailwind.config.ts"]);
+    expect(files.some((f) => f.rel === "tailwind.config.ts"), "the probe path must be absent from the walked set").toBe(false);
+    expect(() => assertAllowlistEarnsItsPlace("probe", neverWalked, () => true)).toThrow(/never walks it/);
+
+    const walkedButClean = files.find((f) => !/glow-?3/.test(f.text));
+    expect(walkedButClean, "expected at least one walked file that does not use glow-3").toBeDefined();
+    expect(() =>
+      assertAllowlistEarnsItsPlace("probe", new Set([walkedButClean!.rel]), (t) => /glow-?3/.test(t))
+    ).toThrow(/no longer trips the rule/);
   });
 
   it("the v2 tokens the rules depend on exist", () => {
