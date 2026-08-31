@@ -106,6 +106,52 @@ const hasForbidden = (s) => new RegExp(`[${SUB_CHARS}]`).test(s);
 
 const substitutionLog = [];
 
+/** The substitution itself, with no logging. For comparing two reads. */
+const normaliseOnly = (s) => String(s).replace(subPattern(), (c) => SUBSTITUTIONS.get(c).to);
+
+/**
+ * docs/RPC_REFERENCE.md read with NO dash normalisation, split into lines that
+ * are index-aligned with the normalised parse. Set once per compute() run.
+ *
+ * Error clauses are recovered from here rather than from the normalised text,
+ * because a clause is a QUOTATION of the condition the reader is told to match
+ * on. Normalising doc prose to the repository's house style is intended; doing
+ * it to a quoted expression publishes a subtly different expression from the one
+ * the reference states.
+ *
+ * The consistency argument is what settles it. The console already publishes
+ * U+2264 faithfully ten times on these same rows, so converting U+2212 while
+ * rendering U+2264 verbatim was an inconsistency rather than a policy. The
+ * generated JSON escapes every non-ASCII code point as \uXXXX and the renderer
+ * emits it as a numeric entity, so both files stay ASCII and the dash gate is
+ * unaffected.
+ */
+let docVerbatimLines = null;
+
+/**
+ * One cell of one row, exactly as the document writes it.
+ *
+ * Falls back to the normalised value rather than failing when the two reads
+ * disagree, and the disagreement itself fails the build: a silent fallback would
+ * turn a desynchronised parse into a quiet loss of the very fidelity this
+ * function exists to provide.
+ */
+function verbatimCell(lineIndex, cellIndex, normalised) {
+  if (docVerbatimLines === null || lineIndex === undefined) return normalised;
+  const raw = docVerbatimLines[lineIndex];
+  if (raw === undefined) return normalised;
+  const cell = splitRow(raw)[cellIndex];
+  if (cell === undefined) return normalised;
+  if (normaliseOnly(cell) !== normalised) {
+    fail(
+      `docs/RPC_REFERENCE.md line ${lineIndex + 1}: the verbatim read and the normalised read disagree on cell ` +
+      `${cellIndex}. Normalised: "${normalised}". Verbatim normalises to: "${normaliseOnly(cell)}". ` +
+      `The two reads are no longer line-aligned, so no clause can be trusted to be quoted exactly.`
+    );
+  }
+  return cell;
+}
+
 function normaliseDashes(text, label) {
   if (!hasForbidden(text)) return text;
   text.split("\n").forEach((line, i) => {
@@ -492,22 +538,104 @@ function parseTable(lines, inFence, start, end) {
   const header = splitRow(lines[i]);
   if (!/^\|[\s:|-]+\|$/.test(lines[i + 1].trim())) return null;
   const rows = [];
+  const rowLines = [];
   let j = i + 2;
   for (; j < end; j++) {
     const t = lines[j].trim();
     if (!t.startsWith("|")) break;
     const cells = splitRow(lines[j]);
+    assertRowIsWellFormed(cells, header, j);
     const row = {};
     header.forEach((h, k) => { row[h] = cells[k] ?? ""; });
     rows.push(row);
+    rowLines.push(j);
   }
   if (rows.length === 0) return null;
-  return { header, rows };
+  return { header, rows, rowLines };
 }
 
+/**
+ * Split a markdown table row on its UNESCAPED pipes, and unescape `\|` into a
+ * literal pipe in the resulting cells.
+ *
+ * The old form was `.replace(/^\|/, "").replace(/\|$/, "").split("|")`, which
+ * reads an escaped pipe as a cell boundary. docs/RPC_REFERENCE.md:400 writes the
+ * canonical entity id derivation as
+ * `blake3("NOVAI_AI_ENTITY_ID_V1" \|\| code_hash \|\| creator)`, so that row
+ * split into seven cells against a three-cell header, the Notes cell was cut at
+ * the first escaped pipe, and the console published the derivation truncated at
+ * a dangling backslash. `code_hash || creator` then occurred zero times on the
+ * whole console, on a page where entity_id is the required parameter of fourteen
+ * of the twenty-nine methods.
+ *
+ * The trailing-pipe strip has the same bug in miniature, which is why the scan
+ * below handles the row's own bounding pipes rather than stripping them first: a
+ * row ending in `\|` would otherwise lose the pipe and keep the backslash.
+ */
 function splitRow(line) {
-  const t = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-  return t.split("|").map((c) => c.trim());
+  const t = line.trim();
+  const cells = [];
+  let cur = "";
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (c === "\\" && t[i + 1] === "|") { cur += "|"; i += 1; continue; }
+    if (c === "|") { cells.push(cur); cur = ""; continue; }
+    cur += c;
+  }
+  cells.push(cur);
+  // The fragments outside the row's own bounding pipes.
+  if (cells.length >= 2 && cells[0].trim() === "") cells.shift();
+  if (cells.length >= 1 && cells[cells.length - 1].trim() === "") cells.pop();
+  return cells.map((c) => c.trim());
+}
+
+/**
+ * Two independent gates on the same defect class, because three of the thirteen
+ * defects the last adversarial pass found were gate holes, and one rule per
+ * defect is not enough.
+ *
+ * STRUCTURAL: a row that splits into a different number of cells than its header
+ * declares is a parser error. This catches the CAUSE. Measured across all 48
+ * tables in the reference: one row failed it before the splitter was fixed
+ * (line 400, seven cells against a three-cell header) and none fails it after.
+ *
+ * SEMANTIC: no published cell may end on a dangling operator or backslash, or
+ * carry an unbalanced backtick. This catches the SYMPTOM, and it catches it even
+ * if a future truncation happens to leave the cell count intact. It also defuses
+ * a live trap: the truncated cell carried an odd number of backticks, and
+ * richStruck in the HTML generator fails the build on odd backticks, so the
+ * committed data was one correction away from breaking the build.
+ */
+function assertRowIsWellFormed(cells, header, lineIndex) {
+  const where = `docs/RPC_REFERENCE.md line ${lineIndex + 1}`;
+  if (cells.length !== header.length) {
+    fail(
+      `${where}: the row splits into ${cells.length} cells and its header declares ${header.length}. ` +
+      `A cell boundary was read where the document did not put one (an escaped pipe is written \\|), ` +
+      `or the row is missing a cell. Either way the parse is wrong and content would be dropped silently.`
+    );
+  }
+  for (const cell of cells) {
+    // Each alternative is reachable from a real row. An earlier draft also
+    // listed `||`, which cannot fire: an unescaped `||` is two cell boundaries,
+    // so it is caught by the width check, and an escaped one unescapes to a cell
+    // ending in a single `|`, which the second alternative already covers. An
+    // alternative that cannot fire is the same class of dead gate as the three
+    // this pass is closing, so it is not carried for appearances.
+    if (/(?:\\|\||\+|,|&&)$/.test(cell)) {
+      fail(
+        `${where}: the cell "${cell.slice(-48)}" ends on a dangling operator or backslash, ` +
+        `which is what a truncated cell looks like. Publishing it would print a fragment of a derivation as ` +
+        `though it were the whole thing.`
+      );
+    }
+    if (((cell.match(/`/g) ?? []).length) % 2 === 1) {
+      fail(
+        `${where}: the cell "${cell.slice(0, 64)}" carries an unbalanced backtick, so a code span opens and ` +
+        `never closes. The renderer would emit a stray backtick or swallow the rest of the row.`
+      );
+    }
+  }
 }
 
 function firstFence(lines, inFence, start, end) {
@@ -735,9 +863,48 @@ function reinterpretNote(note, role, context) {
   );
 }
 
-/** Every backticked identifier in a clause, in order. */
+/**
+ * Every backticked identifier in a clause, in order.
+ *
+ * Reads identifiers from WITHIN a backtick span rather than requiring the whole
+ * span to be one. The old form anchored the identifier to the span boundaries,
+ * so it returned [] on `` `end_height - start_height > 10000` `` and every check
+ * built on it reported clean on the one clause that carried a defect. Two
+ * independent reasons the same gate could not fire: this, and the provenance
+ * blindness that errorProvenance below fixes.
+ */
 const backtickedIdents = (text) =>
-  [...String(text ?? "").matchAll(/`([A-Za-z_][A-Za-z0-9_]*)`/g)].map((m) => m[1]);
+  [...String(text ?? "").matchAll(/`([^`]+)`/g)]
+    .flatMap((m) => m[1].match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []);
+
+/**
+ * Where a method's Errors block came from, by WHATEVER route brought it.
+ *
+ * Two routes exist and they carry different keys. An alias resolves to
+ * `resolvedFrom: <method name>`. A category's Common errors table lands as
+ * `{ kind: "categoryCommon", from: <category title> }` with no `resolvedFrom`
+ * key at all. Three separate checks opened with `if (!m.errors?.resolvedFrom)
+ * continue;` and were therefore blind to every method inheriting by the second
+ * route, which is all three Signal methods.
+ *
+ * This is the single accessor those checks share. It exists as one function
+ * rather than as three corrected copies deliberately: the codebase already
+ * contained the right answer and the wrong one side by side, because
+ * assertInheritedMeaningIsTrue solved this asymmetry for itself and
+ * measureDriftFacts kept the unfixed form. Fixing both without unifying them
+ * would move the divergence rather than remove it.
+ *
+ * `sourceMethod` is null for a category-common table, because a category is not
+ * a method and there is no handler to compare against. A caller that needs a
+ * source handler must check for it rather than assume one.
+ */
+function errorProvenance(m) {
+  const e = m?.errors;
+  if (!e) return null;
+  if (e.resolvedFrom) return { route: "alias", from: e.resolvedFrom, sourceMethod: e.resolvedFrom };
+  if (e.kind === "categoryCommon") return { route: "categoryCommon", from: e.from, sourceMethod: null };
+  return null;
+}
 
 // rewriteForeignFields used to live here. It substituted this method's own
 // field for the source method's when exactly one field had the same type, and
@@ -943,17 +1110,18 @@ function assertInheritedMeaningIsTrue(built, byName) {
     const inherited = [];
     if (m.params?.resolvedFrom) {
       for (const p of m.params.list ?? []) {
-        if (p.notes) inherited.push({ where: `the params note for \`${p.field}\``, text: p.notes, from: m.params.resolvedFrom });
+        if (p.notes) inherited.push({ where: `the params note for \`${p.field}\``, text: p.notes, from: m.params.resolvedFrom, sourceMethod: m.params.resolvedFrom });
       }
     }
-    if (m.errors?.resolvedFrom) {
+    const errFrom = errorProvenance(m);
+    if (errFrom) {
       for (const e of m.errors.list ?? []) {
-        if (e.when) inherited.push({ where: `the ${e.code} error clause`, text: e.when, from: m.errors.resolvedFrom });
+        if (e.when) inherited.push({ where: `the ${e.code} error clause`, text: e.when, from: errFrom.from, sourceMethod: errFrom.sourceMethod });
       }
-      if (m.errors.text) inherited.push({ where: "the errors prose", text: m.errors.text, from: m.errors.resolvedFrom });
+      if (m.errors.text) inherited.push({ where: "the errors prose", text: m.errors.text, from: errFrom.from, sourceMethod: errFrom.sourceMethod });
     }
     if (m.result?.resolvedFrom && m.result.note) {
-      inherited.push({ where: "the result note", text: m.result.note, from: m.result.resolvedFrom });
+      inherited.push({ where: "the result note", text: m.result.note, from: m.result.resolvedFrom, sourceMethod: m.result.resolvedFrom });
     }
 
     // (a) An inherited claim naming the other side of this method's own pair.
@@ -987,7 +1155,13 @@ function assertInheritedMeaningIsTrue(built, byName) {
       const mine = new Set((m.params?.list ?? []).map((p) => p.field));
       for (const item of inherited) {
         if (isCarried(m, item.text)) continue;
-        const theirs = new Set((byName.get(item.from)?.params?.list ?? []).map((p) => p.field));
+        // A category-common table has no source METHOD, so there is no field set
+        // to compare against and this check has nothing to say. The rule that
+        // polices that route is the category-common scoping in compute(), which
+        // drops a common row from a method whose params do not declare the
+        // fields the row's clause names.
+        if (!item.sourceMethod) continue;
+        const theirs = new Set((byName.get(item.sourceMethod)?.params?.list ?? []).map((p) => p.field));
         for (const ident of backtickedIdents(item.text)) {
           if (mine.has(ident) || !theirs.has(ident)) continue;
           problems.push(
@@ -1029,7 +1203,13 @@ function parseErrors(block, lines, inFence, known, name) {
     const codeKey = table.header.find((h) => /code/i.test(h));
     const whenKey = table.header.find((h) => /when|trigger|meaning/i.test(h));
     if (!codeKey || !whenKey) fail(`${name}: errors table header not understood: ${table.header.join(" | ")}`);
-    const list = table.rows.map((r) => ({ code: Number(stripTicks(r[codeKey])), when: r[whenKey] }));
+    // The When cell is read verbatim: it is a quotation of the condition the
+    // caller matches on, not prose to be restyled. See docVerbatimLines.
+    const whenIndex = table.header.indexOf(whenKey);
+    const list = table.rows.map((r, k) => ({
+      code: Number(stripTicks(r[codeKey])),
+      when: verbatimCell(table.rowLines[k], whenIndex, r[whenKey]),
+    }));
     for (const e of list) if (!Number.isInteger(e.code)) fail(`${name}: unparseable error code in the errors table`);
     return { kind: "table", list };
   }
@@ -1483,6 +1663,62 @@ const KNOWN_DRIFT = [
     ],
     holds: (f) => f.faucetDisabledCode === -32000 && f.faucetDocDevModeCode === -32602,
   },
+  {
+    id: "latestblock-claims-only-global-errors",
+    operatorRef: "NEEDS-OPERATOR.md item 21",
+    summary:
+      "novai_getLatestBlock is documented as answering only the global error codes, and its handler emits -32002 on two paths",
+    why:
+      "This is the method every integration calls first, and it is the only one of the three block methods " +
+      "claiming immunity: getBlockByHeight and getBlockByHash both document -32002. handle_get_latest_block " +
+      "answers -32002 when the block fails to load and again when it fails to hash. A client written to the " +
+      "documented set treats a storage failure as an unknown code, and the one method it is most likely to use " +
+      "for a health check is the one whose failure mode is undocumented.",
+    affects: [
+      {
+        method: "novai_getLatestBlock",
+        caveat: "emits an error its table omits",
+        // No wrongText, and the reason is mechanical rather than a preference.
+        // The reference states this as prose, "only the global ones (...)", and
+        // the prose parser hands the same sentence to the -32600 clause, the
+        // -32601 clause and the block's own text. It therefore occurs three
+        // times within one correction site, and the strike gate requires a
+        // wrongText to occur exactly once so the renderer knows which span to
+        // strike. The correction below the table carries the same fact, which
+        // is the substance; the strike is not available without changing how
+        // prose error blocks are parsed, and that is beyond this gate.
+        site: "errors",
+        correction:
+          "This method also answers `-32002`. `handle_get_latest_block` emits it when the block fails to load and " +
+          "again when it fails to hash, so a storage failure reaches the caller as `-32002` rather than as one of " +
+          "the two codes named here. Its two sibling block methods both document it.",
+      },
+    ],
+    holds: (f) => f.latestBlockDocClaimsOnlyGlobal && f.latestBlockEmits32002 > 0,
+  },
+  {
+    id: "sla-seller-cap-does-not-exist",
+    operatorRef: "NEEDS-OPERATOR.md item 22",
+    summary:
+      "novai_listSlasBySeller is documented as bounded by the per-buyer cap of 8, and sellers are not capped in v1",
+    why:
+      "MAX_SLAS_PER_ENTITY's own rustdoc says the cap is per BUYER, the memory-object owner, and states in as " +
+      "many words that sellers are not capped in v1 because they appear in arbitrarily many SLAs but never own " +
+      "the underlying object. A client that sizes a fixed buffer on a documented guarantee of eight silently " +
+      "truncates a seller's result set, which is a data-loss bug rather than an error the caller can see.",
+    affects: [
+      {
+        method: "novai_listSlasBySeller",
+        caveat: "documented cap does not apply to sellers",
+        wrongText: "Bounded internally by the per-buyer cap (= 8 in v1).",
+        correction:
+          "There is no seller-side cap in v1. `MAX_SLAS_PER_ENTITY` bounds how many SLA memory objects a single " +
+          "BUYER may own; a seller appears in arbitrarily many agreements and owns none of them. Size for an " +
+          "unbounded result set rather than for eight.",
+      },
+    ],
+    holds: (f) => f.sellerDocClaimsCap && f.sellersAreUncapped,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1717,11 +1953,23 @@ function measureDriftFacts(root, doc, methodsByName) {
   const docText = readText(root, "docs/RPC_REFERENCE.md");
   const documented = [...new Set([...docText.matchAll(/`(-3\d{4})`/g)].map((m) => Number(m[1])))].sort((a, b) => b - a);
 
-  /** The Trigger cell the reference's error table gives one code. */
+  /**
+   * The Trigger cell the reference's error table gives one code.
+   *
+   * Split with the shared row splitter rather than with `[^|]*` cell patterns.
+   * A `[^|]*` cell reader stops at an escaped pipe exactly as the old row
+   * splitter did, so it is the same defect in a second place: it would read a
+   * truncated trigger and this measurement feeds a KNOWN_DRIFT predicate.
+   */
   const docTriggerFor = (wanted) => {
-    const row = new RegExp(`^\\|\\s*\`${wanted}\`\\s*\\|([^|]*)\\|([^|]*)\\|`, "m").exec(docText);
-    if (!row) fail(`docs/RPC_REFERENCE.md: no error-table row for ${wanted}, so its trigger cannot be measured`);
-    return row[2].trim();
+    for (const line of doc.lines) {
+      const t = line.trim();
+      if (!t.startsWith("|")) continue;
+      const cells = splitRow(line);
+      if (cells.length < 3 || stripTicks(cells[0]) !== String(wanted)) continue;
+      return cells[2];
+    }
+    fail(`docs/RPC_REFERENCE.md: no error-table row for ${wanted}, so its trigger cannot be measured`);
   };
 
   // handle_public_faucet's signature: does it take a dev-mode flag at all?
@@ -1793,6 +2041,37 @@ function measureDriftFacts(root, doc, methodsByName) {
     );
   }
 
+  // novai_getLatestBlock's Errors block claims only the global codes, and the
+  // handler answers -32002 on two separate paths. Measured on both sides: the
+  // document's own claim, and the handler body. The method every integration
+  // calls first is the one method in its category claiming immunity, while its
+  // two siblings both document -32002.
+  const latestBlock = methodsByName.get("novai_getLatestBlock");
+  if (!latestBlock) fail("docs/RPC_REFERENCE.md: novai_getLatestBlock section not found");
+  const latestBlockDocClaimsOnlyGlobal = /only the global ones/i.test(latestBlock.errors?.text ?? "");
+  const latestBlockFnStart = code.indexOf("fn handle_get_latest_block(");
+  if (latestBlockFnStart === -1) fail(`${rel}: fn handle_get_latest_block not found`);
+  const latestBlockFnEnd = code.indexOf("\nfn ", latestBlockFnStart + 1);
+  const latestBlockBody = code.slice(latestBlockFnStart, latestBlockFnEnd === -1 ? code.length : latestBlockFnEnd);
+  const latestBlockEmits32002 = (latestBlockBody.match(/-32002/g) ?? []).length;
+
+  // The seller cap. The reference says listSlasBySeller is "Bounded internally
+  // by the per-buyer cap (= 8 in v1)"; the constant's own rustdoc says sellers
+  // are not capped in v1 and explains why (a seller never owns the underlying
+  // memory object). A client sizing a buffer on a guarantee of eight silently
+  // truncates. Recorded for the record: a Phase 1 agent examined this exact
+  // sentence, read a different rustdoc, and cleared it. An agent's report is not
+  // a verdict, so this is measured against the constant's own declaration.
+  const memoryRel = "crates/ai_entities/src/memory.rs";
+  const memorySource = readText(root, memoryRel);
+  const slaCapAnchor = memorySource.indexOf("pub const MAX_SLAS_PER_ENTITY");
+  if (slaCapAnchor === -1) fail(`${memoryRel}: MAX_SLAS_PER_ENTITY not found, so the seller cap cannot be measured`);
+  const slaCapDoc = memorySource.slice(Math.max(0, slaCapAnchor - 900), slaCapAnchor);
+  const sellersAreUncapped = /Sellers are not capped/i.test(slaCapDoc);
+  const listSlasBySeller = methodsByName.get("novai_listSlasBySeller");
+  if (!listSlasBySeller) fail("docs/RPC_REFERENCE.md: novai_listSlasBySeller section not found");
+  const sellerDocClaimsCap = /Bounded internally by the per-buyer cap/i.test(listSlasBySeller.description ?? "");
+
   // An inherited error clause naming a code this method's handler cannot reach.
   //
   // Measured COMPARATIVELY rather than absolutely: the code is reported only
@@ -1839,13 +2118,17 @@ function measureDriftFacts(root, doc, methodsByName) {
   };
   const inheritedUnreachableCodes = [];
   for (const m of methodsByName.values()) {
-    if (!m.errors?.resolvedFrom) continue;
+    // Same accessor as assertInheritedMeaningIsTrue, not a second copy of the
+    // same idea. This site is comparative against a source HANDLER, so it needs
+    // a source method and skips the category-common route, which has none.
+    const prov = errorProvenance(m);
+    if (!prov?.sourceMethod) continue;
     const mine = codesIn(handlerFor.get(m.name));
-    const theirs = codesIn(handlerFor.get(m.errors.resolvedFrom));
+    const theirs = codesIn(handlerFor.get(prov.sourceMethod));
     if (!mine || !theirs) continue;
     for (const e of m.errors.list ?? []) {
       if (theirs.has(e.code) && !mine.has(e.code)) {
-        inheritedUnreachableCodes.push({ method: m.name, from: m.errors.resolvedFrom, code: e.code, when: e.when });
+        inheritedUnreachableCodes.push({ method: m.name, from: prov.sourceMethod, code: e.code, when: e.when });
       }
     }
   }
@@ -1856,14 +2139,15 @@ function measureDriftFacts(root, doc, methodsByName) {
   // so it stops holding the moment the document's alias is fixed.
   const inheritedForeignFields = [];
   for (const m of methodsByName.values()) {
-    if (!m.errors?.resolvedFrom) continue;
-    const source = methodsByName.get(m.errors.resolvedFrom);
+    const prov = errorProvenance(m);
+    if (!prov?.sourceMethod) continue;
+    const source = methodsByName.get(prov.sourceMethod);
     const mine = new Set((m.params?.list ?? []).map((f) => f.field));
     const theirs = new Set((source?.params?.list ?? []).map((f) => f.field));
     for (const e of m.errors.list ?? []) {
       for (const ident of backtickedIdents(e.when)) {
         if (!mine.has(ident) && theirs.has(ident)) {
-          inheritedForeignFields.push({ method: m.name, from: m.errors.resolvedFrom, field: ident, code: e.code });
+          inheritedForeignFields.push({ method: m.name, from: prov.sourceMethod, field: ident, code: e.code });
         }
       }
     }
@@ -1894,6 +2178,10 @@ function measureDriftFacts(root, doc, methodsByName) {
     faucetDocDevModeCode: devRow.code,
     faucetRpcAcceptsFaucetKey,
     faucetDocClaimsDevKeysOnly,
+    latestBlockDocClaimsOnlyGlobal,
+    latestBlockEmits32002,
+    sellersAreUncapped,
+    sellerDocClaimsCap,
   };
 }
 
@@ -2598,6 +2886,17 @@ function compute(root) {
   const doc = parseDoc(docText);
   const { lines, inFence, categories, methods } = doc;
 
+  // Dash normalisation is a character-for-character replacement, so the raw and
+  // normalised reads have the same line count. Asserted rather than assumed,
+  // because every recovered quotation depends on the two staying aligned.
+  docVerbatimLines = readVerbatim(root, "docs/RPC_REFERENCE.md").split("\n");
+  if (docVerbatimLines.length !== lines.length) {
+    fail(
+      `docs/RPC_REFERENCE.md: the verbatim read has ${docVerbatimLines.length} lines and the normalised read has ` +
+      `${lines.length}. Error clauses are recovered by line index, so a mismatch would quote the wrong line.`
+    );
+  }
+
   const docNames = new Set(methods.map((m) => m.name));
 
   // Category preambles: the shared record shape and any Common errors table.
@@ -2616,16 +2915,27 @@ function compute(root) {
     }
     categoryData.set(c.title, {
       shape: shapeFence && shapeFence.lang === "jsonc" ? shapeFence.body : null,
-      commonErrors: common ? common.rows.map((r) => ({ code: Number(stripTicks(r.Code)), when: r.When })) : null,
+      commonErrors: common
+        ? common.rows.map((r, k) => ({
+            code: Number(stripTicks(r.Code)),
+            when: verbatimCell(common.rowLines[k], common.header.indexOf("When"), r.When),
+          }))
+        : null,
       extras,
     });
   }
 
   // The method index: category and one-line brief per method.
+  // Split with the shared row splitter, not with `[^|]*` cell patterns: a brief
+  // containing an escaped pipe would otherwise be cut at it and published
+  // truncated, which is the defect this pass exists to close.
   const indexBriefs = new Map();
   for (const line of lines) {
-    const m = /^\|[^|]*\|\s*\[`(novai_[A-Za-z]+)`\]\([^)]*\)\s*\|\s*(.+?)\s*\|\s*$/.exec(line);
-    if (m) indexBriefs.set(m[1], m[2]);
+    if (!line.trim().startsWith("|")) continue;
+    const cells = splitRow(line);
+    if (cells.length < 3) continue;
+    const link = /^\[`(novai_[A-Za-z]+)`\]\([^)]*\)$/.exec(cells[1]);
+    if (link) indexBriefs.set(link[1], cells[2]);
   }
   // The index is a fifth in-document list I depend on for every brief. It is
   // not part of the four-way gate, but a disagreement would silently drop a
@@ -2734,6 +3044,77 @@ function compute(root) {
       : m.result?.recordShape ? `${m.result.recordTypes.join(", ")} records, shape declared in "${m.result.inheritedFrom}"`
       : m.result ? "see the documented shape"
       : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Category-common error scoping
+  //
+  // A "Common errors" table is a claim about a CATEGORY, and the document scopes
+  // individual rows by hand where they do not apply to every method in it. The
+  // Signal category's table carries
+  //   | `-32602` | `end_height - start_height > 10000` (range queries) |
+  // and that parenthetical IS the scoping. Flattening the table onto every
+  // method in the category dropped the qualifier, so novai_getSignalsByHeight,
+  // whose only parameter is `height` and whose handler holds no range check at
+  // all, published a range error it cannot emit.
+  //
+  // The rule, rather than a special case: a common row is inherited by a method
+  // only when every backticked field identifier in its clause is declared in
+  // that method's own params. The range row therefore leaves getSignalsByHeight
+  // and stays on getSignalsByIssuer and getSignalsByType, which do take ranges
+  // and for which the row is true.
+  //
+  // This is deliberately NOT a document fix and NOT a tenth KNOWN_DRIFT entry.
+  // The document is correct: it qualified the row and the console lost the
+  // qualifier. Editing the reference would be changing a non-defect, and
+  // carrying an exception would be recording a defect that does not exist.
+  //
+  // Runs after alias resolution, because a method's params may themselves be
+  // aliased and the field set has to be the resolved one.
+  //
+  // Every drop is recorded and printed, never silent: narrowing a published
+  // table is a decision a reader is entitled to see, and an unreported filter is
+  // indistinguishable from a filter that stopped working.
+  // -------------------------------------------------------------------------
+  const scopedOutRows = [];
+  for (const m of built) {
+    if (m.errors?.kind !== "categoryCommon") continue;
+    const mine = new Set((m.params?.list ?? []).map((p) => p.field));
+    const kept = [];
+    for (const e of m.errors.list ?? []) {
+      const idents = backtickedIdents(e.when);
+      const foreign = idents.filter((id) => !mine.has(id));
+      if (idents.length > 0 && foreign.length > 0) {
+        scopedOutRows.push({
+          method: m.name,
+          category: m.category,
+          code: e.code,
+          when: e.when,
+          namesFields: foreign,
+          declaredParams: [...mine],
+        });
+        continue;
+      }
+      kept.push(e);
+    }
+    m.errors = { ...m.errors, list: kept, scopedOut: scopedOutRows.filter((r) => r.method === m.name) };
+    // errorList is assigned during alias resolution, which runs before this, so
+    // the renderer and openrpc.json would otherwise still carry the unfiltered
+    // rows and the whole scoping would be invisible on the page.
+    m.errorList = kept;
+  }
+  // The filter must stay able to fire. If it ever drops nothing, either the
+  // document stopped scoping rows by hand (in which case this is dead code to
+  // delete) or the identifier reader broke again, which is exactly how this
+  // defect survived two adversarial passes. Same only-shrink discipline as
+  // KNOWN_DRIFT: silence is not evidence.
+  if (scopedOutRows.length === 0) {
+    fail(
+      "category-common scoping matched no rows. Either docs/RPC_REFERENCE.md no longer scopes any common error " +
+      "row to a subset of its category, in which case delete this rule, or backtickedIdents has stopped reading " +
+      "identifiers out of an expression, which is the hole that let a range error publish on a method that " +
+      "cannot emit it."
+    );
   }
 
   // The four-way drift gate.
@@ -3000,10 +3381,15 @@ function compute(root) {
     inheritingRecordShape: built.filter((m) => m.inheritsRecordShape).length,
     inheritingWholeResult: built.filter((m) => m.result?.kind === "categoryResult").length,
     inheritingCommonErrors: built.filter((m) => m.errors?.kind === "categoryCommon").length,
+    // Common-error rows NOT inherited, because the inheriting method's params do
+    // not declare the fields the row's clause names. Counted so the narrowing is
+    // a published number rather than an invisible filter.
+    commonErrorRowsScopedOut: scopedOutRows.length,
   };
 
   return {
     methods: built,
+    scopedOutRows,
     drift: { sources: sources.map((s) => ({ key: s.key, source: s.source, count: s.names.size })), union: [...union].sort(), disagreements, active, stale, facts },
     errorCatalogue,
     codeCorrections,
@@ -3230,19 +3616,37 @@ function assertNoNormalisedSourceLiteralIsPublished(root, payload) {
   const problems = [];
   let inspected = 0;
   for (const entry of substitutionLog) {
-    if (!entry.source.endsWith(".rs")) continue;
-    const line = readVerbatim(root, entry.source).split("\n")[entry.line - 1];
-    if (line === undefined) continue;
-    // The string literal containing the substituted character, if it is in one.
+    // Which span shape carries a value the reader matches on, per source kind.
+    // A Rust string literal is a message or a wire value. A markdown code span
+    // is the document quoting an expression, an identifier or a literal, which
+    // is the same promise in a different notation: the range-error clause in the
+    // Signal category's common errors table is exactly that case.
+    //
+    // Markdown PROSE is still out of scope on purpose. Normalising doc prose to
+    // this repository's house style is the intended behaviour; rewriting a
+    // quoted expression is not.
+    const spans =
+      entry.source.endsWith(".rs") ? [...(readVerbatim(root, entry.source).split("\n")[entry.line - 1] ?? "").matchAll(/"((?:[^"\\\\]|\\\\.)*)"/g)]
+      : entry.source.endsWith(".md") ? [...(readVerbatim(root, entry.source).split("\n")[entry.line - 1] ?? "").matchAll(/`([^`]+)`/g)]
+      : null;
+    if (spans === null) continue;
+    // The span containing the substituted character, if it is in one.
     let literal = null;
-    for (const m of line.matchAll(/"((?:[^"\\\\]|\\\\.)*)"/g)) {
+    for (const m of spans) {
       const start = m.index + 1;
       if (entry.column - 1 >= start && entry.column - 1 < start + m[1].length) literal = m[1];
     }
     if (literal === null) continue;
     inspected += 1;
     const normalised = literal.replace(subPattern(), (c) => SUBSTITUTIONS.get(c).to);
-    if (normalised !== literal && payload.includes(JSON.stringify(normalised).slice(1, -1))) {
+    // The needle is escaped exactly as the payload is. Without this the check
+    // could only ever fire on a normalised string that is pure ASCII: the
+    // payload escapes every non-ASCII code point, so a needle still carrying a
+    // literal one never matches and the gate reports clean. That is the same
+    // class as the three holes this pass is closing, so it is fixed here rather
+    // than worked around in the caller.
+    const needle = escapeNonAscii(JSON.stringify(normalised).slice(1, -1));
+    if (normalised !== literal && payload.includes(needle)) {
       problems.push(
         `${entry.source}:${entry.line} the literal "${literal}" is published as "${normalised}". ` +
         `A ${entry.from} was rewritten to "${entry.to}", so a client matching the published string never matches ` +
@@ -3258,10 +3662,17 @@ function assertNoNormalisedSourceLiteralIsPublished(root, payload) {
   return inspected;
 }
 
+/**
+ * Every non-ASCII code point as a \uXXXX escape. This is what keeps the
+ * generated JSON ASCII, and any check that searches that JSON for a string has
+ * to escape its needle the same way or it is searching for a form the file
+ * cannot contain.
+ */
+const escapeNonAscii = (s) =>
+  s.replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
 function stableRender(obj) {
-  const json = JSON.stringify(obj, null, 2);
-  const escaped = json.replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
-  return escaped + "\n";
+  return escapeNonAscii(JSON.stringify(obj, null, 2)) + "\n";
 }
 
 function main() {
@@ -3285,7 +3696,17 @@ function main() {
     driftFailed = true;
   }
 
-  // Printed on EVERY run, not only on failure.
+  // Printed on EVERY run, not only on failure. A filter that narrows a
+  // published table is a decision, and an unreported one is indistinguishable
+  // from a filter that has stopped working.
+  console.log(`console-data: category-common scoping: ${c.scopedOutRows.length} row(s) not inherited`);
+  for (const r of c.scopedOutRows) {
+    console.log(
+      `  - ${r.code} not inherited by ${r.method}: the clause names ${r.namesFields.map((f) => `\`${f}\``).join(", ")}, ` +
+      `and this method declares ${r.declaredParams.map((f) => `\`${f}\``).join(", ") || "no parameters"}`
+    );
+  }
+
   console.log(`console-data: KNOWN_DRIFT: ${c.drift.active.length} accepted exception(s), each open in NEEDS-OPERATOR.md`);
   for (const e of c.drift.active) {
     console.log(`  - ${e.id} (${e.operatorRef}): ${e.summary}`);

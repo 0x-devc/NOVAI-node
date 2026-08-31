@@ -83,7 +83,7 @@ Network | NOVAI developer console
 
  blocks retained on disk | 50,000 | PRUNE_RETAIN_BLOCKS | :65 |
 
- heights retained in the in-memory block index | 100,000 | MAX_INDEX_ENTRIES | :339 |
+ heights retained in the in-memory block index | 100,000 | MAX_INDEX_ENTRIES | :362 |
 
  Retention is published in blocks and never converted to wall-clock time. Block cadence has moved by more than 4x inside a week on this chain, so any hours figure written here would be wrong within days. Divide by the rate you measure yourself.
 
@@ -148,6 +148,10 @@ Network | NOVAI developer console
  vk-list-error-clause-names-foreign-field | novai_listVkRegistrations inherits an error clause from novai_getVkRegistration that names id, a parameter it does not have | NEEDS-OPERATOR.md item 16 |
 
  faucet-disabled-code-mismatch | novai_faucet's disabled path returns -32000, but the method's error table attributes it to -32602 | NEEDS-OPERATOR.md item 10 |
+
+ latestblock-claims-only-global-errors | novai_getLatestBlock is documented as answering only the global error codes, and its handler emits -32002 on two paths | NEEDS-OPERATOR.md item 21 |
+
+ sla-seller-cap-does-not-exist | novai_listSlasBySeller is documented as bounded by the per-buyer cap of 8, and sellers are not capped in v1 | NEEDS-OPERATOR.md item 22 |
 
  novai.network
  /

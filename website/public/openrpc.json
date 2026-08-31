@@ -4,7 +4,7 @@
     "title": "NOVAI JSON-RPC",
     "version": "1.0.0",
     "description": "Generated from docs/RPC_REFERENCE.md and cross-checked against the node's dispatch table, the README method table and the Python SDK. Not hand-maintained.",
-    "x-generatedAt": "2026-08-30T13:06:41.247Z"
+    "x-generatedAt": "2026-08-31T20:13:23.906Z"
   },
   "methods": [
     {
@@ -309,7 +309,7 @@
             "pattern": "^[0-9a-fA-F]{64}$",
             "x-novai-doc-type": "hex32"
           },
-          "description": "the canonical entity id, `blake3(\"NOVAI_AI_ENTITY_ID_V1\" \\"
+          "description": "the canonical entity id, `blake3(\"NOVAI_AI_ENTITY_ID_V1\" || code_hash || creator)`"
         }
       ],
       "result": {
@@ -405,10 +405,6 @@
           "message": "param decode failure or invalid hex length"
         },
         {
-          "code": -32602,
-          "message": "`end_height - start_height > 10000` (range queries)"
-        },
-        {
           "code": -32002,
           "message": "DB read failure"
         }
@@ -470,7 +466,7 @@
         },
         {
           "code": -32602,
-          "message": "`end_height - start_height > 10000` (range queries)"
+          "message": "`end_height \u2212 start_height > 10000` (range queries)"
         },
         {
           "code": -32002,
@@ -535,7 +531,7 @@
         },
         {
           "code": -32602,
-          "message": "`end_height - start_height > 10000` (range queries)"
+          "message": "`end_height \u2212 start_height > 10000` (range queries)"
         },
         {
           "code": -32002,

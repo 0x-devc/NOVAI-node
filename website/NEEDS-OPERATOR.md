@@ -376,6 +376,49 @@ indexed rather than blocked.
 
 ---
 
+## 21. `novai_getLatestBlock` is documented as answering only the global errors
+
+`docs/RPC_REFERENCE.md:101` reads "**Errors**: only the global ones (`-32600`
+malformed envelope, `-32601` unknown method)." The handler answers `-32002` on
+two separate paths: `crates/node/src/rpc.rs:3611` when the block fails to load,
+and `:3618` when it fails to hash.
+
+This matters more than its size suggests. It is the method every integration
+calls first, and it is the only one of the three block methods claiming
+immunity: `novai_getBlockByHeight` and `novai_getBlockByHash` both document
+`-32002`. A client written to the documented set meets an undocumented code on
+the one call it is most likely to use as a health check.
+
+Carried as the `latestblock-claims-only-global-errors` exception, printed on
+every generator run, with the correction published under that method's error
+table. Fixing the sentence retires the exception, and the gate will then fail
+until it is deleted.
+
+## 22. The `listSlasBySeller` cap sentence is false
+
+`docs/RPC_REFERENCE.md:1148` says the method is "Bounded internally by the
+per-buyer cap (= 8 in v1)". The constant's own rustdoc at
+`crates/ai_entities/src/memory.rs:158-163` says the opposite in as many words:
+the cap is per BUYER, the memory-object owner, and *"Sellers are not capped in
+v1: they appear in arbitrarily many SLAs but never own the underlying memory
+object."*
+
+The consequence is data loss rather than an error the caller can see. A client
+that sizes a fixed buffer on a documented guarantee of eight silently truncates
+a seller's result set.
+
+Worth recording how this was found, because it bears on how much weight an
+agent's report carries. A Phase 1 agent examined this exact sentence, read the
+rustdoc on the RPC handler rather than the one on the constant, and cleared it
+as correct. The falsifier read the constant's own declaration and got the
+opposite answer. The measurement now reads the constant, so the exception
+retires itself when the doc is fixed.
+
+Carried as the `sla-seller-cap-does-not-exist` exception, with the false
+sentence struck at its own site and the truth published beneath it.
+
+---
+
 FYI, no action needed: the `rpc.novai.network` TLS certificate is valid until
 **Oct 30 2026**, measured on 2026-08-30, and certbot last renewed it on Aug 1.
 

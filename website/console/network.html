@@ -140,7 +140,7 @@
             <thead><tr><th scope="col">Horizon</th><th scope="col" class="text-right">Blocks</th><th scope="col">Constant</th><th scope="col">Source</th></tr></thead>
             <tbody>
             <tr><td>blocks retained on disk</td><td class="num">50,000</td><td><code>PRUNE_RETAIN_BLOCKS</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/consensus/src/lib.rs#L65">:65</a></td></tr>
-            <tr><td>heights retained in the in-memory block index</td><td class="num">100,000</td><td><code>MAX_INDEX_ENTRIES</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/main.rs#L339">:339</a></td></tr>
+            <tr><td>heights retained in the in-memory block index</td><td class="num">100,000</td><td><code>MAX_INDEX_ENTRIES</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/main.rs#L362">:362</a></td></tr>
             </tbody>
           </table>
         </div>
@@ -190,6 +190,8 @@
             <tr><td><code>getnonce-inherits-unreachable-db-error</code></td><td>novai_getNonce inherits a -32002 DB read failure clause from novai_getBalance, and its handler is never handed the database</td><td>NEEDS-OPERATOR.md item 17</td></tr>
             <tr><td><code>vk-list-error-clause-names-foreign-field</code></td><td>novai_listVkRegistrations inherits an error clause from novai_getVkRegistration that names id, a parameter it does not have</td><td>NEEDS-OPERATOR.md item 16</td></tr>
             <tr><td><code>faucet-disabled-code-mismatch</code></td><td>novai_faucet's disabled path returns -32000, but the method's error table attributes it to -32602</td><td>NEEDS-OPERATOR.md item 10</td></tr>
+            <tr><td><code>latestblock-claims-only-global-errors</code></td><td>novai_getLatestBlock is documented as answering only the global error codes, and its handler emits -32002 on two paths</td><td>NEEDS-OPERATOR.md item 21</td></tr>
+            <tr><td><code>sla-seller-cap-does-not-exist</code></td><td>novai_listSlasBySeller is documented as bounded by the per-buyer cap of 8, and sellers are not capped in v1</td><td>NEEDS-OPERATOR.md item 22</td></tr>
             </tbody>
           </table>
         </div>

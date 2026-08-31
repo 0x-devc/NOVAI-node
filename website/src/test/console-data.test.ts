@@ -193,7 +193,9 @@ describe("generate-console-data: the KNOWN_DRIFT exception list", () => {
       "getnonce-documented-as-interchangeable",
       "getnonce-inherits-unreachable-db-error",
       "invalid-request-trigger-is-wrong",
+      "latestblock-claims-only-global-errors",
       "public-faucet-gating-backwards",
+      "sla-seller-cap-does-not-exist",
       "vk-list-error-clause-names-foreign-field",
     ]);
     for (const e of data.drift.value.knownExceptions) {
@@ -818,6 +820,241 @@ describe("generate-console-data: the remaining source datasets", () => {
     rmSync(root, { recursive: true, force: true });
     expect(res.status).not.toBe(0);
     expect(res.output).toContain("ambiguous");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The table parser, and the two independent gates on the truncation defect.
+//
+// Every test here injects a violation and asserts the probe landed before
+// asserting the gate fired. Three separate scans in the previous gate reported
+// clean because they matched nothing, and each was caught only by feeding it
+// something it had to catch.
+// ---------------------------------------------------------------------------
+
+const ENTITY_ID_ROW =
+  "| `entity_id` | `hex32` | the canonical entity id, `blake3(\"NOVAI_AI_ENTITY_ID_V1\" \\|\\| code_hash \\|\\| creator)` |";
+
+// Built from code points, never written literally. This file is scanned by the
+// dash gate, so a test that quotes the reference's minus sign would fail the
+// gate it exists to exercise.
+const U_MINUS = String.fromCodePoint(0x2212);
+const U_LTE = String.fromCodePoint(0x2264);
+const RANGE_CLAUSE = `\`end_height ${U_MINUS} start_height > 10000\` (range queries)`;
+
+describe("generate-console-data: the row splitter", () => {
+  it("publishes the whole entity id derivation, escaped pipes and all", () => {
+    const m = data.methods.value.find((x: { name: string }) => x.name === "novai_getAiEntity");
+    const note = m.params.list.find((p: { field: string }) => p.field === "entity_id").notes;
+    // The defect published this cut at the first escaped pipe, ending on a
+    // dangling backslash. entity_id is the required parameter of fourteen of
+    // the twenty-nine methods, so the page gave no way to compute one.
+    expect(note).toContain("code_hash || creator");
+    expect(note).not.toMatch(/\\$/);
+    expect(JSON.stringify(data).split("code_hash || creator").length - 1).toBeGreaterThan(0);
+  });
+
+  it("fails on a row that splits into more cells than its header declares", () => {
+    // Unescape the pipes on line 400, which recreates the original defect
+    // exactly rather than inventing a new one: seven cells against a header
+    // of three.
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace(ENTITY_ID_ROW, ENTITY_ID_ROW.replace(/\\\|/g, "|"));
+      landed = out !== text && out.includes('"NOVAI_AI_ENTITY_ID_V1" || code_hash');
+      return out;
+    });
+    expect(landed, "the escaped pipes were not unescaped").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("cells and its header declares");
+  });
+
+  it("fails on a cell ending in a dangling backslash", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace("| `id` | `hex32` | the VK registry handle |", "| `id` | `hex32` | the VK registry handle \\ |");
+      landed = out.includes("registry handle \\ |");
+      return out;
+    });
+    expect(landed, "the trailing backslash was not inserted").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("dangling operator or backslash");
+  });
+
+  it("fails on a cell carrying an unbalanced backtick", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace("| `id` | `hex32` | the VK registry handle |", "| `id` | `hex32` | the VK `registry handle |");
+      landed = out.includes("the VK `registry handle |");
+      return out;
+    });
+    expect(landed, "the unbalanced backtick was not inserted").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("unbalanced backtick");
+  });
+});
+
+describe("generate-console-data: category-common error scoping", () => {
+  it("does not publish the range error on the method that takes no range", () => {
+    const byName = new Map(data.methods.value.map((m: { name: string }) => [m.name, m]));
+    const height = byName.get("novai_getSignalsByHeight") as { params: { list: { field: string }[] }; errors: { list: { when: string }[]; scopedOut: unknown[] } };
+    // Its only parameter is height, and its handler holds no range check.
+    expect(height.params.list.map((p) => p.field)).toEqual(["height"]);
+    expect(height.errors.list.some((e) => /start_height/.test(e.when))).toBe(false);
+    expect(height.errors.scopedOut).toHaveLength(1);
+    // And the row stays where it is true.
+    for (const name of ["novai_getSignalsByIssuer", "novai_getSignalsByType"]) {
+      const m = byName.get(name) as { errors: { list: { when: string }[] } };
+      expect(m.errors.list.some((e) => /start_height/.test(e.when)), `${name} lost a row it should keep`).toBe(true);
+    }
+  });
+
+  it("fails rather than silently scoping nothing, when no common row names a field at all", () => {
+    // Strip the backticks so the clause carries no field identifier. Every
+    // common row is then inherited by every method in the category, nothing is
+    // scoped out, and the vacuity guard must fire rather than let the filter
+    // report a clean run by matching nothing. That is exactly how the original
+    // defect survived two adversarial passes.
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace(RANGE_CLAUSE, `end_height ${U_MINUS} start_height > 10000 (range queries)`);
+      landed = out !== text && !out.includes(RANGE_CLAUSE);
+      return out;
+    });
+    expect(landed, "the range clause backticks were not stripped").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("category-common scoping matched no rows");
+  });
+});
+
+describe("generate-console-data: error clauses are quoted verbatim", () => {
+  it("publishes the reference's own minus sign rather than an ASCII substitute", () => {
+    // Asserted against the FILE, not against a re-stringified object: the file
+    // is what ships, and it is what has to stay ASCII. JSON.stringify of the
+    // parsed object would emit the literal code point and prove nothing about
+    // either property.
+    const raw = readFileSync(DATA, "utf8");
+    expect(raw).toContain("\\u2212");
+    expect(raw).not.toContain("end_height - start_height");
+    // And the value a reader receives is the character the reference writes.
+    const byName = new Map(data.methods.value.map((m: { name: string }) => [m.name, m]));
+    const issuer = byName.get("novai_getSignalsByIssuer") as { errors: { list: { when: string }[] } };
+    expect(issuer.errors.list.some((e) => e.when.includes(U_MINUS))).toBe(true);
+  });
+
+  it("fails when a normalised markdown code span reaches the page", () => {
+    // The gate filtered to .rs sources only, so a doc code span could be
+    // rewritten and published with nothing reporting it. This injection also
+    // exercises the needle escaping: the span carries U+2264, and before the
+    // fix the check searched the ASCII-escaped payload for a needle still
+    // holding a literal one, which could never match.
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace(`\`end - start ${U_LTE} 10000\``, `\`end ${U_MINUS} start ${U_LTE} 10000\``);
+      landed = out !== text && out.includes(`\`end ${U_MINUS} start`);
+      return out;
+    });
+    expect(landed, "the minus sign was not injected into a params note").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("published in rewritten form");
+  });
+});
+
+describe("generate-console-data: the inherited-meaning gate, proven by injection", () => {
+  it("refuses an inherited clause naming a field the inheriting method does not declare", () => {
+    // novai_listVkRegistrations aliases its Errors block onto
+    // novai_getVkRegistration. Adding a row there that names getVkRegistration's
+    // own `id` in an expression gives listVkRegistrations a clause about a field
+    // it has no parameter for, and the carried exception does not cover this
+    // text, so the build must stop.
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace(
+        "| `-32602` | `id` isn't 32 bytes |",
+        "| `-32602` | `id` isn't 32 bytes |\n| `-32602` | `id` decoded to the wrong length |"
+      );
+      landed = out.includes("`id` decoded to the wrong length");
+      return out;
+    });
+    expect(landed, "the extra error row was not inserted").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("an alias inherited a meaning that is false");
+  });
+});
+
+describe("generate-console-data: the curl-agrees-with-params gate, proven by injection", () => {
+  it("refuses a curl passing a field the params table does not declare", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace('"novai_getSignalsByHeight","params":{"height":453}', '"novai_getSignalsByHeight","params":{"heightx":453}');
+      landed = out.includes('{"heightx":453}');
+      return out;
+    });
+    expect(landed, "the curl parameter was not renamed").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("which the params table does not declare");
+  });
+});
+
+describe("generate-console-data: the two new document defects", () => {
+  it("carries both, each measured on both sides", () => {
+    const ids = data.drift.value.knownExceptions.map((e: { id: string }) => e.id);
+    expect(ids).toContain("latestblock-claims-only-global-errors");
+    expect(ids).toContain("sla-seller-cap-does-not-exist");
+  });
+
+  it("fails, naming the entry to delete, when the seller sentence is corrected", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace(" Bounded internally by the per-buyer cap (= 8 in v1).", "");
+      landed = !out.includes("Bounded internally by the per-buyer cap");
+      return out;
+    });
+    expect(landed, "the seller cap sentence was not removed").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("sla-seller-cap-does-not-exist");
+  });
+
+  it("fails, naming the entry to delete, when getLatestBlock's error block is corrected", () => {
+    let landed = false;
+    const root = fixtureRoot((rel, text) => {
+      if (rel !== "docs/RPC_REFERENCE.md") return text;
+      const out = text.replace(
+        "**Errors**: only the global ones (`-32600` malformed envelope, `-32601` unknown method).",
+        "**Errors**: `-32002` for a block that fails to load or hash."
+      );
+      landed = !out.includes("**Errors**: only the global ones");
+      return out;
+    });
+    expect(landed, "the getLatestBlock errors block was not rewritten").toBe(true);
+    const res = generate(root);
+    rmSync(root, { recursive: true, force: true });
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("latestblock-claims-only-global-errors");
   });
 });
 

@@ -53,7 +53,7 @@ Index of names | NOVAI developer console
 
  Index of names
 
- Every method, record type, error code and named constant on this console, and the page that holds it. 88 entries. Built by scanning what each page renders, so a name cannot appear here and be missing from the page it points at.
+ Every method, record type, error code and named constant on this console, and the page that holds it. 89 entries. Built by scanning what each page renders, so a name cannot appear here and be missing from the page it points at.
 
  Name | Kind | Page |
 
@@ -172,6 +172,8 @@ Index of names | NOVAI developer console
  MAX_RPC_RESPONSE_SIZE | constant | errors and limits |
 
  MAX_SIGNAL_QUERY_RANGE | constant | errors and limits |
+
+ MAX_SLAS_PER_ENTITY | constant | rpc reference |
 
  MAX_TX_SIZE | constant | errors and limits |
 

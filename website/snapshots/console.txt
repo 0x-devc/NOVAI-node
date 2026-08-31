@@ -57,7 +57,7 @@ NOVAI developer console
  build time, and every method name in it is cross-checked across four independent sources, so the build
  fails when they disagree. That check is over names: where the reference and the implementation disagree
  about a parameter, an error code or a result, the difference is carried as an explicit exception and
- corrected where you meet it. There are 9 of those today, listed in known gaps.
+ corrected where you meet it. There are 11 of those today, listed in known gaps.
 
  NOVAI treats AI entities as first-class on-chain actors: they hold balances and reputation, publish
  23 kinds of signal, and own 16 kinds of memory object. That is what the
@@ -69,13 +69,13 @@ methods, agreed
  4
 sources cross-checked
 
- 9
+ 11
 carried exceptions
 
  11
 transaction types
 
- Generated from the source tree at 2026-08-30 12:41:54 UTC. Sources: crates/node/src/rpc.rs, docs/RPC_REFERENCE.md, README.md, sdk/novai-python-sdk/novai_sdk.
+ Generated from the source tree at 2026-08-31 20:13:23 UTC. Sources: crates/node/src/rpc.rs, docs/RPC_REFERENCE.md, README.md, sdk/novai-python-sdk/novai_sdk.
 
  01 connect
 

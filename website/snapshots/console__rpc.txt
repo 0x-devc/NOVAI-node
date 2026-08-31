@@ -59,7 +59,7 @@ RPC reference | NOVAI developer console
 
  Category | Method | Brief | Notes |
 
- Block methods | novai_getLatestBlock | Latest committed block header | can answer null |
+ Block methods | novai_getLatestBlock | Latest committed block header | emits an error its table omits can answer null |
 
  | novai_getBlockByHeight | Block header at a given height | reference calls the null path unreachable can answer null |
 
@@ -97,7 +97,7 @@ RPC reference | NOVAI developer console
 
  | novai_listSlasByBuyer | SLAs where the entity is the buyer (range) | |
 
- | novai_listSlasBySeller | SLAs where the entity is the seller (range) | |
+ | novai_listSlasBySeller | SLAs where the entity is the seller (range) | documented cap does not apply to sellers |
 
  Payment channel methods (Week 32) | novai_getPaymentChannel | A payment channel by (owner, object_id) | |
 
@@ -129,6 +129,7 @@ none. Pass {}.
 
  errors
 only the global ones (-32600 malformed envelope, -32601 unknown method).
+correction This method also answers -32002. handle_get_latest_block emits it when the block fails to load and again when it fails to hash, so a storage failure reaches the caller as -32002 rather than as one of the two codes named here. Its two sibling block methods both document it. Tracked as NEEDS-OPERATOR.md item 21.
 
  result
 
@@ -494,7 +495,7 @@ Example response from the reference. Heights and hashes in it are illustrative, 
 
  Field | Type | Required | Notes |
 
- entity_id | hex32 | required | the canonical entity id, `blake3("NOVAI_AI_ENTITY_ID_V1" \ |
+ entity_id | hex32 | required | the canonical entity id, blake3("NOVAI_AI_ENTITY_ID_V1" || code_hash || creator) |
 
  errors
 
@@ -647,8 +648,6 @@ Example response from the reference. Heights and hashes in it are illustrative, 
 
  -32602 | param decode failure or invalid hex length |
 
- -32602 | end_height - start_height > 10000 (range queries) |
-
  -32002 | DB read failure |
 
 Shared by every method in Signal methods.
@@ -716,7 +715,7 @@ Example response from the reference. Heights and hashes in it are illustrative, 
 
  -32602 | param decode failure or invalid hex length |
 
- -32602 | end_height - start_height > 10000 (range queries) |
+ -32602 | end_height &#8722; start_height > 10000 (range queries) |
 
  -32002 | DB read failure |
 
@@ -769,7 +768,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  -32602 | param decode failure or invalid hex length |
 
- -32602 | end_height - start_height > 10000 (range queries) |
+ -32602 | end_height &#8722; start_height > 10000 (range queries) |
 
  -32002 | DB read failure |
 
@@ -1274,6 +1273,8 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
  crates/node/src/rpc.rs:1597
 
  Returns every SLA where the queried entity is the seller and the SLA's created_at falls within the height window. Bounded internally by the per-buyer cap (= 8 in v1).
+
+ correction There is no seller-side cap in v1. MAX_SLAS_PER_ENTITY bounds how many SLA memory objects a single BUYER may own; a seller appears in arbitrarily many agreements and owns none of them. Size for an unbounded result set rather than for eight. Tracked as NEEDS-OPERATOR.md item 22.
 
  params
 

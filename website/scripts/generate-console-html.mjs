@@ -78,12 +78,31 @@ function plain(value) {
 }
 
 /** Doc-sourced prose, escaped, with inline code spans preserved as <code>. */
-function rich(value) {
+function richWith(escape, value) {
   if (value === null || value === undefined) return "";
-  return esc(String(value).replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"))
+  return escape(String(value).replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"))
     .replace(/`([^`]*)`/g, '<code class="text-ink-mid">$1</code>')
     .replace(/\*\*([^*]*)\*\*/g, "<strong>$1</strong>");
 }
+
+const rich = (value) => richWith(esc, value);
+
+/**
+ * rich(), for text that is a QUOTATION of a condition the caller matches on.
+ *
+ * The generator reads error clauses verbatim, so one of them carries the real
+ * U+2212 the reference writes. This page is scanned by the dash gate, which
+ * forbids that code point in the file, and normalising it would republish a
+ * different expression from the one the reference states. escWire resolves both:
+ * the file stays ASCII and the browser receives the character the document uses.
+ *
+ * The consistency argument is the whole reason this exists. The console already
+ * publishes U+2264 faithfully ten times on these same rows, so converting U+2212
+ * alone was an inconsistency rather than a policy.
+ *
+ * escWire escapes before entity-encoding, so the `&` it emits is not re-escaped.
+ */
+const richWire = (value) => richWith(escWire, value);
 
 /**
  * A value the reader is told to match on, escaped for HTML AND with every
@@ -714,7 +733,10 @@ function richStruck(text, wrongText) {
   if (ticks(raw.slice(0, i)) % 2 !== 0) {
     fail(`wrongText starts inside a code span, so striking it would split it: "${wrongText}"`);
   }
-  return `${rich(raw.slice(0, i))}<del ${STRUCK}>${rich(wrongText)}</del>${rich(raw.slice(i + wrongText.length))}`;
+  // Wire-safe on every fragment: a struck error clause is still a quotation, and
+  // a forbidden code point anywhere in it must survive as an entity rather than
+  // be normalised or land literally in a file the dash gate scans.
+  return `${richWire(raw.slice(0, i))}<del ${STRUCK}>${richWire(wrongText)}</del>${richWire(raw.slice(i + wrongText.length))}`;
 }
 
 /** The true statement, printed immediately under the struck one. */
@@ -864,7 +886,10 @@ function renderErrors(m) {
     if (seen.has(key)) continue;
     seen.add(key);
     const c = struckIn(m, "errors", e.when);
-    rows.push([`<code>${esc(e.code)}</code>`, c ? richStruck(e.when, c.wrongText) : rich(e.when)]);
+    // richWire, not rich: an error clause is read verbatim from the reference
+    // and one of them carries a U+2212 that must reach the reader as the
+    // character the document writes, without putting it in this file.
+    rows.push([`<code>${esc(e.code)}</code>`, c ? richStruck(e.when, c.wrongText) : richWire(e.when)]);
   }
   const from = m.errors.kind === "categoryCommon" ? note(`Shared by every method in ${m.errors.from}.`) : "";
   return `${h3("errors")}${table([{ label: "Code" }, { label: "When" }], rows)}${from}${fixes}`;
@@ -1460,7 +1485,11 @@ function assertCorrectionsAreRendered(d, methodsHtml) {
       }
       if (c.wrongText) {
         wantStruck += 1;
-        if (!block.includes(`<del ${STRUCK}>${rich(c.wrongText)}</del>`)) {
+        // richWire, matching what richStruck now emits. Comparing against rich()
+        // would silently stop matching the moment a struck quotation carried a
+        // non-ASCII code point, which is a gate that reports clean because it
+        // is looking for a string the renderer no longer produces.
+        if (!block.includes(`<del ${STRUCK}>${richWire(c.wrongText)}</del>`)) {
           fail(`correction gate: ${m.name} publishes "${c.wrongText}" unstruck while ${c.exceptionId} says it is false`);
         }
       }

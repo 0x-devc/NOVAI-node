@@ -217,7 +217,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
           <table class="console-table">
             <thead><tr><th scope="col">Category</th><th scope="col">Method</th><th scope="col">Brief</th><th scope="col">Notes</th></tr></thead>
             <tbody>
-            <tr><td>Block methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getlatestblock">novai_getLatestBlock</a></td><td>Latest committed block header</td><td><span class="console-pill">can answer null</span></td></tr>
+            <tr><td>Block methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getlatestblock">novai_getLatestBlock</a></td><td>Latest committed block header</td><td><span class="console-pill">emits an error its table omits</span> <span class="console-pill">can answer null</span></td></tr>
             <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getblockbyheight">novai_getBlockByHeight</a></td><td>Block header at a given height</td><td><span class="console-pill">reference calls the null path unreachable</span> <span class="console-pill">can answer null</span></td></tr>
             <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getblockbyhash">novai_getBlockByHash</a></td><td>Block header by its hash</td><td><span class="console-pill">can answer null</span></td></tr>
             <tr><td>Account methods</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getbalance">novai_getBalance</a></td><td>Account balance and nonce</td><td><span class="console-pill">nonce here is the committed one</span></td></tr>
@@ -236,7 +236,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             <tr><td>SLA methods (Week 31)</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getslaagreement">novai_getSlaAgreement</a></td><td>An SLA memory object by (owner, object_id)</td><td></td></tr>
             <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getactivesla">novai_getActiveSla</a></td><td>The currently active SLA between a buyer and seller</td><td></td></tr>
             <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listslasbybuyer">novai_listSlasByBuyer</a></td><td>SLAs where the entity is the buyer (range)</td><td></td></tr>
-            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listslasbyseller">novai_listSlasBySeller</a></td><td>SLAs where the entity is the seller (range)</td><td></td></tr>
+            <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listslasbyseller">novai_listSlasBySeller</a></td><td>SLAs where the entity is the seller (range)</td><td><span class="console-pill">documented cap does not apply to sellers</span></td></tr>
             <tr><td>Payment channel methods (Week 32)</td><td><a class="text-brand-text no-underline hover:underline" href="#novai_getpaymentchannel">novai_getPaymentChannel</a></td><td>A payment channel by (owner, object_id)</td><td></td></tr>
             <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listchannelsbypartya">novai_listChannelsByPartyA</a></td><td>Channels where the entity is party A (range)</td><td></td></tr>
             <tr><td></td><td><a class="text-brand-text no-underline hover:underline" href="#novai_listchannelsbypartyb">novai_listChannelsByPartyB</a></td><td>Channels where the entity is party B (range)</td><td></td></tr>
@@ -260,7 +260,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
           <div class="console-panes">
             <div class="console-pane-prose">
               <h3 class="console-h3">params</h3><p class="console-note">none. Pass <code class="text-ink-mid">{}</code>.</p>
-              <h3 class="console-h3">errors</h3><p class="console-note">only the global ones (<code class="text-ink-mid">-32600</code> malformed envelope, <code class="text-ink-mid">-32601</code> unknown method).</p>
+              <h3 class="console-h3">errors</h3><p class="console-note">only the global ones (<code class="text-ink-mid">-32600</code> malformed envelope, <code class="text-ink-mid">-32601</code> unknown method).</p><p class="console-note"><span class="console-pill">correction</span> This method also answers <code class="text-ink-mid">-32002</code>. <code class="text-ink-mid">handle_get_latest_block</code> emits it when the block fails to load and again when it fails to hash, so a storage failure reaches the caller as <code class="text-ink-mid">-32002</code> rather than as one of the two codes named here. Its two sibling block methods both document it. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 21.</span></p>
             </div>
             <div class="console-pane-code">
               <h3 class="console-h3">result</h3>
@@ -605,7 +605,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
           <table class="console-table">
             <thead><tr><th scope="col">Field</th><th scope="col">Type</th><th scope="col">Required</th><th scope="col">Notes</th></tr></thead>
             <tbody>
-            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>the canonical entity id, `blake3(&quot;NOVAI_AI_ENTITY_ID_V1&quot; \</td></tr>
+            <tr><td><code>entity_id</code></td><td><code>hex32</code></td><td>required</td><td>the canonical entity id, <code class="text-ink-mid">blake3(&quot;NOVAI_AI_ENTITY_ID_V1&quot; || code_hash || creator)</code></td></tr>
             </tbody>
           </table>
         </div>
@@ -761,7 +761,6 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
             <tbody>
             <tr><td><code>-32602</code></td><td>param decode failure or invalid hex length</td></tr>
-            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">end_height - start_height &gt; 10000</code> (range queries)</td></tr>
             <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
             </tbody>
           </table>
@@ -825,7 +824,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
             <tbody>
             <tr><td><code>-32602</code></td><td>param decode failure or invalid hex length</td></tr>
-            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">end_height - start_height &gt; 10000</code> (range queries)</td></tr>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">end_height &#8722; start_height &gt; 10000</code> (range queries)</td></tr>
             <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
             </tbody>
           </table>
@@ -876,7 +875,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             <thead><tr><th scope="col">Code</th><th scope="col">When</th></tr></thead>
             <tbody>
             <tr><td><code>-32602</code></td><td>param decode failure or invalid hex length</td></tr>
-            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">end_height - start_height &gt; 10000</code> (range queries)</td></tr>
+            <tr><td><code>-32602</code></td><td><code class="text-ink-mid">end_height &#8722; start_height &gt; 10000</code> (range queries)</td></tr>
             <tr><td><code>-32002</code></td><td>DB read failure</td></tr>
             </tbody>
           </table>
@@ -1356,8 +1355,8 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             <span class="console-method-name">novai_listSlasBySeller</span>
             <span class="font-mono text-[10px] text-ink-low"><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/rpc.rs#L1597">crates/node/src/rpc.rs:1597</a></span>
           </div>
-          <p class="console-lead">Returns every SLA where the queried entity is the seller and the SLA's <code class="text-ink-mid">created_at</code> falls within the height window. Bounded internally by the per-buyer cap (= 8 in v1).</p>
-          
+          <p class="console-lead">Returns every SLA where the queried entity is the seller and the SLA's <code class="text-ink-mid">created_at</code> falls within the height window. <del class="text-ink-low line-through decoration-ink-low">Bounded internally by the per-buyer cap (= 8 in v1).</del></p>
+          <p class="console-note"><span class="console-pill">correction</span> There is no seller-side cap in v1. <code class="text-ink-mid">MAX_SLAS_PER_ENTITY</code> bounds how many SLA memory objects a single BUYER may own; a seller appears in arbitrarily many agreements and owns none of them. Size for an unbounded result set rather than for eight. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 22.</span></p>
           <div class="console-panes">
             <div class="console-pane-prose">
               <h3 class="console-h3">params</h3><div class="console-scroll">
@@ -2118,7 +2117,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             <thead><tr><th scope="col">Horizon</th><th scope="col" class="text-right">Blocks</th><th scope="col">Constant</th><th scope="col">Source</th></tr></thead>
             <tbody>
             <tr><td>blocks retained on disk</td><td class="num">50,000</td><td><code>PRUNE_RETAIN_BLOCKS</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/consensus/src/lib.rs#L65">:65</a></td></tr>
-            <tr><td>heights retained in the in-memory block index</td><td class="num">100,000</td><td><code>MAX_INDEX_ENTRIES</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/main.rs#L339">:339</a></td></tr>
+            <tr><td>heights retained in the in-memory block index</td><td class="num">100,000</td><td><code>MAX_INDEX_ENTRIES</code></td><td><a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/main.rs#L362">:362</a></td></tr>
             </tbody>
           </table>
         </div>
@@ -2168,6 +2167,8 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             <tr><td><code>getnonce-inherits-unreachable-db-error</code></td><td>novai_getNonce inherits a -32002 DB read failure clause from novai_getBalance, and its handler is never handed the database</td><td>NEEDS-OPERATOR.md item 17</td></tr>
             <tr><td><code>vk-list-error-clause-names-foreign-field</code></td><td>novai_listVkRegistrations inherits an error clause from novai_getVkRegistration that names id, a parameter it does not have</td><td>NEEDS-OPERATOR.md item 16</td></tr>
             <tr><td><code>faucet-disabled-code-mismatch</code></td><td>novai_faucet's disabled path returns -32000, but the method's error table attributes it to -32602</td><td>NEEDS-OPERATOR.md item 10</td></tr>
+            <tr><td><code>latestblock-claims-only-global-errors</code></td><td>novai_getLatestBlock is documented as answering only the global error codes, and its handler emits -32002 on two paths</td><td>NEEDS-OPERATOR.md item 21</td></tr>
+            <tr><td><code>sla-seller-cap-does-not-exist</code></td><td>novai_listSlasBySeller is documented as bounded by the per-buyer cap of 8, and sellers are not capped in v1</td><td>NEEDS-OPERATOR.md item 22</td></tr>
             </tbody>
           </table>
         </div>
