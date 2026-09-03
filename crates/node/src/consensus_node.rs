@@ -662,6 +662,17 @@ pub struct ConsensusNode {
     /// intent check warned about, so a parked fleet logs one warning per
     /// view instead of two hundred per second on the 5 ms propose cadence.
     commit_window_warned_view: Arc<Mutex<Option<(u64, u64)>>>,
+    /// Gate 9 refusal (W4): `(height, round, suppressed)`, the last view the
+    /// propose-path refusal warned about and the refusal ticks swallowed since
+    /// that line was emitted. Unsuppressed this branch measures ~10 lines/s/node
+    /// (the propose tick is 5 ms and the refusal holds until the view moves),
+    /// ~860k lines/day against the 13,788 lines/hour budget that buys four days
+    /// of journald retention, so a node entering the state destroys the only
+    /// record of why it did. Keyed on the VIEW and not a time window on
+    /// purpose: a round climbing while commits are frozen is the livelock
+    /// signature, and per-view suppression makes that transition structurally
+    /// unsuppressible.
+    gate9_warned_view: Arc<Mutex<Option<(u64, u64, u64)>>>,
     /// Configurable base timeout in milliseconds (default: BASE_TIMEOUT_MS = 1000).
     /// Server environments may need higher values (e.g., 3000) to avoid spurious timeouts.
     pub base_timeout_ms: u64,
@@ -780,6 +791,7 @@ impl ConsensusNode {
             snapshot_serve: Arc::new(Mutex::new(crate::snapshot::wire::ServeLimiter::default())),
             snapshot_peers: Arc::new(Mutex::new(crate::snapshot::wire::PeerStrikes::default())),
             commit_window_warned_view: Arc::new(Mutex::new(None)),
+            gate9_warned_view: Arc::new(Mutex::new(None)),
             base_timeout_ms,
             encryption_key,
             known_noise_keys,
@@ -2155,11 +2167,32 @@ impl ConsensusNode {
         }
 
         if !state.may_vote(intended_height, state.round) {
-            tracing::warn!(
-                height = intended_height,
-                round = state.round,
-                "gate 9: already durably voted at this view; not proposing after restart"
-            );
+            // Warned once per view, mirroring the commit-window refusal above.
+            // The decision is untouched: this branch still refuses, always.
+            // What changes is that a node parked here no longer burns its own
+            // journald retention (~10 lines/s on the 5 ms tick) at the exact
+            // moment the journal is the only evidence of the fault. Keyed on
+            // the view, so the first occurrence and every transition speak and
+            // only the repetition is swallowed; the swallowed count rides the
+            // next line so a suppressed stretch is still a measurable dwell
+            // rather than silence.
+            let view = (intended_height, state.round);
+            let mut warned = self.gate9_warned_view.lock_or_recover();
+            match *warned {
+                Some((h, r, suppressed)) if (h, r) == view => {
+                    *warned = Some((h, r, suppressed.saturating_add(1)));
+                }
+                prior => {
+                    let suppressed_ticks = prior.map_or(0, |(_, _, n)| n);
+                    *warned = Some((view.0, view.1, 0));
+                    tracing::warn!(
+                        height = intended_height,
+                        round = state.round,
+                        suppressed_ticks,
+                        "gate 9: already durably voted at this view; not proposing after restart"
+                    );
+                }
+            }
             return Ok(false);
         }
 

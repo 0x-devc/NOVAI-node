@@ -25,3 +25,6 @@ clippy_full.txt
 week8.sh
 marketing/
 explorer/
+
+# SMT GC Phase 0 measurement evidence (local only, large)
+docs/smtgc-phase0-evidence/

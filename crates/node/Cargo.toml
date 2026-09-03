@@ -20,6 +20,12 @@ novai-consensus = { path = "../consensus", version = "0.1.0" }
 novai-consensus-types = { path = "../consensus_types", version = "0.1.0" }
 novai-state = { path = "../state", version = "0.1.0", features = ["rocksdb"] }
 novai-execution = { path = "../execution", version = "0.1.0" }
+# The SMT GC census walks the rebuilt tree from its root to count the LIVE node
+# set, which needs the node encoding. Already in the build as a transitive
+# dependency of novai-state and novai-execution; naming it here is what lets the
+# reachability walk read node rows through the real decoder rather than
+# reimplementing a 67-byte layout that consensus depends on.
+novai-smt = { path = "../smt", version = "0.1.0" }
 novai-ai-entities = { path = "../ai_entities", version = "0.1.0" }
 novai-p2p = { path = "../p2p", version = "0.1.0" }
 novai-copilot = { path = "../copilot", version = "0.1.0" }

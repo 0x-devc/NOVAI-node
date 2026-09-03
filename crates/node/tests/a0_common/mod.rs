@@ -226,13 +226,42 @@ impl Fixture {
     }
 }
 
+/// The facts a fixture build produces, independent of where it was built.
+pub struct FixtureFacts {
+    pub t: u64,
+    pub r0: [u8; 32],
+    pub r1: [u8; 32],
+    pub block_t: Block,
+    pub block_t1: Block,
+}
+
 /// Build a synthetic audited-copy fixture:
 /// state through height T (root r1 stored), cursors committed=executed=T,
 /// block rows for T and T+1 (T+1 carries r1 as its pre-state), and
 /// certification evidence per `spec.evidence`.
 pub fn build_fixture(tag: &str, spec: FixtureSpec) -> Fixture {
     let tmp = TmpDir::new(tag);
-    let mut db = RocksKv::open(&tmp.0).expect("open fixture db");
+    let facts = build_fixture_at(&tmp.0, spec);
+    Fixture {
+        tmp,
+        t: facts.t,
+        r0: facts.r0,
+        r1: facts.r1,
+        block_t: facts.block_t,
+        block_t1: facts.block_t1,
+    }
+}
+
+/// The same build, into a directory the CALLER owns.
+///
+/// The reclaim gate needs this: that tool renames directories BESIDE the data
+/// directory (`.reclaim-staging`, `.preinstall-*`, `.staging-rejected-*`), so a
+/// fixture placed directly in the system temp dir would strew siblings that no
+/// `TmpDir` drop reaches. Giving the caller the parent keeps every artefact
+/// inside one scratch root that is removed on drop.
+pub fn build_fixture_at(dir: &std::path::Path, spec: FixtureSpec) -> FixtureFacts {
+    std::fs::create_dir_all(dir).expect("create fixture dir");
+    let mut db = RocksKv::open(dir).expect("open fixture db");
 
     let r0 = if spec.oneshot {
         apply_state_oneshot(&mut db, &spec.pre_state)
@@ -310,8 +339,7 @@ pub fn build_fixture(tag: &str, spec: FixtureSpec) -> Fixture {
 
     drop(db);
 
-    Fixture {
-        tmp,
+    FixtureFacts {
         t: spec.t,
         r0,
         r1,

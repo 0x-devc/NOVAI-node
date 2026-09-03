@@ -25,6 +25,7 @@ pub mod install;
 pub mod produce;
 pub mod producer;
 pub mod rebuild;
+pub mod reclaim;
 pub mod stage;
 pub mod store;
 pub mod valset;

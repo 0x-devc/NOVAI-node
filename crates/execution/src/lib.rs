@@ -85,6 +85,17 @@ pub enum ExecError<E> {
         needed: u128,
     },
     Overflow,
+    /// The SMT descent reached an internal node whose bytes are absent from the
+    /// node store. Distinct from `Overflow`, which it used to be folded into: a
+    /// missing node names a specific hash and points at storage, an arithmetic
+    /// overflow points at a balance computation, and conflating them costs a
+    /// root cause. This is the exact symptom an SMT garbage collector that
+    /// freed a live node would produce, so it has to be nameable in a log line.
+    SmtMissingNode {
+        /// The node hash the descent asked the store for and did not get. It is
+        /// an `smt/node/<hash>` key, so an operator can look it up directly.
+        hash: [u8; 32],
+    },
     /// Codec/decode failure for non-state data (entity, proposal, gate, signal, memory object).
     CodecDecode(String),
     NonceOverflow,
@@ -6542,15 +6553,27 @@ pub fn append_smt_ops_for_state_ops<K: Kv>(
         match op {
             WriteOp::Put(k, v) => {
                 let sk: Hash32 = smt_key_for_state_key(k);
+                // MissingNode is broken out of the fallback deliberately: it is
+                // the storage-loss signal, and folding it into Overflow told
+                // operators to go read balance arithmetic. The remaining
+                // variants (CorruptNode, BadNodeBytesLen, BadEmptyHeight,
+                // HeightOutOfRange) stay on the fallback because none of them
+                // carries a lookup key worth surfacing here.
                 smt.update(sk, v).map_err(|e| match e {
                     SmtError::Store(err) => ExecError::Db(err),
+                    SmtError::MissingNode { hash } => ExecError::SmtMissingNode { hash },
                     _ => ExecError::Overflow,
                 })?;
             }
             WriteOp::Delete(k) => {
                 let sk: Hash32 = smt_key_for_state_key(k);
+                // Same mapping as the Put arm. A delete walks the identical
+                // `recompute_path` descent, so it lands on a freed node just as
+                // readily; fixing only the update arm would leave half the
+                // surface reporting an overflow.
                 smt.delete(sk).map_err(|e| match e {
                     SmtError::Store(err) => ExecError::Db(err),
+                    SmtError::MissingNode { hash } => ExecError::SmtMissingNode { hash },
                     _ => ExecError::Overflow,
                 })?;
             }

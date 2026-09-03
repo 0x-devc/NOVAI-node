@@ -11,12 +11,19 @@
 //!   a0 inspect --db <copy-path>        report heights, roots, and QC voters
 //!   a0 audit --db <copy-path> [--height <h>]
 //!                                      run the full A1..A8 audit
+//!   a0 reclaim --db <datadir> [--apply]
+//!                                      census the dead SMT nodes; with
+//!                                      --apply, rebuild and swap the directory
 //!
 //! Exit codes: 0 = success / audit PASS, 1 = audit FAIL, 2 = usage or IO
 //! error.
 //!
-//! Scope note (F4 execute gate, A0 only): no snapshot export, no install, no
-//! E-pipeline. Those are a later gate; this binary only ever reads.
+//! Scope note: `valset`, `inspect` and `audit` only ever read, and must be
+//! pointed at OFFLINE COPIES. `reclaim` is the one exception in this binary and
+//! it is the opposite case: it is pointed at a STOPPED node's own data
+//! directory, because rebuilding it beside itself and renaming is the whole
+//! point. Without `--apply` it still only reads. RocksDB's directory lock makes
+//! the running-node mistake impossible rather than merely forbidden.
 //!
 //! The audit pipeline and its support modules live in the library at
 //! `novai_node::snapshot` (gate F5 Stage 0), so the snapshot producer and
@@ -24,10 +31,12 @@
 //! binary is the CLI wrapper over them, and its behaviour is unchanged: same
 //! subcommands, same flags, same report lines, same exit codes.
 
-use novai_node::snapshot::{audit, inspect, valset};
+use novai_node::snapshot::{audit, inspect, reclaim, valset};
 
 fn usage() -> i32 {
-    eprintln!("usage: a0 <valset|inspect|audit> [--db <path>] [--height <h>]");
+    eprintln!(
+        "usage: a0 <valset|inspect|audit|reclaim> [--db <path>] [--height <h>] [--apply]"
+    );
     2
 }
 
@@ -37,7 +46,7 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
-fn require_db(args: &[String]) -> Result<String, i32> {
+fn db_path(args: &[String]) -> Result<String, i32> {
     let Some(db) = flag_value(args, "--db") else {
         eprintln!("missing required --db <path>");
         return Err(usage());
@@ -47,7 +56,24 @@ fn require_db(args: &[String]) -> Result<String, i32> {
         eprintln!("db path does not exist or is not a directory: {db}");
         return Err(2);
     }
+    Ok(db)
+}
+
+fn require_db(args: &[String]) -> Result<String, i32> {
+    let db = db_path(args)?;
     eprintln!("note: A0 must only be pointed at OFFLINE COPIES, never at a live node data dir");
+    Ok(db)
+}
+
+/// The reclaim target is a STOPPED node's own directory, so the offline-copy
+/// note above would be actively misleading here. The note this prints instead
+/// names the two things that matter to the operator running it.
+fn require_datadir(args: &[String]) -> Result<String, i32> {
+    let db = db_path(args)?;
+    eprintln!(
+        "note: reclaim targets a STOPPED node's own data directory and renames beside it; \
+         the node must not be running"
+    );
     Ok(db)
 }
 
@@ -85,6 +111,23 @@ fn main() {
                     Ok(false) => 1,
                     Err(e) => {
                         eprintln!("audit error: {e}");
+                        2
+                    }
+                }
+            }
+            Err(code) => code,
+        },
+        // The census is the DEFAULT. `--apply` is the only thing that renames
+        // anything, so an operator who mistypes the subcommand or forgets a
+        // flag gets a report, never a swap.
+        Some("reclaim") => match require_datadir(&args[1..]) {
+            Ok(db) => {
+                let apply = args[1..].iter().any(|a| a == "--apply");
+                match reclaim::run(&db, apply) {
+                    Ok(true) => 0,
+                    Ok(false) => 1,
+                    Err(e) => {
+                        eprintln!("reclaim error: {e}");
                         2
                     }
                 }

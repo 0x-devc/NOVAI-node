@@ -1874,6 +1874,7 @@ dependencies = [
  "novai-crypto",
  "novai-execution",
  "novai-p2p",
+ "novai-smt",
  "novai-state",
  "novai-types",
  "rand_core 0.6.4",

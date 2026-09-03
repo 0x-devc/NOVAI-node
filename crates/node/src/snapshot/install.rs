@@ -336,7 +336,12 @@ pub fn staging_path(base: &Path, db_subdir: &str) -> PathBuf {
 /// The first unused `{stem}` / `{stem}-2` / `{stem}-3` path under `base`.
 /// Never returns a path that exists, so a rename can never clobber a preserved
 /// directory.
-fn free_path(base: &Path, stem: &str) -> PathBuf {
+///
+/// Shared with the SMT GC reclaim tool rather than reimplemented there: that
+/// tool sets aside directories under the same never-delete rule, and two
+/// implementations of "find a name that cannot clobber a preserved directory"
+/// is two places the never-delete rule can be broken.
+pub(crate) fn free_path(base: &Path, stem: &str) -> PathBuf {
     let first = base.join(stem);
     if !first.exists() {
         return first;
@@ -372,7 +377,7 @@ fn read_committed_height(db_dir: &Path) -> Option<u64> {
 /// Best effort directory fsync, so a rename is durable before the node starts
 /// writing chain state through it. A failure is logged, never fatal: the
 /// rename itself is already atomic within the filesystem.
-fn fsync_dir(dir: &Path) {
+pub(crate) fn fsync_dir(dir: &Path) {
     match std::fs::File::open(dir) {
         Ok(f) => {
             if let Err(e) = f.sync_all() {
