@@ -2311,6 +2311,10 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  novai_getNonce and the nonce field of novai_getBalance are different numbers and are not substitutes. getNonce answers from the mempool admission cursor; getBalance answers from the committed account row. They agree until a transaction from that sender commits and then fails during execution, after which the cursor runs ahead until the node restarts and reseeds from state. Build plain-account transactions from the getBalance nonce, and use getNonce to predict whether the mempool will admit. Registered AI entities are unaffected: their path compares with greater-than-or-equal and self-heals.
 
+ there is no documented funding path
+
+ The faucet route described in the RPC reference is not available on this network: it requires a faucet key that is not configured, and answers 503 with a faucet-disabled body. That is a different 503 from the concurrency rejection listed under errors and limits. This console does not document a funding path.
+
  surface that exists but is not reachable over rpc
 
  Gap | Impact | Workaround |

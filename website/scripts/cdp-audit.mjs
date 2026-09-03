@@ -254,14 +254,38 @@ async function launch() {
   await cdp.send("Page.enable", {}, sessionId);
   await cdp.send("Runtime.enable", {}, sessionId);
 
-  const close = () => {
+  const close = async () => {
     try {
       ws.close();
     } catch {
       /* already gone */
     }
-    proc.kill("SIGKILL");
-    rmSync(profile, { recursive: true, force: true });
+    await new Promise((done) => {
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        done();
+        return;
+      }
+      proc.once("exit", done);
+      proc.kill("SIGKILL");
+    });
+    // Chrome's crashpad handler can outlive the browser process by a few
+    // milliseconds and briefly touch the profile dir it is still holding
+    // open, which makes an immediate recursive rmSync throw ENOTEMPTY even
+    // with force:true (observed on ~half of runs). The audit has already
+    // finished measuring by this point, so retry the disposable temp-dir
+    // cleanup rather than let that race fail a run that actually passed.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        rmSync(profile, { recursive: true, force: true });
+        return;
+      } catch (e) {
+        if (attempt === 4) {
+          console.error(`cdp-audit: warning: could not remove temp profile ${profile}: ${e.message}`);
+          return;
+        }
+        await sleep(100);
+      }
+    }
   };
 
   return { cdp, sessionId, close, browser: version.Browser };
@@ -392,6 +416,7 @@ async function main() {
   const viewportRows = [];
   const semanticRows = [];
   const keyboardRows = [];
+  const skipLinkRows = [];
 
   try {
     for (const width of args.widths) {
@@ -488,13 +513,45 @@ async function main() {
         problems.push(`${page}: the first tab stop is not the skip link (got ${first ? `${first.tag} ${first.href ?? ""}` : "nothing"})`);
       }
       keyboardRows.push({ page, stops: stops.length, withoutIndicator: noIndicator.length, firstStop: first?.href ?? null });
+
+      // Skip-link ACTIVATION, not just the markup that should make it work.
+      // main#main having tabindex="-1" is necessary but not sufficient: only
+      // pressing the link and reading document.activeElement afterward proves
+      // the browser moves focus there instead of just scrolling to it, which
+      // was the actual defect. Fresh navigation, because the walk above has
+      // already moved focus well past the skip link by this point.
+      await goto(cdp, sessionId, `http://127.0.0.1:${port}/${page}`);
+      await evaluate(cdp, sessionId, "document.body.focus(); document.activeElement === document.body");
+      await pressTab(cdp, sessionId);
+      const onSkipLink = await evaluate(cdp, sessionId, ACTIVE_PROBE);
+      for (const type of ["rawKeyDown", "keyUp"]) {
+        await cdp.send(
+          "Input.dispatchKeyEvent",
+          { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 },
+          sessionId
+        );
+      }
+      await sleep(200);
+      const afterActivate = await evaluate(
+        cdp,
+        sessionId,
+        "(() => { const el = document.activeElement; return { tag: el === document.body ? 'body' : el.tagName.toLowerCase(), id: el.id || null }; })()"
+      );
+      if (!onSkipLink || onSkipLink.href !== "#main") {
+        problems.push(`${page}: could not test skip-link activation because the first tab stop was not the skip link`);
+      } else if (afterActivate.tag !== "main" || afterActivate.id !== "main") {
+        problems.push(
+          `${page}: activating the skip link (real Enter keypress) left focus on <${afterActivate.tag}${afterActivate.id ? ` id="${afterActivate.id}"` : ""}>, not <main id="main">`
+        );
+      }
+      skipLinkRows.push({ page, reachedSkipLink: onSkipLink?.href === "#main", activatedFocusTag: afterActivate.tag, activatedFocusId: afterActivate.id });
     }
   } finally {
-    close();
+    await close();
     server.close();
   }
 
-  const report = { browser, widths: args.widths, viewportRows, semanticRows, keyboardRows, problems };
+  const report = { browser, widths: args.widths, viewportRows, semanticRows, keyboardRows, skipLinkRows, problems };
   if (args.json) {
     console.log(JSON.stringify(report, null, 2));
   } else {
@@ -521,6 +578,12 @@ async function main() {
     for (const k of keyboardRows) {
       console.log(`  ${k.page.padEnd(26)} ${String(k.stops).padStart(3)} stops, ${k.withoutIndicator} without an indicator, first stop ${k.firstStop ?? "none"}`);
     }
+    console.log("\nskip-link activation (real Enter keypress on the first tab stop)");
+    for (const sk of skipLinkRows) {
+      console.log(
+        `  ${sk.page.padEnd(26)} reached skip link: ${sk.reachedSkipLink}  focus after Enter: <${sk.activatedFocusTag}${sk.activatedFocusId ? ` id="${sk.activatedFocusId}"` : ""}>`
+      );
+    }
   }
 
   if (problems.length) {
@@ -528,7 +591,11 @@ async function main() {
     for (const p of problems) console.error(`  ${p}`);
     fail(`${problems.length} accessibility or layout problem(s)`);
   }
-  console.log(`\ncdp-audit: clean (${viewportRows.length} page-width measurements, ${keyboardRows.reduce((n, k) => n + k.stops, 0)} focus stops walked)`);
+  // Only append the human summary line in human mode: --json is meant to be
+  // piped to a JSON parser, and a trailing non-JSON line breaks that.
+  if (!args.json) {
+    console.log(`\ncdp-audit: clean (${viewportRows.length} page-width measurements, ${keyboardRows.reduce((n, k) => n + k.stops, 0)} focus stops walked)`);
+  }
 }
 
 main().catch((e) => fail(e.stack ?? String(e)));

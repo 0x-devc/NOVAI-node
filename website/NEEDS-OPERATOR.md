@@ -33,9 +33,57 @@ changes. The verify panel keeps its terminal mode and the network panel keeps
 its snapshot state, both tested, so a future tightening degrades to a labeled
 state instead of a broken page.
 
-## 2. Faucet: is `--faucet-key` set on the live testnet?
+## 2. Faucet: ANSWERED 2026-09-04. `--faucet-key` is NOT set.
 
-I need a yes or no. It decides what the console publishes about funding.
+Measured by the operator from live process arguments on the running fleet. The
+four validator processes run `--dev-keys --allow-insecure-dev-keys` and no
+`--faucet-key`.
+
+Two consequences, and they point in opposite directions, which is why the
+console wording is still an open decision rather than a mechanical edit:
+
+- **The HTTP route `GET /faucet/<address>` is NOT available.** It gates on
+  `--faucet-key` alone, so on this fleet it answers 503.
+- **The JSON-RPC method `novai_faucet` IS available**, because `handle_faucet`
+  falls back to the deterministic dev key when `--dev-keys` is set.
+
+So it is **not true** that there is no funding path, and the console must not say
+so. What is true is that the documented HTTP route does not work here, and that
+the console deliberately does not document the JSON-RPC method (see the WITHHELD
+entry in `generate-console-data.mjs`: it mints tokens and is withheld until the
+public testnet opens).
+
+**Open decision, deliberately not made unilaterally.** Stating "there is no
+public funding path" would be false. Documenting the working method would publish
+a step-by-step mint recipe against a public endpoint running
+`--allow-insecure-dev-keys`. My proposed wording, for a ruling:
+
+> The faucet route described in the RPC reference is not available on this
+> network: it requires a faucet key that is not configured, and answers 503. This
+> console does not document a funding path.
+
+**APPROVED and shipped 2026-09-04**, with one clause added after approval: the
+sentence now says the route answers "503 with a faucet-disabled body" and notes
+that this is a different 503 from the concurrency rejection the console already
+documents under errors and limits. Those are two distinct conditions behind one
+status code (`crates/node/src/rpc.rs:1242` for concurrency, the absent-key branch
+of `handle_public_faucet` for the faucet), and the unqualified sentence would
+have let a reader conflate them.
+
+**Why the faucet stays undocumented, recorded so it is not relitigated: the
+reason is NOT security.** It is that the tokens have no use. The transaction
+generator is off, no entity has ever signalled, and the chain is wiped regularly
+during development. A faucet is worth documenting when there is something to
+spend on and a chain that persists. **Revisit at the public testnet cutover, not
+before.**
+
+The earlier ruling, that the console should say plainly there is no funding path,
+was withdrawn because it would have published something false: `handle_faucet`
+falls back to the deterministic dev key, so the JSON-RPC method does answer. The
+shipped sentence is scoped to what is actually absent, which is a working route
+and a documented path.
+
+The original question, kept for context:
 
 The public HTTP route `GET /faucet/<address>` is gated solely on `--faucet-key`.
 It is NOT gated on dev mode, contrary to the RPC reference (see item 7). So:
@@ -51,11 +99,24 @@ Note the asymmetry: the JSON-RPC `novai_faucet` method is enabled by
 `--faucet-key` OR `--dev-keys`, while the HTTP route requires `--faucet-key`
 specifically. A plain dev-keys node therefore has the method but not the route.
 
-## 3. Chain id: which value is the live one?
+## 3. Chain id: ANSWERED 2026-09-04. There is none.
 
-I am omitting chain id from the console until this is answered, because I cannot
-determine it from the repo and a wrong answer here is the kind of thing a
-developer hardcodes.
+Measured by the operator from live process arguments: all four validator
+processes run `--dev-keys`, so **no genesis file is read at all** and there is no
+genesis chain id to publish.
+
+This is the contingency the original question named, and getting it back as the
+answer changes the console's own wording. The page currently says chain id is
+omitted "because the value that is live has not been confirmed", which was true
+and is now stale: the value IS confirmed, and it is that none exists. The
+stronger and more useful statement, which should replace it, is that this network
+runs without a genesis chain id rather than that the console has not checked.
+
+**The protocol constant equal to 1 used in channel-state signing must still NOT
+be published.** It would be read as a network identifier and it is not one. That
+part of the original ruling is unaffected.
+
+The original question, kept for context:
 
 Two unrelated things carry the name:
 
@@ -66,6 +127,67 @@ Two unrelated things carry the name:
 
 The complication: in `--dev-keys` mode the node never reads a genesis file at
 all, so none of the three repo values is necessarily what is running.
+
+## 3b. Validator count: CONFIRMED 2026-09-04. Four, and they are running.
+
+Measured by the operator from live process arguments: four validator processes,
+all up since 2026-08-30.
+
+The console publishes "Validators | 4" as a configuration fact set by hand and
+excluded from the generator. That decision was right and stands, and this
+measurement is why: the repository's genesis files say 1, 5 and 5, so any
+generator reading the repo would publish a wrong number confidently. The fleet is
+the correct source and the repo is not.
+
+**Keep it hand-set, with the provenance stated at the site.** Deriving it from
+the repo would be worse than typing it, which is the rare case where "derive
+never type" points the other way, and the reason should be written next to the
+value so nobody later "fixes" it into the generator.
+
+Nothing about how the fleet is arranged belongs in this repository: not the
+hostnames, addresses, ports, data directories or service names. The console needs
+the number four and the reason it is hand-set, and nothing else.
+
+## 3c. The chain is not idle by design, and this must never reach the console
+
+The transaction generator is not running on the operator's devnet. That is why
+`tx_count` is 0 and why signal queries return nothing.
+
+**This is a fact about one deployment, not a property of the chain, and it must
+not appear on the console in any form.** It is recorded here only so a future
+session does not go hunting for a code-level explanation of empty blocks and then
+publish whatever it concludes.
+
+**It is off deliberately and it should stay off.** The operator is working on SMT
+garbage collection and needs it off to do that. So this is not a fault, not a
+regression, and not something to restart, report as broken, or work around. If a
+future session finds empty blocks surprising, the answer is here and no
+investigation is warranted.
+
+Verified 2026-09-04 that the console currently makes no such claim: it never
+mentions empty blocks, transaction volume, or an idle chain, and `tx_count`
+appears only as a field name in a result schema. The correct state is the current
+one. Do not add an explanation.
+
+## 3d. For the public testnet cutover, NOT now
+
+Two properties of the current fleet that are correct for a development network
+with worthless tokens and must be decided again before the network carries value.
+Neither is an action today. Both are recorded now because the cutover is exactly
+when they stop being harmless and exactly when nobody will remember them.
+
+1. **`novai_faucet` is reachable on the public RPC today**, through the dev-key
+   fallback. It is documented in the public repository and is not advertised on
+   the console. **Decide deliberately at cutover whether it stays**, rather than
+   discovering it is still there afterwards. The console's decision to withhold
+   it should be revisited in the same pass, since the reason for withholding
+   (the tokens have no use) expires at cutover.
+
+2. **`--allow-insecure-dev-keys` means the validator keys are deterministic.**
+   That is fine on a devnet whose tokens are worthless and whose state is wiped
+   regularly. **It must be replaced before the network carries value.** Anyone
+   who can read the repository can derive the keys, so the flag and the value of
+   what the chain secures cannot both increase.
 
 ## 4. Genesis hash: not retrievable, confirming omission
 

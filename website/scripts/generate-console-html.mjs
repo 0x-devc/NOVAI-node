@@ -328,6 +328,21 @@ const PROSE = {
   // "Five discrepancies" against a derived nine, on the same surface as a
   // sentence reading "There are 9 of those today": the fix that moved the intro
   // counts into a generated region missed the copy inside a string.
+  // A configuration fact about the network as it runs today, not a permanent
+  // property, and deliberately not a statement that no funding path exists:
+  // handle_faucet falls back to the deterministic dev key, so the JSON-RPC
+  // method does answer. What is absent is a route that works and a documented
+  // path, and saying "there is no funding path" would be false.
+  //
+  // The 503 is qualified because it is NOT the 503 this console already
+  // documents. The one under errors and limits is the concurrency rejection at
+  // rpc.rs:1242; this one is the faucet-disabled branch of
+  // handle_public_faucet. Two different conditions behind one status code.
+  gapsFunding:
+    "The faucet route described in the RPC reference is not available on this network: it requires a faucet key " +
+    "that is not configured, and answers 503 with a faucet-disabled body. That is a different 503 from the " +
+    "concurrency rejection listed under errors and limits. This console does not document a funding path.",
+
   gapsExceptions:
     "independent sources and fails when they disagree. The gate also fails when a listed exception stops " +
     "applying, so this list can only shrink, and fixing a document forces its exception to be deleted.",
@@ -1480,6 +1495,8 @@ function renderGaps(d) {
         ${note(PROSE.gapsIndex)}
         ${h3("getnonce and getbalance are different numbers")}
         ${note(PROSE.gapsNonce)}
+        ${h3("there is no documented funding path")}
+        ${note(PROSE.gapsFunding)}
         ${h3("surface that exists but is not reachable over rpc")}
         ${table([{ label: "Gap" }, { label: "Impact" }, { label: "Workaround" }], gapRows)}
         ${h3("carried drift exceptions")}

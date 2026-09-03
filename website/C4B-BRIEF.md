@@ -1,5 +1,22 @@
 # Gate C4b: the thirteen
 
+**CLOSED 2026-09-04.** All thirteen are fixed, plus a fourteenth found at plan
+time and six further instances found by sweeping the classes rather than the
+list. Landed in `169fc0e`, `9e5054b`, `17ff864` and `ad58a1f`, none pushed.
+
+**The current work list is `C4C-BRIEF.md`, and the evidence for it is
+`C4B-VERIFICATION.md`.** Read those instead of this file. This one is kept
+because its reasoning explains why several fixes took the shape they did, and
+because the run 2 numbers in it are the baseline the convergence question is
+measured against.
+
+One correction to leave visible: the P2 recommendation below, to fix the
+document or carry a tenth exception, was WRONG. The document was not wrong. It
+scoped the range row with "(range queries)" and the console dropped the
+qualifier when flattening a category-common table. The fix was a rule about
+inheritance, not a document edit. That is the third of three times in this gate
+a prescribed fix turned out to be wrong when checked against source.
+
 Written 2026-08-30, at the close of Gate C4.
 
 **Read this with `PHASE3-REPORTS.md`.** That file carries the evidence: what was
