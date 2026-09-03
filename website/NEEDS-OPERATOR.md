@@ -129,9 +129,30 @@ guess at either:
 2. Is there an SPA catch-all that rewrites unknown paths to `index.html`? If so
    it will swallow `/console` entirely.
 
-Until this is confirmed, every internal link to the console sits behind a single
-constant in the source, so switching between the two forms is a one line edit
-once you tell me what the host actually serves.
+**Question 2 is answered: yes.** Measured 2026-09-03, and anyone can repeat it:
+
+    for p in / /console /console.html /console/rpc.html \
+             /console/zzz-does-not-exist.html; do
+      curl -s -o /tmp/b "https://novai.network$p"
+      echo "$p $(wc -c < /tmp/b) $(shasum -a 256 /tmp/b | cut -c1-12)"
+    done
+
+Every one of those paths returns HTTP 200 with the same 1,295-byte body, sha
+`8813482f9260`, including a URL that cannot exist. That is an SPA catch-all.
+
+Two consequences follow, and the second is the one that matters:
+
+- Question 1 is moot until a deploy happens. `/console.html` and
+  `/console/rpc.html` are swallowed exactly like `/console` is, so no rewrite
+  rule is being exercised either way.
+- **Production is not serving the console at all**, and has not been. Whatever
+  is decided about the URL shape, the catch-all has to be narrowed to let real
+  files through before any of it takes effect.
+
+An earlier note in the C4b planning recorded 1,294 bytes and a different sha.
+Today's measurement is the one above. I have not tried to reconcile the two,
+because I cannot source what the earlier one measured and inventing a reason
+would be worse than recording that they differ.
 
 ## 7. Explorer link (for you to add, I do not touch that deployment)
 
@@ -416,6 +437,60 @@ retires itself when the doc is fixed.
 
 Carried as the `sla-seller-cap-does-not-exist` exception, with the false
 sentence struck at its own site and the truth published beneath it.
+
+## 23. The deployed site predates the whole website workstream
+
+Measured 2026-09-03. `https://novai.network/` returns a `<title>` containing a
+U+2014 em dash:
+
+    NOVAInetwork <em dash> AI-Integrated Layer 1 Blockchain
+
+The repository's `index.html` has used an ASCII hyphen since the Gate 2.5 dash
+gate landed, and the gate would now refuse that character. So what is deployed is
+older than the redesign work, not one push behind it.
+
+No action is proposed here and nothing about it is diagnosable from this side.
+It is recorded because it changes how any statement about "the live site" should
+be read: the deployed artifact is not what this repository builds, so a claim
+verified against production is not a claim about this code.
+
+## 24. Publishing `novai-sdk` to crates.io, which needs the path dependencies versioned first
+
+The console's SDK section reports that the Rust SDK cannot be installed from a
+registry, and that report is correct and should not be softened. This item is the
+fix for the underlying product gap rather than for the reporting of it.
+
+`sdk/novai-sdk/Cargo.toml` depends on four workspace crates by path, which the
+generator reads and publishes:
+
+| Crate | Path |
+|---|---|
+| `novai-types` | `crates/types` |
+| `novai-crypto` | `crates/crypto` |
+| `novai-codec` | `crates/codec` |
+| `novai-ai-entities` | `crates/ai_entities` |
+
+Cargo refuses to publish a crate carrying a bare `path` dependency, because a
+consumer downloading from the registry has no such path. So publishing the SDK is
+not one action, it is five, and the four come first:
+
+1. Give each of the four crates a version and publish it to crates.io, in
+   dependency order, so each one's own dependencies already resolve from the
+   registry when it goes up.
+2. Rewrite the SDK's four dependencies in the dual form
+   `{ version = "x.y.z", path = "../../crates/..." }`. Cargo uses the path for a
+   workspace build and the version for a published one, so local development is
+   unaffected.
+3. Publish `novai-sdk`.
+
+Two things to check before starting, neither of which I can check from here:
+whether those five names are available on crates.io, and whether any of the four
+crates pulls in a further workspace crate by path, which would extend the list.
+
+The console needs no change when this lands. It reads the manifest, so the
+`consumableFromRegistry: false` it publishes today flips on its own, and the
+sentence about the Rust SDK stops being true the moment the dependencies stop
+being paths.
 
 ---
 

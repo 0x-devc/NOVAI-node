@@ -1,21 +1,34 @@
 # Website handoff
 
-Written 2026-08-27. Covers BOTH website workstreams, because they are paused at
-different points and a fresh session that knows about only one will break the
-other.
+Written 2026-08-27. Status block updated 2026-09-03 at the close of Gate C4b.
+Covers BOTH website workstreams, because they are paused at different points and
+a fresh session that knows about only one will break the other.
 
 Read this before touching anything under `website/`.
 
-**Status: 17 commits ahead of origin/main, none pushed. Pushing auto-deploys to
-Cloudflare. Do not push.** One of the seventeen, `1842fb7`, is node work rather
-than website work.
+**Status: 5 commits ahead of origin/main, none pushed. Pushing auto-deploys to
+Cloudflare. Do not push.** `origin/main` is `98d2e52`. The five unpushed are
+`fdba5ad` (C4 record and C4b brief), `169fc0e`, `9e5054b`, `17ff864` (the three
+C4b work commits) and the commit carrying this update.
+
+The earlier "17 commits ahead" figure in this block was stale: the C4 commits
+`c4a9f3b` and `2454da1` are ancestors of `98d2e52` and are on origin, as is the
+node work `1842fb7`. Checked with `git merge-base --is-ancestor` rather than
+carried forward. Two separate sessions have now inherited that wrong number and
+one acted on it, so verify this line rather than trusting it.
 
 Two workstreams share this directory:
 
 1. **Site redesign**, paused mid-ladder. Gates 2.5, 2, 3 and 4 landed. Gates 5
    to 9 pending.
-2. **Developer console** at `novai.network/console`, a separate page. Gates C0
-   and C1 landed. Gates C2 to C6 pending.
+2. **Developer console** at `novai.network/console`, now ten pages. Gates C0
+   through C4b landed. Gates C5 to C7 pending.
+
+**Production does not serve the console.** Every path on `novai.network`,
+including ones that cannot exist, returns the same 1,295-byte SPA catch-all body,
+and the deployed `<title>` still carries an em dash the dash gate would now
+reject. So nothing in this workstream is public, and the deployed site is older
+than the redesign. See `NEEDS-OPERATOR.md` items 6 and 23.
 
 They share the token system, the console component vocabulary, the chain hook,
 the design-rules test and the build. A change to any of those touches both.
@@ -94,6 +107,13 @@ deleted by `4e32c47`; it is the origin of the config-facts rule in section 4.
 | (C2, this session) | The dash gate fix, plus the audit of every other shared-regex site |
 | `c4a9f3b` | C3 render plus C4 correctness: 15 defect classes, 4 gates, 9 drift exceptions |
 | `2454da1` | C4 structure: 8 pages, 2 find surfaces, tokeniser, colour, chart, layout, 3 gates |
+| `fdba5ad` | C4 record: freeze the console, the Phase 3 verification, the C4b brief |
+| `169fc0e` | C4b instruments: gate the snapshots in `npm test`, commit the CDP driver |
+| `9e5054b` | C4b data: the row splitter, 2 table gates, the shared error-provenance accessor, category-common scoping, verbatim clauses, 2 new drift exceptions |
+| `17ff864` | C4b renderer: the missing lead sentence, 4 dead gates made to fail, the cross-reference gate, find-surface identity, measured citations |
+
+`c4a9f3b` and `2454da1` are on origin. Everything below them in this table is
+local.
 
 ---
 
@@ -276,6 +296,130 @@ section without reading the transaction section.
      `names.html` marked as the current page.
   Nothing is public: the console carries `noindex` and the site does not link to
   it. This is debt, not an incident.
+
+- **Gate C4b, the thirteen. COMPLETE 2026-09-03.** Four commits, none pushed:
+  `169fc0e` instruments, `9e5054b` data layer, `17ff864` renderer, and the
+  commit carrying this note. All thirteen findings are closed, plus a
+  fourteenth found at plan time and six further instances found by sweeping the
+  classes rather than the list.
+  - **The fourteenth is the one worth remembering.** `renderConnect` rendered
+    `PROSE.connect`, a key that has never existed. `rich(undefined)` returns the
+    empty string, so the console shipped an empty `<p class="console-lead">` and
+    **the opening sentence of the whole developer console was missing from the
+    page split until now.** Nobody saw it because nothing was wrong on screen;
+    there was simply nothing there.
+  - **The data layer.** The table parser split rows on the document's escaped
+    pipes, publishing the canonical `entity_id` derivation truncated at a
+    dangling backslash. Two independent gates now cover it, one structural (cell
+    count against header width) and one semantic (no dangling operator, no
+    unbalanced backtick), because three of the thirteen were gate holes and one
+    rule per defect is not enough. Measured across all 48 tables: one row failed
+    before, none after.
+  - **A rule replaced a special case.** `getSignalsByHeight` published a range
+    error its handler cannot emit. The document was NOT wrong: it scoped that row
+    with "(range queries)" and the console dropped the qualifier when flattening a
+    category-common table. A common error row is now inherited only when every
+    backticked field identifier in its clause is a parameter of the inheriting
+    method. No doc change, no tenth exception.
+  - **Error clauses are quoted verbatim.** The reference writes one U+2212 and
+    the console normalised it while publishing U+2264 faithfully ten times on the
+    same rows. Both files stay ASCII; the reader gets the character the document
+    uses.
+  - **Two new document defects**, both measured on both sides and carried with
+    corrections at the point of the error: `getLatestBlock` claims only global
+    errors and emits `-32002` twice, and the `listSlasBySeller` cap sentence is
+    false because sellers are not capped in v1. `NEEDS-OPERATOR.md` items 21 and
+    22. Eleven exceptions now, up from nine, and the count on the page derives.
+
+#### The learnings from C4b, phrased generally
+
+1. **Run 2's thirteen was measured with an ungated artifact and an uncommitted
+   tool.** The frozen snapshots the falsifier attacked were not checked by
+   anything in `npm test`, so they could drift from the pages they claimed to
+   represent while the suite stayed green; and every viewport, tab-order and
+   focus figure in `PHASE3-REPORTS.md` came from a browser driver written ad hoc
+   and never committed, so none of it was reproducible. Both are fixed in
+   `169fc0e`. The number is softer than it reads, and a measurement is only as
+   good as the instrument's provenance.
+
+2. **A gate can exist and not work in four distinct ways, and a test can do it in
+   a fifth.** All five have now been found in checks this project wrote
+   deliberately, which is the point: these are not sloppiness, they are the
+   natural failure modes of verification.
+   - **Blind by a key that is never set.** Three checks opened with
+     `if (!m.errors?.resolvedFrom) continue;`, and a category-common error table
+     carries no such key, so every method inheriting by that route was invisible.
+   - **Unable to parse the thing it polices.** `backtickedIdents` required a
+     whole backtick span to be one identifier and returned nothing for
+     `` `end_height - start_height > 10000` ``, the one clause that carried a
+     defect.
+   - **Tautological.** `assertLossless` was handed a single token the caller had
+     just built, then checked that it rejoins to its own input and carries a
+     class. Both true by construction. Three separate instances of this pattern
+     have now been found.
+   - **Written and then discarded.** `assertProseIsAllUsed` computed the list it
+     needed for the reverse check and threw it away with `void declared;`. It
+     proved declared-implies-used and not the converse, which is exactly the
+     direction that would have caught the missing opening sentence.
+   - **A TEST that never reaches the code it claims to exercise.** Of the
+     eighteen injection tests written this gate, three would have passed for the
+     wrong reason: one injected into a `PROSE` key nothing rendered, so the
+     unused-key branch fired first; one injected inside a generated region, so
+     the marker check rejected the file before the gate under test ran; and one
+     counted every link on a page and so measured the shell chrome rather than
+     the index. Each went red, and none went red for the reason it claimed. The
+     `landed` flag caught all three. **Assert on the gate's own failure message,
+     never merely on a non-zero exit, and check that no earlier gate could have
+     rejected the doctored input first.**
+
+#### Recommended for a later gate, assessed and deliberately NOT built in C4b
+
+- **Pin source links to the generating commit SHA rather than `blob/main`.**
+  Anything emitting a `blob/main` link should derive from committed state, and
+  nothing enforces that today. `generate-console-data.mjs` reads `crates/` from
+  disk and publishes line-anchored links, so a dirty tree publishes `#L362` for a
+  line that exists in no commit anyone can fetch. That is the trap that kept
+  `MAX_INDEX_ENTRIES` frozen at 339 through all of C4. Pinning fixes a live rot
+  vector as well, since `blob/main` anchors drift silently every time main moves,
+  and it makes the dirty-tree case fail loudly rather than publish a bad link,
+  because uncommitted content has no SHA to pin.
+
+  **OBSERVED CASE, 2026-09-03. This is evidence, not a hypothetical, and it is
+  the strongest argument for pinning. Do not let it decay into an anecdote in a
+  session log: the failure it describes is silent, resolves in a browser, and
+  looks correct.** At the close of C4b, `console-data --check` went red without
+  any input of mine changing.
+  The cause was live chain work in the operator's tree: uncommitted edits to
+  `crates/execution/src/lib.rs` had moved `MIN_FEE_TRANSFER` down 23 lines, so a
+  fresh run wanted to publish `feeLine: 12348` where the committed data says
+  `12325`. Verified rather than assumed:
+
+      git show HEAD:crates/execution/src/lib.rs | sed -n '12325p'
+      # pub const MIN_FEE_TRANSFER: u64 = 100;      <- committed, correct
+      git show HEAD:crates/execution/src/lib.rs | sed -n '12348p'
+      # /// Minimum fee for upgrading an AI entity's code hash ...
+
+  So line 12348 does exist in `HEAD`, and it is a doc comment about a DIFFERENT
+  constant. Regenerating would have published a `blob/main` link that resolves,
+  loads, and points at the wrong declaration, which is worse than a 404 because
+  nothing about it looks broken. **The committed data was left alone.** The red
+  check is an artifact of a dirty tree, exactly like `repo-stats`, and the rule
+  in section 9 about never regenerating a derived file while its source is
+  uncommitted applies to `console-data` more sharply than to `repo-stats`,
+  because this one publishes line-anchored links rather than totals.
+
+  The generalisation, which is what makes it worth pinning rather than just
+  worth remembering: a `blob/main` line anchor has no failure mode a reader can
+  see. A stale one does not 404, it resolves to whatever now occupies that line,
+  and a citation pointing confidently at the wrong declaration is the exact
+  defect class this console exists to eliminate. A SHA-pinned link either
+  resolves to the line that was measured or does not resolve at all.
+
+- **A CI job, which is the real answer to staleness and is worth more than any
+  remaining defect.** See section 11.
+
+- **The rail teaches ten sections and the navigation has eight destinations.**
+  See section 12.
 
 - **Gate C5, live panels.** Network status and verify panel as React islands,
   mounted (not hydrated) into containers holding identical static markup, so
@@ -708,3 +852,207 @@ noted in a comment at the site so nobody converts those calls to `matchAll`).
 now a factory. Nothing under `src/` holds a reusable regex object at all: every
 hit is an import path, an SVG `<g>` element, or an inline literal built fresh at
 each call. No other instance of the bug exists in the tree.
+
+---
+
+## 11. CI: turning "cannot rot" into a repo-time property
+
+**DECIDED 2026-09-03, approved in principle by the operator. Not built in C4b.
+This is the first item of the next gate.** The shape below is the accepted
+design, not a menu: its own workflow separate from `ci.yml`, on push to `main`
+and on pull requests, with no `paths:` filter.
+
+The reason recorded as decisive was reason 3 in the workflow section: a check
+placed after clippy never runs when clippy is red, which would be a sixth variant
+of a gate that cannot fire, deliberately constructed. Do not relitigate the
+placement on convenience grounds.
+
+The console's whole differentiator is that every fact is generated from the
+source tree and gated against drift. Today that gate only fires when somebody
+builds the website. Add an RPC method to `crates/node/src/rpc.rs`, commit, push,
+and nothing anywhere goes red: the console is silently stale until the next
+website build, which might be weeks later and might be done by someone who
+assumes a green build means a correct page.
+
+CI closes that. The gate stops being a property of the build and becomes a
+property of the repository.
+
+### What it runs
+
+Two commands, and deliberately not `npm run build`:
+
+    node website/scripts/generate-console-data.mjs --check
+    node website/scripts/generate-console-html.mjs --check
+
+`--check` regenerates from the tree and byte-compares against the committed
+artifacts, so it fails when the repository and the published page disagree.
+
+### The finding that decides the cost: it needs no dependencies
+
+`generate-console-data.mjs`, `generate-console-html.mjs`, `tokenise.mjs` and
+`freeze-console.mjs` import **nothing outside `node:` builtins** and one relative
+import of each other. Verified by grepping every static import and every dynamic
+`import(` and `require(` in all four: there are none.
+
+So the job needs **no `npm ci`, no `node_modules`, no lockfile install**. It is a
+checkout, `actions/setup-node`, and two `node` invocations. Estimated 20 to 30
+seconds wall clock. On a public repository GitHub Actions is free; on a private
+one this is about a minute a push against the free monthly allowance. The cost is
+not the consideration.
+
+It also means the job cannot break because of an npm registry outage or a
+transitive dependency change, which matters for a check whose whole job is to be
+trustworthy.
+
+### It needs its own workflow, not a step in `ci.yml`
+
+`ci.yml` today is: checkout, Rust toolchain, LLVM and Clang via apt,
+`cargo fmt`, `cargo clippy -D warnings`, `cargo test --all --all-features`,
+`cargo install cargo-deny --locked`, `cargo deny check licenses`. It triggers on
+push to every branch and on pull requests.
+
+Three reasons not to add a step to it, the third being the one that should settle
+it:
+
+1. **No shared setup.** The drift check needs no Rust, no LLVM, no cargo. Bolting
+   it on means a 20-second check reports only after ten-plus minutes of Rust
+   build and a `cargo install`.
+2. **Failure attribution.** "console drift" red and "rust tests" red are
+   different problems for different owners. One job conflates them.
+3. **Steps run in order and stop at the first failure.** As a step after clippy,
+   a clippy failure means the drift check never runs at all. That is precisely
+   the "a gate that never runs" failure mode this project has now found five
+   variants of, and building a new one on purpose would be indefensible.
+
+### Triggers, and the one thing not to do
+
+    on:
+      push:
+        branches: [main]
+      pull_request:
+
+**Do not add a `paths:` filter.** The instinct is to scope it to
+`crates/**`, `sdk/**`, `docs/**`, `README.md`, `website/**`, and that instinct is
+wrong here. The generators read a specific and growing set of files, and a filter
+that misses one produces exactly the silent staleness the job exists to prevent.
+The job is 20 seconds. Running it always costs less than an incomplete filter
+costs once.
+
+### What it catches, and what it does not
+
+Catches: a new, renamed or removed RPC method (the four-way name-set gate); a
+moved dispatch arm, which shifts published source-link line numbers; a changed
+constant value; an edited reference table; a newly emitted error code; and a
+document defect being FIXED, which makes a `KNOWN_DRIFT` exception stale and
+names it for deletion.
+
+Does not catch: anything needing the built page or the browser, the TypeScript
+typecheck, or the vitest suite. All of those need `npm ci` and are a second,
+slower job if wanted. `freeze-console.mjs --check` is dependency-free and could
+join the fast job, though it adds little while `console-html --check` is green,
+since the pages cannot drift from the data without that failing first.
+
+### `repo-stats` stays OUT of CI. DECIDED 2026-09-03.
+
+A policy decision rather than a technical one, and it went the way the reasoning
+below points: `repo-stats` publishes marketing numbers on the main site, so it is
+not the console's to gate. **Revisit when the marketing site work resumes**, not
+before, and not as part of standing up the console job.
+
+The reasoning, kept because the revisit will need it:
+
+`generate-repo-stats.mjs --check` is red locally right now, and it is red for a
+reason that **does not exist in CI**: it walks the working tree, and this working
+tree carries uncommitted chain work. A CI checkout is committed state by
+definition, so in CI the check measures exactly what it should.
+
+That makes including it a real policy choice with a real consequence: every
+commit that changes `crates/` would have to regenerate and commit
+`repo-stats.generated.json`, or main goes red. It publishes marketing numbers on
+the main site and it is the operator's file, so my recommendation is to start
+with the two console checks only and decide `repo-stats` separately, on its own
+merits, once the fast job has been green for a while. That is the decision
+recorded above.
+
+### The same point applies to the console checks, and it is the strongest argument for CI
+
+`console-data --check` is red in the working tree as this is written, for the
+same reason: uncommitted chain work has moved a line number the console
+publishes. See the SHA-pinning note in section 3 for the measurement.
+
+That is not a defect in the data. It is the check comparing a committed artifact
+against an UNCOMMITTED tree, which is a comparison it should never have to make.
+In CI the two sides are both committed by construction, so the check finally
+measures the thing it was written to measure: does the published console agree
+with the repository as it actually exists for everyone else?
+
+This inverts how the local red should be read. Locally it means "somebody is
+mid-edit". In CI it would mean "main is stale", which is the only version of that
+signal worth acting on, and the only version that is actionable by whoever pushed.
+
+---
+
+## 12. The rail teaches ten sections; the navigation has eight destinations
+
+**DECIDED 2026-09-03: option C, grouping only. Build it at Gate C6.**
+
+The decision, so a future session implements it rather than reopening it:
+**grouping only, spacing only, no renumbering, no nesting, no new component.**
+Options A and B below are recorded as rejected with their reasons, not as live
+alternatives. The ten section numbers stay, the eight pages stay, and every `h2`
+keeps the number it has.
+
+The rail lists ten numbered entries. Two pairs share a page: `01 connect` and
+`02 first call` both resolve to `/console.html`, and `08 network parameters` and
+`09 known gaps` both resolve to `/console/network.html`. That split was approved
+on content grounds and is right. The dissonance is that the numbering implies ten
+units of navigation when there are eight.
+
+Worth stating precisely, because it bounds the severity: the pairing IS visible
+when the reader is on the owning page, where both entries carry `aria-current`
+and both are same-page fragments. From every other page the two are ordinary
+cross-page links and nothing distinguishes them from separate destinations. So
+this is a clarity defect, not a broken interaction: clicking `02` from the SDKs
+page lands correctly, on `/console.html#first-call`.
+
+### Option A: ten pages, one per numbered section
+
+Rejected, and the reasons are concrete rather than aesthetic.
+
+It undoes a content decision made for the five-minute goal. Connect and first
+call sit together so the endpoint and a runnable curl are in one scroll;
+splitting them makes the first page a four-row table and one command, then a
+click to reach the first real call. Known gaps is largely about parameters
+(retention, pruning), so that pair is a topic, not an accident.
+
+It also adds two pages to the cross-page reference surface, and that surface is
+measured: the eight-way split produced eight cross-reference defects, which is
+the single largest class this gate had to close. Paying that cost again to
+resolve a numbering artifact is the tail wagging the dog.
+
+### Option B: an eight-entry rail with sub-entries
+
+Rejected. It renumbers the rail to 01 to 08 while every `h2` on every page reads
+`01 connect` through `10 verify it yourself`, so the rail and the headings would
+state different numbers for the same thing, which is strictly worse than today.
+Renumbering the headings to match discards the ten-step reading order the section
+numbering exists to encode. It also introduces a nesting level into a flat rail.
+
+### Option C, THE DECISION: group the rail by destination
+
+Keep ten numbers, keep eight pages, keep every heading as it is, and group the
+rail so the entries that share a page read as one destination. The minimum
+version is spacing only: emit the ten items in their four page groups, with the
+existing rhythm inside a group and one step more between groups. No new colour,
+no new type size, no nesting, no new component.
+
+It is the only option that changes neither the page structure, nor the
+numbering, nor a content decision already made on its merits. It resolves the
+mismatch by making the number stop implying a destination, which is the actual
+conflict: the numbers are doing two jobs, signalling reading order and implying a
+unit of navigation, and only the second one is wrong.
+
+Severity is low and it is a design change, so it belongs with the rest of the
+navigation work at Gate C6 rather than inside a correctness gate. It is decided,
+not merely recorded: build it at C6 to the constraints at the head of this
+section.
