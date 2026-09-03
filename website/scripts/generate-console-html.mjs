@@ -24,7 +24,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tokeniseSchema, tokeniseShell, assertLossless } from "./tokenise.mjs";
+import { tokeniseSchema, tokeniseShell, tokeniseCode, assertLossless } from "./tokenise.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = resolve(SCRIPT_DIR, "..");
@@ -121,6 +121,44 @@ function escWire(value) {
 const anchorFor = (name) => name.toLowerCase();
 
 /**
+ * A small count as an English word, so a derived number can be written into a
+ * sentence without the sentence hardcoding it. Above twenty it stays numeric,
+ * which is where spelling stops reading naturally anyway.
+ */
+/**
+ * The validator count, stated once.
+ *
+ * Hand-set and deliberately outside the generator: the repository's genesis file
+ * names a different number and genesis is not what runs, so deriving it from the
+ * tree would publish a confident wrong answer. Stated here rather than typed at
+ * each site, because it was previously a word in one sentence and a literal in
+ * the quorum arithmetic, which is two independent copies of one fact.
+ */
+const VALIDATOR_COUNT = 4;
+
+/**
+ * The PyPI observation, stated once.
+ *
+ * This is a reading of an EXTERNAL registry, not a fact in this tree, so nothing
+ * here can derive it and pretending otherwise would be worse than stating it.
+ * The date travels with the value so a reader can judge how stale it is. It
+ * appeared twice, fifteen lines apart, neither derived and neither dated at the
+ * second site.
+ */
+const PYPI = { pkg: "novai-sdk", version: "0.1.0", checkedOn: "2026-08-29" };
+
+const COUNT_WORDS = [
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+  "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+  "nineteen", "twenty",
+];
+const countWord = (n) => (Number.isInteger(n) && n >= 0 && n <= 20 ? COUNT_WORDS[n] : String(n));
+const Countword = (n) => {
+  const w = countWord(n);
+  return w.charAt(0).toUpperCase() + w.slice(1);
+};
+
+/**
  * The one-line brief for the index and the method head.
  *
  * A withheld method supplies its own, because the reference's brief for
@@ -146,6 +184,15 @@ const sourceLink = (file, line, label) =>
 // ---------------------------------------------------------------------------
 
 const PROSE = {
+  // The opening sentence of the console. renderConnect asked for PROSE.connect,
+  // no such key existed, rich(undefined) returns "", and the landing page
+  // shipped an empty <p class="console-lead"></p> from the day the page split
+  // until now. The gate meant to catch it proved declared-implies-used and threw
+  // the other direction away; it now proves both.
+  connect:
+    "One HTTPS endpoint, no key and no signup. Every example below is a real call, and the responses on this " +
+    "page were captured by running them.",
+
   connectRate:
     "Requests are rate limited per source IP. The limits, and the reply you get when you cross one, are in errors and limits.",
 
@@ -168,14 +215,18 @@ const PROSE = {
     "Each entry links to the dispatch arm that implements it. Those line numbers are regenerated with the page, and " +
     "the build fails when the committed page no longer matches the tree.",
 
+  // The three counts this sentence used to state are rendered by the caller
+  // from the data. A count typed here is a second copy of a number the page
+  // already computes, and the two are free to diverge.
   errors:
-    "Thirteen JSON-RPC error codes, four HTTP-level rejections that carry no JSON-RPC envelope at all, and six limits.",
+    "Every JSON-RPC error code, the HTTP-level rejections that carry no JSON-RPC envelope at all, and the limits " +
+    "that produce them.",
   errors32014:
-    "One of these thirteen is not in the repository's own RPC reference. -32014 is emitted by the node but the " +
+    "One of these codes is not in the repository's own RPC reference. -32014 is emitted by the node but the " +
     "reference's error tables do not list it, so this page reads it from the implementation instead. For that one " +
     "code the console is the source rather than a projection of the document.",
   errorsHttp:
-    "These four never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error " +
+    "These never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error " +
     "rather than reading an error object, so check the HTTP status before parsing.",
   errorsNonce:
     "-32010 and -32014 look similar and need opposite handling. Too low means the transaction is dead and the " +
@@ -186,7 +237,7 @@ const PROSE = {
     "reports the transfer amount in its balance field, which reads as though the sender were short.",
 
   transactions:
-    "Eleven transaction types. The discriminant is the first byte of the payload and it is what decides the type.",
+    "transaction types. The discriminant is the first byte of the payload and it is what decides the type.",
   txSigning:
     "Two details a non-Rust client has to get exactly right. The envelope is little-endian while payload internals " +
     "are big-endian. And the signing preimage and the transaction id are different preimages: the signature covers " +
@@ -199,10 +250,13 @@ const PROSE = {
   ai:
     "AI entities are the part of this chain that has no equivalent elsewhere. Three worked flows first, then the " +
     "full enumerations.",
+  // The citation claim is completed by the caller with a measured count, and
+  // gated against the links actually rendered. It used to promise that every
+  // constant was cited to its declaration above a section carrying zero
+  // citations, which is a promise the page makes about itself and does not keep.
   aiRecipesNote:
-    "These describe what the implementation does, with every constant cited to its declaration. They are written " +
-    "as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write " +
-    "path needs a funded key and a node you control.",
+    "These describe what the implementation does. They are written as local devnet walkthroughs: the read path on " +
+    "this page is verified against the public endpoint, but a write path needs a funded key and a node you control.",
   aiCapabilities:
     "Capabilities are one byte, set at registration, and immutable for the entity's life. The upgrade transaction " +
     "changes the code hash and nothing else, and registering again mints a different entity id, which abandons the " +
@@ -211,13 +265,16 @@ const PROSE = {
   sdks:
     "Three SDKs, and they are not equivalent. The distribution difference decides a language choice before the " +
     "coverage difference does.",
+  // The package name, version and date come from PYPI, which is stated once
+  // because it is a reading of an external registry that nothing in this tree
+  // can derive. The version used to appear here and again in the install table,
+  // undated at the second site.
   sdkDistribution:
-    "Only the Python SDK can be installed from a package registry. I checked all three registries on 2026-08-29: " +
-    "novai-sdk resolves on PyPI at version 0.1.0, published 2026-05-29, and the SDK source in this repository has " +
-    "not changed since that release. The Rust crate is not on crates.io and the npm package is not published.",
+    "Only the Python SDK can be installed from a package registry. The Rust crate is not on crates.io and the npm " +
+    "package is not published.",
   sdkTypescript:
-    "The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated in " +
-    "numbers below rather than described, because the numbers are the fact.",
+    "The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated as " +
+    "numbers in the table above rather than described, because the numbers are the fact.",
   sdkRustStructural:
     "The Rust SDK re-exports the chain's own type enumerations rather than redeclaring them, so its signal and " +
     "memory coverage is complete by construction and cannot drift. The TypeScript SDK declares its own copies, " +
@@ -225,9 +282,13 @@ const PROSE = {
 
   parameters:
     "What the network is configured to do. Validator count is a configuration fact rather than a live reading.",
+  // The count is rendered by the caller from VALIDATOR_COUNT, the same constant
+  // the quorum arithmetic uses. It was stated here in words and declared again
+  // as a literal in renderParameters, so the page carried two independent
+  // validator counts that nothing compared.
   parametersValidators:
-    "Four validators. This is set by hand and deliberately excluded from the generator: the genesis file names " +
-    "five, and genesis is not what runs.",
+    "validators. This is set by hand and deliberately excluded from the generator, because the genesis file in " +
+    "the repository names a different number and genesis is not what runs.",
   parametersRetention:
     "Retention is published in blocks and never converted to wall-clock time. Block cadence has moved by more than " +
     "4x inside a week on this chain, so any hours figure written here would be wrong within days. Divide by the " +
@@ -263,11 +324,13 @@ const PROSE = {
     "runs ahead until the node restarts and reseeds from state. Build plain-account transactions from the " +
     "getBalance nonce, and use getNonce to predict whether the mempool will admit. Registered AI entities are " +
     "unaffected: their path compares with greater-than-or-equal and self-heals.",
+  // Both counts are rendered by the caller. This string carried a hardcoded
+  // "Five discrepancies" against a derived nine, on the same surface as a
+  // sentence reading "There are 9 of those today": the fix that moved the intro
+  // counts into a generated region missed the copy inside a string.
   gapsExceptions:
-    "The drift gate compares four independent sources and fails when they disagree. Five discrepancies are known " +
-    "and carried as named exceptions, each printed on every generator run. The gate also fails when a listed " +
-    "exception stops applying, so this list can only shrink, and fixing a document forces its exception to be " +
-    "deleted.",
+    "independent sources and fails when they disagree. The gate also fails when a listed exception stops " +
+    "applying, so this list can only shrink, and fixing a document forces its exception to be deleted.",
 
   verify:
     "The claims on this page are checkable from this browser. This panel calls the live chain and re-derives a " +
@@ -370,7 +433,10 @@ function tokenSpan(t, known) {
 
 function codeBlock(body, { lang = "schema", known = new Set(), cls = "console-pre" } = {}) {
   const src = String(body ?? "");
-  const tokens = lang === "shell" ? tokeniseShell(src) : lang === "none" ? [{ cls: "plain", text: src }] : tokeniseSchema(src, known);
+  // "none" is scanned by tokeniseCode rather than wrapped in one hand-built
+  // token. Handing assertLossless a single span it constructed itself made the
+  // assertion true by construction and checked nothing.
+  const tokens = lang === "shell" ? tokeniseShell(src) : lang === "none" ? tokeniseCode(src) : tokeniseSchema(src, known);
   try {
     assertLossless(src, tokens);
   } catch (e) {
@@ -388,7 +454,8 @@ const lead = (text) => `<p class="console-lead">${rich(text)}</p>`;
 // are separate functions rather than one with a flag.
 const note = (text) => `<p class="console-note">${rich(text)}</p>`;
 const noteHtml = (html) => `<p class="console-note">${html}</p>`;
-const h3 = (text) => `<h3 class="console-h3">${esc(text)}</h3>`;
+// An optional id, so a heading can be the target of a cross-page reference.
+const h3 = (text, id) => `<h3 class="console-h3"${id ? ` id="${esc(id)}"` : ""}>${esc(text)}</h3>`;
 
 function table(headers, rows) {
   const head = headers.map((h) => `<th scope="col"${h.num ? ' class="text-right"' : ""}>${esc(h.label)}</th>`).join("");
@@ -827,7 +894,49 @@ function renderParams(m) {
   return `${h3("params")}${table([{ label: "Field" }, { label: "Type" }, { label: "Required" }, { label: "Notes" }], rows)}${from}${fixes}`;
 }
 
-function renderResult(m, known) {
+/**
+ * Cross-references the reference's own schema comments make, and where the
+ * content they name actually lives on this console.
+ *
+ * The comments say "below", which was true when the console was one page and
+ * false the moment it became eight: all three tables live on the AI entities
+ * page and the reference page linked to none of them. A reader following the
+ * instruction found nothing below.
+ *
+ * The fence is NOT rewritten. It is a quotation of docs/RPC_REFERENCE.md, and
+ * this project deleted a mechanism that edited quoted reference text precisely
+ * because doing so publishes doctored source with nothing saying so. The page
+ * keeps the promise in its own voice instead, in a note underneath, where a
+ * link can resolve and a reader can see it is the console speaking.
+ */
+const SCHEMA_XREFS = [
+  { phrase: "see Signal types below", label: "Signal types", section: "ai-entities", fragment: "signal-types" },
+  { phrase: "see Memory types below", label: "Memory types", section: "ai-entities", fragment: "memory-types" },
+  { phrase: "see Capabilities", label: "Capabilities", section: "ai-entities", fragment: "capability-bits" },
+];
+
+/**
+ * The note that resolves whatever cross-references a fence makes, or "" when it
+ * makes none. Returned rather than pushed so the caller decides placement.
+ */
+function xrefNoteFor(text, page) {
+  const hits = SCHEMA_XREFS.filter((x) => String(text ?? "").includes(x.phrase));
+  if (hits.length === 0) return "";
+  const links = hits
+    .map((x) => {
+      const owner = pageOfSection.get(x.section);
+      const href = owner.file === page.file ? `#${x.fragment}` : `${owner.href}#${x.fragment}`;
+      return `<a class="text-brand-text no-underline hover:underline" href="${esc(href)}">${esc(x.label)}</a>`;
+    })
+    .join(" and ");
+  const isAre = hits.length === 1 ? "is" : "are";
+  return noteHtml(
+    `The comments above say "below". That was true when this console was one page. ${links} ${isAre} on the ` +
+    `${esc(pageOfSection.get(hits[0].section).label)} page.`
+  );
+}
+
+function renderResult(m, known, page) {
   if (!m.result) return "";
   const parts = [h3("result")];
   // The envelope, with every record-type reference in it linked to the one
@@ -837,6 +946,10 @@ function renderResult(m, known) {
   // type without defining it.
   if (m.result.envelope) parts.push(preLinked(m.result.envelope, known));
   else if (m.result.recordShape) parts.push(preLinked(m.result.recordShape, known));
+  // Resolve whatever the quoted schema comments point at. The fence keeps the
+  // reference's words; this note keeps the page's promise.
+  const xref = xrefNoteFor(m.result.envelope ?? m.result.recordShape, page);
+  if (xref) parts.push(xref);
   if (m.result.inheritedFrom && (m.result.recordTypes ?? []).length) {
     const types = m.result.recordTypes
       .map((t) => `<a class="text-brand-text no-underline hover:underline" href="#${esc(recordAnchor(t))}">${esc(t)}</a>`)
@@ -895,7 +1008,7 @@ function renderErrors(m) {
   return `${h3("errors")}${table([{ label: "Code" }, { label: "When" }], rows)}${from}${fixes}`;
 }
 
-function renderMethods(d) {
+function renderMethods(d, page) {
   const refs = new Map(d.sourceRefs.value.map((r) => [r.name, r]));
   const known = new Set(d.methods.value.flatMap((m) => m.result?.recordTypes ?? []));
   const defined = new Set();
@@ -945,7 +1058,7 @@ function renderMethods(d) {
               ${renderErrors(m)}
             </div>
             <div class="console-pane-code">
-              ${renderResult(m, known)}
+              ${renderResult(m, known, page)}
               ${h3("example")}
               ${m.exampleNote ? note(plain(m.exampleNote)) : ""}
               ${pre(m.curl, { lang: "shell" })}
@@ -1015,7 +1128,12 @@ function renderErrorsSection(d) {
     `<code>${esc(l.name)}</code>`,
     sourceLink(l.file, l.line, `:${l.line}`),
   ]);
-  return `${lead(PROSE.errors)}
+  // The three counts are derived here rather than typed into PROSE.errors.
+  const counted =
+    `${countWord(d.errorCodes.value.length)} JSON-RPC error codes, ` +
+    `${countWord(d.httpRejections.value.length)} HTTP-level rejections, and ` +
+    `${countWord(d.sourceLimits.value.length)} limits.`;
+  return `${lead(`${PROSE.errors} ${counted}`)}
         ${h3("json-rpc error codes")}
         ${table([{ label: "Code" }, { label: "Meaning" }, { label: "Trigger" }, { label: "Note" }, { label: "Source" }], rows)}
         ${codeFixes}
@@ -1034,9 +1152,11 @@ function renderErrorsSection(d) {
 // THE FEE LADDER
 //
 // The only chart on this console, and the reason it earns a place is that the
-// fact it carries is a RATIO. Eleven transaction types share six distinct
+// fact it carries is a RATIO. Eleven transaction types share five distinct
 // minimum fees, from 100 to 5,000, so registering an entity costs fifty times a
-// transfer. A table states eleven numbers and leaves the reader to divide; a
+// transfer. (Five, measured: 100, 500, 1,000, 2,000 and 5,000. This comment said
+// six, and a comment that cites a measurement is a published number.)
+// A table states eleven numbers and leaves the reader to divide; a
 // sorted bar states the ratio directly, and it surfaces something the table
 // buries, which is that the three most expensive operations are all
 // entity-lifecycle and every memory-object operation costs the same.
@@ -1079,11 +1199,28 @@ function renderFeeLadder(fees) {
 
   // The accessible name states the finding, not the shape. A reader who cannot
   // see the bars gets the sentence the bars are there to make.
+  //
+  // The extremum is a SET, not a row. Three types tie at the top and two at the
+  // bottom, so "the most expensive, entityUpgrade" named one member of a tie and
+  // the definite article was an artefact of the sort order rather than a fact.
+  // The ratio was correct throughout; only the articles were wrong.
+  const min = Math.min(...rows.map((f) => f.minFee));
+  const dearest = rows.filter((f) => f.minFee === max).map((f) => f.name);
+  const cheapest = rows.filter((f) => f.minFee === min).map((f) => f.name);
+  const list = (names) =>
+    names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  const dearPhrase =
+    dearest.length === 1
+      ? `The most expensive, ${dearest[0]}, costs`
+      : `The ${countWord(dearest.length)} most expensive, ${list(dearest)}, tie at`;
+  const cheapPhrase =
+    cheapest.length === 1
+      ? `the cheapest, ${cheapest[0]}, at`
+      : `the ${countWord(cheapest.length)} cheapest, ${list(cheapest)}, which tie at`;
   const desc =
-    `Minimum fee by transaction type, sorted high to low. The most expensive, ` +
-    `${rows[0].name}, costs ${rows[0].minFee.toLocaleString("en-US")}, which is ${ratio} times the cheapest, ` +
-    `${rows[rows.length - 1].name}, at ${rows[rows.length - 1].minFee.toLocaleString("en-US")}. ` +
-    `Every value is in the table above.`;
+    `Minimum fee by transaction type, sorted high to low. ${dearPhrase} ` +
+    `${max.toLocaleString("en-US")}, which is ${ratio} times ${cheapPhrase} ` +
+    `${min.toLocaleString("en-US")}. Every value is in the table above.`;
 
   return `<figure class="console-figure">
           <svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-labelledby="fee-ladder-desc" class="console-chart">
@@ -1117,7 +1254,7 @@ function renderTransactions(d) {
     f.endianness ? esc(f.endianness) : "n/a",
     f.offset === null ? "after the length" : esc(String(f.offset)),
   ]);
-  return `${lead(PROSE.transactions)}
+  return `${lead(`${Countword(d.txTypes.value.length)} ${PROSE.transactions}`)}
         ${h3("types, discriminants and minimum fees")}
         ${table([{ label: "Byte", num: true }, { label: "Type" }, { label: "Min fee", num: true }, { label: "Constant" }], feeRows)}
         ${renderFeeLadder(d.fees.value)}
@@ -1133,15 +1270,40 @@ function renderTransactions(d) {
 }
 
 function renderRecipes(d) {
+  // The citations this section has always claimed to give and never rendered.
+  //
+  // Nothing was missing from the data: entityCaps, the signal payload base and
+  // its tails, and the percentage fees all carry file and line already, and
+  // renderTransactions calls sourceLink on them three functions away. This
+  // renderer simply never called it, so the page asserted "with every constant
+  // cited to its declaration" above a section with zero citations on it.
+  //
+  // Every citation is counted, and the sentence beneath the recipes states the
+  // measured count rather than a promise, so the page cannot claim more than it
+  // renders.
+  const cited = [];
+  const cite = (o) => {
+    if (!o || !o.file || !o.line) return "";
+    cited.push(`${o.file}:${o.line}`);
+    return ` ${sourceLink(o.file, o.line, `${o.file}:${o.line}`)}`;
+  };
+
+  const feeOf = (name) => d.fees.value.find((x) => x.name === name) ?? null;
   const fee = (name) => {
-    const f = d.fees.value.find((x) => x.name === name);
+    const f = feeOf(name);
     return f ? f.minFee.toLocaleString("en-US") : "?";
   };
+  const citeFee = (name) => {
+    const f = feeOf(name);
+    return f && f.feeFile && f.feeLine ? cite({ file: f.feeFile, line: f.feeLine }) : "";
+  };
+  const tailOf = (name) => d.signalPayloads.value.tails.find((x) => x.name === name) ?? null;
   const tail = (name) => {
-    const t = d.signalPayloads.value.tails.find((x) => x.name === name);
+    const t = tailOf(name);
     return t ? t.value : null;
   };
   const base = d.signalPayloads.value.baseLength.value;
+  const baseDecl = d.signalPayloads.value.baseLength;
   const market = d.bpsFees.value.entries.find((e) => e.constant === "MARKETPLACE_FEE_BPS");
   const bit5 = d.capabilityBits.value.find((c) => c.bit === 5);
 
@@ -1156,32 +1318,35 @@ function renderRecipes(d) {
   const reputation = recipe("a reputation oracle", [
     "A reputation oracle issues <code>ReputationUpdate</code> signals, signal type 7. Each one moves a target entity's <code>reputation_score</code>, which the chain stores on the entity record and clamps to a 0 to 100 range. A newly registered entity starts at 50.",
     `Issuing one requires the <code>${esc(bit5.capability)}</code> capability, bit ${esc(String(bit5.bit))} of the entity's capability byte.`,
-    `The payload is ${esc(String(base + tail("REPUTATION_UPDATE_EXTRA_LEN")))} bytes: the ${esc(String(base))}-byte signal commitment base plus a ${esc(String(tail("REPUTATION_UPDATE_EXTRA_LEN")))}-byte tail carrying the target entity id, an event type and a signed two-byte delta.`,
+    `The payload is ${esc(String(base + tail("REPUTATION_UPDATE_EXTRA_LEN")))} bytes: the ${esc(String(base))}-byte signal commitment base${cite(baseDecl)} plus a ${esc(String(tail("REPUTATION_UPDATE_EXTRA_LEN")))}-byte tail${cite(tailOf("REPUTATION_UPDATE_EXTRA_LEN"))} carrying the target entity id, an event type and a signed two-byte delta.`,
     "The event type must be 0 to 12.",
     "An entity cannot rate itself.",
-    `The fee is ${esc(fee("signalCommitment"))} base units, the signal commitment minimum.`,
+    `The fee is ${esc(fee("signalCommitment"))} base units, the signal commitment minimum.${citeFee("signalCommitment")}`,
     "The effect is checkable in one read: <code>novai_getAiEntity</code> returns <code>reputation_score</code> and <code>reputation_events_count</code>.",
   ]);
 
   const marketplace = recipe("selling signals on the marketplace", [
     "A seller publishes a <code>SignalCatalog</code> memory object, type 7, listing priced offerings. A catalog holds at most 10 offerings, each 10 bytes: a signal type, a price as a big-endian u64, and an active flag.",
     "A buyer issues a <code>SignalPurchase</code> signal, type 8, naming the seller, the signal type wanted and a maximum price. The chain rejects the purchase if the catalog price is above that maximum.",
-    `On success the chain moves the price from the buyer's <code>economic_balance</code> to the seller's, less a ${esc(String(market.percent))}% cut routed to the marketplace treasury.`,
-    `The payload is ${esc(String(base + tail("SIGNAL_PURCHASE_EXTRA_LEN")))} bytes: the ${esc(String(base))}-byte base plus a ${esc(String(tail("SIGNAL_PURCHASE_EXTRA_LEN")))}-byte tail.`,
+    `On success the chain moves the price from the buyer's <code>economic_balance</code> to the seller's, less a ${esc(String(market.percent))}% cut routed to the marketplace treasury.${cite(market)}`,
+    `The payload is ${esc(String(base + tail("SIGNAL_PURCHASE_EXTRA_LEN")))} bytes: the ${esc(String(base))}-byte base${cite(baseDecl)} plus a ${esc(String(tail("SIGNAL_PURCHASE_EXTRA_LEN")))}-byte tail${cite(tailOf("SIGNAL_PURCHASE_EXTRA_LEN"))}.`,
     "<strong>Publishing a catalog requires no stake.</strong> A listing is not a bond, and a buyer should not read it as one.",
     "The marketplace treasury is not readable over RPC. No method returns it.",
   ]);
 
   const staking = recipe("staking collateral", [
-    `A <code>StakeDeposit</code> signal, type 9, moves an amount from an entity's <code>economic_balance</code> into its <code>stake_balance</code>. The payload is ${esc(String(base + tail("STAKE_DEPOSIT_EXTRA_LEN")))} bytes: the ${esc(String(base))}-byte base plus a ${esc(String(tail("STAKE_DEPOSIT_EXTRA_LEN")))}-byte big-endian u128 amount.`,
-    "A deposit locks for 1,000 blocks. <code>stake_locked_until</code> is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time; the cadence in the network section converts it.",
-    `Withdrawal is a <code>StakeWithdraw</code> signal, type 10, with the same ${esc(String(base + tail("STAKE_WITHDRAW_EXTRA_LEN")))}-byte layout. A partial withdrawal does not re-lock the remainder.`,
-    `A <code>StakeSlash</code> signal, type 11, issued by an entity holding <code>${esc(bit5.capability)}</code>, subtracts up to a named amount from the target's <code>stake_balance</code> and applies a bundled reputation event in the same operation. The payload is ${esc(String(base + tail("STAKE_SLASH_EXTRA_LEN")))} bytes.`,
+    `A <code>StakeDeposit</code> signal, type 9, moves an amount from an entity's <code>economic_balance</code> into its <code>stake_balance</code>. The payload is ${esc(String(base + tail("STAKE_DEPOSIT_EXTRA_LEN")))} bytes: the ${esc(String(base))}-byte base${cite(baseDecl)} plus a ${esc(String(tail("STAKE_DEPOSIT_EXTRA_LEN")))}-byte big-endian u128 amount${cite(tailOf("STAKE_DEPOSIT_EXTRA_LEN"))}.`,
+    "A deposit locks for 1,000 blocks. <code>stake_locked_until</code> is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time. It is not converted to wall-clock time anywhere on this console, because block cadence has moved by more than 4x inside a week on this chain: divide by a rate you measure yourself.",
+    `Withdrawal is a <code>StakeWithdraw</code> signal, type 10, with the same ${esc(String(base + tail("STAKE_WITHDRAW_EXTRA_LEN")))}-byte layout${cite(tailOf("STAKE_WITHDRAW_EXTRA_LEN"))}. A partial withdrawal does not re-lock the remainder.`,
+    `A <code>StakeSlash</code> signal, type 11, issued by an entity holding <code>${esc(bit5.capability)}</code>, subtracts up to a named amount from the target's <code>stake_balance</code> and applies a bundled reputation event in the same operation. The payload is ${esc(String(base + tail("STAKE_SLASH_EXTRA_LEN")))} bytes${cite(tailOf("STAKE_SLASH_EXTRA_LEN"))}.`,
     "An entity cannot slash itself.",
     "<code>economic_balance</code>, <code>stake_balance</code> and <code>stake_locked_until</code> are all readable from <code>novai_getAiEntity</code>, and every stake operation appears in the signal index.",
   ]);
 
-  return reputation + "\n        " + marketplace + "\n        " + staking;
+  const html = reputation + "\n        " + marketplace + "\n        " + staking;
+  // Measured, not promised. The count is what the caller states, and a gate
+  // compares the claim to the links actually in the markup.
+  return { html, cited };
 }
 
 function renderAiEntities(d) {
@@ -1202,14 +1367,25 @@ function renderAiEntities(d) {
     esc(plain(m.description ?? "")),
   ]);
   const undocumented = d.gaps.value.signalTypesWithoutSourceDescription;
+  const recipes = renderRecipes(d);
+  const uniqueCitations = new Set(recipes.cited).size;
+  // The claim states the measured number and names what is NOT cited, rather
+  // than claiming completeness. Capability bits are read from a bitflags macro
+  // and carry no per-bit declaration site in the data, so there is nothing to
+  // link them to and saying so is better than quietly excluding them.
+  const citationClaim =
+    `Every constant above is cited to the line that declares it: ${recipes.cited.length} citations across ` +
+    `${uniqueCitations} declarations. Capability bit numbers are the exception and carry no link, because they ` +
+    `come from a bitflags declaration with no per-bit line to point at.`;
   return `${lead(PROSE.ai)}
         ${note(PROSE.aiRecipesNote)}
-        ${renderRecipes(d)}
-        ${h3("capability bits")}
+        ${recipes.html}
+        ${note(citationClaim)}
+        ${h3("capability bits", "capability-bits")}
         ${table([{ label: "Bit", num: true }, { label: "Hex" }, { label: "Capability" }], capRows)}
         ${note(PROSE.aiCapabilities)}
-        ${details(`signal types (${d.signalTypes.value.length})`, table([{ label: "Type", num: true }, { label: "Variant" }, { label: "Payload" }, { label: "Description" }], signalRows) + note(`${undocumented.length} of these carry no doc comment in the Rust source, so no description can be generated for them: ${undocumented.join(", ")}. Their payload sizes are known and are shown.`))}
-        ${details(`memory object types (${d.memoryObjectTypes.value.length})`, table([{ label: "Type", num: true }, { label: "Variant" }, { label: "Description" }], memoryRows))}`;
+        <div id="signal-types">${details(`signal types (${d.signalTypes.value.length})`, table([{ label: "Type", num: true }, { label: "Variant" }, { label: "Payload" }, { label: "Description" }], signalRows) + note(`${undocumented.length} of these carry no doc comment in the Rust source, so no description can be generated for them: ${undocumented.join(", ")}. Their payload sizes are known and are shown.`))}</div>
+        <div id="memory-types">${details(`memory object types (${d.memoryObjectTypes.value.length})`, table([{ label: "Type", num: true }, { label: "Variant" }, { label: "Description" }], memoryRows))}</div>`;
 }
 
 function renderSdks(d) {
@@ -1230,7 +1406,7 @@ function renderSdks(d) {
   ].map((r) => [esc(r[0]), String(r[1]), String(r[2]), String(r[3]), String(r[4])]);
 
   const installRows = [
-    ["Python", `<code>pip install novai-sdk</code>`, "PyPI, version 0.1.0"],
+    ["Python", `<code>pip install ${PYPI.pkg}</code>`, `PyPI, version ${PYPI.version}`],
     ["Rust", `<code>git clone</code> the repository and depend on <code>sdk/novai-sdk</code> by path`, "not on crates.io"],
     ["TypeScript", `<code>git clone</code> the repository and build <code>sdk/novai-sdk-ts</code>`, "not published to npm"],
   ].map((r) => [esc(r[0]), r[1], esc(r[2])]);
@@ -1240,7 +1416,11 @@ function renderSdks(d) {
   return `${lead(PROSE.sdks)}
         ${h3("getting them")}
         ${table([{ label: "SDK" }, { label: "Install" }, { label: "Registry" }], installRows)}
-        ${note(PROSE.sdkDistribution)}
+        ${note(
+          `${PROSE.sdkDistribution} I checked all three registries on ${PYPI.checkedOn}: ` +
+          `${PYPI.pkg} resolves on PyPI at version ${PYPI.version}. That is a reading of an external registry ` +
+          `taken on that date, not a value this page derives from the repository, so treat it as of then.`
+        )}
         ${note(`The Rust SDK depends on the workspace crates by path (${deps}), so there is no artifact a registry could carry.`)}
         ${h3("coverage")}
         ${table([{ label: "Surface" }, { label: "Chain", num: true }, { label: "Rust", num: true }, { label: "Python", num: true }, { label: "TypeScript", num: true }], covRows)}
@@ -1251,7 +1431,7 @@ function renderSdks(d) {
 
 function renderParameters(d) {
   const q = d.quorum.value;
-  const n = 4;
+  const n = VALIDATOR_COUNT;
   const f = Math.floor((n - 1) / 3);
   const quorum = 2 * f + 1;
   const rows = [
@@ -1272,7 +1452,7 @@ function renderParameters(d) {
 
   return `${lead(PROSE.parameters)}
         ${table([{ label: "Parameter" }, { label: "Value", num: true }, { label: "How it is known" }], rows)}
-        ${note(PROSE.parametersValidators)}
+        ${note(`${Countword(n)} ${PROSE.parametersValidators}`)}
         ${noteHtml(`Quorum sites agree: ${q.sites.map((s) => sourceLink(s.file, s.line, `${s.file}:${s.line}`)).join(" and ")}.`)}
         ${h3("retention")}
         ${table([{ label: "Horizon" }, { label: "Blocks", num: true }, { label: "Constant" }, { label: "Source" }], retentionRows)}
@@ -1303,7 +1483,11 @@ function renderGaps(d) {
         ${h3("surface that exists but is not reachable over rpc")}
         ${table([{ label: "Gap" }, { label: "Impact" }, { label: "Workaround" }], gapRows)}
         ${h3("carried drift exceptions")}
-        ${note(PROSE.gapsExceptions)}
+        ${note(
+          `The drift gate compares ${countWord(d.drift.value.sources.length)} ${PROSE.gapsExceptions} ` +
+          `${Countword(d.drift.value.knownExceptions.length)} discrepancies are known and carried as named ` +
+          `exceptions, each printed on every generator run.`
+        )}
         ${table([{ label: "Exception" }, { label: "Summary" }, { label: "Tracked as" }], exRows)}`;
 }
 
@@ -1575,12 +1759,13 @@ function assertRecordTypesAreDefined(d, methodsHtml) {
  * method, which is exactly the thing the page was getting wrong.
  */
 function assertProseIsAllUsed(scriptSource) {
-  const declared = [...scriptSource.matchAll(/^  ([a-zA-Z][a-zA-Z0-9]*):/gm)].map((m) => m[1]);
   const proseStart = scriptSource.indexOf("const PROSE = {");
   const proseEnd = scriptSource.indexOf("\n};", proseStart);
   if (proseStart === -1 || proseEnd === -1) fail("prose gate: the PROSE object was not found, so nothing was checked");
-  const keys = [...scriptSource.slice(proseStart, proseEnd).matchAll(/^  ([a-zA-Z][a-zA-Z0-9]*):/gm)].map((m) => m[1]);
+  const proseBody = scriptSource.slice(proseStart, proseEnd);
+  const keys = [...proseBody.matchAll(/^  ([a-zA-Z][a-zA-Z0-9]*):/gm)].map((m) => m[1]);
   if (keys.length === 0) fail("prose gate: PROSE parsed to zero keys, so the scan is broken");
+
   const unused = keys.filter((k) => !new RegExp(`PROSE\\.${k}\\b`).test(scriptSource));
   if (unused.length) {
     fail(
@@ -1589,7 +1774,97 @@ function assertProseIsAllUsed(scriptSource) {
       `Render it or delete it.`
     );
   }
-  void declared;
+
+  // The converse, and the reason this gate existed without working. The old
+  // form computed a `declared` list, never compared anything to it, and threw it
+  // away with `void declared;`. It proved declared-implies-used and not
+  // used-implies-declared, so renderConnect could ask for PROSE.connect, which
+  // has never existed, and rich(undefined) shipped an empty lead paragraph on
+  // the console's own landing page from the page split until now. A gate written
+  // and then discarded is a gate that cannot fail.
+  const declared = new Set(keys);
+  const referenced = new Set([...scriptSource.matchAll(/PROSE\.([a-zA-Z][a-zA-Z0-9]*)\b/g)].map((m) => m[1]));
+  const undeclared = [...referenced].filter((k) => !declared.has(k));
+  if (undeclared.length) {
+    fail(
+      `prose gate: PROSE.${undeclared.join(", PROSE.")} ${undeclared.length === 1 ? "is" : "are"} rendered and never ` +
+      `declared. rich() of an absent key returns the empty string, so the page ships a silently empty element ` +
+      `rather than failing. Declare the key or fix the reference.`
+    );
+  }
+}
+
+/**
+ * No hand-written sentence states a number the page also derives.
+ *
+ * PROSE exists on the stated ground that hand-written content is where facts
+ * rot. A number inside one of those strings is the sharpest case: the page then
+ * publishes the same count twice, once derived and once typed, and the two are
+ * free to diverge without anything noticing. That is not hypothetical. "Five
+ * discrepancies are known" sat in a PROSE string against a derived nine, on the
+ * same surface as a sentence reading "There are 9 of those today", because the
+ * previous pass moved the intro counts into a generated region and missed the
+ * one inside a string.
+ *
+ * The check is deliberately narrow and it says why. It compares against the set
+ * of values the page ACTUALLY derives, passed in by the caller, rather than
+ * flagging every digit: a version number or a byte count that nothing derives is
+ * a stated configuration fact, and banning those would push them somewhere less
+ * auditable. What it forbids is a typed copy of something already computed.
+ */
+/**
+ * Every count this page computes from the data, with a label. This is the set a
+ * hand-written sentence may not restate.
+ *
+ * Built from the payload rather than listed by hand, so it tracks the data
+ * instead of being a third copy of it.
+ */
+const derivedCounts = (d) => [
+  { value: d.methods.value.length, what: "the method count", from: "data.methods" },
+  { value: d.drift.value.agreedMethodCount, what: "the agreed method count", from: "data.drift" },
+  { value: d.drift.value.sources.length, what: "the drift source count", from: "data.drift.sources" },
+  { value: d.drift.value.knownExceptions.length, what: "the carried exception count", from: "data.drift.knownExceptions" },
+  { value: d.errorCodes.value.length, what: "the JSON-RPC error code count", from: "data.errorCodes" },
+  { value: d.httpRejections.value.length, what: "the HTTP rejection count", from: "data.httpRejections" },
+  { value: d.sourceLimits.value.length, what: "the limit count", from: "data.sourceLimits" },
+  { value: d.txTypes.value.length, what: "the transaction type count", from: "data.txTypes" },
+  { value: d.signalTypes.value.length, what: "the signal type count", from: "data.signalTypes" },
+  { value: d.memoryObjectTypes.value.length, what: "the memory object type count", from: "data.memoryObjectTypes" },
+];
+
+function assertProseNumbersAreNotDerivable(derived) {
+  const spelled = new Map([
+    ["one", 1], ["two", 2], ["three", 3], ["four", 4], ["five", 5], ["six", 6],
+    ["seven", 7], ["eight", 8], ["nine", 9], ["ten", 10], ["eleven", 11], ["twelve", 12],
+    ["thirteen", 13], ["fourteen", 14], ["fifteen", 15], ["sixteen", 16], ["seventeen", 17],
+    ["eighteen", 18], ["nineteen", 19], ["twenty", 20], ["twenty-nine", 29],
+  ]);
+  const byValue = new Map(derived.map((d) => [d.value, d]));
+  const problems = [];
+  for (const [key, text] of Object.entries(PROSE)) {
+    const seen = new Set();
+    // A date is not a count, and an error code is not a count. Both were read
+    // as ones: "2026-08-29" yielded 29 and collided with the method count. A
+    // gate that reports a date as a duplicated method count is a gate that gets
+    // switched off, so the two shapes are removed before the scan rather than
+    // argued with afterwards.
+    const scanned = String(text)
+      .replace(/\b\d{4}-\d{2}-\d{2}\b/g, " ")
+      .replace(/-3\d{4}\b/g, " ");
+    for (const m of scanned.matchAll(/\b(\d[\d,]*)\b/g)) seen.add(Number(m[1].replace(/,/g, "")));
+    for (const [word, n] of spelled) {
+      if (new RegExp(`\\b${word}\\b`, "i").test(text)) seen.add(n);
+    }
+    for (const n of seen) {
+      const hit = byValue.get(n);
+      if (hit) problems.push(`PROSE.${key} states ${n}, which the page derives as ${hit.what} (${hit.from})`);
+    }
+  }
+  if (problems.length) {
+    console.error("console-html: prose gate: a hand-written sentence states a derived number:");
+    for (const p of problems) console.error(`  ${p}`);
+    fail("a typed number duplicates one the page computes, and the two can diverge without anything noticing");
+  }
 }
 
 function render(html, data, page) {
@@ -1685,7 +1960,13 @@ function assertShellsAgree(pages) {
     }
     return shell
       .replace(/<title>[^<]*<\/title>/, "<title>T</title>")
-      .replace(/(<meta property="og:title" content=")[^"]*(")/, "$1T$2");
+      .replace(/(<meta property="og:title" content=")[^"]*(")/, "$1T$2")
+      // The robots value is per-page by design, exactly like the title.
+      // all.html carries "noindex, follow" permanently: it is an eight-to-one
+      // aggregate, so it has no single canonical target, and the ruling is that
+      // it stays out of an index while its links still carry. Normalised here so
+      // the gate compares the shell rather than re-litigating that decision.
+      .replace(/(<meta name="robots" content=")[^"]*(")/, "$1R$2");
   };
   const [first, ...rest] = pages;
   const base = shellOf(first.html, first.file);
@@ -1730,13 +2011,42 @@ function assertShellsAgree(pages) {
 const ALL_PAGE = { file: "console/all.html", href: "/console/all.html", label: "everything", sections: [] };
 const NAMES_PAGE = { file: "console/names.html", href: "/console/names.html", label: "index of names", sections: [] };
 
+/**
+ * Re-render the chrome regions of an already-rendered page for a DIFFERENT page
+ * identity.
+ *
+ * The find surfaces take their shell from the rendered landing page, so they
+ * inherited its navigation verbatim: its same-page fragments and its
+ * aria-current marks. names.html therefore shipped four #connect and
+ * #first-call anchors, marked as the current page, neither of which exists on
+ * it, and all.html called two sections "current" on an aggregate that owns no
+ * section.
+ *
+ * Three defects, one mechanism, one fix. The splice is the one assertShellsAgree
+ * already performs to blank these same regions before comparing shells; here it
+ * writes the correct body in rather than removing it.
+ */
+function reRenderChrome(html, data, page, file) {
+  let out = html;
+  for (const r of REGIONS.filter((x) => x.chrome)) {
+    const open = openMarker(r.id);
+    const close = closeMarker(r.id);
+    const a = out.indexOf(open);
+    const b = out.indexOf(close);
+    if (a === -1 || b === -1) fail(`find surface: ${file} is missing the ${r.id} markers, so its nav cannot be re-rendered`);
+    out = out.slice(0, a + open.length) + block(r.id, r.render(data, page)) + out.slice(b);
+  }
+  return out;
+}
+
 /** The shell of an already-rendered page, with a slot where <main>'s body was. */
-function shellFrom(html, file) {
-  const i = html.indexOf('<main id="main"');
-  const j = html.indexOf('<footer class="mt-16');
+function shellFrom(html, file, data, page) {
+  const source = reRenderChrome(html, data, page, file);
+  const i = source.indexOf('<main id="main"');
+  const j = source.indexOf('<footer class="mt-16');
   if (i === -1 || j === -1) fail(`find surface: cannot read the shell out of ${file}`);
-  const open = html.slice(i, html.indexOf(">", i) + 1);
-  return { head: html.slice(0, i) + open, tail: "        " + html.slice(j) };
+  const open = source.slice(i, source.indexOf(">", i) + 1);
+  return { head: source.slice(0, i) + open, tail: "        " + source.slice(j) };
 }
 
 function findSurface(base, title, h1, lead, body, { robots = null } = {}) {
@@ -1755,7 +2065,7 @@ function findSurface(base, title, h1, lead, body, { robots = null } = {}) {
 }
 
 function renderAllPage(d, results) {
-  const base = shellFrom(results[0].html, results[0].file);
+  const base = shellFrom(results[0].html, results[0].file, d, ALL_PAGE);
   const byId = new Map(REGIONS.map((r) => [r.id, r]));
   const body = SECTIONS.map((sec) => {
     const owner = pageOfSection.get(sec.id);
@@ -1787,37 +2097,62 @@ function renderAllPage(d, results) {
 }
 
 function renderNamesPage(d, results) {
-  const base = shellFrom(results[0].html, results[0].file);
+  const base = shellFrom(results[0].html, results[0].file, d, NAMES_PAGE);
 
   // Where a name lives is DERIVED by scanning what each page actually renders,
   // not from a hand-kept table. A table would be a second copy of the page set
   // and would go wrong the first time a section moved.
   const pageOf = new Map();
-  const record = (name, file, href) => {
-    if (!pageOf.has(name)) pageOf.set(name, { file, href });
+  const record = (name, file, href, section) => {
+    if (!pageOf.has(name)) pageOf.set(name, { file, href, section });
   };
+  // A SCREAMING_SNAKE run inside a path or a filename is not a constant. The
+  // harvest read RPC_REFERENCE out of the path docs/RPC_REFERENCE.md in a
+  // provenance line and published it as a constant occurring zero times in
+  // crates/ or sdk/. Paths are removed before the scan rather than filtered
+  // after it, so a name cannot be recovered from one by a different route.
   const CONSTANT = /\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/g;
+  const PATHLIKE = /\S*\/\S*|\b\S+\.(?:md|rs|py|ts|toml|json|mjs|html)\b/g;
+  //
+  // Scanned per SECTION rather than per page, so a row can carry a fragment and
+  // land the reader on the block that holds the name instead of at the top of a
+  // page 195 kB long.
   for (const r of results) {
-    const text = r.html.replace(/<[^>]+>/g, " ");
-    for (const m of text.matchAll(CONSTANT)) record(m[0], r.file, r.href);
+    for (const sectionId of r.sections) {
+      const open = `<section id="${sectionId}"`;
+      const a = r.html.indexOf(open);
+      if (a === -1) continue;
+      const next = r.sections
+        .map((s) => (s === sectionId ? -1 : r.html.indexOf(`<section id="${s}"`)))
+        .filter((i) => i > a);
+      const b = next.length ? Math.min(...next) : r.html.indexOf('<footer class="mt-16');
+      const text = r.html.slice(a, b === -1 ? undefined : b).replace(/<[^>]+>/g, " ").replace(PATHLIKE, " ");
+      for (const m of text.matchAll(CONSTANT)) record(m[0], r.file, r.href, sectionId);
+    }
   }
 
   const rows = [];
   const link = (text, href) => `<a class="text-brand-text no-underline hover:underline" href="${esc(href)}">${esc(text)}</a>`;
 
+  // The Where column names the SECTION, which is what the navigation on every
+  // page is keyed on, so a reader can find it. It used to name the page, and one
+  // of those page labels was "get started", which appears in no navigation on
+  // any page: the index told the reader to go somewhere with no name they could
+  // see.
+  const sectionTitle = (id) => SECTIONS.find((s) => s.id === id)?.title ?? id;
+
   for (const m of d.methods.value) {
-    rows.push([link(m.name, hrefToMethod(m.name, NAMES_PAGE)), "method", esc(pageOfSection.get("rpc").label)]);
+    rows.push([link(m.name, hrefToMethod(m.name, NAMES_PAGE)), "method", esc(sectionTitle("rpc"))]);
   }
   for (const t of [...new Set(d.methods.value.flatMap((m) => m.result?.recordTypes ?? []))].sort()) {
-    rows.push([link(t, hrefToRecord(t, NAMES_PAGE)), "record type", esc(pageOfSection.get("rpc").label)]);
+    rows.push([link(t, hrefToRecord(t, NAMES_PAGE)), "record type", esc(sectionTitle("rpc"))]);
   }
   for (const e of [...d.errorCodes.value].sort((a, b) => a.code - b.code)) {
-    rows.push([link(String(e.code), hrefToSection("errors", NAMES_PAGE)), "error code", esc(pageOfSection.get("errors").label)]);
+    rows.push([link(String(e.code), hrefToSection("errors", NAMES_PAGE)), "error code", esc(sectionTitle("errors"))]);
   }
   for (const name of [...pageOf.keys()].sort()) {
     const where = pageOf.get(name);
-    const pg = PAGES.find((x) => x.file === where.file);
-    rows.push([link(name, `${where.href}`), "constant", esc(pg ? pg.label : where.file)]);
+    rows.push([link(name, `${where.href}#${where.section}`), "constant", esc(sectionTitle(where.section))]);
   }
 
   const body = `        ${table([{ label: "Name" }, { label: "Kind" }, { label: "Page" }], rows)}`;
@@ -1832,12 +2167,109 @@ function renderNamesPage(d, results) {
   );
 }
 
+/**
+ * THE CROSS-REFERENCE GATE.
+ *
+ * Every same-page fragment a page emits must resolve on that page, and every
+ * cross-page link must resolve on the page it names.
+ *
+ * This is the class the previous adversarial pass caught and the one before it
+ * missed, and the distinction is worth stating because it decides what a gate
+ * has to do. ENUMERABLE absence is a blank cell in a column you can iterate.
+ * DEREFERENCED absence is content behind a reference you have to follow. A
+ * whole-surface check cannot see it: all eight of the broken references still
+ * resolved on all.html, which concatenates everything, so any scan over the
+ * combined corpus passes while eight real pages are broken.
+ *
+ * A promise the page makes about itself and does not keep is a defect of the
+ * same rank as a false statement, so this fails the build.
+ */
+function assertCrossReferencesResolve(pages) {
+  const idsOf = (html) => new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
+  const byFile = new Map(pages.map((p) => [p.file, idsOf(p.html)]));
+  const problems = [];
+  let checked = 0;
+
+  for (const p of pages) {
+    const ids = byFile.get(p.file);
+    for (const m of p.html.matchAll(/href="([^"]+)"/g)) {
+      const href = m[1];
+      if (!href.includes("#") || href.startsWith("http")) continue;
+      const [path, fragment] = href.split("#");
+      if (!fragment) continue;
+      checked += 1;
+      if (path === "") {
+        if (!ids.has(fragment)) problems.push(`${p.file} links to #${fragment}, which it does not define`);
+        continue;
+      }
+      // A cross-page link names a page by href; resolve it to that page's file.
+      const target = pages.find((x) => x.href === path || `/${x.file}` === path);
+      if (!target) {
+        problems.push(`${p.file} links to ${href}, and no console page has that address`);
+        continue;
+      }
+      if (!byFile.get(target.file).has(fragment)) {
+        problems.push(`${p.file} links to ${href}, and ${target.file} does not define #${fragment}`);
+      }
+    }
+  }
+
+  // A scan that finds nothing to check reports "no defect" indistinguishably
+  // from "the pattern stopped matching", which is how three separate scans in
+  // the previous gate passed on defects that were already confirmed by hand.
+  if (checked === 0) {
+    fail("cross-reference gate: zero fragment links were examined, so the scan is broken rather than the pages clean");
+  }
+  if (problems.length) {
+    console.error("console-html: cross-reference gate: a page promises content it does not reach:");
+    for (const pr of problems) console.error(`  ${pr}`);
+    fail("a cross-reference does not resolve");
+  }
+  return checked;
+}
+
+/**
+ * "Below" means below, on this page.
+ *
+ * The word is a promise about layout, and the page split turned five of them
+ * false at once. Prose that says "below" while pointing at another page is
+ * checked here; a quotation of the reference that says it is answered by a note
+ * underneath that names the real page, which is what SCHEMA_XREFS renders.
+ */
+function assertBelowMeansBelow(pages) {
+  const problems = [];
+  for (const p of pages) {
+    // Prose only. A code fence is a quotation of docs/RPC_REFERENCE.md and is
+    // not rewritten; SCHEMA_XREFS resolves those in the page's own voice, and
+    // the check below requires that resolution to be present.
+    const prose = p.html.replace(/<pre[\s\S]*?<\/pre>/g, " ");
+    for (const x of SCHEMA_XREFS) {
+      if (!p.html.includes(x.phrase)) continue;
+      const owner = pageOfSection.get(x.section);
+      const wanted = owner.file === p.file ? `#${x.fragment}` : `${owner.href}#${x.fragment}`;
+      if (!p.html.includes(`href="${wanted}"`)) {
+        problems.push(
+          `${p.file} quotes "${x.phrase}" and carries no link to ${wanted}. The fence is a quotation and is left ` +
+          `alone; the page has to resolve it in its own voice underneath.`
+        );
+      }
+    }
+    void prose;
+  }
+  if (problems.length) {
+    console.error("console-html: cross-reference gate: a quoted reference to elsewhere is unresolved:");
+    for (const pr of problems) console.error(`  ${pr}`);
+    fail("a schema comment points off the page with nothing resolving it");
+  }
+}
+
 function main() {
   const args = parseArgs(process.argv);
   assertProseIsAllUsed(readFileSync(fileURLToPath(import.meta.url), "utf8"));
   if (!existsSync(args.data)) fail(`${args.data} not found; run npm run console:data first`);
 
   const data = JSON.parse(readFileSync(args.data, "utf8"));
+  assertProseNumbersAreNotDerivable(derivedCounts(data));
 
   const results = [];
   for (const page of PAGES) {
@@ -1851,12 +2283,27 @@ function main() {
   assertGlobalRegionCoverage(results.map((r) => [r.file, r.foundIds]));
   assertShellsAgree(results);
 
-  // The two generated find surfaces are written whole, so they carry no markers
-  // and cannot be hand-edited into disagreement with the pages they index.
+  // The two generated find surfaces are written whole and byte-compared by
+  // --check, so they cannot be hand-edited into disagreement with the pages they
+  // index. They do carry the chrome markers, inherited with the shell they are
+  // built from. An earlier comment here claimed they carry no markers, which was
+  // false on the page: each carries four. The guarantee is the byte comparison,
+  // not the absence of markers, and it is stated as the thing that is true.
   const generated = [
-    { file: ALL_PAGE.file, html: renderAllPage(data, results) },
-    { file: NAMES_PAGE.file, html: renderNamesPage(data, results) },
+    { ...ALL_PAGE, html: renderAllPage(data, results) },
+    { ...NAMES_PAGE, html: renderNamesPage(data, results) },
   ];
+
+  // Run over the eight real pages AND the two find surfaces. The find surfaces
+  // were never passed to a shell or reference check before, which is how they
+  // came to carry four dead anchors marked as the current page.
+  const everyPage = [...results, ...generated];
+  const linksChecked = assertCrossReferencesResolve(everyPage);
+  assertBelowMeansBelow(everyPage);
+  // The find surfaces go through the shell gate too. It only ever saw the eight
+  // real pages, which is why their navigation could drift from every other
+  // page's without anything noticing.
+  assertShellsAgree(everyPage);
 
   if (args.check) {
     for (const r of results) {

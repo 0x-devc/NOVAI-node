@@ -53,7 +53,7 @@ Index of names | NOVAI developer console
 
  Index of names
 
- Every method, record type, error code and named constant on this console, and the page that holds it. 89 entries. Built by scanning what each page renders, so a name cannot appear here and be missing from the page it points at.
+ Every method, record type, error code and named constant on this console, and the page that holds it. 88 entries. Built by scanning what each page renders, so a name cannot appear here and be missing from the page it points at.
 
  Name | Kind | Page |
 
@@ -163,7 +163,7 @@ Index of names | NOVAI developer console
 
  MAX_CONCURRENT_RPC | constant | errors and limits |
 
- MAX_INDEX_ENTRIES | constant | network |
+ MAX_INDEX_ENTRIES | constant | network parameters |
 
  MAX_RPC_BODY_SIZE | constant | errors and limits |
 
@@ -209,7 +209,7 @@ Index of names | NOVAI developer console
 
  PROOF_TYPE_GROTH16_REGISTERED | constant | ai entities |
 
- PRUNE_RETAIN_BLOCKS | constant | network |
+ PRUNE_RETAIN_BLOCKS | constant | network parameters |
 
  REP_DELTA_SLA_VIOLATION_TRIGGERED | constant | ai entities |
 
@@ -220,8 +220,6 @@ Index of names | NOVAI developer console
  REP_EVENT_PAYMENT_FAILED | constant | ai entities |
 
  REP_EVENT_PROOF_VERIFIED | constant | ai entities |
-
- RPC_REFERENCE | constant | get started |
 
  SLA_STATUS_ACTIVE | constant | ai entities |
 

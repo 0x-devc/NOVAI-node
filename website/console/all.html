@@ -63,8 +63,8 @@
 
       <!-- @@console-generated:nav-chips@@ -->
         <nav aria-label="Sections" class="flex gap-1.5 overflow-x-auto border-t border-line-subtle px-4 py-2 lg:hidden sm:px-6">
-        <a href="#connect" class="console-chip" aria-current="true">01 connect</a>
-        <a href="#first-call" class="console-chip" aria-current="true">02 first call</a>
+        <a href="/console.html#connect" class="console-chip">01 connect</a>
+        <a href="/console.html#first-call" class="console-chip">02 first call</a>
         <a href="/console/rpc.html#rpc" class="console-chip">03 rpc reference</a>
         <a href="/console/errors.html#errors" class="console-chip">04 errors and limits</a>
         <a href="/console/transactions.html#transactions" class="console-chip">05 transactions</a>
@@ -89,8 +89,8 @@
           <div class="sticky top-[3.25rem] py-6">
             <p class="px-4 pb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-low">sections</p>
             <ul class="list-none space-y-px p-0">
-            <li><a href="#connect" class="console-rail" aria-current="true"><span class="console-rail-n">01</span> connect</a></li>
-            <li><a href="#first-call" class="console-rail" aria-current="true"><span class="console-rail-n">02</span> first call</a></li>
+            <li><a href="/console.html#connect" class="console-rail"><span class="console-rail-n">01</span> connect</a></li>
+            <li><a href="/console.html#first-call" class="console-rail"><span class="console-rail-n">02</span> first call</a></li>
             <li><a href="/console/rpc.html#rpc" class="console-rail"><span class="console-rail-n">03</span> rpc reference</a></li>
             <li><a href="/console/errors.html#errors" class="console-rail"><span class="console-rail-n">04</span> errors and limits</a></li>
             <li><a href="/console/transactions.html#transactions" class="console-rail"><span class="console-rail-n">05</span> transactions</a></li>
@@ -109,7 +109,7 @@
         </nav>
         <!-- @@console-generated:/nav-rail@@ -->
 
-      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+      <main id="main" tabindex="-1" class="min-w-0 px-4 py-8 sm:px-6">
         <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
           Everything on one page
         </h1>
@@ -118,7 +118,7 @@
           <h2 class="console-h2"><span class="console-h2-n">01</span> connect
             <a class="console-canonical" href="/console.html#connect">on its own page</a>
           </h2>
-        <p class="console-lead"></p>
+        <p class="console-lead">One HTTPS endpoint, no key and no signup. Every example below is a real call, and the responses on this page were captured by running them.</p>
         <pre class="console-pre" data-lang="shell"><code><span class="tok-cmd">URL</span><span class="tok-punct">=</span><span class="tok-url">https://rpc.novai.network</span>
 
 <span class="tok-cmd">curl</span> <span class="tok-flag">-s</span> <span class="tok-flag">-X</span> POST <span class="tok-var">$URL</span> <span class="tok-flag">-H</span> <span class="tok-str">'Content-Type: application/json'</span> <span class="tok-punct">\</span>
@@ -153,16 +153,16 @@
         <pre class="console-pre-out" data-lang="schema"><code><span class="tok-punct">{</span><span class="tok-prop">&quot;jsonrpc&quot;</span><span class="tok-punct">:</span><span class="tok-str">&quot;2.0&quot;</span><span class="tok-punct">,</span><span class="tok-prop">&quot;result&quot;</span><span class="tok-punct">:{</span><span class="tok-prop">&quot;block_hash&quot;</span><span class="tok-punct">:</span><span class="tok-str">&quot;6b4ef2adc610656969ca65c94c057ddcb5eafa3c441de14d95b931aac066a8e9&quot;</span><span class="tok-punct">,</span><span class="tok-prop">&quot;height&quot;</span><span class="tok-punct">:</span><span class="tok-num">5225248</span><span class="tok-punct">,</span><span class="tok-prop">&quot;parent_hash&quot;</span><span class="tok-punct">:</span><span class="tok-str">&quot;0c6582e4ef81f793266ae8d46642f9acd9c314bc7947ef2e57142a2f3a0981c1&quot;</span><span class="tok-punct">,</span><span class="tok-prop">&quot;round&quot;</span><span class="tok-punct">:</span><span class="tok-num">0</span><span class="tok-punct">,</span><span class="tok-prop">&quot;state_root&quot;</span><span class="tok-punct">:</span><span class="tok-str">&quot;2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e&quot;</span><span class="tok-punct">,</span><span class="tok-prop">&quot;tx_count&quot;</span><span class="tok-punct">:</span><span class="tok-num">0</span><span class="tok-punct">},</span><span class="tok-prop">&quot;id&quot;</span><span class="tok-punct">:</span><span class="tok-num">1</span><span class="tok-punct">}</span></code></pre>
         <h3 class="console-h3">python</h3>
         <p class="console-note">Standard library only. No pip install.</p>
-        <pre class="console-pre" data-lang="none"><code>import json, urllib.request
+        <pre class="console-pre" data-lang="none"><code>import json<span class="tok-punct">,</span> urllib<span class="tok-punct">.</span>request
 
-req = urllib.request.Request(
-    &quot;https://rpc.novai.network&quot;,
-    data=json.dumps({&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;method&quot;: &quot;novai_getLatestBlock&quot;,
-                     &quot;params&quot;: {}, &quot;id&quot;: 1}).encode(),
-    headers={&quot;Content-Type&quot;: &quot;application/json&quot;},
-)
-with urllib.request.urlopen(req, timeout=10) as r:
-    print(json.dumps(json.load(r)[&quot;result&quot;], indent=2))</code></pre>
+req <span class="tok-punct">=</span> urllib<span class="tok-punct">.</span>request<span class="tok-punct">.</span>Request<span class="tok-punct">(</span>
+    <span class="tok-str">&quot;https://rpc.novai.network&quot;</span><span class="tok-punct">,</span>
+    data<span class="tok-punct">=</span>json<span class="tok-punct">.</span>dumps<span class="tok-punct">({</span><span class="tok-str">&quot;jsonrpc&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;2.0&quot;</span><span class="tok-punct">,</span> <span class="tok-str">&quot;method&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;novai_getLatestBlock&quot;</span><span class="tok-punct">,</span>
+                     <span class="tok-str">&quot;params&quot;</span><span class="tok-punct">:</span> <span class="tok-punct">{},</span> <span class="tok-str">&quot;id&quot;</span><span class="tok-punct">:</span> <span class="tok-num">1</span><span class="tok-punct">}).</span>encode<span class="tok-punct">(),</span>
+    headers<span class="tok-punct">={</span><span class="tok-str">&quot;Content-Type&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;application/json&quot;</span><span class="tok-punct">},</span>
+<span class="tok-punct">)</span>
+with urllib<span class="tok-punct">.</span>request<span class="tok-punct">.</span>urlopen<span class="tok-punct">(</span>req<span class="tok-punct">,</span> timeout<span class="tok-punct">=</span><span class="tok-num">10</span><span class="tok-punct">)</span> as r<span class="tok-punct">:</span>
+    print<span class="tok-punct">(</span>json<span class="tok-punct">.</span>dumps<span class="tok-punct">(</span>json<span class="tok-punct">.</span>load<span class="tok-punct">(</span>r<span class="tok-punct">)[</span><span class="tok-str">&quot;result&quot;</span><span class="tok-punct">],</span> indent<span class="tok-punct">=</span><span class="tok-num">2</span><span class="tok-punct">))</span></code></pre>
         <pre class="console-pre-out" data-lang="schema"><code><span class="tok-punct">{</span>
   <span class="tok-prop">&quot;block_hash&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;8cec80e8dc7b2e77b1e43314bda2f2570aaad82fb02c4afa9a1d35990177d802&quot;</span><span class="tok-punct">,</span>
   <span class="tok-prop">&quot;height&quot;</span><span class="tok-punct">:</span> <span class="tok-num">5225249</span><span class="tok-punct">,</span>
@@ -173,30 +173,30 @@ with urllib.request.urlopen(req, timeout=10) as r:
 <span class="tok-punct">}</span></code></pre>
         <h3 class="console-h3">rust</h3>
         <p class="console-note">A standalone cargo project with one dependency. This needs a build step, which the two above do not, so it is the third path rather than the first. It does not use the NOVAI Rust SDK, because that SDK depends on the workspace crates by path and so cannot be built outside a clone of the repository.</p>
-        <pre class="console-pre" data-lang="none"><code>// Cargo.toml
-// [dependencies]
-// reqwest = { version = &quot;0.12&quot;, features = [&quot;blocking&quot;, &quot;json&quot;] }
-// serde_json = &quot;1&quot;
+        <pre class="console-pre" data-lang="none"><code><span class="tok-comment">// Cargo.toml</span>
+<span class="tok-comment">// [dependencies]</span>
+<span class="tok-comment">// reqwest = { version = &quot;0.12&quot;, features = [&quot;blocking&quot;, &quot;json&quot;] }</span>
+<span class="tok-comment">// serde_json = &quot;1&quot;</span>
 
-use std::error::Error;
+use std<span class="tok-punct">::</span>error<span class="tok-punct">::</span>Error<span class="tok-punct">;</span>
 
-fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
-    let body = serde_json::json!({
-        &quot;jsonrpc&quot;: &quot;2.0&quot;,
-        &quot;method&quot;: &quot;novai_getLatestBlock&quot;,
-        &quot;params&quot;: {},
-        &quot;id&quot;: 1
-    });
+fn main<span class="tok-punct">()</span> <span class="tok-punct">-&gt;</span> Result<span class="tok-punct">&lt;(),</span> Box<span class="tok-punct">&lt;</span>dyn Error<span class="tok-punct">&gt;&gt;</span> <span class="tok-punct">{</span>
+    let body <span class="tok-punct">=</span> serde_json<span class="tok-punct">::</span>json<span class="tok-punct">!({</span>
+        <span class="tok-str">&quot;jsonrpc&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;2.0&quot;</span><span class="tok-punct">,</span>
+        <span class="tok-str">&quot;method&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;novai_getLatestBlock&quot;</span><span class="tok-punct">,</span>
+        <span class="tok-str">&quot;params&quot;</span><span class="tok-punct">:</span> <span class="tok-punct">{},</span>
+        <span class="tok-str">&quot;id&quot;</span><span class="tok-punct">:</span> <span class="tok-num">1</span>
+    <span class="tok-punct">});</span>
 
-    let resp: serde_json::Value = reqwest::blocking::Client::new()
-        .post(&quot;https://rpc.novai.network&quot;)
-        .json(&amp;body)
-        .send()?
-        .json()?;
+    let resp<span class="tok-punct">:</span> serde_json<span class="tok-punct">::</span>Value <span class="tok-punct">=</span> reqwest<span class="tok-punct">::</span>blocking<span class="tok-punct">::</span>Client<span class="tok-punct">::</span>new<span class="tok-punct">()</span>
+        <span class="tok-punct">.</span>post<span class="tok-punct">(</span><span class="tok-str">&quot;https://rpc.novai.network&quot;</span><span class="tok-punct">)</span>
+        <span class="tok-punct">.</span>json<span class="tok-punct">(&amp;</span>body<span class="tok-punct">)</span>
+        <span class="tok-punct">.</span>send<span class="tok-punct">()?</span>
+        <span class="tok-punct">.</span>json<span class="tok-punct">()?;</span>
 
-    println!(&quot;{}&quot;, serde_json::to_string_pretty(&amp;resp[&quot;result&quot;])?);
-    Ok(())
-}</code></pre>
+    println<span class="tok-punct">!(</span><span class="tok-str">&quot;{}&quot;</span><span class="tok-punct">,</span> serde_json<span class="tok-punct">::</span>to_string_pretty<span class="tok-punct">(&amp;</span>resp<span class="tok-punct">[</span><span class="tok-str">&quot;result&quot;</span><span class="tok-punct">])?);</span>
+    Ok<span class="tok-punct">(())</span>
+<span class="tok-punct">}</span></code></pre>
         <pre class="console-pre-out" data-lang="schema"><code><span class="tok-punct">{</span>
   <span class="tok-prop">&quot;block_hash&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;4c065392ab83658711dc3df2ade2bda953c33a1a4f5d0e884439b6a9548ed1a3&quot;</span><span class="tok-punct">,</span>
   <span class="tok-prop">&quot;height&quot;</span><span class="tok-punct">:</span> <span class="tok-num">5225251</span><span class="tok-punct">,</span>
@@ -645,6 +645,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
     <span class="tok-prop">&quot;last_upgrade_height&quot;</span><span class="tok-punct">:</span>      <span class="tok-ph">&lt;u64&gt;</span>               <span class="tok-comment">// block height of the most recent upgrade; 0 if never upgraded</span>
   <span class="tok-punct">}</span>
 <span class="tok-punct">}</span></code></pre>
+        <p class="console-note">The comments above say "below". That was true when this console was one page. <a class="text-brand-text no-underline hover:underline" href="/console/entities.html#capability-bits">Capabilities</a> is on the ai entities page.</p>
               <h3 class="console-h3">example</h3>
               
               <pre class="console-pre" data-lang="shell"><code><span class="tok-cmd">curl</span> <span class="tok-flag">-s</span> <span class="tok-flag">-X</span> POST <span class="tok-var">$URL</span> <span class="tok-flag">-H</span> <span class="tok-str">'Content-Type: application/json'</span> <span class="tok-punct">\</span>
@@ -715,6 +716,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
     <span class="tok-punct">}</span>
   <span class="tok-punct">]</span>
 <span class="tok-punct">}</span></code></pre>
+        <p class="console-note">The comments above say "below". That was true when this console was one page. <a class="text-brand-text no-underline hover:underline" href="/console/entities.html#memory-types">Memory types</a> is on the ai entities page.</p>
               <h3 class="console-h3">example</h3>
               
               <pre class="console-pre" data-lang="shell"><code><span class="tok-cmd">curl</span> <span class="tok-flag">-s</span> <span class="tok-flag">-X</span> POST <span class="tok-var">$URL</span> <span class="tok-flag">-H</span> <span class="tok-str">'Content-Type: application/json'</span> <span class="tok-punct">\</span>
@@ -778,6 +780,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
     <span class="tok-punct">}</span>
   <span class="tok-punct">]</span>
 <span class="tok-punct">}</span></code></pre>
+        <p class="console-note">The comments above say "below". That was true when this console was one page. <a class="text-brand-text no-underline hover:underline" href="/console/entities.html#signal-types">Signal types</a> is on the ai entities page.</p>
         <p class="console-note">Record shape declared once for Signal methods and shared by every method in it.</p>
               <h3 class="console-h3">example</h3>
               
@@ -842,6 +845,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
     <span class="tok-punct">}</span>
   <span class="tok-punct">]</span>
 <span class="tok-punct">}</span></code></pre>
+        <p class="console-note">The comments above say "below". That was true when this console was one page. <a class="text-brand-text no-underline hover:underline" href="/console/entities.html#signal-types">Signal types</a> is on the ai entities page.</p>
         <p class="console-note">Record shape declared once for Signal methods and shared by every method in it.</p>
               <h3 class="console-h3">example</h3>
               
@@ -893,6 +897,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
     <span class="tok-punct">}</span>
   <span class="tok-punct">]</span>
 <span class="tok-punct">}</span></code></pre>
+        <p class="console-note">The comments above say "below". That was true when this console was one page. <a class="text-brand-text no-underline hover:underline" href="/console/entities.html#signal-types">Signal types</a> is on the ai entities page.</p>
         <p class="console-note">Record shape declared once for Signal methods and shared by every method in it.</p>
               <h3 class="console-h3">example</h3>
               
@@ -1789,7 +1794,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
           <h2 class="console-h2"><span class="console-h2-n">04</span> errors and limits
             <a class="console-canonical" href="/console/errors.html#errors">on its own page</a>
           </h2>
-        <p class="console-lead">Thirteen JSON-RPC error codes, four HTTP-level rejections that carry no JSON-RPC envelope at all, and six limits.</p>
+        <p class="console-lead">Every JSON-RPC error code, the HTTP-level rejections that carry no JSON-RPC envelope at all, and the limits that produce them. thirteen JSON-RPC error codes, four HTTP-level rejections, and six limits.</p>
         <h3 class="console-h3">json-rpc error codes</h3>
         <div class="console-scroll">
           <table class="console-table">
@@ -1812,7 +1817,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
           </table>
         </div>
         <p class="console-note"><span class="console-pill">correction</span> A missing <code class="text-ink-mid">jsonrpc</code> or <code class="text-ink-mid">method</code> field answers <code class="text-ink-mid">-32700</code>, not this code, because every field of the request struct is required and a missing one fails to deserialize. <code class="text-ink-mid">-32600</code> is what you get when <code class="text-ink-mid">jsonrpc</code> is present and is not <code class="text-ink-mid">&quot;2.0&quot;</code>. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 19.</span></p>
-        <p class="console-note">One of these thirteen is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.</p>
+        <p class="console-note">One of these codes is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.</p>
         <h3 class="console-h3">http rejections with no json-rpc envelope</h3>
         <div class="console-scroll">
           <table class="console-table">
@@ -1825,7 +1830,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             </tbody>
           </table>
         </div>
-        <p class="console-note">These four never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.</p>
+        <p class="console-note">These never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.</p>
         <h3 class="console-h3">limits</h3>
         <div class="console-scroll">
           <table class="console-table">
@@ -1871,7 +1876,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
         </div>
         <figure class="console-figure">
           <svg viewBox="0 0 544 258" width="544" height="258" role="img" aria-labelledby="fee-ladder-desc" class="console-chart">
-            <desc id="fee-ladder-desc">Minimum fee by transaction type, sorted high to low. The most expensive, entityUpgrade, costs 5,000, which is 50 times the cheapest, transfer, at 100. Every value is in the table above.</desc>
+            <desc id="fee-ladder-desc">Minimum fee by transaction type, sorted high to low. The three most expensive, entityUpgrade, registerAiEntity and registerAiEntityWithKey, tie at 5,000, which is 50 times the two cheapest, creditAiEntity and transfer, which tie at 100. Every value is in the table above.</desc>
             <text x="182" y="13" text-anchor="end" class="fee-label">entityUpgrade</text><rect x="190" y="0" width="300" height="18" rx="2" class="fee-bar" /><text x="496" y="13" class="fee-value">5,000</text>
             <text x="182" y="37" text-anchor="end" class="fee-label">registerAiEntity</text><rect x="190" y="24" width="300" height="18" rx="2" class="fee-bar" /><text x="496" y="37" class="fee-value">5,000</text>
             <text x="182" y="61" text-anchor="end" class="fee-label">registerAiEntityWithKey</text><rect x="190" y="48" width="300" height="18" rx="2" class="fee-bar" /><text x="496" y="61" class="fee-value">5,000</text>
@@ -1924,16 +1929,16 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             <a class="console-canonical" href="/console/entities.html#ai-entities">on its own page</a>
           </h2>
         <p class="console-lead">AI entities are the part of this chain that has no equivalent elsewhere. Three worked flows first, then the full enumerations.</p>
-        <p class="console-note">These describe what the implementation does, with every constant cited to its declaration. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.</p>
+        <p class="console-note">These describe what the implementation does. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.</p>
         <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
           <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">a reputation oracle</p>
           <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
             <li>A reputation oracle issues <code>ReputationUpdate</code> signals, signal type 7. Each one moves a target entity's <code>reputation_score</code>, which the chain stores on the entity record and clamps to a 0 to 100 range. A newly registered entity starts at 50.</li>
             <li>Issuing one requires the <code>submit_reputation_updates</code> capability, bit 5 of the entity's capability byte.</li>
-            <li>The payload is 101 bytes: the 66-byte signal commitment base plus a 35-byte tail carrying the target entity id, an event type and a signed two-byte delta.</li>
+            <li>The payload is 101 bytes: the 66-byte signal commitment base <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1187">crates/execution/src/lib.rs:1187</a> plus a 35-byte tail <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1191">crates/execution/src/lib.rs:1191</a> carrying the target entity id, an event type and a signed two-byte delta.</li>
             <li>The event type must be 0 to 12.</li>
             <li>An entity cannot rate itself.</li>
-            <li>The fee is 1,000 base units, the signal commitment minimum.</li>
+            <li>The fee is 1,000 base units, the signal commitment minimum. <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L12328">crates/execution/src/lib.rs:12328</a></li>
             <li>The effect is checkable in one read: <code>novai_getAiEntity</code> returns <code>reputation_score</code> and <code>reputation_events_count</code>.</li>
           </ul>
         </div>
@@ -1942,8 +1947,8 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
           <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
             <li>A seller publishes a <code>SignalCatalog</code> memory object, type 7, listing priced offerings. A catalog holds at most 10 offerings, each 10 bytes: a signal type, a price as a big-endian u64, and an active flag.</li>
             <li>A buyer issues a <code>SignalPurchase</code> signal, type 8, naming the seller, the signal type wanted and a maximum price. The chain rejects the purchase if the catalog price is above that maximum.</li>
-            <li>On success the chain moves the price from the buyer's <code>economic_balance</code> to the seller's, less a 2% cut routed to the marketplace treasury.</li>
-            <li>The payload is 107 bytes: the 66-byte base plus a 41-byte tail.</li>
+            <li>On success the chain moves the price from the buyer's <code>economic_balance</code> to the seller's, less a 2% cut routed to the marketplace treasury. <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L12443">crates/execution/src/lib.rs:12443</a></li>
+            <li>The payload is 107 bytes: the 66-byte base <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1187">crates/execution/src/lib.rs:1187</a> plus a 41-byte tail <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1199">crates/execution/src/lib.rs:1199</a>.</li>
             <li><strong>Publishing a catalog requires no stake.</strong> A listing is not a bond, and a buyer should not read it as one.</li>
             <li>The marketplace treasury is not readable over RPC. No method returns it.</li>
           </ul>
@@ -1951,15 +1956,16 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
         <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
           <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">staking collateral</p>
           <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
-            <li>A <code>StakeDeposit</code> signal, type 9, moves an amount from an entity's <code>economic_balance</code> into its <code>stake_balance</code>. The payload is 82 bytes: the 66-byte base plus a 16-byte big-endian u128 amount.</li>
-            <li>A deposit locks for 1,000 blocks. <code>stake_locked_until</code> is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time; the cadence in the network section converts it.</li>
-            <li>Withdrawal is a <code>StakeWithdraw</code> signal, type 10, with the same 82-byte layout. A partial withdrawal does not re-lock the remainder.</li>
-            <li>A <code>StakeSlash</code> signal, type 11, issued by an entity holding <code>submit_reputation_updates</code>, subtracts up to a named amount from the target's <code>stake_balance</code> and applies a bundled reputation event in the same operation. The payload is 117 bytes.</li>
+            <li>A <code>StakeDeposit</code> signal, type 9, moves an amount from an entity's <code>economic_balance</code> into its <code>stake_balance</code>. The payload is 82 bytes: the 66-byte base <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1187">crates/execution/src/lib.rs:1187</a> plus a 16-byte big-endian u128 amount <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1207">crates/execution/src/lib.rs:1207</a>.</li>
+            <li>A deposit locks for 1,000 blocks. <code>stake_locked_until</code> is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time. It is not converted to wall-clock time anywhere on this console, because block cadence has moved by more than 4x inside a week on this chain: divide by a rate you measure yourself.</li>
+            <li>Withdrawal is a <code>StakeWithdraw</code> signal, type 10, with the same 82-byte layout <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1215">crates/execution/src/lib.rs:1215</a>. A partial withdrawal does not re-lock the remainder.</li>
+            <li>A <code>StakeSlash</code> signal, type 11, issued by an entity holding <code>submit_reputation_updates</code>, subtracts up to a named amount from the target's <code>stake_balance</code> and applies a bundled reputation event in the same operation. The payload is 117 bytes <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1223">crates/execution/src/lib.rs:1223</a>.</li>
             <li>An entity cannot slash itself.</li>
             <li><code>economic_balance</code>, <code>stake_balance</code> and <code>stake_locked_until</code> are all readable from <code>novai_getAiEntity</code>, and every stake operation appears in the signal index.</li>
           </ul>
         </div>
-        <h3 class="console-h3">capability bits</h3>
+        <p class="console-note">Every constant above is cited to the line that declares it: 10 citations across 8 declarations. Capability bit numbers are the exception and carry no link, because they come from a bitflags declaration with no per-bit line to point at.</p>
+        <h3 class="console-h3" id="capability-bits">capability bits</h3>
         <div class="console-scroll">
           <table class="console-table">
             <thead><tr><th scope="col" class="text-right">Bit</th><th scope="col">Hex</th><th scope="col">Capability</th></tr></thead>
@@ -1975,7 +1981,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
           </table>
         </div>
         <p class="console-note">Capabilities are one byte, set at registration, and immutable for the entity's life. The upgrade transaction changes the code hash and nothing else, and registering again mints a different entity id, which abandons the reputation, stake, agreements and memory objects attached to the old one. Set every bit you might need on day one.</p>
-        <details class="console-details">
+        <div id="signal-types"><details class="console-details">
           <summary class="console-summary">signal types (23)</summary>
           <div class="px-4 pb-3"><div class="console-scroll">
           <table class="console-table">
@@ -2007,8 +2013,8 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             </tbody>
           </table>
         </div><p class="console-note">7 of these carry no doc comment in the Rust source, so no description can be generated for them: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast. Their payload sizes are known and are shown.</p></div>
-        </details>
-        <details class="console-details">
+        </details></div>
+        <div id="memory-types"><details class="console-details">
           <summary class="console-summary">memory object types (16)</summary>
           <div class="px-4 pb-3"><div class="console-scroll">
           <table class="console-table">
@@ -2033,7 +2039,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             </tbody>
           </table>
         </div></div>
-        </details>
+        </details></div>
         </section>
 
         <section id="sdks" class="console-section">
@@ -2052,7 +2058,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             </tbody>
           </table>
         </div>
-        <p class="console-note">Only the Python SDK can be installed from a package registry. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0, published 2026-05-29, and the SDK source in this repository has not changed since that release. The Rust crate is not on crates.io and the npm package is not published.</p>
+        <p class="console-note">Only the Python SDK can be installed from a package registry. The Rust crate is not on crates.io and the npm package is not published. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0. That is a reading of an external registry taken on that date, not a value this page derives from the repository, so treat it as of then.</p>
         <p class="console-note">The Rust SDK depends on the workspace crates by path (novai-types, novai-crypto, novai-codec, novai-ai-entities), so there is no artifact a registry could carry.</p>
         <h3 class="console-h3">coverage</h3>
         <div class="console-scroll">
@@ -2066,7 +2072,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
           </table>
         </div>
         <p class="console-note">The Rust SDK re-exports the chain's own type enumerations rather than redeclaring them, so its signal and memory coverage is complete by construction and cannot drift. The TypeScript SDK declares its own copies, which is why it can and does.</p>
-        <p class="console-note">The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated in numbers below rather than described, because the numbers are the fact.</p>
+        <p class="console-note">The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated as numbers in the table above rather than described, because the numbers are the fact.</p>
         <details class="console-details">
           <summary class="console-summary">transaction builders, per SDK</summary>
           <div class="px-4 pb-3"><div class="console-scroll">
@@ -2109,7 +2115,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
             </tbody>
           </table>
         </div>
-        <p class="console-note">Four validators. This is set by hand and deliberately excluded from the generator: the genesis file names five, and genesis is not what runs.</p>
+        <p class="console-note">Four validators. This is set by hand and deliberately excluded from the generator, because the genesis file in the repository names a different number and genesis is not what runs.</p>
         <p class="console-note">Quorum sites agree: <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/snapshot/valset.rs#L28">crates/node/src/snapshot/valset.rs:28</a> and <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/consensus_types/src/leader.rs#L115">crates/consensus_types/src/leader.rs:115</a>.</p>
         <h3 class="console-h3">retention</h3>
         <div class="console-scroll">
@@ -2153,7 +2159,7 @@ fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
           </table>
         </div>
         <h3 class="console-h3">carried drift exceptions</h3>
-        <p class="console-note">The drift gate compares four independent sources and fails when they disagree. Five discrepancies are known and carried as named exceptions, each printed on every generator run. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted.</p>
+        <p class="console-note">The drift gate compares four independent sources and fails when they disagree. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted. Eleven discrepancies are known and carried as named exceptions, each printed on every generator run.</p>
         <div class="console-scroll">
           <table class="console-table">
             <thead><tr><th scope="col">Exception</th><th scope="col">Summary</th><th scope="col">Tracked as</th></tr></thead>

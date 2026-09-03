@@ -534,6 +534,8 @@ Example response from the reference. Heights and hashes in it are illustrative, 
 }
 [/CODE]
 
+ The comments above say "below". That was true when this console was one page. Capabilities is on the ai entities page.
+
  example
 
 [CODE]
@@ -603,6 +605,8 @@ Example response from the reference. Heights and hashes in it are illustrative, 
 }
 [/CODE]
 
+ The comments above say "below". That was true when this console was one page. Memory types is on the ai entities page.
+
  example
 
 [CODE]
@@ -666,6 +670,8 @@ Shared by every method in Signal methods.
  ]
 }
 [/CODE]
+
+ The comments above say "below". That was true when this console was one page. Signal types is on the ai entities page.
 
  Record shape declared once for Signal methods and shared by every method in it.
 
@@ -736,6 +742,8 @@ Shared by every method in Signal methods.
 }
 [/CODE]
 
+ The comments above say "below". That was true when this console was one page. Signal types is on the ai entities page.
+
  Record shape declared once for Signal methods and shared by every method in it.
 
  example
@@ -788,6 +796,8 @@ Shared by every method in Signal methods.
  ]
 }
 [/CODE]
+
+ The comments above say "below". That was true when this console was one page. Signal types is on the ai entities page.
 
  Record shape declared once for Signal methods and shared by every method in it.
 

@@ -83,7 +83,7 @@ Transactions | NOVAI developer console
 
  11 | entityUpgrade | 5,000 | MIN_FEE_ENTITY_UPGRADE |
 
- Minimum fee by transaction type, sorted high to low. The most expensive, entityUpgrade, costs 5,000, which is 50 times the cheapest, transfer, at 100. Every value is in the table above.
+ Minimum fee by transaction type, sorted high to low. The three most expensive, entityUpgrade, registerAiEntity and registerAiEntityWithKey, tie at 5,000, which is 50 times the two cheapest, creditAiEntity and transfer, which tie at 100. Every value is in the table above.
  entityUpgrade5,000
  registerAiEntity5,000
  registerAiEntityWithKey5,000

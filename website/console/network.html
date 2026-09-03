@@ -109,7 +109,7 @@
         </nav>
         <!-- @@console-generated:/nav-rail@@ -->
 
-      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+      <main id="main" tabindex="-1" class="min-w-0 px-4 py-8 sm:px-6">
         <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
           Network parameters and gaps
         </h1>
@@ -132,7 +132,7 @@
             </tbody>
           </table>
         </div>
-        <p class="console-note">Four validators. This is set by hand and deliberately excluded from the generator: the genesis file names five, and genesis is not what runs.</p>
+        <p class="console-note">Four validators. This is set by hand and deliberately excluded from the generator, because the genesis file in the repository names a different number and genesis is not what runs.</p>
         <p class="console-note">Quorum sites agree: <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/node/src/snapshot/valset.rs#L28">crates/node/src/snapshot/valset.rs:28</a> and <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/consensus_types/src/leader.rs#L115">crates/consensus_types/src/leader.rs:115</a>.</p>
         <h3 class="console-h3">retention</h3>
         <div class="console-scroll">
@@ -176,7 +176,7 @@
           </table>
         </div>
         <h3 class="console-h3">carried drift exceptions</h3>
-        <p class="console-note">The drift gate compares four independent sources and fails when they disagree. Five discrepancies are known and carried as named exceptions, each printed on every generator run. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted.</p>
+        <p class="console-note">The drift gate compares four independent sources and fails when they disagree. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted. Eleven discrepancies are known and carried as named exceptions, each printed on every generator run.</p>
         <div class="console-scroll">
           <table class="console-table">
             <thead><tr><th scope="col">Exception</th><th scope="col">Summary</th><th scope="col">Tracked as</th></tr></thead>

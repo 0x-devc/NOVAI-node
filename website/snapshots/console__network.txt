@@ -73,7 +73,7 @@ Network | NOVAI developer console
 
  JSON-RPC methods | 29 | agreed across four sources |
 
- Four validators. This is set by hand and deliberately excluded from the generator: the genesis file names five, and genesis is not what runs.
+ Four validators. This is set by hand and deliberately excluded from the generator, because the genesis file in the repository names a different number and genesis is not what runs.
 
  Quorum sites agree: crates/node/src/snapshot/valset.rs:28 and crates/consensus_types/src/leader.rs:115.
 
@@ -127,7 +127,7 @@ Network | NOVAI developer console
 
  carried drift exceptions
 
- The drift gate compares four independent sources and fails when they disagree. Five discrepancies are known and carried as named exceptions, each printed on every generator run. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted.
+ The drift gate compares four independent sources and fails when they disagree. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted. Eleven discrepancies are known and carried as named exceptions, each printed on every generator run.
 
  Exception | Summary | Tracked as |
 

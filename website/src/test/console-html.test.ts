@@ -360,3 +360,196 @@ describe("generate-console-html: what actually reached the page", () => {
     expect(committed).toContain("yours will differ");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The gates added when the fourteenth defect was found.
+//
+// Each injects a violation and asserts the probe landed before asserting the
+// gate fired. The reason this discipline is not optional here: the prose gate
+// already existed, computed the value it needed for the reverse check, and
+// threw it away with `void declared;`, so it reported clean for the whole life
+// of the page split while the console's opening sentence was missing.
+// ---------------------------------------------------------------------------
+
+/** Doctor the GENERATOR itself, and run it against the committed pages. */
+function withScript(edit: (t: string) => string): { status: number; output: string; landed: boolean } {
+  const dir = mkdtempSync(join(tmpdir(), "console-script-"));
+  const src = readFileSync(SCRIPT, "utf8");
+  const out = edit(src);
+  const copy = join(dir, "generate-console-html.mjs");
+  // The generator imports ./tokenise.mjs by relative path, so the sibling has
+  // to travel with it or the copy fails to load for the wrong reason.
+  writeFileSync(copy, out);
+  writeFileSync(join(dir, "tokenise.mjs"), readFileSync(resolve("scripts/tokenise.mjs"), "utf8"));
+  let res: { status: number; output: string };
+  try {
+    const r = execFileSync(process.execPath, [copy, "--check", "--web-root", resolve("."), "--data", DATA], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    res = { status: 0, output: r };
+  } catch (err) {
+    const e = err as { status: number | null; stdout?: string; stderr?: string };
+    res = { status: e.status ?? -1, output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
+  }
+  rmSync(dir, { recursive: true, force: true });
+  return { ...res, landed: out !== src };
+}
+
+describe("generate-console-html: the prose gate, both directions", () => {
+  it("renders the console's opening sentence rather than an empty paragraph", () => {
+    // The defect: renderConnect asked for PROSE.connect, which did not exist,
+    // and rich(undefined) returns "". The landing page shipped an empty lead.
+    expect(pages.get("console.html")).not.toContain('<p class="console-lead"></p>');
+    expect(pages.get("console/all.html")).not.toContain('<p class="console-lead"></p>');
+    expect(pages.get("console.html")).toContain("One HTTPS endpoint, no key and no signup");
+  });
+
+  it("fails when a rendered PROSE key was never declared", () => {
+    const res = withScript((t) => t.replace("${lead(PROSE.connect)}", "${lead(PROSE.connectX)}"));
+    expect(res.landed, "the PROSE reference was not renamed").toBe(true);
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("rendered and never declared");
+  });
+
+  it("fails when a declared PROSE key is never rendered", () => {
+    const res = withScript((t) => t.replace("const PROSE = {", "const PROSE = {\n  orphanKey: \"nothing renders this\","));
+    expect(res.landed, "the orphan key was not inserted").toBe(true);
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("declared and never rendered");
+  });
+
+  it("fails when a hand-written sentence states a number the page derives", () => {
+    // The exact defect: "Five discrepancies are known" against a derived count.
+    // Injected into a key that IS rendered, so the unused-key branch cannot
+    // fire first and pass the test for the wrong reason.
+    const res = withScript((t) =>
+      t.replace(
+        '"Requests are rate limited per source IP.',
+        '"There are 11 carried exceptions. Requests are rate limited per source IP.'
+      )
+    );
+    expect(res.landed, "the derived number was not injected into PROSE").toBe(true);
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("states a derived number");
+  });
+});
+
+describe("generate-console-html: the cross-reference gate", () => {
+  it("resolves every same-page fragment on the page that emits it", () => {
+    const res = run(["--check"]);
+    expect(res.status, res.output).toBe(0);
+  });
+
+  it("fails when a page links to a fragment it does not define", () => {
+    // Inserted OUTSIDE any generated region, so --check does not reject it as a
+    // hand-edited region first and pass this test for the wrong reason.
+    const res = withPages("console/rpc.html", (t) =>
+      t.replace(
+        '<main id="main" tabindex="-1" class="min-w-0 px-4 py-8 sm:px-6">',
+        '<main id="main" tabindex="-1" class="min-w-0 px-4 py-8 sm:px-6"><a href="#does-not-exist">x</a>'
+      )
+    );
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("does-not-exist");
+  });
+
+  it("fails when a cross-page link names a fragment the target page lacks", () => {
+    const res = withScript((t) => t.replace('fragment: "signal-types"', 'fragment: "signal-types-gone"'));
+    expect(res.landed, "the fragment was not renamed").toBe(true);
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("signal-types-gone");
+  });
+
+  it("resolves the five schema comments that point off the reference page", () => {
+    // These read correctly on one page and broke the moment it became eight.
+    // The fence keeps the reference's words; the note resolves them.
+    expect(rpc).toContain("see Signal types below");
+    expect(rpc).toContain('href="/console/entities.html#signal-types"');
+    expect(rpc).toContain('href="/console/entities.html#memory-types"');
+    expect(rpc).toContain('href="/console/entities.html#capability-bits"');
+  });
+
+  it("fails when a quoted reference to another page is left unresolved", () => {
+    const res = withScript((t) => t.replace("  if (xref) parts.push(xref);", "  void xref;"));
+    expect(res.landed, "the xref note was not disabled").toBe(true);
+    expect(res.status).not.toBe(0);
+    expect(res.output).toContain("unresolved");
+  });
+
+  it("no longer claims the network section converts blocks to time", () => {
+    // The target page states the opposite, and that is a settled decision.
+    expect(committed).not.toContain("the cadence in the network section converts it");
+    expect(committed).toContain("It is not converted to wall-clock time anywhere on this console");
+  });
+});
+
+describe("generate-console-html: the find surfaces carry their own identity", () => {
+  it("ships no dead anchors and no inherited current-page marks", () => {
+    for (const f of GENERATED_FILES) {
+      const html = pages.get(f) as string;
+      expect(html, `${f} still links to a landing-page fragment`).not.toContain('href="#connect"');
+      expect(html, `${f} still links to a landing-page fragment`).not.toContain('href="#first-call"');
+      expect(html, `${f} still marks a section as current`).not.toContain("aria-current");
+    }
+  });
+
+  it("gives every constant row a fragment rather than only a page", () => {
+    // Scoped to the index table. The shell's own page links (the header, the
+    // canonical links) legitimately carry no fragment, and counting those would
+    // measure the chrome rather than the index.
+    const names = pages.get("console/names.html") as string;
+    const table = names.slice(names.indexOf("<tbody>"), names.indexOf("</tbody>"));
+    const rows = table.match(/href="[^"]*"/g) ?? [];
+    const withFragment = rows.filter((h) => h.includes("#"));
+    expect(rows.length).toBeGreaterThan(50);
+    expect(withFragment.length, "an index row lands at the top of a page instead of at the name").toBe(rows.length);
+  });
+
+  it("harvests no constant out of a path or a filename", () => {
+    const names = pages.get("console/names.html") as string;
+    // RPC_REFERENCE occurs zero times in crates/ or sdk/. It was read out of
+    // the path docs/RPC_REFERENCE.md in a provenance line.
+    expect(names).not.toContain(">RPC_REFERENCE<");
+  });
+
+  it("names a destination that appears in the navigation", () => {
+    // "get started" is a page label that appears in no nav on any page, so the
+    // index pointed the reader somewhere they could not see a name for.
+    expect(pages.get("console/names.html")).not.toContain("get started");
+  });
+});
+
+describe("generate-console-html: the citation promise is measured", () => {
+  it("renders as many citations as it claims", () => {
+    const entities = pages.get("console/entities.html") as string;
+    const claim = /([0-9]+) citations across ([0-9]+) declarations/.exec(entities);
+    expect(claim, "the citation claim is not on the page").not.toBeNull();
+    const recipes = entities.slice(entities.indexOf("a reputation oracle"), entities.indexOf("citations across"));
+    const links = (recipes.match(/blob\/main/g) ?? []).length;
+    expect(links, "the page claims more citations than it renders").toBe(Number((claim as RegExpExecArray)[1]));
+  });
+
+  it("no longer promises that every constant is cited without saying how many", () => {
+    expect(committed).not.toContain("with every constant cited to its declaration");
+  });
+});
+
+describe("generate-console-html: the chart caption states ties honestly", () => {
+  it("names every type at the extremum rather than one of them", () => {
+    const tx = pages.get("console/transactions.html") as string;
+    const desc = /<desc id="fee-ladder-desc">([^<]*)</.exec(tx) as RegExpExecArray;
+    expect(desc[1]).toContain("tie at");
+    expect(desc[1]).toContain("50 times");
+    // The defect was the definite article on a set of three.
+    expect(desc[1]).not.toMatch(/The most expensive, \w+, costs 5,000/);
+  });
+});
+
+describe("generate-console-html: the skip link moves focus", () => {
+  it("gives every page a focusable main", () => {
+    for (const [file, html] of pages) {
+      expect(html, `${file} has no focusable <main>`).toContain('<main id="main" tabindex="-1"');
+    }
+  });
+});

@@ -58,6 +58,8 @@ Everything on one page | NOVAI developer console
  01 connect
  on its own page
 
+ One HTTPS endpoint, no key and no signup. Every example below is a real call, and the responses on this page were captured by running them.
+
 [CODE]
 URL=https://rpc.novai.network
 
@@ -653,6 +655,8 @@ Example response from the reference. Heights and hashes in it are illustrative, 
 }
 [/CODE]
 
+ The comments above say "below". That was true when this console was one page. Capabilities is on the ai entities page.
+
  example
 
 [CODE]
@@ -722,6 +726,8 @@ Example response from the reference. Heights and hashes in it are illustrative, 
 }
 [/CODE]
 
+ The comments above say "below". That was true when this console was one page. Memory types is on the ai entities page.
+
  example
 
 [CODE]
@@ -785,6 +791,8 @@ Shared by every method in Signal methods.
  ]
 }
 [/CODE]
+
+ The comments above say "below". That was true when this console was one page. Signal types is on the ai entities page.
 
  Record shape declared once for Signal methods and shared by every method in it.
 
@@ -855,6 +863,8 @@ Shared by every method in Signal methods.
 }
 [/CODE]
 
+ The comments above say "below". That was true when this console was one page. Signal types is on the ai entities page.
+
  Record shape declared once for Signal methods and shared by every method in it.
 
  example
@@ -907,6 +917,8 @@ Shared by every method in Signal methods.
  ]
 }
 [/CODE]
+
+ The comments above say "below". That was true when this console was one page. Signal types is on the ai entities page.
 
  Record shape declared once for Signal methods and shared by every method in it.
 
@@ -1865,7 +1877,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
  04 errors and limits
  on its own page
 
- Thirteen JSON-RPC error codes, four HTTP-level rejections that carry no JSON-RPC envelope at all, and six limits.
+ Every JSON-RPC error code, the HTTP-level rejections that carry no JSON-RPC envelope at all, and the limits that produce them. thirteen JSON-RPC error codes, four HTTP-level rejections, and six limits.
 
  json-rpc error codes
 
@@ -1899,7 +1911,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  correction A missing jsonrpc or method field answers -32700, not this code, because every field of the request struct is required and a missing one fails to deserialize. -32600 is what you get when jsonrpc is present and is not "2.0". Tracked as NEEDS-OPERATOR.md item 19.
 
- One of these thirteen is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.
+ One of these codes is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.
 
  http rejections with no json-rpc envelope
 
@@ -1913,7 +1925,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  503 | Service Unavailable &#8212; too many concurrent requests | :1242 |
 
- These four never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.
+ These never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.
 
  limits
 
@@ -1968,7 +1980,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  11 | entityUpgrade | 5,000 | MIN_FEE_ENTITY_UPGRADE |
 
- Minimum fee by transaction type, sorted high to low. The most expensive, entityUpgrade, costs 5,000, which is 50 times the cheapest, transfer, at 100. Every value is in the table above.
+ Minimum fee by transaction type, sorted high to low. The three most expensive, entityUpgrade, registerAiEntity and registerAiEntityWithKey, tie at 5,000, which is 50 times the two cheapest, creditAiEntity and transfer, which tie at 100. Every value is in the table above.
  entityUpgrade5,000
  registerAiEntity5,000
  registerAiEntityWithKey5,000
@@ -2026,7 +2038,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  AI entities are the part of this chain that has no equivalent elsewhere. Three worked flows first, then the full enumerations.
 
- These describe what the implementation does, with every constant cited to its declaration. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.
+ These describe what the implementation does. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.
 
  a reputation oracle
 
@@ -2034,13 +2046,13 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  Issuing one requires the submit_reputation_updates capability, bit 5 of the entity's capability byte.
 
- The payload is 101 bytes: the 66-byte signal commitment base plus a 35-byte tail carrying the target entity id, an event type and a signed two-byte delta.
+ The payload is 101 bytes: the 66-byte signal commitment base crates/execution/src/lib.rs:1187 plus a 35-byte tail crates/execution/src/lib.rs:1191 carrying the target entity id, an event type and a signed two-byte delta.
 
  The event type must be 0 to 12.
 
  An entity cannot rate itself.
 
- The fee is 1,000 base units, the signal commitment minimum.
+ The fee is 1,000 base units, the signal commitment minimum. crates/execution/src/lib.rs:12328
 
  The effect is checkable in one read: novai_getAiEntity returns reputation_score and reputation_events_count.
 
@@ -2050,9 +2062,9 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  A buyer issues a SignalPurchase signal, type 8, naming the seller, the signal type wanted and a maximum price. The chain rejects the purchase if the catalog price is above that maximum.
 
- On success the chain moves the price from the buyer's economic_balance to the seller's, less a 2% cut routed to the marketplace treasury.
+ On success the chain moves the price from the buyer's economic_balance to the seller's, less a 2% cut routed to the marketplace treasury. crates/execution/src/lib.rs:12443
 
- The payload is 107 bytes: the 66-byte base plus a 41-byte tail.
+ The payload is 107 bytes: the 66-byte base crates/execution/src/lib.rs:1187 plus a 41-byte tail crates/execution/src/lib.rs:1199.
 
  Publishing a catalog requires no stake. A listing is not a bond, and a buyer should not read it as one.
 
@@ -2060,17 +2072,19 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  staking collateral
 
- A StakeDeposit signal, type 9, moves an amount from an entity's economic_balance into its stake_balance. The payload is 82 bytes: the 66-byte base plus a 16-byte big-endian u128 amount.
+ A StakeDeposit signal, type 9, moves an amount from an entity's economic_balance into its stake_balance. The payload is 82 bytes: the 66-byte base crates/execution/src/lib.rs:1187 plus a 16-byte big-endian u128 amount crates/execution/src/lib.rs:1207.
 
- A deposit locks for 1,000 blocks. stake_locked_until is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time; the cadence in the network section converts it.
+ A deposit locks for 1,000 blocks. stake_locked_until is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time. It is not converted to wall-clock time anywhere on this console, because block cadence has moved by more than 4x inside a week on this chain: divide by a rate you measure yourself.
 
- Withdrawal is a StakeWithdraw signal, type 10, with the same 82-byte layout. A partial withdrawal does not re-lock the remainder.
+ Withdrawal is a StakeWithdraw signal, type 10, with the same 82-byte layout crates/execution/src/lib.rs:1215. A partial withdrawal does not re-lock the remainder.
 
- A StakeSlash signal, type 11, issued by an entity holding submit_reputation_updates, subtracts up to a named amount from the target's stake_balance and applies a bundled reputation event in the same operation. The payload is 117 bytes.
+ A StakeSlash signal, type 11, issued by an entity holding submit_reputation_updates, subtracts up to a named amount from the target's stake_balance and applies a bundled reputation event in the same operation. The payload is 117 bytes crates/execution/src/lib.rs:1223.
 
  An entity cannot slash itself.
 
  economic_balance, stake_balance and stake_locked_until are all readable from novai_getAiEntity, and every stake operation appears in the signal index.
+
+ Every constant above is cited to the line that declares it: 10 citations across 8 declarations. Capability bit numbers are the exception and carry no link, because they come from a bitflags declaration with no per-bit line to point at.
 
  capability bits
 
@@ -2195,7 +2209,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  TypeScript | git clone the repository and build sdk/novai-sdk-ts | not published to npm |
 
- Only the Python SDK can be installed from a package registry. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0, published 2026-05-29, and the SDK source in this repository has not changed since that release. The Rust crate is not on crates.io and the npm package is not published.
+ Only the Python SDK can be installed from a package registry. The Rust crate is not on crates.io and the npm package is not published. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0. That is a reading of an external registry taken on that date, not a value this page derives from the repository, so treat it as of then.
 
  The Rust SDK depends on the workspace crates by path (novai-types, novai-crypto, novai-codec, novai-ai-entities), so there is no artifact a registry could carry.
 
@@ -2211,7 +2225,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  The Rust SDK re-exports the chain's own type enumerations rather than redeclaring them, so its signal and memory coverage is complete by construction and cannot drift. The TypeScript SDK declares its own copies, which is why it can and does.
 
- The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated in numbers below rather than described, because the numbers are the fact.
+ The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated as numbers in the table above rather than described, because the numbers are the fact.
 
  transaction builders, per SDK
 
@@ -2260,7 +2274,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  JSON-RPC methods | 29 | agreed across four sources |
 
- Four validators. This is set by hand and deliberately excluded from the generator: the genesis file names five, and genesis is not what runs.
+ Four validators. This is set by hand and deliberately excluded from the generator, because the genesis file in the repository names a different number and genesis is not what runs.
 
  Quorum sites agree: crates/node/src/snapshot/valset.rs:28 and crates/consensus_types/src/leader.rs:115.
 
@@ -2315,7 +2329,7 @@ curl -s -X POST $URL -H 'Content-Type: application/json' \
 
  carried drift exceptions
 
- The drift gate compares four independent sources and fails when they disagree. Five discrepancies are known and carried as named exceptions, each printed on every generator run. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted.
+ The drift gate compares four independent sources and fails when they disagree. The gate also fails when a listed exception stops applying, so this list can only shrink, and fixing a document forces its exception to be deleted. Eleven discrepancies are known and carried as named exceptions, each printed on every generator run.
 
  Exception | Summary | Tracked as |
 

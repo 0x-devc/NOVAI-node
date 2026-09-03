@@ -109,7 +109,7 @@
         </nav>
         <!-- @@console-generated:/nav-rail@@ -->
 
-      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+      <main id="main" tabindex="-1" class="min-w-0 px-4 py-8 sm:px-6">
         <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
           SDKs
         </h1>
@@ -129,7 +129,7 @@
             </tbody>
           </table>
         </div>
-        <p class="console-note">Only the Python SDK can be installed from a package registry. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0, published 2026-05-29, and the SDK source in this repository has not changed since that release. The Rust crate is not on crates.io and the npm package is not published.</p>
+        <p class="console-note">Only the Python SDK can be installed from a package registry. The Rust crate is not on crates.io and the npm package is not published. I checked all three registries on 2026-08-29: novai-sdk resolves on PyPI at version 0.1.0. That is a reading of an external registry taken on that date, not a value this page derives from the repository, so treat it as of then.</p>
         <p class="console-note">The Rust SDK depends on the workspace crates by path (novai-types, novai-crypto, novai-codec, novai-ai-entities), so there is no artifact a registry could carry.</p>
         <h3 class="console-h3">coverage</h3>
         <div class="console-scroll">
@@ -143,7 +143,7 @@
           </table>
         </div>
         <p class="console-note">The Rust SDK re-exports the chain's own type enumerations rather than redeclaring them, so its signal and memory coverage is complete by construction and cannot drift. The TypeScript SDK declares its own copies, which is why it can and does.</p>
-        <p class="console-note">The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated in numbers below rather than described, because the numbers are the fact.</p>
+        <p class="console-note">The TypeScript SDK is in development and is not a supported signing path. Its coverage gap is stated as numbers in the table above rather than described, because the numbers are the fact.</p>
         <details class="console-details">
           <summary class="console-summary">transaction builders, per SDK</summary>
           <div class="px-4 pb-3"><div class="console-scroll">

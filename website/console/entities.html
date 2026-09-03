@@ -109,7 +109,7 @@
         </nav>
         <!-- @@console-generated:/nav-rail@@ -->
 
-      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+      <main id="main" tabindex="-1" class="min-w-0 px-4 py-8 sm:px-6">
         <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
           AI entities
         </h1>
@@ -118,16 +118,16 @@
           <h2 class="console-h2"><span class="console-h2-n">06</span> ai entities</h2>
           <!-- @@console-generated:ai-entities@@ -->
         <p class="console-lead">AI entities are the part of this chain that has no equivalent elsewhere. Three worked flows first, then the full enumerations.</p>
-        <p class="console-note">These describe what the implementation does, with every constant cited to its declaration. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.</p>
+        <p class="console-note">These describe what the implementation does. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.</p>
         <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
           <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">a reputation oracle</p>
           <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
             <li>A reputation oracle issues <code>ReputationUpdate</code> signals, signal type 7. Each one moves a target entity's <code>reputation_score</code>, which the chain stores on the entity record and clamps to a 0 to 100 range. A newly registered entity starts at 50.</li>
             <li>Issuing one requires the <code>submit_reputation_updates</code> capability, bit 5 of the entity's capability byte.</li>
-            <li>The payload is 101 bytes: the 66-byte signal commitment base plus a 35-byte tail carrying the target entity id, an event type and a signed two-byte delta.</li>
+            <li>The payload is 101 bytes: the 66-byte signal commitment base <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1187">crates/execution/src/lib.rs:1187</a> plus a 35-byte tail <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1191">crates/execution/src/lib.rs:1191</a> carrying the target entity id, an event type and a signed two-byte delta.</li>
             <li>The event type must be 0 to 12.</li>
             <li>An entity cannot rate itself.</li>
-            <li>The fee is 1,000 base units, the signal commitment minimum.</li>
+            <li>The fee is 1,000 base units, the signal commitment minimum. <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L12328">crates/execution/src/lib.rs:12328</a></li>
             <li>The effect is checkable in one read: <code>novai_getAiEntity</code> returns <code>reputation_score</code> and <code>reputation_events_count</code>.</li>
           </ul>
         </div>
@@ -136,8 +136,8 @@
           <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
             <li>A seller publishes a <code>SignalCatalog</code> memory object, type 7, listing priced offerings. A catalog holds at most 10 offerings, each 10 bytes: a signal type, a price as a big-endian u64, and an active flag.</li>
             <li>A buyer issues a <code>SignalPurchase</code> signal, type 8, naming the seller, the signal type wanted and a maximum price. The chain rejects the purchase if the catalog price is above that maximum.</li>
-            <li>On success the chain moves the price from the buyer's <code>economic_balance</code> to the seller's, less a 2% cut routed to the marketplace treasury.</li>
-            <li>The payload is 107 bytes: the 66-byte base plus a 41-byte tail.</li>
+            <li>On success the chain moves the price from the buyer's <code>economic_balance</code> to the seller's, less a 2% cut routed to the marketplace treasury. <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L12443">crates/execution/src/lib.rs:12443</a></li>
+            <li>The payload is 107 bytes: the 66-byte base <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1187">crates/execution/src/lib.rs:1187</a> plus a 41-byte tail <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1199">crates/execution/src/lib.rs:1199</a>.</li>
             <li><strong>Publishing a catalog requires no stake.</strong> A listing is not a bond, and a buyer should not read it as one.</li>
             <li>The marketplace treasury is not readable over RPC. No method returns it.</li>
           </ul>
@@ -145,15 +145,16 @@
         <div class="mt-6 rounded-md border border-line bg-surface-1 px-4 py-3">
           <p class="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-hi">staking collateral</p>
           <ul class="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
-            <li>A <code>StakeDeposit</code> signal, type 9, moves an amount from an entity's <code>economic_balance</code> into its <code>stake_balance</code>. The payload is 82 bytes: the 66-byte base plus a 16-byte big-endian u128 amount.</li>
-            <li>A deposit locks for 1,000 blocks. <code>stake_locked_until</code> is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time; the cadence in the network section converts it.</li>
-            <li>Withdrawal is a <code>StakeWithdraw</code> signal, type 10, with the same 82-byte layout. A partial withdrawal does not re-lock the remainder.</li>
-            <li>A <code>StakeSlash</code> signal, type 11, issued by an entity holding <code>submit_reputation_updates</code>, subtracts up to a named amount from the target's <code>stake_balance</code> and applies a bundled reputation event in the same operation. The payload is 117 bytes.</li>
+            <li>A <code>StakeDeposit</code> signal, type 9, moves an amount from an entity's <code>economic_balance</code> into its <code>stake_balance</code>. The payload is 82 bytes: the 66-byte base <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1187">crates/execution/src/lib.rs:1187</a> plus a 16-byte big-endian u128 amount <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1207">crates/execution/src/lib.rs:1207</a>.</li>
+            <li>A deposit locks for 1,000 blocks. <code>stake_locked_until</code> is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time. It is not converted to wall-clock time anywhere on this console, because block cadence has moved by more than 4x inside a week on this chain: divide by a rate you measure yourself.</li>
+            <li>Withdrawal is a <code>StakeWithdraw</code> signal, type 10, with the same 82-byte layout <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1215">crates/execution/src/lib.rs:1215</a>. A partial withdrawal does not re-lock the remainder.</li>
+            <li>A <code>StakeSlash</code> signal, type 11, issued by an entity holding <code>submit_reputation_updates</code>, subtracts up to a named amount from the target's <code>stake_balance</code> and applies a bundled reputation event in the same operation. The payload is 117 bytes <a class="text-brand-text no-underline hover:underline" href="https://github.com/NOVAInetwork/NOVAI-node/blob/main/crates/execution/src/lib.rs#L1223">crates/execution/src/lib.rs:1223</a>.</li>
             <li>An entity cannot slash itself.</li>
             <li><code>economic_balance</code>, <code>stake_balance</code> and <code>stake_locked_until</code> are all readable from <code>novai_getAiEntity</code>, and every stake operation appears in the signal index.</li>
           </ul>
         </div>
-        <h3 class="console-h3">capability bits</h3>
+        <p class="console-note">Every constant above is cited to the line that declares it: 10 citations across 8 declarations. Capability bit numbers are the exception and carry no link, because they come from a bitflags declaration with no per-bit line to point at.</p>
+        <h3 class="console-h3" id="capability-bits">capability bits</h3>
         <div class="console-scroll">
           <table class="console-table">
             <thead><tr><th scope="col" class="text-right">Bit</th><th scope="col">Hex</th><th scope="col">Capability</th></tr></thead>
@@ -169,7 +170,7 @@
           </table>
         </div>
         <p class="console-note">Capabilities are one byte, set at registration, and immutable for the entity's life. The upgrade transaction changes the code hash and nothing else, and registering again mints a different entity id, which abandons the reputation, stake, agreements and memory objects attached to the old one. Set every bit you might need on day one.</p>
-        <details class="console-details">
+        <div id="signal-types"><details class="console-details">
           <summary class="console-summary">signal types (23)</summary>
           <div class="px-4 pb-3"><div class="console-scroll">
           <table class="console-table">
@@ -201,8 +202,8 @@
             </tbody>
           </table>
         </div><p class="console-note">7 of these carry no doc comment in the Rust source, so no description can be generated for them: Anomaly, Optimization, Prediction, RiskScore, AuditReport, SpamRisk, CongestionForecast. Their payload sizes are known and are shown.</p></div>
-        </details>
-        <details class="console-details">
+        </details></div>
+        <div id="memory-types"><details class="console-details">
           <summary class="console-summary">memory object types (16)</summary>
           <div class="px-4 pb-3"><div class="console-scroll">
           <table class="console-table">
@@ -227,7 +228,7 @@
             </tbody>
           </table>
         </div></div>
-        </details>
+        </details></div>
         <!-- @@console-generated:/ai-entities@@ -->
         </section>
 

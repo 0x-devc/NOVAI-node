@@ -57,7 +57,7 @@ AI entities | NOVAI developer console
 
  AI entities are the part of this chain that has no equivalent elsewhere. Three worked flows first, then the full enumerations.
 
- These describe what the implementation does, with every constant cited to its declaration. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.
+ These describe what the implementation does. They are written as local devnet walkthroughs: the read path on this page is verified against the public endpoint, but a write path needs a funded key and a node you control.
 
  a reputation oracle
 
@@ -65,13 +65,13 @@ AI entities | NOVAI developer console
 
  Issuing one requires the submit_reputation_updates capability, bit 5 of the entity's capability byte.
 
- The payload is 101 bytes: the 66-byte signal commitment base plus a 35-byte tail carrying the target entity id, an event type and a signed two-byte delta.
+ The payload is 101 bytes: the 66-byte signal commitment base crates/execution/src/lib.rs:1187 plus a 35-byte tail crates/execution/src/lib.rs:1191 carrying the target entity id, an event type and a signed two-byte delta.
 
  The event type must be 0 to 12.
 
  An entity cannot rate itself.
 
- The fee is 1,000 base units, the signal commitment minimum.
+ The fee is 1,000 base units, the signal commitment minimum. crates/execution/src/lib.rs:12328
 
  The effect is checkable in one read: novai_getAiEntity returns reputation_score and reputation_events_count.
 
@@ -81,9 +81,9 @@ AI entities | NOVAI developer console
 
  A buyer issues a SignalPurchase signal, type 8, naming the seller, the signal type wanted and a maximum price. The chain rejects the purchase if the catalog price is above that maximum.
 
- On success the chain moves the price from the buyer's economic_balance to the seller's, less a 2% cut routed to the marketplace treasury.
+ On success the chain moves the price from the buyer's economic_balance to the seller's, less a 2% cut routed to the marketplace treasury. crates/execution/src/lib.rs:12443
 
- The payload is 107 bytes: the 66-byte base plus a 41-byte tail.
+ The payload is 107 bytes: the 66-byte base crates/execution/src/lib.rs:1187 plus a 41-byte tail crates/execution/src/lib.rs:1199.
 
  Publishing a catalog requires no stake. A listing is not a bond, and a buyer should not read it as one.
 
@@ -91,17 +91,19 @@ AI entities | NOVAI developer console
 
  staking collateral
 
- A StakeDeposit signal, type 9, moves an amount from an entity's economic_balance into its stake_balance. The payload is 82 bytes: the 66-byte base plus a 16-byte big-endian u128 amount.
+ A StakeDeposit signal, type 9, moves an amount from an entity's economic_balance into its stake_balance. The payload is 82 bytes: the 66-byte base crates/execution/src/lib.rs:1187 plus a 16-byte big-endian u128 amount crates/execution/src/lib.rs:1207.
 
- A deposit locks for 1,000 blocks. stake_locked_until is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time; the cadence in the network section converts it.
+ A deposit locks for 1,000 blocks. stake_locked_until is set to the current height plus that period, and a withdrawal before that height is rejected. The lock is counted in blocks, not in time. It is not converted to wall-clock time anywhere on this console, because block cadence has moved by more than 4x inside a week on this chain: divide by a rate you measure yourself.
 
- Withdrawal is a StakeWithdraw signal, type 10, with the same 82-byte layout. A partial withdrawal does not re-lock the remainder.
+ Withdrawal is a StakeWithdraw signal, type 10, with the same 82-byte layout crates/execution/src/lib.rs:1215. A partial withdrawal does not re-lock the remainder.
 
- A StakeSlash signal, type 11, issued by an entity holding submit_reputation_updates, subtracts up to a named amount from the target's stake_balance and applies a bundled reputation event in the same operation. The payload is 117 bytes.
+ A StakeSlash signal, type 11, issued by an entity holding submit_reputation_updates, subtracts up to a named amount from the target's stake_balance and applies a bundled reputation event in the same operation. The payload is 117 bytes crates/execution/src/lib.rs:1223.
 
  An entity cannot slash itself.
 
  economic_balance, stake_balance and stake_locked_until are all readable from novai_getAiEntity, and every stake operation appears in the signal index.
+
+ Every constant above is cited to the line that declares it: 10 citations across 8 declarations. Capability bit numbers are the exception and carry no link, because they come from a bitflags declaration with no per-bit line to point at.
 
  capability bits
 

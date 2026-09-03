@@ -3,10 +3,12 @@
 //
 // WHY HAND WRITTEN RATHER THAN A GRAMMAR OFF THE SHELF
 //
-// Measured over the rendered page: 84 code blocks, 51 JSON-shaped, 31 shell,
-// one Python and one Rust. JSON.parse fails on 29 of the 51, and that is not a
-// defect. The fences are a schema notation, not JSON, and they carry three
-// constructs no JSON grammar knows:
+// Measured over the RENDERED BLOCKS on the eight real pages, which is the basis
+// and is stated because counting fences in the source or including the two find
+// surfaces gives different numbers: 87 code blocks, 55 schema, 30 shell, and two
+// hand-authored (one Python, one Rust). JSON.parse fails on 34 of the 55, and
+// that is not a defect. The fences are a schema notation, not JSON, and they
+// carry three constructs no JSON grammar knows:
 //
 //   type placeholders     "block_hash": "<hex32>",  "height": <u64>
 //   record references     { "channels": [PaymentChannel, ...] }
@@ -18,8 +20,13 @@
 // the page, which is what turns colour into navigation. That construct is ours,
 // so the tokeniser has to be ours.
 //
-// The shell side needs no argument at all. Across all 31 blocks there is one
+// The shell side needs no argument at all. Across all 30 blocks there is one
 // command, curl, and four flags: -s -X -H -d.
+//
+// These figures were stale within one gate of being written: they were measured
+// before a change that moved them and not re-measured after it. A comment that
+// cites a measurement is a published number and rots exactly like one on the
+// page, which is the whole argument this console is built on.
 //
 // INVARIANT, asserted by the caller: concatenating every token's text
 // reproduces the input byte for byte, and no character is left unclassified.
@@ -189,6 +196,79 @@ export function tokeniseShell(src) {
     push("punct", c);
     i += 1;
     atLineStart = false;
+  }
+  return out;
+}
+
+/**
+ * The two hand-authored blocks: the Python and Rust first-call examples.
+ *
+ * These used to be handed to the renderer as a single hand-built token,
+ * `{cls: "plain", text: src}`, and then asserted lossless. Both halves of that
+ * assertion were true by construction: one token trivially rejoins to the input,
+ * and a token given a class trivially has one. The two blocks were asserted and
+ * unchecked, which is the third instance of a check reading a value back from
+ * the same step that produced it.
+ *
+ * So this is a real scanner and the assertion is a real assertion. It is
+ * deliberately small: line comments, strings, numbers and punctuation, which is
+ * every construct these two blocks actually contain. It is not a Python or Rust
+ * grammar and does not claim to be one.
+ */
+export function tokeniseCode(src) {
+  const out = [];
+  const push = (cls, text) => {
+    if (!text) return;
+    const last = out[out.length - 1];
+    if (last && last.cls === cls) last.text += text;
+    else out.push({ cls, text });
+  };
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+
+    // Line comment: # for Python, // for Rust.
+    if (c === "#" || (c === "/" && src[i + 1] === "/")) {
+      const end = src.indexOf("\n", i);
+      const stop = end === -1 ? src.length : end;
+      push("comment", src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+
+    // String literal, with escapes.
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < src.length && src[j] !== c) {
+        if (src[j] === "\\") j += 1;
+        j += 1;
+      }
+      push("str", src.slice(i, Math.min(j + 1, src.length)));
+      i = Math.min(j + 1, src.length);
+      continue;
+    }
+
+    // Number.
+    if (/[0-9]/.test(c)) {
+      let j = i;
+      while (j < src.length && /[0-9_.]/.test(src[j])) j += 1;
+      push("num", src.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    // Identifier or word.
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i;
+      while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j += 1;
+      push("plain", src.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (/\s/.test(c)) { push("plain", c); i += 1; continue; }
+    push("punct", c);
+    i += 1;
   }
   return out;
 }

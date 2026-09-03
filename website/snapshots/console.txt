@@ -79,6 +79,8 @@ transaction types
 
  01 connect
 
+ One HTTPS endpoint, no key and no signup. Every example below is a real call, and the responses on this page were captured by running them.
+
 [CODE]
 URL=https://rpc.novai.network
 

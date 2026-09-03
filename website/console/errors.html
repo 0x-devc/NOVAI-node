@@ -109,7 +109,7 @@
         </nav>
         <!-- @@console-generated:/nav-rail@@ -->
 
-      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+      <main id="main" tabindex="-1" class="min-w-0 px-4 py-8 sm:px-6">
         <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
           Errors and limits
         </h1>
@@ -117,7 +117,7 @@
         <section id="errors" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">04</span> errors and limits</h2>
           <!-- @@console-generated:errors@@ -->
-        <p class="console-lead">Thirteen JSON-RPC error codes, four HTTP-level rejections that carry no JSON-RPC envelope at all, and six limits.</p>
+        <p class="console-lead">Every JSON-RPC error code, the HTTP-level rejections that carry no JSON-RPC envelope at all, and the limits that produce them. thirteen JSON-RPC error codes, four HTTP-level rejections, and six limits.</p>
         <h3 class="console-h3">json-rpc error codes</h3>
         <div class="console-scroll">
           <table class="console-table">
@@ -140,7 +140,7 @@
           </table>
         </div>
         <p class="console-note"><span class="console-pill">correction</span> A missing <code class="text-ink-mid">jsonrpc</code> or <code class="text-ink-mid">method</code> field answers <code class="text-ink-mid">-32700</code>, not this code, because every field of the request struct is required and a missing one fails to deserialize. <code class="text-ink-mid">-32600</code> is what you get when <code class="text-ink-mid">jsonrpc</code> is present and is not <code class="text-ink-mid">&quot;2.0&quot;</code>. <span class="text-ink-low">Tracked as NEEDS-OPERATOR.md item 19.</span></p>
-        <p class="console-note">One of these thirteen is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.</p>
+        <p class="console-note">One of these codes is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.</p>
         <h3 class="console-h3">http rejections with no json-rpc envelope</h3>
         <div class="console-scroll">
           <table class="console-table">
@@ -153,7 +153,7 @@
             </tbody>
           </table>
         </div>
-        <p class="console-note">These four never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.</p>
+        <p class="console-note">These never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.</p>
         <h3 class="console-h3">limits</h3>
         <div class="console-scroll">
           <table class="console-table">

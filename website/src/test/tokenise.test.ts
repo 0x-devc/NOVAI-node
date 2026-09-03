@@ -99,7 +99,7 @@ describe("tokenise: what reached the page", () => {
     // back to one plain span, which looks fine in a diff and dead on the page.
     const blocks = committed.match(/<pre class="console-pre[^"]*"[^>]*>[\s\S]*?<\/pre>/g) ?? [];
     expect(blocks.length).toBeGreaterThan(80);
-    const flat = blocks.filter((b) => !b.includes('class="tok-') && !b.includes('data-lang="none"'));
+    const flat = blocks.filter((b) => !b.includes('class="tok-'));
     expect(flat, `${flat.length} code block(s) carry no tokens`).toHaveLength(0);
   });
 });

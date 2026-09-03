@@ -109,7 +109,7 @@
         </nav>
         <!-- @@console-generated:/nav-rail@@ -->
 
-      <main id="main" class="min-w-0 px-4 py-8 sm:px-6">
+      <main id="main" tabindex="-1" class="min-w-0 px-4 py-8 sm:px-6">
         <h1 class="font-display text-2xl font-semibold tracking-tight text-ink-hi sm:text-3xl">
           NOVAI developer console
         </h1>
@@ -149,7 +149,7 @@
                 <section id="connect" class="console-section">
           <h2 class="console-h2"><span class="console-h2-n">01</span> connect</h2>
           <!-- @@console-generated:connect@@ -->
-        <p class="console-lead"></p>
+        <p class="console-lead">One HTTPS endpoint, no key and no signup. Every example below is a real call, and the responses on this page were captured by running them.</p>
         <pre class="console-pre" data-lang="shell"><code><span class="tok-cmd">URL</span><span class="tok-punct">=</span><span class="tok-url">https://rpc.novai.network</span>
 
 <span class="tok-cmd">curl</span> <span class="tok-flag">-s</span> <span class="tok-flag">-X</span> POST <span class="tok-var">$URL</span> <span class="tok-flag">-H</span> <span class="tok-str">'Content-Type: application/json'</span> <span class="tok-punct">\</span>
@@ -184,16 +184,16 @@
         <pre class="console-pre-out" data-lang="schema"><code><span class="tok-punct">{</span><span class="tok-prop">&quot;jsonrpc&quot;</span><span class="tok-punct">:</span><span class="tok-str">&quot;2.0&quot;</span><span class="tok-punct">,</span><span class="tok-prop">&quot;result&quot;</span><span class="tok-punct">:{</span><span class="tok-prop">&quot;block_hash&quot;</span><span class="tok-punct">:</span><span class="tok-str">&quot;6b4ef2adc610656969ca65c94c057ddcb5eafa3c441de14d95b931aac066a8e9&quot;</span><span class="tok-punct">,</span><span class="tok-prop">&quot;height&quot;</span><span class="tok-punct">:</span><span class="tok-num">5225248</span><span class="tok-punct">,</span><span class="tok-prop">&quot;parent_hash&quot;</span><span class="tok-punct">:</span><span class="tok-str">&quot;0c6582e4ef81f793266ae8d46642f9acd9c314bc7947ef2e57142a2f3a0981c1&quot;</span><span class="tok-punct">,</span><span class="tok-prop">&quot;round&quot;</span><span class="tok-punct">:</span><span class="tok-num">0</span><span class="tok-punct">,</span><span class="tok-prop">&quot;state_root&quot;</span><span class="tok-punct">:</span><span class="tok-str">&quot;2843779c3de67ceed02e32b0bef2014a0fbfff14d82f62efa1c216c1daae150e&quot;</span><span class="tok-punct">,</span><span class="tok-prop">&quot;tx_count&quot;</span><span class="tok-punct">:</span><span class="tok-num">0</span><span class="tok-punct">},</span><span class="tok-prop">&quot;id&quot;</span><span class="tok-punct">:</span><span class="tok-num">1</span><span class="tok-punct">}</span></code></pre>
         <h3 class="console-h3">python</h3>
         <p class="console-note">Standard library only. No pip install.</p>
-        <pre class="console-pre" data-lang="none"><code>import json, urllib.request
+        <pre class="console-pre" data-lang="none"><code>import json<span class="tok-punct">,</span> urllib<span class="tok-punct">.</span>request
 
-req = urllib.request.Request(
-    &quot;https://rpc.novai.network&quot;,
-    data=json.dumps({&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;method&quot;: &quot;novai_getLatestBlock&quot;,
-                     &quot;params&quot;: {}, &quot;id&quot;: 1}).encode(),
-    headers={&quot;Content-Type&quot;: &quot;application/json&quot;},
-)
-with urllib.request.urlopen(req, timeout=10) as r:
-    print(json.dumps(json.load(r)[&quot;result&quot;], indent=2))</code></pre>
+req <span class="tok-punct">=</span> urllib<span class="tok-punct">.</span>request<span class="tok-punct">.</span>Request<span class="tok-punct">(</span>
+    <span class="tok-str">&quot;https://rpc.novai.network&quot;</span><span class="tok-punct">,</span>
+    data<span class="tok-punct">=</span>json<span class="tok-punct">.</span>dumps<span class="tok-punct">({</span><span class="tok-str">&quot;jsonrpc&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;2.0&quot;</span><span class="tok-punct">,</span> <span class="tok-str">&quot;method&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;novai_getLatestBlock&quot;</span><span class="tok-punct">,</span>
+                     <span class="tok-str">&quot;params&quot;</span><span class="tok-punct">:</span> <span class="tok-punct">{},</span> <span class="tok-str">&quot;id&quot;</span><span class="tok-punct">:</span> <span class="tok-num">1</span><span class="tok-punct">}).</span>encode<span class="tok-punct">(),</span>
+    headers<span class="tok-punct">={</span><span class="tok-str">&quot;Content-Type&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;application/json&quot;</span><span class="tok-punct">},</span>
+<span class="tok-punct">)</span>
+with urllib<span class="tok-punct">.</span>request<span class="tok-punct">.</span>urlopen<span class="tok-punct">(</span>req<span class="tok-punct">,</span> timeout<span class="tok-punct">=</span><span class="tok-num">10</span><span class="tok-punct">)</span> as r<span class="tok-punct">:</span>
+    print<span class="tok-punct">(</span>json<span class="tok-punct">.</span>dumps<span class="tok-punct">(</span>json<span class="tok-punct">.</span>load<span class="tok-punct">(</span>r<span class="tok-punct">)[</span><span class="tok-str">&quot;result&quot;</span><span class="tok-punct">],</span> indent<span class="tok-punct">=</span><span class="tok-num">2</span><span class="tok-punct">))</span></code></pre>
         <pre class="console-pre-out" data-lang="schema"><code><span class="tok-punct">{</span>
   <span class="tok-prop">&quot;block_hash&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;8cec80e8dc7b2e77b1e43314bda2f2570aaad82fb02c4afa9a1d35990177d802&quot;</span><span class="tok-punct">,</span>
   <span class="tok-prop">&quot;height&quot;</span><span class="tok-punct">:</span> <span class="tok-num">5225249</span><span class="tok-punct">,</span>
@@ -204,30 +204,30 @@ with urllib.request.urlopen(req, timeout=10) as r:
 <span class="tok-punct">}</span></code></pre>
         <h3 class="console-h3">rust</h3>
         <p class="console-note">A standalone cargo project with one dependency. This needs a build step, which the two above do not, so it is the third path rather than the first. It does not use the NOVAI Rust SDK, because that SDK depends on the workspace crates by path and so cannot be built outside a clone of the repository.</p>
-        <pre class="console-pre" data-lang="none"><code>// Cargo.toml
-// [dependencies]
-// reqwest = { version = &quot;0.12&quot;, features = [&quot;blocking&quot;, &quot;json&quot;] }
-// serde_json = &quot;1&quot;
+        <pre class="console-pre" data-lang="none"><code><span class="tok-comment">// Cargo.toml</span>
+<span class="tok-comment">// [dependencies]</span>
+<span class="tok-comment">// reqwest = { version = &quot;0.12&quot;, features = [&quot;blocking&quot;, &quot;json&quot;] }</span>
+<span class="tok-comment">// serde_json = &quot;1&quot;</span>
 
-use std::error::Error;
+use std<span class="tok-punct">::</span>error<span class="tok-punct">::</span>Error<span class="tok-punct">;</span>
 
-fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
-    let body = serde_json::json!({
-        &quot;jsonrpc&quot;: &quot;2.0&quot;,
-        &quot;method&quot;: &quot;novai_getLatestBlock&quot;,
-        &quot;params&quot;: {},
-        &quot;id&quot;: 1
-    });
+fn main<span class="tok-punct">()</span> <span class="tok-punct">-&gt;</span> Result<span class="tok-punct">&lt;(),</span> Box<span class="tok-punct">&lt;</span>dyn Error<span class="tok-punct">&gt;&gt;</span> <span class="tok-punct">{</span>
+    let body <span class="tok-punct">=</span> serde_json<span class="tok-punct">::</span>json<span class="tok-punct">!({</span>
+        <span class="tok-str">&quot;jsonrpc&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;2.0&quot;</span><span class="tok-punct">,</span>
+        <span class="tok-str">&quot;method&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;novai_getLatestBlock&quot;</span><span class="tok-punct">,</span>
+        <span class="tok-str">&quot;params&quot;</span><span class="tok-punct">:</span> <span class="tok-punct">{},</span>
+        <span class="tok-str">&quot;id&quot;</span><span class="tok-punct">:</span> <span class="tok-num">1</span>
+    <span class="tok-punct">});</span>
 
-    let resp: serde_json::Value = reqwest::blocking::Client::new()
-        .post(&quot;https://rpc.novai.network&quot;)
-        .json(&amp;body)
-        .send()?
-        .json()?;
+    let resp<span class="tok-punct">:</span> serde_json<span class="tok-punct">::</span>Value <span class="tok-punct">=</span> reqwest<span class="tok-punct">::</span>blocking<span class="tok-punct">::</span>Client<span class="tok-punct">::</span>new<span class="tok-punct">()</span>
+        <span class="tok-punct">.</span>post<span class="tok-punct">(</span><span class="tok-str">&quot;https://rpc.novai.network&quot;</span><span class="tok-punct">)</span>
+        <span class="tok-punct">.</span>json<span class="tok-punct">(&amp;</span>body<span class="tok-punct">)</span>
+        <span class="tok-punct">.</span>send<span class="tok-punct">()?</span>
+        <span class="tok-punct">.</span>json<span class="tok-punct">()?;</span>
 
-    println!(&quot;{}&quot;, serde_json::to_string_pretty(&amp;resp[&quot;result&quot;])?);
-    Ok(())
-}</code></pre>
+    println<span class="tok-punct">!(</span><span class="tok-str">&quot;{}&quot;</span><span class="tok-punct">,</span> serde_json<span class="tok-punct">::</span>to_string_pretty<span class="tok-punct">(&amp;</span>resp<span class="tok-punct">[</span><span class="tok-str">&quot;result&quot;</span><span class="tok-punct">])?);</span>
+    Ok<span class="tok-punct">(())</span>
+<span class="tok-punct">}</span></code></pre>
         <pre class="console-pre-out" data-lang="schema"><code><span class="tok-punct">{</span>
   <span class="tok-prop">&quot;block_hash&quot;</span><span class="tok-punct">:</span> <span class="tok-str">&quot;4c065392ab83658711dc3df2ade2bda953c33a1a4f5d0e884439b6a9548ed1a3&quot;</span><span class="tok-punct">,</span>
   <span class="tok-prop">&quot;height&quot;</span><span class="tok-punct">:</span> <span class="tok-num">5225251</span><span class="tok-punct">,</span>

@@ -55,7 +55,7 @@ Errors and limits | NOVAI developer console
 
  04 errors and limits
 
- Thirteen JSON-RPC error codes, four HTTP-level rejections that carry no JSON-RPC envelope at all, and six limits.
+ Every JSON-RPC error code, the HTTP-level rejections that carry no JSON-RPC envelope at all, and the limits that produce them. thirteen JSON-RPC error codes, four HTTP-level rejections, and six limits.
 
  json-rpc error codes
 
@@ -89,7 +89,7 @@ Errors and limits | NOVAI developer console
 
  correction A missing jsonrpc or method field answers -32700, not this code, because every field of the request struct is required and a missing one fails to deserialize. -32600 is what you get when jsonrpc is present and is not "2.0". Tracked as NEEDS-OPERATOR.md item 19.
 
- One of these thirteen is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.
+ One of these codes is not in the repository's own RPC reference. -32014 is emitted by the node but the reference's error tables do not list it, so this page reads it from the implementation instead. For that one code the console is the source rather than a projection of the document.
 
  http rejections with no json-rpc envelope
 
@@ -103,7 +103,7 @@ Errors and limits | NOVAI developer console
 
  503 | Service Unavailable &#8212; too many concurrent requests | :1242 |
 
- These four never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.
+ These never carry a JSON-RPC envelope. A client that calls .json() on the response raises a parse error rather than reading an error object, so check the HTTP status before parsing.
 
  limits
 
