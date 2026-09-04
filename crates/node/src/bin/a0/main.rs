@@ -11,8 +11,10 @@
 //!   a0 inspect --db <copy-path>        report heights, roots, and QC voters
 //!   a0 audit --db <copy-path> [--height <h>]
 //!                                      run the full A1..A8 audit
-//!   a0 reclaim --db <datadir> [--apply]
+//!   a0 reclaim --db <datadir> [--stage-only | --apply]
 //!                                      census the dead SMT nodes; with
+//!                                      --stage-only, rebuild and audit beside
+//!                                      the directory without renaming; with
 //!                                      --apply, rebuild and swap the directory
 //!
 //! Exit codes: 0 = success / audit PASS, 1 = audit FAIL, 2 = usage or IO
@@ -35,7 +37,8 @@ use novai_node::snapshot::{audit, inspect, reclaim, valset};
 
 fn usage() -> i32 {
     eprintln!(
-        "usage: a0 <valset|inspect|audit|reclaim> [--db <path>] [--height <h>] [--apply]"
+        "usage: a0 <valset|inspect|audit|reclaim> [--db <path>] [--height <h>] \
+         [--stage-only] [--apply]"
     );
     2
 }
@@ -123,7 +126,26 @@ fn main() {
         Some("reclaim") => match require_datadir(&args[1..]) {
             Ok(db) => {
                 let apply = args[1..].iter().any(|a| a == "--apply");
-                match reclaim::run(&db, apply) {
+                let stage_only = args[1..].iter().any(|a| a == "--stage-only");
+                // Refused rather than resolved by precedence. The two flags ask
+                // for opposite things about the one irreversible step in this
+                // binary, so guessing which the operator meant is the wrong
+                // service to offer.
+                if apply && stage_only {
+                    eprintln!(
+                        "--apply and --stage-only are mutually exclusive: one swaps the \
+                         directory, the other exists so you can decide first"
+                    );
+                    std::process::exit(2);
+                }
+                let mode = if apply {
+                    reclaim::Mode::Apply
+                } else if stage_only {
+                    reclaim::Mode::StageOnly
+                } else {
+                    reclaim::Mode::DryRun
+                };
+                match reclaim::run(&db, mode) {
                     Ok(true) => 0,
                     Ok(false) => 1,
                     Err(e) => {

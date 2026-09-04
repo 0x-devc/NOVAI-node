@@ -18,8 +18,10 @@
 //! by itself. R2 pins that the rebuild really does reproduce the reachable set,
 //! walked from the root rather than asserted. R3 pins that the copier is TOTAL,
 //! because the one genuinely new piece of code is the part that carries the
-//! 70 MB of non-SMT rows across, and a silently dropped family is the failure
-//! this design is most exposed to. The rest (R4, R5, R7, R8) pin the refusals.
+//! non-SMT rows across (31.16 MB over 100,122 rows, measured on the production
+//! node0 copy), and a silently dropped family is the failure this design is most
+//! exposed to. The rest (R4, R5, R7, R8) pin the refusals, and W5 below counts
+//! the staged keep set because nothing else in the pipeline did.
 //!
 //! THE DEFAULT IS A DRY RUN. The count-only mode is what the CLI does with no
 //! flag, and `dry_run_is_the_default_and_moves_nothing` is the gate on that.
@@ -77,6 +79,16 @@ impl Scratch {
 
     fn live_arg(&self) -> String {
         self.live().to_str().expect("utf8").to_string()
+    }
+
+    /// Where `stage` leaves the rebuilt directory. Derived the same way the
+    /// tool derives it rather than hardcoded, so a change to the suffix moves
+    /// both together.
+    fn staging(&self) -> PathBuf {
+        self.base().join(format!(
+            "validator-0{}",
+            reclaim::RECLAIM_STAGING_SUFFIX
+        ))
     }
 
     /// Sibling directories the tool may have created, by suffix.
@@ -1040,4 +1052,318 @@ fn a_hqc_descent_directory_reclaims_too() {
     assert_eq!(non_smt_rows(&sc.live()), before);
     let (code, stdout, _stderr) = run_a0(&["audit", "--db", &sc.live_arg()]);
     assert_eq!(code, 0, "stdout:\n{stdout}");
+}
+
+// ===========================================================================
+// Phase 2, W5: the staged keep set is counted, and the swap is separable
+//
+// TWO THINGS ARE ADDED HERE AND THEY SHARE A CAUSE.
+//
+// `stage` exists because proving the rebuild and proving the swap are separate
+// questions. Phase 2 proves the tool on a 26.5 GB copy of a real validator, and
+// the rename in that setting would be a swap of a directory no node will ever
+// boot, which proves nothing and risks the only copy.
+//
+// `verify_staged_keep_set` exists because this gate has now found the same
+// defect three times: a check the design assumed was somewhere else. Phase 1
+// found that the plan's "caught before the rename by A5" named a check that
+// does not exist, and that no audit check reads the anti-equivocation marks.
+// This is the third. The copier already returned the number of rows it wrote
+// and the census beside it already held the number it should have written, and
+// nothing compared them. A dropped `KEY_VOTED_VIEW` was caught by an assertion
+// in one unit test and by nothing in the tool.
+// ===========================================================================
+
+#[test]
+fn stage_proves_the_rebuild_and_renames_nothing() {
+    // The Phase 2 shape, in miniature: everything a reclaim does except the
+    // swap. The source must come through byte-identical, because the whole
+    // point of staging separately is that it is safe to run against a copy you
+    // cannot afford to damage.
+    let (sc, facts) = fixture("stage_only", churned_spec());
+    let before = all_rows(&sc.live());
+    let source_root = stored_root(&sc.live());
+
+    let staged = reclaim::stage(&sc.live()).expect("stage a healthy directory");
+
+    assert_eq!(staged.height, facts.t);
+    assert_eq!(staged.root, source_root, "same root as the source");
+    assert_eq!(staged.staging, sc.staging());
+    assert!(staged.staging.is_dir(), "the staged directory must exist");
+    assert!(
+        sc.siblings_with(".preinstall").is_empty(),
+        "staging must never set the live directory aside"
+    );
+    assert_eq!(
+        all_rows(&sc.live()),
+        before,
+        "the source must be byte-identical after a staging run"
+    );
+    assert_eq!(
+        committed_height(&staged.staging),
+        facts.t,
+        "and the staged directory must be an openable database at the height"
+    );
+}
+
+#[test]
+fn the_staged_keep_set_equals_the_census_exactly() {
+    // The invariant `verify_staged_keep_set` rests on, pinned separately from
+    // the check itself. The rebuild writes non-node rows of its own (the leaf
+    // rows and `smt/root`), so the staged keep set is only equal to the source
+    // keep set because every one of those is already IN the source keep set. If
+    // `append_smt_ops_for_state_ops` ever wrote a non-node row the source does
+    // not carry, the equality would become an inequality and the tool would
+    // start refusing healthy directories. This test is what would say so.
+    let (sc, _facts) = fixture("keep_equal", churned_spec());
+    let counts = reclaim::plan(&sc.live()).expect("plan");
+
+    let staged = reclaim::stage(&sc.live()).expect("stage");
+
+    let rows = non_smt_rows(&staged.staging);
+    let bytes: u64 = rows.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
+    assert_eq!(
+        rows.len() as u64,
+        counts.keep_rows,
+        "the staged keep set must hold exactly the rows the census counted"
+    );
+    assert_eq!(bytes, counts.keep_bytes, "and exactly the same bytes");
+    assert_eq!(
+        rows,
+        non_smt_rows(&sc.live()),
+        "and byte-identically, row for row"
+    );
+}
+
+#[test]
+fn w5_a_dropped_anti_equivocation_mark_is_refused() {
+    // THE Phase 2 fail-closed proof that did not hold before this session.
+    //
+    // The probe lands in scope by construction: it punctures a REAL staged
+    // directory produced by `stage`, then runs the check against it. It is not
+    // exercisable only by mutating the copier, which is what made the previous
+    // coverage of this hazard a single assertion in a single unit test.
+    //
+    // Why this row and not another: A3 classifies KEY_VOTED_VIEW as
+    // Operational, no audit check reads it, and it is not a node so the staged
+    // tree walk does not reach it. A directory missing it audits PASS at the
+    // right height and the right root and boots a validator that has forgotten
+    // what it already voted for.
+    let (sc, facts) = fixture("w5_marks", churned_spec());
+    {
+        let mut db = RocksKv::open(&sc.live()).expect("reopen");
+        db.put(
+            KEY_VOTED_VIEW,
+            &novai_consensus_types::codec::encode_voted_view_v1(facts.t, 3),
+        )
+        .expect("plant the durable vote mark");
+    }
+    let counts = reclaim::plan(&sc.live()).expect("plan");
+    let staged = reclaim::stage(&sc.live()).expect("stage");
+
+    // The staged directory is complete at this point, so the check passes.
+    reclaim::verify_staged_keep_set(&staged.staging, counts.keep_rows, counts.keep_bytes)
+        .expect("a complete staged keep set must pass");
+
+    let mark_len = {
+        let mut db = RocksKv::open(&staged.staging).expect("reopen staging");
+        let mark = db
+            .get(KEY_VOTED_VIEW)
+            .expect("get mark")
+            .expect("the staged directory must carry the mark before it is dropped");
+        db.delete(KEY_VOTED_VIEW).expect("drop the mark");
+        (KEY_VOTED_VIEW.len() + mark.len()) as u64
+    };
+
+    let err = reclaim::verify_staged_keep_set(&staged.staging, counts.keep_rows, counts.keep_bytes)
+        .expect_err("a staged directory missing the vote mark must be refused");
+    match err {
+        ReclaimError::StagedKeepSetIncomplete {
+            staged_rows,
+            staged_bytes,
+            expect_rows,
+            expect_bytes,
+        } => {
+            assert_eq!(staged_rows + 1, expect_rows, "exactly one row short");
+            assert_eq!(
+                staged_bytes + mark_len,
+                expect_bytes,
+                "and short by exactly the mark's own bytes"
+            );
+        }
+        other => panic!("wrong refusal: {other:?}"),
+    }
+
+    // And the reason it matters, stated as a fact rather than as a comment:
+    // the audit this check runs beside passes on the punctured directory.
+    let arg = staged.staging.to_str().expect("utf8").to_string();
+    let (code, stdout, stderr) = run_a0(&["audit", "--db", &arg]);
+    assert_eq!(
+        code, 0,
+        "the A0 audit does not see a missing vote mark, which is why the count \
+         check has to; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn w5_a_punctured_staged_tree_is_refused() {
+    // The 4a companion to the 4b check above, exercised the same way: puncture
+    // a real staged directory and run the verifier against it. Phase 1 proved
+    // this by mutating the tool to drop rows mid-rebuild; this proves it
+    // without touching the tool, which is the difference between a gate and a
+    // demonstration.
+    let (sc, _facts) = fixture("w5_tree", churned_spec());
+    let counts = reclaim::plan(&sc.live()).expect("plan");
+    let staged = reclaim::stage(&sc.live()).expect("stage");
+
+    reclaim::verify_staged_tree(&staged.staging, staged.root, counts.live_node_rows)
+        .expect("a complete staged tree must pass");
+
+    let reachable = reachable_node_keys(&staged.staging);
+    let victim = reachable
+        .iter()
+        .nth(reachable.len() / 2)
+        .expect("a reachable node")
+        .clone();
+    {
+        let mut db = RocksKv::open(&staged.staging).expect("reopen staging");
+        db.delete(&victim).expect("puncture the staged tree");
+    }
+
+    let err = reclaim::verify_staged_tree(&staged.staging, staged.root, counts.live_node_rows)
+        .expect_err("a punctured staged tree must be refused");
+    assert!(
+        matches!(err, ReclaimError::StagedTreeIncomplete(_)),
+        "wrong refusal: {err:?}"
+    );
+    assert!(
+        format!("{err}").contains(&hex::encode(&victim[KEY_PREFIX_SMT_NODE.len()..])),
+        "the refusal must name the hash it could not find, because this project \
+         has lost root causes to evidence that did not name anything: {err}"
+    );
+}
+
+#[test]
+fn staging_is_never_cleared_automatically() {
+    // The never-delete rule, applied to the one directory a stage-only run
+    // leaves behind. A second run must refuse rather than overwrite: the
+    // staging directory may be the only copy of what a previous run produced,
+    // and on the Phase 2 material the source itself is the only copy there is.
+    let (sc, _facts) = fixture("staging_kept", churned_spec());
+    let staged = reclaim::stage(&sc.live()).expect("stage");
+    let staged_rows = all_rows(&staged.staging);
+
+    let err = reclaim::stage(&sc.live()).expect_err("a second stage must refuse");
+    assert!(
+        matches!(err, ReclaimError::StagingOccupied(_)),
+        "wrong refusal: {err:?}"
+    );
+    let err = reclaim::reclaim(&sc.live()).expect_err("and so must an apply");
+    assert!(
+        matches!(err, ReclaimError::StagingOccupied(_)),
+        "wrong refusal: {err:?}"
+    );
+    assert_eq!(
+        all_rows(&staged.staging),
+        staged_rows,
+        "and the first run's output must be untouched"
+    );
+}
+
+#[test]
+fn the_stage_only_flag_stages_and_the_apply_flag_swaps() {
+    // The CLI contract for the three modes, in one place, because the flag is
+    // what an operator actually types and the difference between the two
+    // mutating modes is the only irreversible step in this binary.
+    let (sc, facts) = fixture("cli_modes", churned_spec());
+    let before = all_rows(&sc.live());
+
+    let (code, stdout, stderr) = run_a0(&["reclaim", "--db", &sc.live_arg(), "--stage-only"]);
+    assert_eq!(
+        code, 0,
+        "a stage-only run must succeed; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    for line in ["D7 PASS staged_tree_rows=", "D8 PASS staged_keep_rows=", "D9 PASS staged_audit"] {
+        assert!(
+            stdout.contains(line),
+            "the staging report must name the check {line}; stdout:\n{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains(&format!("RESULT STAGED height={}", facts.t)),
+        "stdout:\n{stdout}"
+    );
+    assert_eq!(
+        sc.siblings_with(".reclaim-staging").len(),
+        1,
+        "stage-only must leave the staged directory in place"
+    );
+    assert!(
+        sc.siblings_with(".preinstall").is_empty(),
+        "and must rename nothing"
+    );
+    assert_eq!(all_rows(&sc.live()), before, "the source is untouched");
+}
+
+#[test]
+fn asking_for_both_mutating_modes_is_a_usage_error() {
+    // Refused rather than resolved by precedence: the two flags disagree about
+    // whether the irreversible step runs, and picking one for the operator is
+    // the wrong service to offer.
+    let (sc, _facts) = fixture("cli_both", churned_spec());
+
+    let (code, stdout, stderr) = run_a0(&[
+        "reclaim",
+        "--db",
+        &sc.live_arg(),
+        "--stage-only",
+        "--apply",
+    ]);
+
+    assert_eq!(code, 2, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        sc.siblings_with(".reclaim-staging").is_empty()
+            && sc.siblings_with(".preinstall").is_empty(),
+        "and nothing may have been created or renamed"
+    );
+}
+
+#[test]
+fn p2c_a_torn_directory_is_refused_in_all_three_modes() {
+    // Phase 2's first fail-closed fixture. A1's own condition, checked before
+    // the leaf set is read, so a directory captured inside the one-block crash
+    // window is refused rather than rebuilt from state that is half a block
+    // old. All three modes are asserted together because a refusal that holds
+    // in two of three is a refusal an operator can walk around.
+    let (sc, facts) = fixture("p2c_torn", churned_spec());
+    {
+        let mut db = RocksKv::open(&sc.live()).expect("reopen");
+        db.put(KEY_EXECUTED_HEIGHT, &(facts.t - 1).to_be_bytes())
+            .expect("tear the cursor pair");
+    }
+    let before = all_rows(&sc.live());
+
+    let arg = sc.live_arg();
+    for extra in [None, Some("--stage-only"), Some("--apply")] {
+        let mut args = vec!["reclaim", "--db", arg.as_str()];
+        if let Some(e) = extra {
+            args.push(e);
+        }
+        let (code, stdout, stderr) = run_a0(&args);
+        assert_eq!(
+            code, 1,
+            "a torn directory must be refused by {args:?}; stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("RESULT REFUSED") && stdout.contains("torn"),
+            "and the refusal must say why; stdout:\n{stdout}"
+        );
+    }
+
+    assert!(
+        sc.siblings_with(".reclaim-staging").is_empty()
+            && sc.siblings_with(".preinstall").is_empty(),
+        "a refused run creates nothing"
+    );
+    assert_eq!(all_rows(&sc.live()), before, "and changes nothing");
 }

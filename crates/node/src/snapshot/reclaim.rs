@@ -15,7 +15,9 @@
 //! tombstones and then needs a compaction to free anything, and a compaction
 //! needs transient free space on a box that has 9.5 GB of it. It fits the disk
 //! worst at exactly the moment disk is the problem. This rebuilds beside the
-//! live directory instead: peak extra allocation is about 75 MB.
+//! live directory instead: peak extra allocation is about 34 MB, measured on a
+//! copy of the production node0 directory at height 7,150,693 (31.16 MB of
+//! non-SMT rows plus 3.10 MB of rebuilt tree, roughly 24 MB on disk).
 //!
 //! WHAT MAKES IT SAFE. Not care, a derivation. `Smt::with_root` has exactly one
 //! production caller and it always passes the single mutable `KEY_SMT_ROOT`,
@@ -198,6 +200,16 @@ pub enum ReclaimError {
     /// memory. Raised by the on-disk reachability walk, which exists because
     /// the A0 audit cannot see `smt/node/` rows at all.
     StagedTreeIncomplete(String),
+    /// The staged directory does not carry every row the census counted outside
+    /// `smt/node/`. The copier is the only writer of the blocks, the QCs, the
+    /// cursors and the anti-equivocation marks, and no other check in this
+    /// pipeline reads them, so this is the only place a lost family is seen.
+    StagedKeepSetIncomplete {
+        staged_rows: u64,
+        staged_bytes: u64,
+        expect_rows: u64,
+        expect_bytes: u64,
+    },
     /// The staged directory failed its audit. It is preserved for diagnosis and
     /// the live directory was never touched.
     AuditFailed {
@@ -245,6 +257,19 @@ impl std::fmt::Display for ReclaimError {
                  memory ({why}); nothing has been renamed, and note that the A0 audit cannot \
                  catch this because it rebuilds from the leaves and never reads the node store"
             ),
+            Self::StagedKeepSetIncomplete {
+                staged_rows,
+                staged_bytes,
+                expect_rows,
+                expect_bytes,
+            } => write!(
+                f,
+                "reclaim refused: the staged directory holds {staged_rows} rows and \
+                 {staged_bytes} bytes outside smt/node/, but the source census counted \
+                 {expect_rows} and {expect_bytes}; the copier is the only writer of the blocks, \
+                 QCs, cursors and anti-equivocation marks, and neither the audit nor the \
+                 staged-tree walk reads them, so nothing else would see this loss"
+            ),
             Self::AuditFailed { moved_to, result } => write!(
                 f,
                 "reclaim refused: the staged directory failed its audit ({result}); it is \
@@ -263,6 +288,28 @@ pub struct ReclaimOutcome {
     /// The preserved previous directory. The operator deletes it, after the
     /// node passes the rejoin gate, and never before.
     pub preinstall: PathBuf,
+}
+
+/// What a completed staging run produced, with nothing renamed.
+///
+/// [`stage`] is every step of a reclaim except the swap, so this is the whole
+/// correctness claim standing on disk and waiting for a decision. Phase 2
+/// proves the tool on a real validator copy through this type, because proving
+/// the rebuild and proving the swap are separate questions and the swap belongs
+/// to a live node.
+#[derive(Debug)]
+pub struct StagedOutcome {
+    pub counts: ReclaimCounts,
+    pub height: u64,
+    pub root: [u8; 32],
+    /// The rebuilt, walked and audited directory, sitting beside the source.
+    /// It is NEVER removed automatically: a staging directory left behind is
+    /// either the artefact of a proof or the evidence of a failure, and this
+    /// tool does not decide which.
+    pub staging: PathBuf,
+    /// The staged audit's own result line, so a caller reporting a staging run
+    /// quotes the verifier rather than paraphrasing it.
+    pub audit_result: String,
 }
 
 // ===========================================================================
@@ -314,14 +361,26 @@ pub fn plan(db_dir: &Path) -> Result<ReclaimCounts, ReclaimError> {
 // The mutating path.
 // ===========================================================================
 
-/// Rebuild `db_dir` beside itself and swap it in.
+/// Rebuild `db_dir` beside itself, prove the result, and stop before the swap.
+///
+/// This is every step of [`reclaim`] except the two renames, and [`reclaim`]
+/// calls it rather than repeating it, so the path proven here is the path that
+/// runs in production. Splitting it out is what lets the rebuild be proven on a
+/// real validator copy offline: the rebuild and the audit are safe anywhere,
+/// the swap belongs to a stopped node that is about to restart.
+///
+/// On success the staging directory is left in place, audited and unrenamed.
+/// On failure it is left in place too, and a later run refuses rather than
+/// clearing it, because it may be the only copy of what went wrong.
 ///
 /// # Errors
 /// Refuses, without touching the live directory, on any of: a running node
 /// holding the database lock, a torn cursor pair, an outstanding checkpoint, an
 /// occupied staging path, an unclassifiable key, a rebuilt root that disagrees
-/// with the stored root, or a staged directory that fails the full A0 audit.
-pub fn reclaim(db_dir: &Path) -> Result<ReclaimOutcome, ReclaimError> {
+/// with the stored root, a staged tree that does not match the verified
+/// rebuild, a staged keep set short of the census, or a staged directory that
+/// fails the full A0 audit.
+pub fn stage(db_dir: &Path) -> Result<StagedOutcome, ReclaimError> {
     let (base, subdir) = split(db_dir)?;
     let staging = base.join(format!("{subdir}{RECLAIM_STAGING_SUFFIX}"));
 
@@ -381,6 +440,18 @@ pub fn reclaim(db_dir: &Path) -> Result<ReclaimOutcome, ReclaimError> {
     // before the audit that cannot see it.
     verify_staged_tree(&staging, source_root, tree.live_rows)?;
 
+    // Step 4b, and it is the same class of gap as 4a: a check the design
+    // assumed was somewhere else. The copier is the ONLY writer of the blocks,
+    // the QCs, the cursors and the anti-equivocation marks, and it already
+    // returned a row count that this pipeline discarded while the census beside
+    // it held the expected one. A dropped `KEY_VOTED_VIEW` is invisible to the
+    // audit (A3 classifies it Operational and no check reads it) and invisible
+    // to the staged-tree walk (it is not a node), so before this it was caught
+    // by nothing outside a unit test. Counting the staged keep set and
+    // comparing it to the census gates every non-node family at once, rather
+    // than naming the two marks and leaving the next family uncovered.
+    verify_staged_keep_set(&staging, keep_rows, keep_bytes)?;
+
     // Step 4. The same verifier the producer, the receiver and the boot
     // installer run, against the exact bytes about to be installed, pinned to
     // the source height so A1 checks it rather than merely reporting it.
@@ -409,6 +480,35 @@ pub fn reclaim(db_dir: &Path) -> Result<ReclaimOutcome, ReclaimError> {
         });
     }
 
+    Ok(StagedOutcome {
+        counts,
+        height,
+        root: source_root,
+        staging,
+        audit_result: report.result_line(),
+    })
+}
+
+/// Rebuild `db_dir` beside itself and swap it in.
+///
+/// The proof is [`stage`] and this is the commit point: two renames and an
+/// fsync, and nothing else. Keeping the swap this thin is deliberate, because
+/// everything above it can be rehearsed offline and this cannot.
+///
+/// # Errors
+/// Every refusal [`stage`] can raise, none of which touches the live directory,
+/// plus an IO failure on one of the two renames.
+pub fn reclaim(db_dir: &Path) -> Result<ReclaimOutcome, ReclaimError> {
+    let staged = stage(db_dir)?;
+    let (base, subdir) = split(db_dir)?;
+    let StagedOutcome {
+        counts,
+        height,
+        root,
+        staging,
+        audit_result: _,
+    } = staged;
+
     // Step 5. The live directory is set aside, never removed, and named for the
     // height it holds so an operator choosing one for a rollback is not
     // guessing. Then one rename, and the swap is done.
@@ -421,7 +521,7 @@ pub fn reclaim(db_dir: &Path) -> Result<ReclaimOutcome, ReclaimError> {
 
     tracing::warn!(
         height,
-        root = %hex::encode(source_root),
+        root = %hex::encode(root),
         reclaimed_rows = counts.dead_node_rows(),
         preserved = %preinstall.display(),
         "SMT reclaim installed; the previous directory is preserved and is the rollback"
@@ -430,7 +530,7 @@ pub fn reclaim(db_dir: &Path) -> Result<ReclaimOutcome, ReclaimError> {
     Ok(ReclaimOutcome {
         counts,
         height,
-        root: source_root,
+        root,
         preinstall,
     })
 }
@@ -594,7 +694,19 @@ fn materialize_tree(staging: &Path, leaves: &[(Vec<u8>, Vec<u8>)]) -> Result<(),
 /// to the tree whose root was already checked against the source. A walk that
 /// only checked for dangling children would pass a directory holding a
 /// perfectly well formed tree of the wrong shape.
-fn verify_staged_tree(
+///
+/// PUBLIC ON PURPOSE. It is the check the plan's step 4 was assumed to do, so
+/// it has to be runnable on its own: against a staged directory before a swap,
+/// and against an installed directory after one. A check reachable only from
+/// inside the pipeline that calls it can be exercised only by breaking that
+/// pipeline, and a gate exercisable only by its own definition site is not a
+/// gate.
+///
+/// # Errors
+/// [`ReclaimError::StagedTreeIncomplete`] if the stored root is not
+/// `expect_root`, if an internal node reachable from it is absent, or if the
+/// reachable count is not `expect_rows`.
+pub fn verify_staged_tree(
     staging: &Path,
     expect_root: [u8; 32],
     expect_rows: u64,
@@ -622,6 +734,72 @@ fn verify_staged_tree(
         return Err(ReclaimError::StagedTreeIncomplete(format!(
             "the staged tree spans {rows} rows but the verified rebuild spans {expect_rows}"
         )));
+    }
+    Ok(())
+}
+
+/// Count the staged rows outside `smt/node/` and prove the copier lost none.
+///
+/// WHY THIS EXISTS, and it is the third instance in this gate of the same
+/// defect. Phase 1 found that the plan's "caught before the rename by A5" named
+/// a check that does not exist, and that the audit is blind to the
+/// anti-equivocation marks. This is the same shape once more: the copier
+/// already returned the number of rows it wrote, the census beside it already
+/// held the number it should have written, and the pipeline compared neither.
+///
+/// A dropped `KEY_VOTED_VIEW` is seen by nothing else. A3 classifies it
+/// Operational, no audit check reads it, and it is not a node so the staged
+/// tree walk does not reach it either. The result would audit PASS at the right
+/// height and the right root, install cleanly, and boot a validator that has
+/// forgotten what it already voted for.
+///
+/// COUNTING THE STAGED DIRECTORY RATHER THAN TRUSTING THE COPIER'S RETURN
+/// VALUE is the point. The copier's own count says what it decided to write;
+/// this says what is actually there, so it also covers a write that was
+/// batched, dropped or never flushed.
+///
+/// The invariant that makes the comparison exact: the only non-node rows the
+/// rebuild writes are the leaf rows and `smt/root`
+/// (`append_smt_ops_for_state_ops`, `crates/execution/src/lib.rs:6552-6593`),
+/// and every one of those is in the source keep set already, so the staged keep
+/// set is the source keep set with nothing added.
+///
+/// Honest limit, stated rather than implied: rows and bytes are a strong
+/// checksum over a verbatim copy, not a set equality. A copier that substituted
+/// one row for another of the same length would pass here. That is not a shape
+/// this copier can produce, since it writes back exactly the pairs it scanned,
+/// and a full key-set comparison would mean holding both key sets in memory at
+/// production scale for a failure mode the code has no path to.
+///
+/// # Errors
+/// [`ReclaimError::StagedKeepSetIncomplete`] if either figure disagrees.
+pub fn verify_staged_keep_set(
+    staging: &Path,
+    expect_rows: u64,
+    expect_bytes: u64,
+) -> Result<(), ReclaimError> {
+    let db = RocksKv::open(staging)
+        .map_err(|e| ReclaimError::Io(format!("reopen staging to count: {e:?}")))?;
+    let (mut rows, mut bytes) = (0u64, 0u64);
+    {
+        let mut count = |k: &[u8], v: &[u8]| {
+            if !k.starts_with(KEY_PREFIX_SMT_NODE) {
+                rows += 1;
+                bytes += (k.len() + v.len()) as u64;
+            }
+        };
+        db.for_each_prefix(b"", &mut count)
+            .map_err(|e| ReclaimError::Io(format!("scan staged default cf: {e:?}")))?;
+        db.for_each_prefix(b"nnpx/", &mut count)
+            .map_err(|e| ReclaimError::Io(format!("scan staged nnpx cf: {e:?}")))?;
+    }
+    if rows != expect_rows || bytes != expect_bytes {
+        return Err(ReclaimError::StagedKeepSetIncomplete {
+            staged_rows: rows,
+            staged_bytes: bytes,
+            expect_rows,
+            expect_bytes,
+        });
     }
     Ok(())
 }
@@ -676,6 +854,17 @@ fn copy_non_smt_rows(src: &RocksKv, staging: &Path) -> Result<u64, ReclaimError>
 // CLI
 // ===========================================================================
 
+/// What the operator asked for. The census is the default in every path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Read only. Writes nothing, stages nothing, renames nothing.
+    DryRun,
+    /// Rebuild, walk, count and audit beside the source. Renames nothing.
+    StageOnly,
+    /// All of that, and then the swap.
+    Apply,
+}
+
 /// Print the census, and apply it only when asked.
 ///
 /// `Ok(true)` = success (exit 0), `Ok(false)` = refused (exit 1), `Err` =
@@ -685,10 +874,10 @@ fn copy_non_smt_rows(src: &RocksKv, staging: &Path) -> Result<u64, ReclaimError>
 /// Never: refusals are reported as `Ok(false)` so the caller's exit codes stay
 /// aligned with the auditor's. The signature keeps the `Err` arm so a future
 /// environment failure has somewhere to go without changing every call site.
-pub fn run(db_dir: &str, apply: bool) -> Result<bool, String> {
+pub fn run(db_dir: &str, mode: Mode) -> Result<bool, String> {
     let path = Path::new(db_dir);
 
-    if apply {
+    if mode == Mode::Apply {
         return match reclaim(path) {
             Ok(outcome) => {
                 for line in outcome.counts.lines() {
@@ -699,6 +888,46 @@ pub fn run(db_dir: &str, apply: bool) -> Result<bool, String> {
                     outcome.height,
                     hex::encode(outcome.root),
                     outcome.preinstall.display()
+                );
+                Ok(true)
+            }
+            Err(e) => {
+                println!("RESULT REFUSED {e}");
+                Ok(false)
+            }
+        };
+    }
+
+    if mode == Mode::StageOnly {
+        return match stage(path) {
+            Ok(outcome) => {
+                let c = &outcome.counts;
+                println!("D1 PASS committed=executed height={}", c.height);
+                println!("D2 PASS source_root={}", hex::encode(c.source_root));
+                println!("D3 PASS checkpoint_pin=none");
+                for line in c.lines() {
+                    println!("{line}");
+                }
+                // The three checks that stand between a rebuilt directory and a
+                // swap, each named so a staging report quotes them rather than
+                // asserting that they ran. D7 and D8 are the two the A0 audit
+                // cannot perform.
+                println!(
+                    "D7 PASS staged_tree_rows={} root={}",
+                    c.live_node_rows,
+                    hex::encode(outcome.root)
+                );
+                println!(
+                    "D8 PASS staged_keep_rows={} staged_keep_bytes={}",
+                    c.keep_rows, c.keep_bytes
+                );
+                println!("D9 PASS staged_audit {}", outcome.audit_result);
+                println!(
+                    "RESULT STAGED height={} root={} staging={} (nothing was renamed; the \
+                     staging directory is never removed automatically)",
+                    outcome.height,
+                    hex::encode(outcome.root),
+                    outcome.staging.display()
                 );
                 Ok(true)
             }
