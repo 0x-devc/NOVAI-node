@@ -571,21 +571,28 @@ fn preflight_cursors(db: &RocksKv) -> Result<(u64, [u8; 32]), ReclaimError> {
     let committed = read_cursor(db, KEY_COMMITTED_HEIGHT)?;
     let executed = read_cursor(db, KEY_EXECUTED_HEIGHT)?;
     match (committed, executed) {
-        (Some(c), Some(e)) if c == e => {
-            let root = match db
-                .get(KEY_SMT_ROOT)
-                .map_err(|e| ReclaimError::Io(format!("get root: {e:?}")))?
-            {
-                Some(bytes) => decode_smt_root_v1(&bytes)
-                    .map_err(|e| ReclaimError::Io(format!("decode stored root: {e:?}")))?,
-                None => novai_execution::empty_smt_root(),
-            };
-            Ok((c, root))
-        }
+        (Some(c), Some(e)) if c == e => Ok((c, read_stored_root(db)?)),
         (committed, executed) => Err(ReclaimError::Torn {
             committed,
             executed,
         }),
+    }
+}
+
+/// The stored `smt/root`, defaulting to the canonical empty root when absent.
+///
+/// Split out of `preflight_cursors` because [`verify_tree`] needs the root
+/// WITHOUT the cursor condition: it has to work on a directory that is torn,
+/// which is exactly the directory an operator is holding when they reach the
+/// plan's 4.4 rollback.
+fn read_stored_root(db: &RocksKv) -> Result<[u8; 32], ReclaimError> {
+    match db
+        .get(KEY_SMT_ROOT)
+        .map_err(|e| ReclaimError::Io(format!("get root: {e:?}")))?
+    {
+        Some(bytes) => decode_smt_root_v1(&bytes)
+            .map_err(|e| ReclaimError::Io(format!("decode stored root: {e:?}"))),
+        None => Ok(novai_execution::empty_smt_root()),
     }
 }
 
@@ -738,6 +745,74 @@ pub fn verify_staged_tree(
     Ok(())
 }
 
+/// What [`verify_tree`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeReport {
+    pub root: [u8; 32],
+    pub leaf_count: u64,
+    /// Rows reachable from the root, counted by walking the directory's own
+    /// `smt/node/` rows, and equal to the leaf-driven rebuild's live figure.
+    pub live_node_rows: u64,
+    pub live_node_bytes: u64,
+}
+
+/// Prove a directory's node store actually holds the tree its root claims.
+///
+/// THIS IS THE CHECK NOTHING ELSE PERFORMS, and it exists because Phase 2 found
+/// that an operator on a real box had no way to run it. `a0 audit` cannot: A4
+/// rebuilds the root from the LEAVES into a fresh store and A5 compares that to
+/// the stored root, so the audit never reads the audited directory's own
+/// `smt/node/` rows and a punctured directory audits PASS at the right height
+/// and the right root. `a0 reclaim` cannot either, and for the opposite reason:
+/// it rebuilds from the leaves too, so it silently HEALS a hole rather than
+/// reporting one. Between them an operator could confirm everything except the
+/// one thing that halts a validator on its next update walk.
+///
+/// The plan's 4.4 rollback assumes the operator can inspect a directory and
+/// decide between it and the preserved one. That decision needs this.
+///
+/// IT DELIBERATELY DOES NOT REQUIRE `committed == executed`. Every other entry
+/// point here refuses a torn directory, because rebuilding from state that is
+/// half a block old is unsound. This one only reads, and the directory an
+/// operator most needs to inspect is the one that failed, which is very likely
+/// torn. Refusing there would withhold the answer exactly when it is wanted.
+///
+/// # Errors
+/// [`ReclaimError::RootMismatch`] if the leaf set does not reproduce the stored
+/// root, [`ReclaimError::StagedTreeIncomplete`] if a node the root reaches is
+/// absent or the reachable count disagrees, [`ReclaimError::Unclassifiable`] if
+/// a key is unknown to the classification table, and [`ReclaimError::Io`] if
+/// the directory cannot be opened (a running node holds the lock).
+pub fn verify_tree(db_dir: &Path) -> Result<TreeReport, ReclaimError> {
+    // The handle is dropped before `verify_staged_tree` opens the same
+    // directory: RocksDB takes a directory lock and a second open from this
+    // process would fail.
+    let (stored, leaves) = {
+        let db = open(db_dir)?;
+        let stored = read_stored_root(&db)?;
+        let leaves =
+            extract_leaf_set(&db).map_err(|e| ReclaimError::Unclassifiable(e.to_string()))?;
+        (stored, leaves)
+    };
+
+    let tree = rebuild_tree(&leaves).map_err(ReclaimError::Io)?;
+    if tree.root != stored {
+        return Err(ReclaimError::RootMismatch {
+            source: hex::encode(stored),
+            rebuilt: hex::encode(tree.root),
+        });
+    }
+
+    verify_staged_tree(db_dir, stored, tree.live_rows)?;
+
+    Ok(TreeReport {
+        root: stored,
+        leaf_count: leaves.len() as u64,
+        live_node_rows: tree.live_rows,
+        live_node_bytes: tree.live_bytes,
+    })
+}
+
 /// Count the staged rows outside `smt/node/` and prove the copier lost none.
 ///
 /// WHY THIS EXISTS, and it is the third instance in this gate of the same
@@ -853,6 +928,41 @@ fn copy_non_smt_rows(src: &RocksKv, staging: &Path) -> Result<u64, ReclaimError>
 // ===========================================================================
 // CLI
 // ===========================================================================
+
+/// Print what the node store actually holds. Reads only.
+///
+/// `Ok(true)` = complete (exit 0), `Ok(false)` = incomplete or refused
+/// (exit 1), matching `audit::run` and `run`.
+///
+/// # Errors
+/// Never: refusals are reported as `Ok(false)` so the exit codes stay aligned
+/// with the auditor's.
+pub fn run_verify_tree(db_dir: &str) -> Result<bool, String> {
+    match verify_tree(Path::new(db_dir)) {
+        Ok(report) => {
+            println!("V1 PASS stored_root={}", hex::encode(report.root));
+            println!(
+                "V2 PASS leaves={} rebuilt_root={}",
+                report.leaf_count,
+                hex::encode(report.root)
+            );
+            println!(
+                "V3 PASS live_node_rows={} live_node_bytes={} (every reachable node present)",
+                report.live_node_rows, report.live_node_bytes
+            );
+            println!(
+                "RESULT TREE-COMPLETE root={} live_node_rows={}",
+                hex::encode(report.root),
+                report.live_node_rows
+            );
+            Ok(true)
+        }
+        Err(e) => {
+            println!("RESULT TREE-INCOMPLETE {e}");
+            Ok(false)
+        }
+    }
+}
 
 /// What the operator asked for. The census is the default in every path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

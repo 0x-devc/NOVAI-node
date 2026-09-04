@@ -1367,3 +1367,173 @@ fn p2c_a_torn_directory_is_refused_in_all_three_modes() {
     );
     assert_eq!(all_rows(&sc.live()), before, "and changes nothing");
 }
+
+// ===========================================================================
+// Phase 3 precondition: `a0 verify-tree`
+//
+// WHY A SUBCOMMAND AND NOT JUST A LIBRARY FUNCTION. Phase 2 proved the tool on
+// a real validator copy and then found that the operator running Phase 3 had no
+// command that could detect a punctured node store. `a0 audit` cannot, because
+// A4 rebuilds from the leaves into a fresh store and A5 compares that to the
+// stored root, so the audit never reads the directory's own `smt/node/` rows.
+// `a0 reclaim` cannot either, and for the opposite reason: it also rebuilds
+// from the leaves, so it silently HEALS a hole rather than reporting one.
+// Between them an operator could confirm everything except the one thing that
+// halts a validator on its next update walk.
+//
+// The plan's 4.4 rollback assumes the operator can inspect a directory and
+// choose between it and the preserved one. That decision needs this.
+// ===========================================================================
+
+#[test]
+fn verify_tree_reports_the_live_set_of_a_healthy_directory() {
+    let (sc, _facts) = fixture("vt_healthy", churned_spec());
+    let counts = reclaim::plan(&sc.live()).expect("plan");
+    let source_root = stored_root(&sc.live());
+
+    let (code, stdout, stderr) = run_a0(&["verify-tree", "--db", &sc.live_arg()]);
+
+    assert_eq!(
+        code, 0,
+        "a healthy directory must verify; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "RESULT TREE-COMPLETE root={} live_node_rows={}",
+            hex::encode(source_root),
+            counts.live_node_rows
+        )),
+        "and must report the live set the census derives independently; stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn verify_tree_names_the_hole_that_the_audit_cannot_see() {
+    // THE test this subcommand exists for, and it asserts both halves in one
+    // place: the same directory, the same moment, one command blind and the
+    // other not. Asserting only the refusal would leave the reason it matters
+    // as a claim in a comment.
+    let (sc, _facts) = fixture("vt_hole", churned_spec());
+    let reachable = reachable_node_keys(&sc.live());
+    let victim = reachable
+        .iter()
+        .nth(reachable.len() / 2)
+        .expect("a reachable node")
+        .clone();
+    {
+        let mut db = RocksKv::open(&sc.live()).expect("reopen");
+        db.delete(&victim).expect("puncture the tree");
+    }
+
+    let (audit_code, audit_out, _) = run_a0(&["audit", "--db", &sc.live_arg()]);
+    assert_eq!(
+        audit_code, 0,
+        "the audit is blind to this, which is the whole reason verify-tree \
+         exists; stdout:\n{audit_out}"
+    );
+
+    let (code, stdout, stderr) = run_a0(&["verify-tree", "--db", &sc.live_arg()]);
+    assert_eq!(
+        code, 1,
+        "verify-tree must refuse; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("RESULT TREE-INCOMPLETE"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&hex::encode(&victim[KEY_PREFIX_SMT_NODE.len()..])),
+        "and must name the hash it could not find, so the operator has \
+         something to chase rather than a verdict; stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn verify_tree_works_on_a_torn_directory() {
+    // Every other entry point refuses a torn directory, because rebuilding
+    // from state half a block old is unsound. This one only reads, and the
+    // directory an operator most needs to inspect is the one that just failed,
+    // which is very likely torn. Refusing there would withhold the answer
+    // exactly when it is wanted, so this pins that it does not.
+    let (sc, facts) = fixture("vt_torn", churned_spec());
+    {
+        let mut db = RocksKv::open(&sc.live()).expect("reopen");
+        db.put(KEY_EXECUTED_HEIGHT, &(facts.t - 1).to_be_bytes())
+            .expect("tear the cursor pair");
+    }
+
+    // The contrast, asserted rather than described: reclaim refuses the same
+    // directory in the same state.
+    let (reclaim_code, reclaim_out, _) = run_a0(&["reclaim", "--db", &sc.live_arg()]);
+    assert_eq!(reclaim_code, 1, "stdout:\n{reclaim_out}");
+    assert!(reclaim_out.contains("torn"), "stdout:\n{reclaim_out}");
+
+    let (code, stdout, stderr) = run_a0(&["verify-tree", "--db", &sc.live_arg()]);
+    assert_eq!(
+        code, 0,
+        "verify-tree must still answer on a torn directory; \
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("RESULT TREE-COMPLETE"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn verify_tree_refuses_a_root_the_leaves_do_not_reproduce() {
+    // The other half of what a node store can be wrong about. A complete tree
+    // under the wrong root is not a hole, and the reachability walk alone
+    // would not catch it, so the rebuilt root is compared to the stored one
+    // before the walk runs.
+    let (sc, _facts) = fixture("vt_root", churned_spec());
+    {
+        let mut db = RocksKv::open(&sc.live()).expect("reopen");
+        db.put(
+            KEY_SMT_ROOT,
+            &novai_state::encode_smt_root_v1(&[0x5A; 32]),
+        )
+        .expect("plant a root the leaves do not produce");
+    }
+
+    // WHICH check fired is the whole assertion here, and asserting only
+    // "it refused" was not enough: with the root comparison removed, the
+    // reachability walk fails anyway, because the planted root is not a node
+    // that exists, and it names the same hash in its own message. A test that
+    // accepted either refusal passed under the mutation that deletes the check
+    // it exists to gate. So the variant is asserted, not just the outcome.
+    let err = reclaim::verify_tree(&sc.live())
+        .expect_err("a root the leaf set does not reproduce must be refused");
+    assert!(
+        matches!(err, ReclaimError::RootMismatch { .. }),
+        "the root comparison must be what refuses, not the walk downstream of \
+         it: {err:?}"
+    );
+
+    let (code, stdout, stderr) = run_a0(&["verify-tree", "--db", &sc.live_arg()]);
+    assert_eq!(
+        code, 1,
+        "and the CLI must exit 1; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("RESULT TREE-INCOMPLETE")
+            && stdout.contains("the leaf set does not span the live tree")
+            && stdout.contains(&"5a".repeat(32)),
+        "naming the stored root and saying why; stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn verify_tree_passes_on_a_reclaimed_directory() {
+    // The Phase 3 use: after a swap, before deleting the preserved directory,
+    // confirm the installed one holds its whole tree. The A0 audit that ran
+    // inside the reclaim could not have told the operator this.
+    let (sc, _facts) = fixture("vt_reclaimed", churned_spec());
+    let outcome = reclaim::reclaim(&sc.live()).expect("reclaim");
+
+    let report = reclaim::verify_tree(&sc.live()).expect("the reclaimed directory must verify");
+
+    assert_eq!(report.root, outcome.root, "same root as the reclaim reported");
+    assert_eq!(
+        report.live_node_rows, outcome.counts.live_node_rows,
+        "and the same live set, counted from the tree on disk rather than \
+         from the leaves the reclaim rebuilt it from"
+    );
+}

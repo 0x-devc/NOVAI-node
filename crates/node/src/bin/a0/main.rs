@@ -11,6 +11,9 @@
 //!   a0 inspect --db <copy-path>        report heights, roots, and QC voters
 //!   a0 audit --db <copy-path> [--height <h>]
 //!                                      run the full A1..A8 audit
+//!   a0 verify-tree --db <copy-path>   prove the node store holds the tree its
+//!                                      root claims; the ONE check `audit`
+//!                                      cannot perform
 //!   a0 reclaim --db <datadir> [--stage-only | --apply]
 //!                                      census the dead SMT nodes; with
 //!                                      --stage-only, rebuild and audit beside
@@ -37,7 +40,7 @@ use novai_node::snapshot::{audit, inspect, reclaim, valset};
 
 fn usage() -> i32 {
     eprintln!(
-        "usage: a0 <valset|inspect|audit|reclaim> [--db <path>] [--height <h>] \
+        "usage: a0 <valset|inspect|audit|verify-tree|reclaim> [--db <path>] [--height <h>] \
          [--stage-only] [--apply]"
     );
     2
@@ -123,6 +126,28 @@ fn main() {
         // The census is the DEFAULT. `--apply` is the only thing that renames
         // anything, so an operator who mistypes the subcommand or forgets a
         // flag gets a report, never a swap.
+        // Reads only, like `inspect` and `audit`, but it is pointed at a
+        // STOPPED node's own directory as often as at a copy: the plan's 4.4
+        // rollback is exactly the case where an operator has to decide between
+        // the directory in place and the preserved one. So it gets its own
+        // note rather than borrowing either of the two above.
+        Some("verify-tree") => match db_path(&args[1..]) {
+            Ok(db) => {
+                eprintln!(
+                    "note: verify-tree only reads; the node must not be running, and this is \
+                     the one check `a0 audit` cannot perform"
+                );
+                match reclaim::run_verify_tree(&db) {
+                    Ok(true) => 0,
+                    Ok(false) => 1,
+                    Err(e) => {
+                        eprintln!("verify-tree error: {e}");
+                        2
+                    }
+                }
+            }
+            Err(code) => code,
+        },
         Some("reclaim") => match require_datadir(&args[1..]) {
             Ok(db) => {
                 let apply = args[1..].iter().any(|a| a == "--apply");
