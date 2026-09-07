@@ -21,7 +21,7 @@ fn vectors_dir() -> PathBuf {
 }
 
 fn should_update_vectors() -> bool {
-    std::env::var("UPDATE_VECTORS").is_ok()
+    std::env::var("UPDATE_VECTORS").ok().as_deref() == Some("1")
 }
 
 /// Standard test entity used for golden vectors.

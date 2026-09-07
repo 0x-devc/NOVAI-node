@@ -14,7 +14,7 @@ fn vectors_dir() -> &'static Path {
 }
 
 fn should_update_vectors() -> bool {
-    std::env::var("UPDATE_VECTORS").is_ok()
+    std::env::var("UPDATE_VECTORS").ok().as_deref() == Some("1")
 }
 
 #[test]

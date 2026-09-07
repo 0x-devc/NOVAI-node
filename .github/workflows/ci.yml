@@ -31,6 +31,14 @@ jobs:
       - name: Cargo test
         run: cargo test --all --all-features
 
+      # The golden-vector suites rewrite their `.bin` files when UPDATE_VECTORS=1.
+      # Regeneration is a deliberate act that belongs in its own reviewed commit,
+      # so a test run that leaves any tracked file modified fails the build rather
+      # than letting the drift through unnoticed. Note this catches modifications
+      # to tracked files, not the creation of new untracked ones.
+      - name: No tracked file was modified by the test run
+        run: git diff --exit-code
+
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
 
