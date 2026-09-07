@@ -26,5 +26,12 @@ week8.sh
 marketing/
 explorer/
 
+# Python bytecode. Compiled .pyc files embed the absolute path of the
+# source they were built from, so on a developer machine they carry the
+# home directory into any commit that stages them. The pre-commit content
+# guard reads the staged diff as text and cannot see inside them.
+__pycache__/
+*.pyc
+
 # SMT GC Phase 0 measurement evidence (local only, large)
 docs/smtgc-phase0-evidence/
