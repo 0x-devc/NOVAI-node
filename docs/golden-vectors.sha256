@@ -1,0 +1,77 @@
+# SHA-256 of every committed golden vector in this workspace.
+#
+# WHAT: the 46 .bin files under crates/*/tests/vectors/. Each one is the
+# byte-exact expected output of an encoder, and the golden vector suites
+# compare against these bytes on every test run. They are the record of what
+# the wire and state encodings actually produce.
+#
+# RECORDED: 2026-09-07, at commit c2373af (c2373af5f670cc2f1d115af91543c9cbfb80eab7).
+#
+# WHY: these files are rewritten in place by their own test suites when
+# UPDATE_VECTORS=1. Until 3bd6e28 that gate was spelled
+# std::env::var("UPDATE_VECTORS").is_ok() in four of the five suites, which is
+# true for UPDATE_VECTORS=0 and for the empty string, so any run that merely
+# had the variable set overwrote the vectors and passed. This manifest is the
+# fixed point taken immediately after that gate was corrected: it is the
+# reference for deciding whether a later change to these bytes was intended.
+#
+# A change to any hash below means an encoding changed. That is a consensus
+# level event, not a test fixture update, and it should be explained in the
+# commit that causes it rather than absorbed silently.
+#
+# NOTHING IN THIS REPOSITORY VERIFIES THIS FILE. No test reads it, no CI step
+# checks it. It is a record, not a gate. The gate that does exist is
+# crates/codec/tests/gate_update_vectors_pin.rs, which checks how the
+# regeneration branch is spelled, plus the git diff --exit-code step in
+# .github/workflows/ci.yml, which fails a build whose tests modified a tracked
+# file. Neither of those compares against the hashes below.
+#
+# To check by hand, from the repository root:
+#   shasum -a 256 -c docs/golden-vectors.sha256
+#
+2f3e853bd8d26daa6857d420933cda12d10609a8ee8272876000aceb2ca5d312  crates/ai_entities/tests/vectors/ai_entity_v1.bin
+55e5fb04374ffe70e32821548dde37394f4e334be37816895d287ce299942e65  crates/ai_entities/tests/vectors/ai_entity_v2.bin
+4a0aada853552db68e8a3ad0df0258d70b2d8d221e38ad56bbccb7a2f9514a14  crates/ai_entities/tests/vectors/ai_entity_v3_with_pubkey.bin
+e78a1554a62260a82d4ba62d3ba60332c0b6692f29f80c9503b1b0117aaf0001  crates/ai_entities/tests/vectors/ai_entity_v3_zero_pubkey.bin
+6f96a7b5a255191695e895d7a323ba4b870095f42f0c62aae2b9c0e6fb436367  crates/ai_entities/tests/vectors/ai_entity_v4.bin
+cc3a98f8a2e44fdaec74dc35812077235c262d3520d670a138256c8256162fc8  crates/ai_entities/tests/vectors/ai_entity_v5.bin
+846bcdf041657a5de3ee2b442dc374b1dc6547161c931e542ec630d951219501  crates/ai_entities/tests/vectors/signal_commit_anomaly_with_proof.bin
+a384a1409afd1d8c842f7061de9f30f17156fdcc345faa1b7d0d0a77ed229810  crates/ai_entities/tests/vectors/signal_commit_anomaly.bin
+594eec60a85f598dbdc7a9fe9cb32e22408b0bcee4ffb18b477d1edeb48bbc09  crates/ai_entities/tests/vectors/signal_commit_auditreport.bin
+fb6d9f043b6dad0b984128571b153861e43fcf8dc93eb30cd02c33d77f5deab5  crates/ai_entities/tests/vectors/signal_commit_congestionforecast.bin
+0dad4bb458e0715c8cedc57e060608248f4494eda8b0ba9aaabe093968d0bbe8  crates/ai_entities/tests/vectors/signal_commit_optimization.bin
+47a1b4a2e625ef78e0956431507b05ddd1ad8428a48416efbe81f51de6effe40  crates/ai_entities/tests/vectors/signal_commit_prediction.bin
+d2632e4e4b893c99d42f069ed09759ae66a79f6841cd8db8cfac11a236e1645f  crates/ai_entities/tests/vectors/signal_commit_riskscore.bin
+6c501e8943d2f135fa7d9b1e566bb4d17d80d8756698e75bd385c19a2bc6c82c  crates/ai_entities/tests/vectors/signal_commit_spamrisk.bin
+b99caf386464777b73dbc8b25e1e6d6d1f29bebd3adb4a5860cb087802b4cafb  crates/ai_entities/tests/vectors/signal_commit_subscription_cancel.bin
+15dd7915d6408c8728a2d5acd8b5d1dbcb91b09af4121ca1195b1d90cd75a609  crates/ai_entities/tests/vectors/signal_commit_subscription_create.bin
+32ae29205c1087866fafdeca6c372999652d7c509fa08789a0a16117cf9f4817  crates/codec/tests/vectors/ai_signal_v1_no_proof.bin
+7582eb8fc98716b9a493df69e44ab3e1bcba50a09e25f94696726170ed5b050b  crates/codec/tests/vectors/ai_signal_v1_with_proof.bin
+e3acd293b6bbbc379a82ce0fd447d1f03a921826df285d48692901970e75c2b6  crates/codec/tests/vectors/approval_gate_v1_multisig.bin
+ee25da5cb0068f2902e437d5e780168d7aea2a4c822975632f902c2980135fc9  crates/codec/tests/vectors/approval_gate_v1_threshold.bin
+29c0cb70680a162468962f961dd3239c7e4db3423490a67b1914043e11957722  crates/codec/tests/vectors/approval_gate_v1_timelock_only.bin
+a7d2e91f80ae0771c35831ab91c37ee8a77f8ab13f563a92d19771baee849f18  crates/codec/tests/vectors/blockheader_v1.bin
+b70ef29a6777c5fae818dd4405e20f2c3d7f4cac79df393028817fade1bf3532  crates/codec/tests/vectors/signal_commitment_v1.bin
+734a0252dec33639c69884e7d49252431026d733ee246eaba2fdf9274d9bcd02  crates/codec/tests/vectors/txv1_signed.bin
+74532ec9e13a5a1eace1398777579beb9d92193d64fd1895ef0f10001efce6ee  crates/codec/tests/vectors/txv1_unsigned.bin
+8c3adcfba1045404191ad9ffecd08fa2ca481ec231ce77229803f72dcae1395d  crates/consensus_types/tests/vectors/block_empty_txs_v1.bin
+717bf92b05f1df5498d88bf04e41df3641fb22989f7b19486d3197fa1e9d3682  crates/consensus_types/tests/vectors/block_response_v2.bin
+cafc13d0b84dee1132fde16f7a802220a831406014920edf1cf319474b46bf83  crates/consensus_types/tests/vectors/block_with_tx_v1.bin
+df97dbfa02fd796c80b7f181bb18f8483037d6b7f0cc074e6337d40340b99080  crates/consensus_types/tests/vectors/proposal_unsigned_v1.bin
+8022599f88937134ea10fc5497b044f3a8c00c85904b56a99c5a552efe00503f  crates/consensus_types/tests/vectors/proposal_v1.bin
+ac0434247c2d54195e4d7fd83cc79924c91d8b30570d7c132f1b374891a4caee  crates/consensus_types/tests/vectors/qc_empty_votes_v1.bin
+9b56fba9271dab70be1dfb930d8c54f8b626ccdda0a76a0f7fc8b9b71318249f  crates/consensus_types/tests/vectors/qc_with_votes_v1.bin
+b353ba4dc51924d2e462698f6b1345738e7f32599c554ea90cbd501c661270c2  crates/consensus_types/tests/vectors/signed_proposal_v1.bin
+bcfa7b81b3790d7630f6211de97c3e2e135b723272dac561793204ff4cbc537e  crates/consensus_types/tests/vectors/timeout_no_qc_signed_v1.bin
+523a5711c8ec65b9985ba6ee0eddc6a76d1d4387debc7bf058974abd0b6b698d  crates/consensus_types/tests/vectors/timeout_no_qc_unsigned_v1.bin
+343ba500726626de158829720df0b7a5d01ace598d3f9288d46104ba10955cdc  crates/consensus_types/tests/vectors/timeout_with_qc_signed_v1.bin
+cf99d3acd599d9787422945eae082dda84bded55803fd4b952138718c47f5529  crates/consensus_types/tests/vectors/timeout_with_qc_unsigned_v1.bin
+638d5790db06461d24217abf8c09e81bf643a24fdf1c2e46a19a259ccae9dea4  crates/consensus_types/tests/vectors/vote_signed_v1.bin
+0b814b6be253bcc150fb06135c0e979f30445d65b77797722c6f0a766677862e  crates/consensus_types/tests/vectors/vote_unsigned_v1.bin
+d366dd8fb0361f7d6bb70cb5c9c900ccee5fed2c218e0aded8df84474d640fcf  crates/consensus_types/tests/vectors/vote_with_signal_v1.bin
+669af3a4ac8d45dadf7e22a49221b6f38d4ca26ca9553ebe2557ae3178e08d1f  crates/governance/tests/vectors/audit_log_v1_expired.bin
+589d1facec6af6077f26197e7cee0d5f0a655430f1078c7f309d6c35fca1fb1c  crates/governance/tests/vectors/audit_log_v1_submitted.bin
+393879c8c25016605ad64b9b848919508463d6e0ca23805c9af0557610873080  crates/governance/tests/vectors/audit_log_v1_with_details.bin
+78bec52cf826e0f57b017a1b67a94b4549e72013d1306b50b36f1e7d13841f57  crates/governance/tests/vectors/proposal_v1_emergency.bin
+19ea44d7b8d6b9d0b63173d4b309846cfa54aa5eea1e5de89bd0433c9dd970a1  crates/governance/tests/vectors/proposal_v1_param_change.bin
+a35cc2cb808b283e26aa72799d244349b2c7d3b204ecbcbee8c4cca7e09d2781  crates/governance/tests/vectors/proposal_v1_with_approvals.bin
