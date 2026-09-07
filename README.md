@@ -1,3 +1,11 @@
+> **This repository is archived and read-only. Development has concluded.**
+>
+> The devnet was stopped on 2026-09-07 at block height 8,237,892, with all four validators in state root agreement.
+>
+> The code is preserved as-is. Issues and pull requests are closed.
+>
+> Worth reading first: `crates/consensus` and `crates/execution` for the protocol itself, and `docs/DEVLOG.md` for the week by week record of how it was built.
+
 # NOVAI - L1 Blockchain with First-Class AI Entities
 
 NOVAI is a Layer-1 blockchain where AI entities are protocol primitives, not smart contracts.
@@ -8,9 +16,9 @@ There is no smart contract VM. There is no WASM runtime. Every transaction type 
 
 The entire codebase is clean-room: no code copied or adapted from Substrate, Tendermint, Cosmos SDK, Diem, Aptos, Sui, or any other blockchain implementation. Concepts are drawn from published papers (HotStuff BFT, Sparse Merkle Trees), but every line is written from first principles.
 
-## What is Currently Live
+## What Was Live
 
-The private testnet has been running since early 2026. Current state:
+The private testnet ran from early 2026 until the devnet was stopped on 2026-09-07. Across its iterations it reached:
 
 - **BFT consensus** producing blocks continuously (16M+ blocks committed)
 - **11 transaction types** fully executing with deterministic state transitions
@@ -23,7 +31,7 @@ The private testnet has been running since early 2026. Current state:
 - **Block pruning** (100K block retention) for bounded disk usage
 - **Developer CLI** (`novai-cli`) for the full AI entity lifecycle
 
-What is **not** live: smart contracts, dynamic code execution, the NNPX privacy layer (types defined, logic not active), and AI autonomous execution (requires governance gate work).
+What was never live: smart contracts, dynamic code execution, the NNPX privacy layer (types defined, logic not active), and AI autonomous execution (requires governance gate work).
 
 ## Architecture
 
@@ -448,7 +456,7 @@ All RPC calls use JSON-RPC 2.0 over HTTP POST. The node exposes 29 methods; all 
 
 ## Becoming a Validator on the Public Testnet
 
-The public testnet is not yet launched. When it launches, the process will be:
+The public testnet was never launched. This section is kept as a record of the onboarding process that was planned:
 
 ### 1. Generate Your Validator Key
 
@@ -461,7 +469,7 @@ This creates a 32-byte Ed25519 seed file and prints your public key and address.
 
 ### 2. Submit Your Validator Public Key
 
-Your public key must be included in the genesis configuration before the network starts. During the testnet registration period, submit your hex-encoded public key through the registration process (details will be announced on [@NOVAInetwork](https://x.com/NOVAInetwork)).
+Your public key must be included in the genesis configuration before the network starts. During the planned registration period, validators would have submitted their hex-encoded public key through a registration process.
 
 ### 3. Genesis Configuration
 
@@ -504,7 +512,7 @@ Prometheus metrics are available at `http://localhost:8080/metrics` for monitori
 
 ### Hardware Requirements
 
-The testnet runs on modest hardware. A single VPS with 2 CPU cores, 4 GB RAM, and 50 GB SSD is sufficient. RocksDB write buffers are tuned to 16 MB with an 8 MB LRU cache, so memory usage is bounded.
+The testnet ran on modest hardware. A single VPS with 2 CPU cores, 4 GB RAM, and 50 GB SSD is sufficient. RocksDB write buffers are tuned to 16 MB with an 8 MB LRU cache, so memory usage is bounded.
 
 ### Current Limitations
 
